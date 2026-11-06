@@ -35,7 +35,7 @@ from typing import Mapping, Sequence
 USER_AGENT = "open-agent-harness-sources"
 KEPT_HEADERS = ("content-type", "content-length", "retry-after", "x-ratelimit-remaining", "x-ratelimit-reset")
 REDIRECTS = (301, 302, 303, 307, 308)
-_WORKER_CODE = "import sys; sys.path.insert(0, sys.argv[1]); from oah.design.sources.web import _worker; _worker()"
+_WORKER_CODE = "import sys; sys.path.append(sys.argv[1]); from oah.design.sources.web import _worker; _worker()"
 _ENV_KEYS = {"PATH", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "TEMP", "TMP", "LANG", "LC_ALL",
              "LC_CTYPE"}
 
@@ -181,12 +181,15 @@ class _PinnedHTTP(http.client.HTTPConnection):
 
 
 def _retry_after(headers: Mapping[str, str], now: float) -> float | None:
-    value = headers.get("retry-after", "")
-    if value.isdigit():
-        return now + min(int(value), 7 * 86400)
-    reset = headers.get("x-ratelimit-reset", "")
-    if reset.isdigit():
-        return float(int(reset))
+    ceiling = now + 7 * 86400
+    for key in ("retry-after", "x-ratelimit-reset"):
+        value = headers.get(key, "")
+        if value and value.isascii() and value.isdecimal():
+            value = value.lstrip("0") or "0"
+            if len(value) > 16:
+                return ceiling
+            seconds = int(value)
+            return min(ceiling, now + seconds if key == "retry-after" else max(now, seconds))
     return None
 
 
@@ -305,7 +308,7 @@ def get(url: str, *, policy: WebPolicy, headers: Mapping[str, str] | None = None
     payload = json.dumps({"url": url, "headers": dict(headers or {}), "policy": policy.to_json()}).encode("utf-8")
     src = str(pathlib.Path(__file__).resolve().parents[3])
     try:
-        completed = subprocess.run([sys.executable, "-I", "-B", "-c", _WORKER_CODE, src], input=payload,
+        completed = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _WORKER_CODE, src], input=payload,
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_worker_env(),
                                    timeout=policy.timeout + 2.0)
     except subprocess.TimeoutExpired:

@@ -91,6 +91,12 @@ class JudgementCase(SourceCase):
 class ProvenanceTest(JudgementCase):
     """Per-purpose public provenance, not caller labels."""
 
+    def test_source_change_impact_refuses_arbitrary_source_file_text(self) -> None:
+        field = judge.public_field(self.store, self.first, "src/lib.rs", 0, 14)
+        request = judge.Request("source-change-impact", "source-change-impact/v2", (("file_excerpt", field),))
+        self.assertEqual("unused(scope)", self.run_judge(request).status)
+        self.assertEqual([], self.provider.calls)
+
     PRIVATE = ("Our clinic lets each nurse see only her own patients, and the board meets on Thursdays to approve "
                "new vendors.\n")
 
@@ -166,9 +172,13 @@ class ProvenanceTest(JudgementCase):
         for field in (judge.public_field(self.store, second, "release-notes", 0, 40),
                       judge.public_field(self.store, second, "src/lib.rs", 14, 33)):
             with self.subTest(field=field.path_or_field):
-                request = judge.Request("source-change-impact", "source-change-impact/v2",
-                                        (("release_note_excerpt" if field.path_or_field == "release-notes"
-                                          else "file_excerpt", field),))
+                if field.path_or_field == "release-notes":
+                    request = judge.Request("source-change-impact", "source-change-impact/v2",
+                                            (("release_note_excerpt", field),))
+                else:
+                    request = judge.Request("candidate-priority", "candidate-priority/v2",
+                                            (("o0:evidence_excerpt", field), ("o1:evidence_excerpt", self.notes())),
+                                            ("o0", "o1"))
                 with mock.patch.object(judge, "_gate", wraps=judge._gate) as gate:
                     self.assertEqual("unused(secret)", self.run_judge(request).status)
                 gate.assert_not_called()
@@ -553,6 +563,18 @@ class TypeSafeJudgementTest(JudgementCase):
 
 
 class AdvisoryTest(JudgementCase):
+    def test_saved_advice_stops_applying_when_rerank_is_disabled(self) -> None:
+        request = judge.Request("source-change-impact", "source-change-impact/v2",
+                                (("release_note_excerpt", self.notes()),), input_ref="same-input")
+        result = self.run_judge(request)
+        self.assertEqual("used", result.status)
+        active = judge.apply(result, current_input_ref="same-input", config=config(), sources=self.store,
+                             request=request, policy=POLICY)
+        disabled = judge.apply(result, current_input_ref="same-input", config=config(rerank_on=False),
+                               sources=self.store, request=request, policy=POLICY)
+        self.assertTrue(active.applied)
+        self.assertEqual((False, "disabled"), (disabled.applied, disabled.reason))
+
     """No judgement is an input to license eligibility, material checks, tested status, carry or acceptance."""
 
     def test_yes_answers_never_change_license_facts_or_source_proof(self) -> None:

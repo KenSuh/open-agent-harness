@@ -62,7 +62,8 @@ class Native:
     def _open(self, path: str, *, directory: bool) -> int:
         access = 0x81 if directory else 0xC0010000
         flags = 0x02200000 if directory else 0x00200080
-        handle = self.api.CreateFileW(path, access, 1, None, 3 if directory else 1, flags, None)
+        share = 3 if directory else 1
+        handle = self.api.CreateFileW(path, access, share, None, 3 if directory else 1, flags, None)
         if handle is None or handle == ctypes.c_void_p(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
         return handle

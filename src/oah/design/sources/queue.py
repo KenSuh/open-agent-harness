@@ -2,7 +2,7 @@
 """ScanStateV1: the fair, persistent source-check cycle behind `oah sources check --scheduled`.
 
 A cycle starts from the sorted registry, rotated after the last attempted ID, and keeps its pending queue across
-invocations; a partial run (budget, rate limit, interruption) never restarts it. Each run holds a reservation with an
+invocations; a partial run (budget or interruption) never restarts it. Each run holds a reservation with an
 expiry; a crashed run's in-flight source is requeued at the tail, labelled interrupted, once that expires. New
 registrations join the tail; a removed or re-registered token loses only its own queued entry. `complete` means every
 cycle member had a terminal attempt or a valid fresh reuse, not that every source succeeded. This module is pure
@@ -15,7 +15,7 @@ import secrets
 from typing import Mapping
 
 from oah.design.sources.model import iso, parse_iso
-from oah.design.sources.state import digest_of
+from oah.design.sources.state import digest_of, hex_of
 
 RUN_BUDGET = 1800.0
 GRACE = 120.0
@@ -33,12 +33,24 @@ def well_formed(data: object) -> bool:
     if not isinstance(data, Mapping) or data.get("version") != 1 or data.get("kind") != "oah-sources-schedule":
         return False
     scan = data.get("scan")
-    if not isinstance(scan, Mapping) or type(scan.get("generation")) is not int or type(scan.get("seq")) is not int:
+    required = {"generation", "seq", "cycle", "reservation", "last_command_at", "last_complete_scan_at",
+                "last_attempted", "counts"}
+    if not isinstance(scan, Mapping) or not required <= set(scan) \
+            or any(type(scan[key]) is not int or not 0 <= scan[key] < 10**12 for key in ("generation", "seq")):
+        return False
+    if any(scan[key] is not None and parse_iso(scan[key]) is None
+           for key in ("last_command_at", "last_complete_scan_at")):
+        return False
+    if scan["last_attempted"] is not None and not isinstance(scan["last_attempted"], str):
+        return False
+    if not isinstance(scan["counts"], Mapping) or any(not isinstance(key, str) or type(value) is not int
+            or value < 0 for key, value in scan["counts"].items()):
         return False
     cycle = scan.get("cycle")
     if cycle is not None:
         if not isinstance(cycle, Mapping) or not isinstance(cycle.get("pending"), list) \
-                or not isinstance(cycle.get("done"), list):
+                or not isinstance(cycle.get("done"), list) or not isinstance(cycle.get("id"), str) \
+                or hex_of(cycle.get("registry_digest")) is None or parse_iso(cycle.get("started_at")) is None:
             return False
         if len(cycle["pending"]) + len(cycle["done"]) > MAX_ENTRIES:
             return False
@@ -46,9 +58,25 @@ def well_formed(data: object) -> bool:
             if not isinstance(entry, Mapping) or not isinstance(entry.get("id"), str) \
                     or not isinstance(entry.get("registration"), str):
                 return False
+        if any(not _pending(entry) for entry in cycle["pending"]):
+            return False
+        if any(not isinstance(entry.get("outcome"), str) or parse_iso(entry.get("at")) is None
+               for entry in cycle["done"]):
+            return False
     reservation = scan.get("reservation")
     return reservation is None or (isinstance(reservation, Mapping) and parse_iso(reservation.get("expires_at"))
-                                   is not None and isinstance(reservation.get("run"), str))
+            is not None and parse_iso(reservation.get("started_at")) is not None
+            and isinstance(reservation.get("run"), str) and "source" in reservation
+            and (reservation["source"] is None or (_pending(reservation["source"])
+                 and parse_iso(reservation["source"].get("attempted_at")) is not None)))
+
+
+def _pending(entry) -> bool:
+    return (isinstance(entry, Mapping) and isinstance(entry.get("id"), str)
+            and isinstance(entry.get("registration"), str) and hex_of(entry.get("spec_digest")) is not None
+            and type(entry.get("seq")) is int and 0 < entry["seq"] < 10**12
+            and "not_before" in entry
+            and (entry["not_before"] is None or parse_iso(entry["not_before"]) is not None))
 
 
 def _members(registry: Mapping) -> list[dict]:
@@ -117,36 +145,28 @@ def owns(state: dict, run: str) -> bool:
 
 
 def next_source(state: dict, now: dt.datetime) -> dict | None:
-    """The first queued entry whose not_before has passed, marked in flight with its attempt start time."""
+    """Take the first member; check_one records any active backoff as this cycle's terminal result."""
     cycle = state["scan"]["cycle"]
-    if cycle is None:
+    if cycle is None or not cycle["pending"]:
         return None
-    for index, entry in enumerate(cycle["pending"]):
-        not_before = parse_iso(entry.get("not_before"))
-        if not_before is None or not_before <= now:
-            cycle["pending"].pop(index)
-            flight = dict(entry, attempted_at=iso(now))
-            state["scan"]["reservation"]["source"] = flight
-            state["scan"]["last_attempted"] = entry["id"]
-            state["scan"]["generation"] += 1
-            return flight
-    return None
+    entry = cycle["pending"].pop(0)
+    flight = dict(entry, attempted_at=iso(now))
+    state["scan"]["reservation"]["source"] = flight
+    state["scan"]["last_attempted"] = entry["id"]
+    state["scan"]["generation"] += 1
+    return flight
 
 
 def finish_source(state: dict, flight: Mapping, outcome: str, now: dt.datetime,
                   retry_after: str | None = None) -> None:
-    """Record a terminal attempt, or requeue a rate-limited entry with its not_before."""
+    """Finish this cycle's attempt, including a refusal or an active rate-limit backoff."""
     cycle = state["scan"]["cycle"]
     state["scan"]["reservation"]["source"] = None
     state["scan"]["generation"] += 1
     if cycle is None:
         return
-    if outcome in ("skipped-rate-limited", "rate-limited") and retry_after is not None:
-        cycle["pending"].append({key: flight[key] for key in ("id", "registration", "spec_digest", "seq")}
-                                | {"not_before": retry_after})
-        return
     cycle["done"].append({"id": flight["id"], "registration": flight["registration"], "outcome": outcome,
-                          "at": iso(now), "seq": flight.get("seq")})
+                          "at": iso(now), "seq": flight.get("seq"), "retry_after": retry_after})
 
 
 def outstanding(state: dict) -> list[dict]:
@@ -169,10 +189,6 @@ def close_run(state: dict, run: str, now: dt.datetime) -> str:
     if cycle is not None and not cycle["pending"]:
         scan["last_complete_scan_at"] = iso(now)
         return "complete"
-    pending = (cycle or {}).get("pending", [])
-    if pending and all(parse_iso(entry.get("not_before")) is not None and parse_iso(entry["not_before"]) > now
-                       for entry in pending):
-        return "partial(rate-limited)"
     return "partial(over-budget)"
 
 

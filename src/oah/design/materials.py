@@ -28,6 +28,7 @@ from typing import Mapping, Sequence
 from oah.design.model import MAX_BYTES, DesignError, check_id, normalize_text, text_digest
 from oah.design.sources import license as license_module
 from oah.design.sources import portable
+import oah.design.sources.shapes as shapes
 from oah.design.sources.diff import escape
 from oah.design.sources.model import SourceError
 from oah.design.sources.state import StateProblem, digest_of, loads
@@ -1084,7 +1085,7 @@ def _data_block(text: str) -> str:
     return lines[start + 1]
 
 
-def parse(text: str) -> dict:
+def parse(text: str, *, material_errors: dict[str, str] | None = None) -> dict:
     """The record in a materials part (version 2, or a legacy version 1); OAH_MATERIALS_INVALID otherwise."""
     if not isinstance(text, str) or len(text.encode("utf-8")) >= MAX_BYTES:
         raise _invalid("the materials text must be under 1 MiB")
@@ -1096,7 +1097,7 @@ def parse(text: str) -> dict:
         return _legacy(record)
     if not isinstance(record, dict) or record.get("version") != SCHEMA or set(record) != RECORD_KEYS:
         raise _invalid(f"the data block is not a version-{SCHEMA} materials record")
-    _validate(record)
+    _validate(record, material_errors=material_errors)
     return record
 
 
@@ -1119,7 +1120,45 @@ def _same(stored: object, normalized: object, what: str) -> None:
         raise _invalid(f"{what} is not in its recorded form")
 
 
-def _validate(record: Mapping) -> None:
+def _validate_material(material: Mapping, envelope_ids: list[str | None]) -> None:
+    ident = material["id"]
+    try:
+        for field, schema in (("checked", shapes.CHECKED), ("reviewed", shapes.REVIEWED),
+                              ("release", shapes.RELEASE), ("license", shapes.LICENSE)):
+            shapes.validate(material[field], schema, f"material {ident}.{field}")
+        source = material["source"]
+        if not isinstance(source, dict):
+            raise _invalid(f"material {ident}: source is an object")
+        authored = source.get("provider") == "authored"
+        if not authored:
+            shapes.validate(source, shapes.SOURCE, f"material {ident}.source")
+    except shapes.ShapeError as exc:
+        raise _invalid(str(exc)) from None
+    if material["choice"] not in CHOICES or material["observation"] not in ("verified", "unverified"):
+        raise _invalid(f"material {ident}: choice or observation is not a known word")
+    if material["decision"] is not None:
+        _id(material["decision"], "decision")
+    _same(material["integration"], _integration(material["integration"], f"material {ident}", None),
+          f"material {ident} integration")
+    _same(material["package"], _package(material["package"], f"material {ident}"), f"material {ident} package")
+    _same(material["services"], _lines(material["services"], "services"), f"material {ident} services")
+    _same(material["unverified"], _lines(material["unverified"], "unverified"), f"material {ident} unverified")
+    _same(material["notes"], _line(material["notes"], "notes", TEXT, optional=True), f"material {ident} notes")
+    if authored:
+        normalized = _authored_source({"kind": source.get("kind"), "origin": source.get("locator"),
+            **{key: source.get(key) for key in ("revision", "author", "at", "limitations", "evidence", "text")}},
+            ident, None)
+        _same(source, normalized, f"material {ident} authored source")
+        _same(_identity_view(material), _identity_view(_authored_facts(normalized)),
+              f"material {ident} authored facts")
+    elif material["portable_evidence_id"] not in envelope_ids:
+        raise _invalid(f"material {ident}: its portable evidence is not in the record")
+    _id(source.get("id"), "source")
+    _digest(material["spec_digest"], "spec_digest")
+    _digest(material["snapshot"], "snapshot")
+
+
+def _validate(record: Mapping, *, material_errors: dict[str, str] | None = None) -> None:
     """Closed shapes and referential integrity; authored fields must equal their own normalized form."""
     if record["lang"] not in LABELS:
         raise _invalid("lang is en or ko")
@@ -1137,6 +1176,7 @@ def _validate(record: Mapping) -> None:
     if None in envelope_ids or envelope_ids != sorted(set(envelope_ids)):
         raise _invalid("portable_evidence is a sorted list of distinct envelopes")
     materials = {}
+    invalid_materials = {}
     for material in record["materials"]:
         if not isinstance(material, dict) or set(material) != MATERIAL_KEYS:
             raise _invalid("a material does not have exactly the version-2 fields")
@@ -1144,30 +1184,13 @@ def _validate(record: Mapping) -> None:
         if ident in materials:
             raise _invalid(f"material {ident} appears twice")
         materials[ident] = material
-        if material["choice"] not in CHOICES or material["observation"] not in ("verified", "unverified"):
-            raise _invalid(f"material {ident}: choice or observation is not a known word")
-        _same(material["integration"], _integration(material["integration"], f"material {ident}", None),
-              f"material {ident} integration")
-        _same(material["package"], _package(material["package"], f"material {ident}"), f"material {ident} package")
-        _same(material["services"], _lines(material["services"], "services"), f"material {ident} services")
-        _same(material["unverified"], _lines(material["unverified"], "unverified"), f"material {ident} unverified")
-        _same(material["notes"], _line(material["notes"], "notes", TEXT, optional=True), f"material {ident} notes")
-        authored = material["source"].get("provider") == "authored" if isinstance(material["source"], dict) else False
-        if authored:
-            source = material["source"]
-            normalized = _authored_source({"kind": source.get("kind"), "origin": source.get("locator"),
-                **{key: source.get(key) for key in ("revision", "author", "at", "limitations", "evidence", "text")}},
-                ident, None)
-            _same(source, normalized, f"material {ident} authored source")
-            _same(_identity_view(material), _identity_view(_authored_facts(normalized)),
-                  f"material {ident} authored facts")
-        elif material["portable_evidence_id"] not in envelope_ids:
-            raise _invalid(f"material {ident}: its portable evidence is not in the record")
-        if not isinstance(material["source"], dict):
-            raise _invalid(f"material {ident}: source is an object")
-        _id(material["source"].get("id"), "source")
-        _digest(material["spec_digest"], "spec_digest")
-        _digest(material["snapshot"], "snapshot")
+        try:
+            _validate_material(material, envelope_ids)
+        except MaterialsError as exc:
+            if material_errors is None:
+                raise
+            invalid_materials[ident] = str(exc)
+            material_errors[ident] = str(exc)
     decisions = {}
     for decision in record["decisions"]:
         if not isinstance(decision, dict) or set(decision) != DECISION_KEYS:
@@ -1203,12 +1226,14 @@ def _validate(record: Mapping) -> None:
         chosen = decision["chosen"]
         if chosen is not None and chosen not in materials:
             raise _invalid(f"decision {ident}: chosen is not a material of this record")
-        if decision["status"] == "selected" and (chosen is None or materials[chosen]["decision"] != ident
-                                                 or materials[chosen]["choice"] != "selected"):
+        if decision["status"] == "selected" and (chosen is None or (chosen not in invalid_materials
+                and (materials[chosen]["decision"] != ident or materials[chosen]["choice"] != "selected"))):
             raise _invalid(f"decision {ident}: a selected decision names its selected material")
     if set(inputs) != set(decisions):
         raise _invalid("decision_inputs and decisions name different decisions")
     for ident, material in materials.items():
+        if ident in invalid_materials:
+            continue
         if material["decision"] is not None and material["decision"] not in decisions:
             raise _invalid(f"material {ident}: its decision is not in the record")
         if material["choice"] == "selected" and material["decision"] is None:
@@ -1355,8 +1380,9 @@ def check(text: str | None, sources=None, policy: Mapping | None = None, context
         report["problems"].append("materials-not-a-design-part")
         return report
     report["materials_digest"] = text_digest(normalized)
+    material_errors: dict[str, str] = {}
     try:
-        record = parse(normalized)
+        record = parse(normalized, material_errors=material_errors)
     except MaterialsError as exc:
         report["problems"].append(f"{exc.code}: {str(exc).partition(': ')[2]}")
         return report
@@ -1369,18 +1395,32 @@ def check(text: str | None, sources=None, policy: Mapping | None = None, context
         report["overall"] = "unknown"
         report["problems"].append("legacy-version-1-record")
         return report
+    envelopes = {portable.envelope_id(item): item for item in record["portable_evidence"]}
+    verified_envelopes, envelope_errors = {}, {}
+    for key, envelope in envelopes.items():
+        try:
+            verified_envelopes[key] = portable.verify(envelope)
+        except portable.PortableError as exc:
+            envelope_errors[key] = f"portable-evidence-invalid: {str(exc).partition(': ')[2]}"
     try:
-        edited = render(record) != normalized
+        edited = False if material_errors or envelope_errors else render(record) != normalized
     except MaterialsError:
         edited = True
     if edited:
         report["problems"].append("OAH_MATERIALS_EDITED")
     materials = {item["id"]: item for item in record["materials"]}
-    envelopes = {portable.envelope_id(item): item for item in record["portable_evidence"]}
-    heads = _heads(sources, materials)
+    heads = _heads(sources, {key: value for key, value in materials.items() if key not in material_errors})
     material_problems: dict[str, list[str]] = {}
     for ident, material in materials.items():
         problems: list[str] = []
+        if ident in material_errors:
+            problems.append(material_errors[ident])
+            report["source_reads"].append({"material": ident, "source": None, "spec_digest": None,
+                "snapshot": None, "envelope": None, "historical_evidence": "invalid", "historical_times": {},
+                "recorded_eligibility": None, "eligibility": None, "integration": None, "registration": "unknown",
+                "registered_head": None, "upstream_freshness": "unknown", "problems": problems})
+            material_problems[ident] = problems
+            continue
         read = {"material": ident, "source": material["source"]["id"], "spec_digest": material["spec_digest"],
                 "snapshot": material["snapshot"], "envelope": material["portable_evidence_id"],
                 "historical_evidence": "invalid", "historical_times": {key: (material["checked"] or {}).get(key)
@@ -1395,14 +1435,15 @@ def check(text: str | None, sources=None, policy: Mapping | None = None, context
             report["source_reads"].append(read)
             material_problems[ident] = problems
             continue
-        try:
-            evidence = portable.verify(envelopes[material["portable_evidence_id"]])
-        except portable.PortableError as exc:
-            problems.append(f"portable-evidence-invalid: {str(exc).partition(': ')[2]}")
-            evidence = None
+        evidence = verified_envelopes.get(material["portable_evidence_id"])
+        if material["portable_evidence_id"] in envelope_errors:
+            problems.append(envelope_errors[material["portable_evidence_id"]])
         if evidence is not None:
             facts = _facts(evidence, allow)
-            if _identity_view(material) != _identity_view(dict(material, **facts)):
+            same_policy = (material["license"] is not None and facts["license"] is not None
+                           and material["license"]["policy_digest"] == facts["license"]["policy_digest"])
+            if (_identity_view(material) != _identity_view(dict(material, **facts))
+                    or same_policy and material["license"] != facts["license"]):
                 problems.append("claim-unsupported")
             else:
                 read["historical_evidence"] = portable.HISTORICAL

@@ -150,8 +150,12 @@ choice. Each resolution names the exact old and new inputs, so a later check can
 project, after you confirm (`--yes` agrees). Each pass is bounded to 30 minutes and works through a
 persistent, fair queue. A pass that runs out of time keeps the queue, so the next pass continues where it
 stopped instead of starting over, and sources that time out early never keep the later ones from being
-attempted. `complete` means every source had an attempt in this cycle, not that every check succeeded.
-A pass reports `complete`, `partial(over-budget)`, `partial(rate-limited)`, `partial(interrupted)`,
+attempted. `complete` means every source received an attempt or a recorded cooldown result in this cycle,
+not that every check succeeded. A rate-limited result finishes that source's turn; its cooldown never
+holds the cycle open or prevents the next cycle from checking other sources. Both `Retry-After` and
+`x-ratelimit-reset` are capped at seven days. A manual check during cooldown reports
+`skipped-rate-limited` and exits `1`.
+A pass reports `complete`, `partial(over-budget)`, `partial(interrupted)`,
 `not-due`, `busy` or `disabled`, and exits `1` when partial.
 
 The OS wakes the entry once a day; `[sources] check_interval_hours` decides whether a pass is due.
@@ -220,11 +224,13 @@ All keys live under `[sources]` in `.oah/config.toml`; `OAH_CONFIG_INVALID` name
 
 ## Limits
 
-- GitHub's unauthenticated rate limits apply. A rate-limited source waits for a later pass.
-- Snapshots are never pruned, so the state folder grows with each changed snapshot.
+- GitHub's unauthenticated rate limits apply. A source in cooldown is recorded and skipped while other
+  sources continue; a complete scheduled cycle can therefore include failed or rate-limited results.
+- Evidence is never pruned. The state folder grows even on unchanged checks: attempts and release-selection
+  records are retained, including API response metadata. Changed snapshots also retain original bodies.
 - Release selection reads a bounded set of tags and releases. When it cannot see them all, the observation
   says `selection-incomplete` instead of claiming the newest. A selected release is the newest oah observed,
   not a promise that nothing newer exists.
 - Native Windows filesystem and scheduler behavior requires platform qualification; API mocks do not prove it.
 - `schedule status` reads `launchctl print` on macOS and the Task Scheduler on Windows. A fact it cannot read
-  makes the state `unverifiable`; it is never assumed.
+  makes the state `unverifiable`; it is never assumed. A failed Windows query cannot prove an entry absent.

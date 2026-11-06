@@ -10,7 +10,9 @@ import http.server
 import json
 import os
 import pathlib
+import shutil
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -622,24 +624,25 @@ class FairQueueTest(unittest.TestCase):
         self.assertEqual("s00", third.results[0].source)
         self.assertEqual("complete", third.outcome)
 
-    def test_rate_limited_entries_wait_while_others_run(self) -> None:
+    def test_rate_limited_attempts_complete_without_delaying_the_next_cycle(self) -> None:
         sources = self.sources()
         self.register_docs(sources, 3)
         retry = (self.clock.now() + dt.timedelta(hours=2)).timestamp()
         self.docs.fail["https://docs.example.org/p00"] = web.WebFailure("rate-limited", 429, retry)
         report = sources.scheduled()
-        self.assertEqual("partial(rate-limited)", report.outcome)
-        self.assertEqual(("s00",), report.outstanding)
-        self.assertEqual("2026-11-01T14:00:00+00:00", report.retry_after)
+        self.assertEqual("complete", report.outcome)
+        self.assertEqual((), report.outstanding)
+        self.assertIsNone(report.retry_after)
         self.assertEqual(["s00", "s01", "s02"], [item.source for item in report.results])
         state = sources.schedule_state()
-        self.assertIsNone(state["scan"]["last_complete_scan_at"])
+        self.assertEqual("2026-11-01T12:00:00+00:00", state["scan"]["last_complete_scan_at"])
+        self.assertEqual(1, state["scan"]["counts"]["rate-limited"])
         self.clock.advance(60)
         waiting = sources.scheduled()
         self.assertEqual((), waiting.results)
-        self.assertEqual("partial(rate-limited)", waiting.outcome)
+        self.assertEqual("not-due", waiting.outcome)
         del self.docs.fail["https://docs.example.org/p00"]
-        self.clock.advance(7200)
+        self.clock.advance(86400)
         self.assertEqual("complete", sources.scheduled().outcome)
 
     def test_interrupted_run_is_requeued_after_its_reservation_expires(self) -> None:
@@ -984,6 +987,124 @@ class LoopbackCase(unittest.TestCase):
         return caught.exception
 
 
+class ResponseIsolationTest(LoopbackCase):
+    clock: Clock
+
+    def store(self, **settings) -> Sources:
+        return Sources(make_tmp_dir(self) / "state", settings=settings,
+                       transport=Transport(allow_loopback=True), now=self.clock.now, clock=self.clock.monotonic)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.clock = Clock(dt.datetime.now(dt.timezone.utc).replace(microsecond=0))
+        self.reply("/good", body=b"healthy", headers=(("Content-Type", "text/plain; charset=utf-8"),))
+
+    def test_bogus_charsets_fail_without_stopping_healthy_sources(self) -> None:
+        for charset in ("undefined", "base64", "zlib", "rot13", "hex", "bz2", "uu", "quopri", "idna", "not-a-codec"):
+            with self.subTest(charset=charset):
+                self.reply("/bad", body=b"public text", headers=(("Content-Type", f"text/plain; charset={charset}"),))
+                sources = self.store()
+                bad = sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True))[1]
+                sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True))
+                results = sources.check()
+                self.assertEqual([("a-bad", "failed"), ("z-good", "changed")],
+                                 [(item.source, item.result) for item in results])
+                self.assertEqual(("bad-response",), results[0].problems)
+                status = sources.status(bad)
+                self.assertEqual("unavailable", status.freshness)
+                assert status.head is not None
+                self.assertEqual("failed", status.head.outcome)
+                self.assertIsNotNone(status.head.attempted_at)
+
+    def test_bad_documents_are_attempted_in_scheduled_and_design_refresh_paths(self) -> None:
+        from oah.design.sources.view import DesignRef, DesignView, SnapshotView
+
+        self.reply("/bad", body=b"text", headers=(("Content-Type", "text/plain; charset=undefined"),))
+        ref = DesignRef("acme", "u" * 8, "booking", 1, "sha256:" + "a" * 64)
+        view = DesignView("acme", "u" * 8, "authority", "booking", SnapshotView(ref, "Booking", {}, {}),
+                          None, None, "clean", False, "current", "worktree")
+        for mode in ("scheduled", "refresh"):
+            with self.subTest(mode=mode):
+                sources = self.store()
+                for ident, path in (("a-bad", "/bad"), ("z-good", "/good")):
+                    sources.register(build_spec(url=self.base + path, source_id=ident, allow_loopback=True,
+                                                for_designs=["acme/booking"]))
+                report = (sources.scheduled() if mode == "scheduled" else sources.refresh_for(
+                    None, "acme", "booking", reason="start", reader=lambda: view))
+                self.assertEqual([("a-bad", "failed"), ("z-good", "changed")],
+                                 [(item.source, item.result) for item in report.results])
+                if mode == "scheduled":
+                    from oah.design.sources.check import ScanReport
+                    assert isinstance(report, ScanReport)
+                    self.assertEqual("complete", report.outcome)
+                    self.assertEqual((), report.outstanding)
+
+    def test_oversized_decoded_text_is_failed_and_never_stored_as_fresh(self) -> None:
+        body = b"\xff" * state_module.BLOB_LIMIT
+        self.reply("/bad", body=body, headers=(("Content-Type", "text/plain; charset=latin-1"),))
+        sources = self.store(max_document_bytes=state_module.BLOB_LIMIT)
+        spec = sources.register(build_spec(url=self.base + "/bad", source_id="bad", allow_loopback=True))[1]
+        for _ in range(2):
+            result = sources.check_one(spec)
+            self.assertEqual(("failed", ("oversize",)), (result.result, result.problems))
+            self.assertEqual("unavailable", sources.status(spec).freshness)
+        self.assertTrue(all(path.stat().st_size <= state_module.BLOB_LIMIT
+                            for path in sources.state.root.glob("blobs/*/*")))
+
+    def test_rate_limits_finish_the_cycle_and_manual_checks_refuse_during_backoff(self) -> None:
+        import io
+        from oah.cli import main
+
+        self.reply("/limited", status=429, headers=(("X-RateLimit-Reset", "300000000000"),))
+        sources = self.store(fresh_hours=1)
+        limited = sources.register(build_spec(url=self.base + "/limited", source_id="limited", allow_loopback=True))[1]
+        good = sources.register(build_spec(url=self.base + "/good", source_id="good", allow_loopback=True))[1]
+        for day in range(4):
+            report = sources.scheduled()
+            self.assertEqual(("complete", ()), (report.outcome, report.outstanding))
+            good_head, limited_head = sources.head(good), sources.head(limited)
+            assert good_head is not None and limited_head is not None and limited_head.retry_after is not None
+            self.assertEqual(self.clock.now().isoformat(), good_head.attempted_at)
+            self.assertEqual("fresh", sources.status(good).freshness)
+            self.assertNotEqual("fresh", sources.status(limited).freshness)
+            retry = dt.datetime.fromisoformat(limited_head.retry_after)
+            self.assertLessEqual(retry, max(self.clock.now(), dt.datetime.now(dt.timezone.utc)) + dt.timedelta(days=7))
+            self.clock.advance(86400)
+        out = io.StringIO()
+        with mock.patch("oah.sources_cli._sources", return_value=sources), contextlib.redirect_stdout(out):
+            code = main(["sources", "check", "limited", "--json"])
+        self.assertEqual(1, code)
+        self.assertEqual("skipped-rate-limited", json.loads(out.getvalue())["results"][0]["result"])
+
+    def test_undecodable_bytes_fail_and_tolerated_html_keeps_other_sources_usable(self) -> None:
+        for body, kind, expected in ((b"\xff", "text/plain; charset=utf-8", "failed"),
+                                     (b"<![bogus]>", "text/html; charset=utf-8", "changed")):
+            with self.subTest(kind=kind):
+                sources = self.store()
+                bad = sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True))[1]
+                sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True))
+                self.reply("/bad", body=b"prior good document", headers=(("Content-Type", "text/plain"),))
+                self.assertEqual("changed", sources.check_one(bad).result)
+                self.reply("/bad", body=body, headers=(("Content-Type", kind),))
+                results = {item.source: item for item in sources.check()}
+                self.assertEqual((expected, "changed"), (results["a-bad"].result, results["z-good"].result))
+                if expected == "failed":
+                    self.assertEqual(("bad-response",), results["a-bad"].problems)
+                    self.assertNotEqual("fresh", sources.status(bad).freshness)
+
+    def test_reset_and_retry_headers_with_thousands_of_digits_stay_bounded(self) -> None:
+        for key in ("Retry-After", "X-RateLimit-Reset"):
+            with self.subTest(header=key):
+                self.reply("/huge", status=429, headers=((key, "9" * 6000),))
+                sources = self.store()
+                spec = sources.register(build_spec(url=self.base + "/huge", source_id="huge", allow_loopback=True))[1]
+                result = sources.check_one(spec)
+                self.assertEqual(("failed", ("rate-limited",)), (result.result, result.problems))
+                assert result.retry_after is not None
+                self.assertLessEqual(dt.datetime.fromisoformat(result.retry_after),
+                                     dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=7))
+
+
 class PublicHttpTest(LoopbackCase):
     """Credential-free direct requests to vetted public addresses, closed refusal codes and no error bodies."""
 
@@ -1287,6 +1408,15 @@ class LicenseDiscoveryTest(SourceCase):
 class RegistryValidationTest(unittest.TestCase):
     """Canonical locators, closed refusals before anything is stored, and idempotent registration."""
 
+    def test_loopback_registry_reads_require_the_transport_test_seam(self) -> None:
+        state = make_tmp_dir(self) / "state"
+        testing = Sources(state, transport=Transport(allow_loopback=True))
+        testing.register(build_spec(url="http://127.0.0.1:8080/page", source_id="loop", allow_loopback=True))
+        self.assertEqual({"loop"}, set(testing.registry()[0].sources))
+        registry, unusable = Sources(state).registry()
+        self.assertEqual({}, registry.sources)
+        self.assertEqual({"loop"}, set(unusable))
+
     def test_locators_are_canonical_or_refused(self) -> None:
         self.assertEqual("https://github.com/acme/lib", build_spec(url="https://github.com/Acme/Lib.git").locator)
         bad = ("http://github.com/acme/lib", "https://git@github.com/acme/lib", "https://github.com:443/acme/lib",
@@ -1330,6 +1460,79 @@ class RegistryValidationTest(unittest.TestCase):
             sources.register(build_spec(url="https://docs.example.org/other", source_id="guide"))
         self.assertEqual("OAH_SOURCES_EXISTS", caught.exception.code)
         self.assertEqual("https://docs.example.org/guide", sources.spec("guide").locator)
+
+
+class SourceSafetyTest(SourceCase):
+    def test_installed_worker_keeps_standard_library_ahead_of_sibling_packages(self) -> None:
+        package_root = make_tmp_dir(self) / "site-packages"
+        shutil.copytree(pathlib.Path(web.__file__).resolve().parents[2], package_root / "oah")
+        marker = package_root.parent / "stdlib-shadow-ran"
+        (package_root / "ssl.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+                                             "raise RuntimeError('sibling package shadowed ssl')\n")
+        result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", web._WORKER_CODE, str(package_root)],
+                                input=b"{}", capture_output=True, timeout=5)
+        self.assertFalse(marker.exists(), result.stderr.decode(errors="replace"))
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("network", json.loads(result.stdout)["code"])
+
+    def test_public_evidence_names_do_not_inherit_skill_staging_reservations(self) -> None:
+        from oah.toolkit.fetch import StageError, check_portable_paths
+
+        names = {"src/UPSTREAM.json": "public upstream data", "src/.oah-skill.json": "public skill data"}
+        git_commit(self.upstream, names, "Public evidence names")
+        sources = self.sources()
+        branch = git(self.upstream, "branch", "--show-current").strip()
+        spec = sources.register(build_spec(url=LOCATOR, track="commit", ref=branch, paths=list(names)))[1]
+        result = sources.check_one(spec)
+        self.assertEqual("changed", result.result)
+        assert result.snapshot is not None
+        snapshot = sources.snapshot(result.snapshot)
+        assert snapshot is not None
+        self.assertEqual(set(names), {item["path"] for item in snapshot["files"]})
+        with self.assertRaises(StageError):
+            check_portable_paths(list(names))
+
+    def test_ls_remote_ignores_a_repository_enclosing_the_temporary_directory(self) -> None:
+        self.commit({"src/lib.rs": "public\n"})
+        self.tag("v1.0.0")
+        other = make_git_repo(self)
+        git_commit(other, {"file": "other\n"})
+        git(other, "tag", "v9.0.0")
+        outer = make_git_repo(self)
+        url = self.upstream.as_uri()
+        git(outer, "config", f"url.{other.as_uri()}.insteadOf", url)
+        scratch = outer / "scratch"
+        scratch.mkdir()
+        with mock.patch("tempfile.tempdir", str(scratch)):
+            advertisement = gitref.ls_remote(url, tags=True)
+        self.assertEqual({"refs/tags/v1.0.0", "refs/tags/v1.0.0^{}"}, set(advertisement.refs))
+
+    def test_a_fifo_state_file_is_refused_without_waiting_for_a_writer(self) -> None:
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("native Windows has no POSIX FIFO")
+        root = make_tmp_dir(self)
+        (root / "sources/heads").mkdir(parents=True)
+        os.mkfifo(root / "sources/heads/x.json")
+        code = ("import sys; from oah.design.sources.state import State, StateProblem; "
+                "s=State(sys.argv[1]);\n"
+                "try: s.read('heads/x.json', 1000)\n"
+                "except StateProblem as exc: print(exc.code)\n")
+        result = subprocess.run([sys.executable, "-B", "-c", code, str(root)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual((0, "not-a-file\n", ""), (result.returncode, result.stdout, result.stderr))
+
+    def test_malformed_queue_members_are_a_scoped_state_problem(self) -> None:
+        from oah.design.sources import queue
+
+        sources = self.sources()
+        spec = sources.register(build_spec(url=LOCATOR))[1]
+        data = queue.empty()
+        data["scan"]["cycle"] = {"id": "cycle", "pending": [{"id": spec.id, "registration": spec.registration}],
+                                  "done": []}
+        sources.state.write_json("schedule.json", data)
+        with self.assertRaises(state_module.StateProblem) as caught:
+            sources.scheduled()
+        self.assertEqual("bad-record", caught.exception.code)
 
 
 class Pages:

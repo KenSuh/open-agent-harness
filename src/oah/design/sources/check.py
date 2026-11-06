@@ -177,7 +177,7 @@ class RefreshReport:
 
 @dataclasses.dataclass(frozen=True)
 class ScanReport:
-    outcome: str         # disabled | not-due | busy | complete | partial(over-budget|rate-limited|interrupted)
+    outcome: str         # disabled | not-due | busy | complete | partial(over-budget|interrupted)
     results: tuple[CheckResult, ...] = ()
     outstanding: tuple[str, ...] = ()
     retry_after: str | None = None
@@ -220,7 +220,7 @@ class Sources:
             data = self.state.read_json("registry.json", REGISTRY_LIMIT)
         except StateProblem as exc:
             raise SourceError("OAH_SOURCES_STATE_CORRUPT", str(exc).partition(": ")[2]) from None
-        return parse_registry(data, "sources/registry.json")
+        return parse_registry(data, "sources/registry.json", allow_loopback=self.transport.allow_loopback)
 
     def register(self, spec: SourceSpec) -> tuple[str, SourceSpec]:
         """('registered' | 'present' | 'updated', the stored spec). Never touches the network."""
@@ -318,12 +318,20 @@ class Sources:
         return SourceStatus(spec, head, freshness(head, now, self.settings["fresh_hours"]), verified, discovered)
 
     def snapshot(self, digest: str) -> dict | None:
+        from oah.design.sources import portable
+
         manifest = self.state.get_record("snapshots", digest)
         if manifest is not None and (manifest.get("kind") != "oah-source-snapshot" or manifest.get("version") != 1
                                      or not isinstance(manifest.get("spec"), dict)
                                      or hex_of(manifest.get("content_key")) is None):
             raise StateProblem("bad-record", f"snapshots/{digest[7:9]}/{digest[7:]}.json",
                                "is not a source snapshot")
+        if manifest is not None:
+            try:
+                portable.uses(manifest)
+            except portable.PortableError as exc:
+                raise StateProblem("bad-record", f"snapshots/{digest[7:9]}/{digest[7:]}.json",
+                                   str(exc).partition(": ")[2]) from None
         return manifest
 
     def record(self, kind: str, digest: str) -> dict | None:
@@ -380,7 +388,8 @@ class Sources:
         current = freshness(head, started, self.settings["fresh_hours"])
         retry = parse_iso(head.retry_after) if head is not None else None
         if retry is not None and started < retry:
-            return CheckResult(spec.id, "skipped-rate-limited", freshness=current, retry_after=head.retry_after)
+            return CheckResult(spec.id, "skipped-rate-limited", problems=("rate-limited",),
+                               freshness=current, retry_after=head.retry_after)
         if skip_fresh and current == "fresh":
             return CheckResult(spec.id, "skipped-fresh", freshness="fresh",
                                observation=None if head is None else head.observation)

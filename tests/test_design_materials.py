@@ -358,8 +358,154 @@ class InputBasisTest(MaterialsCase):
                 self.assertIn(problem, report["decisions"][0]["problems"])
 
 
+class MaterialShapeTest(MaterialsCase):
+    def test_same_policy_license_claims_must_match_the_portable_originals(self) -> None:
+        built = materials.build(self.selection(), self.sources, view=self.view())
+        record = json.loads(materials.canonical_json(built.record))
+        record["materials"][0]["license"]["eligibility"] = "ineligible"
+        record["materials"][0]["license"]["reason"] = "forged"
+        report = materials.check(materials.render(record), self.sources, None, self.view())
+        self.assertEqual("invalid", report["overall"])
+        self.assertIn("claim-unsupported", report["source_reads"][0]["problems"])
+
+    def test_malformed_material_facts_are_scoped_and_keep_healthy_evidence(self) -> None:
+        selection = self.selection(materials=[
+            {"id": "lib", "source": "lib", "choice": "selected", "decision": "storage"},
+            {"id": "healthy", "source": "lib", "choice": "candidate", "decision": "storage"}])
+        built = materials.build(selection, self.sources, view=self.view())
+        cases = (("license", "MIT"), ("checked", []), ("reviewed", "v1"), ("release", 5),
+                 ("source.paths", 5), ("source.paths", ["src", {}]), ("license.eligibility", []),
+                 ("checked.confirmed_at", 5), ("reviewed.commit", []), ("release.tag", {}))
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                record = json.loads(materials.canonical_json(built.record))
+                material = next(item for item in record["materials"] if item["id"] == "lib")
+                parent, dot, child = field.partition(".")
+                if dot:
+                    material[parent][child] = value
+                else:
+                    material[field] = value
+                text = built.text[:built.text.rindex(materials.FENCE)] + materials.FENCE + "\n" \
+                    + materials.canonical_json(record) + "\n```\n"
+                with self.assertRaises(materials.MaterialsError):
+                    materials.parse(text)
+                report = materials.check(text, self.sources, None, self.view())
+                self.assertEqual("invalid", report["overall"])
+                reads = {item["material"]: item for item in report["source_reads"]}
+                self.assertEqual({"lib", "healthy"}, set(reads))
+                self.assertEqual(portable.HISTORICAL, reads["healthy"]["historical_evidence"])
+                self.assertEqual("invalid", reads["lib"]["historical_evidence"])
+                self.assertTrue(reads["lib"]["problems"])
+
+    def test_non_mapping_manifest_entries_are_typed_in_verify_check_and_diff(self) -> None:
+        from oah.design.sources.model import SourceError
+        from oah.design.sources.state import record_digest
+
+        built = materials.build(self.selection(), self.sources, view=self.view())
+        for field in ("files", "license.files", "license.notices"):
+            with self.subTest(field=field):
+                envelope = json.loads(materials.canonical_json(built.record["portable_evidence"][0]))
+                manifest = envelope["snapshot"]["manifest"]
+                parent, dot, child = field.partition(".")
+                if dot:
+                    manifest[parent][child] = ["not-a-mapping"]
+                else:
+                    manifest[field] = ["not-a-mapping"]
+                snapshot = record_digest(manifest)
+                envelope["snapshot"]["digest"] = snapshot
+                observation = envelope["provenance"]["observation"]
+                observation["snapshot"] = snapshot
+                envelope["provenance"]["observation_digest"] = record_digest(observation)
+                with self.assertRaises(portable.PortableError) as caught:
+                    portable.verify(envelope)
+                self.assertEqual("OAH_SOURCES_EVIDENCE_INVALID", caught.exception.code)
+                with self.assertRaises(SourceError) as caught:
+                    self.sources.diff("lib", snapshot, snapshot, evidence=[envelope])
+                self.assertEqual("OAH_SOURCES_EVIDENCE_INVALID", caught.exception.code)
+                record = json.loads(materials.canonical_json(built.record))
+                record["portable_evidence"] = [envelope]
+                record["materials"][0]["portable_evidence_id"] = portable.envelope_id(envelope)
+                record["materials"][0]["snapshot"] = snapshot
+                report = materials.check(materials.render(record), self.sources, None, self.view())
+                self.assertEqual("invalid", report["overall"])
+                self.assertTrue(report["source_reads"][0]["problems"])
+
+
 class PortableEvidenceTest(MaterialsCase):
-    """Complete originals survive an empty clone, with S1 times kept apart from S2 freshness."""
+    def test_four_source_accepted_materials_and_a_distinct_working_draft_stay_reproducible(self) -> None:
+        from tests.test_design_sources import Pages
+
+        pages = Pages()
+        getter = lambda url, **kwargs: self.github(url, **kwargs) if url.startswith("https://api.github.com") \
+            else pages(url, **kwargs)
+        sources = Sources(make_tmp_dir(self) / "four", transport=Transport(
+            git_url=lambda locator: str(self.upstream), getter=getter), now=self.clock.now, clock=self.clock.monotonic)
+        sources.register(build_spec(url=LOCATOR, paths=["src"]))
+        for name in "abc":
+            sources.register(build_spec(url=f"https://docs.example.org/{name}", source_id=f"doc-{name}"))
+        self.assertEqual({"changed"}, {item.result for item in sources.check()})
+        selected = [{"id": "lib", "source": "lib", "choice": "selected", "decision": "storage"}] \
+            + [{"id": f"m{name}", "source": f"doc-{name}", "choice": "candidate", "decision": "storage"}
+               for name in "abc"]
+        built = materials.build(self.selection(materials=selected), sources, view=self.view())
+        self.assertEqual(4, len(built.record["portable_evidence"]))
+        self.save({"materials": built.text})
+        self.accept_current()
+        accepted_view = self.view().accepted
+        assert accepted_view is not None
+        accepted = accepted_view.ref
+        draft = materials.build(self.selection(materials=selected, narrative="A distinct working comparison."),
+                                sources, view=self.view())
+        self.save({"request": MULTI, "materials": draft.text})
+        current = self.view()
+        assert current.accepted is not None
+        self.assertNotEqual(accepted.digest, current.current.ref.digest)
+        self.assertEqual(accepted, current.accepted.ref)
+        self.assertNotEqual(current.accepted.texts["materials"], current.current.texts["materials"])
+        self.assertEqual(4, len(materials.parse(current.accepted.texts["materials"])["portable_evidence"]))
+        report = materials.check(self.saved_text(), None, None, current)
+        self.assertEqual("needs-review", report["overall"])
+        self.assertEqual({"lib", "ma", "mb", "mc"}, {item["material"] for item in report["source_reads"]})
+        self.assertEqual({portable.HISTORICAL}, {item["historical_evidence"] for item in report["source_reads"]})
+
+    def test_a_300kb_document_is_portable_and_tamper_or_missing_bytes_are_scoped(self) -> None:
+        from tests.test_design_sources import Pages
+
+        pages = Pages()
+        pages.type, pages.body = "text/plain", b"public documentation\n" * 15000
+        sources = Sources(make_tmp_dir(self) / "docs", transport=Transport(getter=pages), now=self.clock.now)
+        spec = sources.register(build_spec(url="https://docs.example.org/guide", source_id="guide"))[1]
+        self.assertEqual("changed", sources.check_one(spec).result)
+        selected = [{"id": "lib", "source": "guide", "choice": "selected", "decision": "storage"}]
+        built = materials.build(self.selection(materials=selected), sources, view=self.view())
+        envelope = built.record["portable_evidence"][0]
+        evidence = portable.verify(json.loads(materials.canonical_json(envelope)))
+        self.assertEqual(315000, len(pages.body))
+        self.assertEqual(pages.body, evidence.read(evidence.manifest["document"]["sha256"]))
+        self.assertEqual("current", materials.check(built.text, None, None, self.view())["overall"])
+        for mutation in ("tamper", "missing"):
+            with self.subTest(mutation=mutation):
+                bad = json.loads(materials.canonical_json(envelope))
+                if mutation == "tamper":
+                    bad["blobs"][0]["data"] = base64.b64encode(b"other public bytes").decode("ascii")
+                else:
+                    bad["blobs"] = []
+                with self.assertRaises(portable.PortableError):
+                    portable.verify(bad)
+
+    def test_private_narrative_stays_local_and_offline_checks_send_nothing(self) -> None:
+        private = "Private design: a confidential school booking plan."
+        before = {str(p): p.read_bytes() for p in self.sources.state.root.rglob("*") if p.is_file()}
+        with mock.patch.object(self.sources.observer, "observe", side_effect=AssertionError("unexpected fetch")), \
+                mock.patch("oah.rerank.judge.judge", side_effect=AssertionError("unexpected judge request")):
+            built = materials.build(self.selection(narrative=private), self.sources, view=self.view())
+            self.assertIn(private, built.text)
+            envelopes = built.record["portable_evidence"]
+            self.assertNotIn(private, materials.canonical_json(envelopes))
+            for envelope in envelopes:
+                portable.verify(envelope)
+            self.assertEqual("current", materials.check(built.text, None, None, self.view())["overall"])
+        self.assertEqual(before, {str(p): p.read_bytes() for p in self.sources.state.root.rglob("*") if p.is_file()})
 
     def test_copyright_notices_keep_license_eligibility_and_originals_offline(self) -> None:
         notice = "Copyright (c) 2026 Acme"
@@ -929,7 +1075,7 @@ class GuardedOutputTest(unittest.TestCase):
 
 
 class WindowsOutputTest(unittest.TestCase):
-    def test_native_primitives_deny_mutation_sharing_and_rename_and_discard_the_owned_handle(self) -> None:
+    def test_native_primitives_share_destination_writes_but_deny_directory_replacement(self) -> None:
         import ctypes
         from types import SimpleNamespace
         from oah.design.sources.output_windows import Native
@@ -939,7 +1085,13 @@ class WindowsOutputTest(unittest.TestCase):
         native.api = api
         self.assertEqual(7, native.open_directory("C:/repo/out"))
         directory = api.CreateFileW.call_args.args
-        self.assertEqual((0x81, 1, None, 3, 0x02200000, None), directory[1:])
+        self.assertEqual((0x81, 3, None, 3, 0x02200000, None), directory[1:])
+        def information(_handle, kind, _buffer, _size):
+            if kind == 3:
+                self.assertEqual(3, directory[2] & 3)
+                self.assertEqual(0, directory[2] & 4)
+            return 1
+        api.SetFileInformationByHandle.side_effect = information
         self.assertEqual(7, native.create_file("C:/repo/out/temp"))
         self.assertEqual((0xC0010000, 1, None, 1, 0x00200080, None), api.CreateFileW.call_args.args[1:])
         native.rename(7, "C:/repo/out/materials.md")
@@ -1143,6 +1295,18 @@ class ProposalAssessmentTest(MaterialsCase):
         self.assertEqual("no(thresholds-changed)", stale.assessment["applied"])
         self.assertEqual(stored, self.sources.assessment(digest))
 
+    def test_a_stale_proposal_does_not_prevent_a_healthy_assessment(self) -> None:
+        assessment, proposals, provider, config = self.prepare_proposal()
+        stale = dataclasses.replace(proposals[0], key="0" * 64, design="removed-design")
+        rows = assessment.assess(self.sources, [stale, *proposals],
+                                 reader=lambda project, design: read_view(self.store, project, design),
+                                 config=config, env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+        self.assertEqual(["no(stale-or-unknown)", "yes"], [p.assessment["applied"] for p in rows])
+        self.assertEqual(1, len(provider.calls))
+        pointers = self.sources.state.read_json("assessment-index.json", 1 << 20)
+        assert isinstance(pointers, dict)
+        self.assertNotIn(stale.key, pointers["assessments"])
+
     def test_a_design_change_during_assessment_preserves_prior_good_evidence(self) -> None:
         assessment, proposals, provider, config = self.prepare_proposal()
         reader = lambda project, design: read_view(self.store, project, design)
@@ -1157,9 +1321,10 @@ class ProposalAssessmentTest(MaterialsCase):
             self.save({"request": MULTI}, "Concurrent correction")
             return reply
 
-        with mock.patch.object(provider, "judge", side_effect=concurrent_change), self.assertRaises(ViewUnavailable):
-            assessment.assess(self.sources, proposals, reader=reader, config=config,
-                              env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+        with mock.patch.object(provider, "judge", side_effect=concurrent_change):
+            rows = assessment.assess(self.sources, proposals, reader=reader, config=config,
+                                     env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+        self.assertEqual("no(stale-or-unknown)", rows[0].assessment["applied"])
         self.assertEqual(before_index, self.sources.state.read_json("assessment-index.json", 1 << 20))
         self.assertEqual(good, self.sources.assessment(first.assessment["record"]))
         self.assertEqual("open", self.sources.proposals()[0][0].status)
@@ -1181,6 +1346,24 @@ class SourcesCliTest(MaterialsCase):
         path = self.repo.parent / "selection.json"
         path.write_text(json.dumps(self.selection()), encoding="utf-8")
         return path
+
+    def test_malformed_materials_cli_returns_invalid_and_healthy_source_reads(self) -> None:
+        selection = self.selection(materials=[
+            {"id": "lib", "source": "lib", "choice": "selected", "decision": "storage"},
+            {"id": "healthy", "source": "lib", "choice": "candidate", "decision": "storage"}])
+        built = materials.build(selection, self.sources, view=self.view())
+        record = json.loads(materials.canonical_json(built.record))
+        next(item for item in record["materials"] if item["id"] == "lib")["license"] = "MIT"
+        text = built.text[:built.text.rindex(materials.FENCE)] + materials.FENCE + "\n" \
+            + materials.canonical_json(record) + "\n```\n"
+        self.save({"materials": text})
+        code, out, err = self.cli("sources", "materials", "check", "--design", "acme/booking", "--json")
+        self.assertEqual((1, ""), (code, err))
+        report = json.loads(out)
+        self.assertEqual("invalid", report["overall"])
+        reads = {item["material"]: item for item in report["source_reads"]}
+        self.assertEqual({"healthy", "lib"}, set(reads))
+        self.assertEqual(portable.HISTORICAL, reads["healthy"]["historical_evidence"])
 
     def test_render_check_and_guarded_out(self) -> None:
         selection = str(self.selection_file())
@@ -1268,9 +1451,9 @@ class SourcesCliTest(MaterialsCase):
             code, out, err = self.cli("sources", "proposals", "--json")
             self.assertEqual(0, code, err)
             self.assertEqual({"booking", "reporting"}, {p["design"] for p in json.loads(out)["proposals"]})
-            with self.assertRaises(ViewUnavailable):
-                assessment.assess(self.sources, [stale], reader=reader, config=cfg,
-                                  env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+            rows = assessment.assess(self.sources, [stale], reader=reader, config=cfg,
+                                     env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+            self.assertEqual("no(stale-or-unknown)", rows[0].assessment["applied"])
         current = dict(stored["basis"], binding=reader("acme", "booking").identity())
         request = assessment.request_for(self.sources, stale, current, reader("acme", "booking"))
         applied = judge.apply(stored["judgement"], current_input_ref=digest_of(current), config=cfg,
@@ -1290,6 +1473,18 @@ class SourcesCliTest(MaterialsCase):
         self.assertIn("unavailable", out)
         code, _out, err = self.cli("sources", "diff", "lib", "--from", "HEAD", "--to", head)
         self.assertEqual((1, True), (code, err.startswith("OAH_SOURCES_USAGE")))
+
+    def test_diff_terminal_output_escapes_external_path_names(self) -> None:
+        path = "src/\x1b[31mred\u202eevil.py"
+        report = {"completeness": "complete", "paths": {"entries": [{"change": "added", "path": path}]},
+                  "text_diffs": [{"item": path, "status": "shown", "lines": []}]}
+        digest = "sha256:" + "0" * 64
+        with mock.patch.object(Sources, "diff", return_value=report):
+            code, out, err = self.cli("sources", "diff", "lib", "--from", digest, "--to", digest)
+        self.assertEqual(0, code, err)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)
+        self.assertEqual(2, out.count("src/\\u001b[31mred\\u202eevil.py"))
 
     def test_unavailable_a_check_is_unknown_without_fabricated_materials(self) -> None:
         with mock.patch("oah.design.sources.read_view", side_effect=ViewUnavailable("ref-unavailable")):

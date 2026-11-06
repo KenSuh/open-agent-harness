@@ -38,7 +38,7 @@ def register(commands: argparse._SubParsersAction) -> None:
     add.add_argument("--tag-prefix", default="")
     add.add_argument("--prerelease", action="store_true", help="prereleases count as candidates too")
     add.add_argument("--release-order", choices=("auto", "semver", "published"))
-    add.add_argument("--ref", help="the branch or tag a commit-tracked source follows")
+    add.add_argument("--ref", help="the branch a commit-tracked source follows")
     add.add_argument("--paths", nargs="*", default=[], help="the folders or files that matter")
     add.add_argument("--manifest", dest="manifest_path")
     add.add_argument("--for-design", dest="for_designs", action="append", default=[], metavar="PROJECT/DESIGN")
@@ -216,11 +216,13 @@ def _check(args: argparse.Namespace) -> int:
         for item in results:
             extra = f" {', '.join(item.problems)}" if item.problems else ""
             print(f"{item.source:24} {item.result:16} {item.freshness}{extra}")
-    failed = {"failed", "blocked", "unverified", "state-corrupt", "superseded"}
+    failed = {"failed", "blocked", "unverified", "state-corrupt", "superseded", "skipped-rate-limited", "over-budget"}
     return EXIT_REFUSED if any(item.result in failed for item in results) else EXIT_OK
 
 
 def _diff(args: argparse.Namespace) -> int:
+    from oah.design.sources.diff import escape
+
     report = _sources().diff(args.source_id, args.from_snapshot, args.to_snapshot)
     if args.json:
         _print(report)
@@ -234,10 +236,10 @@ def _diff(args: argparse.Namespace) -> int:
             if shown >= 200:
                 print(f"  ... {len(report['paths']['entries']) - shown} more (display limit 200; --json lists all)")
                 break
-            print(f"  {entry['change']:8} {entry['path']}")
+            print(f"  {entry['change']:8} {escape(entry['path'])}")
             shown += 1
         for item in report.get("text_diffs") or []:
-            print(f"  --- {item['item']} ({item['status']}; external data)")
+            print(f"  --- {escape(item['item'])} ({item['status']}; external data)")
             for line in item.get("lines") or []:
                 print(f"  | {line}")
         for problem in report.get("problems") or []:

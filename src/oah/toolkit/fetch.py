@@ -195,10 +195,12 @@ def fetch(repository: str, ref: str, scratch: pathlib.Path, *, paths: tuple[str,
     return Tree(scratch, commit, remaining)
 
 
-def _portable_paths(paths: list[str]) -> None:
+def _portable_paths(paths: list[str], *, staging: bool = True) -> None:
     """Refuse names that alias or escape on supported filesystems before writing any bytes."""
     seen: dict[str, tuple[str, bool]] = {}
-    reserved = {UPSTREAM_FILE.casefold(), MARKER_FILE.casefold(), ".git"}
+    reserved = {".git"}
+    if staging:
+        reserved.update((UPSTREAM_FILE.casefold(), MARKER_FILE.casefold()))
     for path in paths:
         parts = path.split("/")
         for index, part in enumerate(parts):
@@ -219,9 +221,9 @@ def _portable_paths(paths: list[str]) -> None:
             seen[key] = spelling, is_file
 
 
-def check_portable_paths(paths: list[str]) -> None:
-    """The staging path rules (no escape, alias, reserved or device name, no case collision); raises StageError."""
-    _portable_paths(list(paths))
+def check_portable_paths(paths: list[str], *, staging: bool = True) -> None:
+    """Portable path rules; staging also reserves the updater's own metadata names. Raises StageError."""
+    _portable_paths(list(paths), staging=staging)
 
 
 def manifest_problems(folder: pathlib.Path, files: dict | Upstream) -> list[str]:

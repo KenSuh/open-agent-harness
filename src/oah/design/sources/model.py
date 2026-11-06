@@ -165,7 +165,7 @@ def _check_paths(values: Sequence[str], what: str) -> tuple[str, ...]:
                               "src/lib.rs, with forward slashes and no wildcards")
         paths.append(value)
     try:
-        check_portable_paths(paths)
+        check_portable_paths(paths, staging=False)
     except StageError as exc:
         raise SourceError("OAH_SOURCES_USAGE", f"{what}: {str(exc).partition(': ')[2]}") from None
     if len(set(paths)) != len(paths):
@@ -238,7 +238,7 @@ class SourceSpec:
                 "spec_digest": self.spec_digest}
 
     @classmethod
-    def from_json(cls, data: object, where: str) -> "SourceSpec":
+    def from_json(cls, data: object, where: str, *, allow_loopback: bool = False) -> "SourceSpec":
         if not isinstance(data, Mapping):
             raise SourceError("OAH_SOURCES_STATE_CORRUPT", f"{where} is not an object")
         try:
@@ -247,7 +247,7 @@ class SourceSpec:
                 tag_prefix=data.get("tag_prefix") or "", prerelease=data.get("channel") == "prerelease",
                 ref=_short_ref(data.get("ref")), paths=data.get("paths") or [],
                 manifest_path=data.get("manifest_path"), for_designs=data.get("for") or [],
-                allow_loopback=True, provider=data.get("provider"),
+                allow_loopback=allow_loopback, provider=data.get("provider"),
                 release_order=data.get("release_order") or None)
         except (SourceError, TypeError, AttributeError) as exc:
             raise SourceError("OAH_SOURCES_STATE_CORRUPT", f"{where} is not a valid registration ({exc})") from None
@@ -352,7 +352,7 @@ class Registry:
         return {"version": 1, "kind": "oah-sources-registry", "sources": dict(sorted(entries.items()))}
 
 
-def parse_registry(data: object, rel: str) -> tuple[Registry, dict]:
+def parse_registry(data: object, rel: str, *, allow_loopback: bool = False) -> tuple[Registry, dict]:
     """(registry, raw entries that are unusable). A file that is not a registry at all raises SourceError."""
     if data is None:
         return Registry({}, {}), {}
@@ -363,7 +363,7 @@ def parse_registry(data: object, rel: str) -> tuple[Registry, dict]:
     sources, problems, raw = {}, {}, {}
     for key, value in data["sources"].items():
         try:
-            spec = SourceSpec.from_json(value, f"{rel} entry {key!r}")
+            spec = SourceSpec.from_json(value, f"{rel} entry {key!r}", allow_loopback=allow_loopback)
             if spec.id != key:
                 raise SourceError("OAH_SOURCES_STATE_CORRUPT", f"{rel} entry {key!r} names id {spec.id!r}")
             sources[key] = spec

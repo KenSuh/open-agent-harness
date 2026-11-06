@@ -135,34 +135,44 @@ def assess(sources: Sources, proposals: Sequence[Proposal], *, reader: Callable[
             rows.append(dataclasses.replace(proposal, assessment=unassessed("budget" if index >= MAX_ASSESSMENTS
                                                                          else "dismissed")))
             continue
-        basis, view = _basis(sources, proposal, reader)
-        request = request_for(sources, proposal, basis, view)
-        if not any(type(field) is judge.PublicSnapshotField and role.endswith("excerpt") for role, field in request.fields):
-            result = judge.Judgement("unused(insufficient-input)", request.purpose, None)
-        else:
-            result = judge.judge(request, config=config, policy=sources.policy_digest(), sources=sources,
-                                 state_dir=sources.state_dir, budget=budget, env=env, keychain=keychain, providers=providers)
-        latest, latest_view = _basis(sources, proposal, reader)
-        latest_request = request_for(sources, proposal, latest, latest_view)
-        applied = judge.apply(result, current_input_ref=digest_of(latest), config=config, sources=sources,
-                              request=latest_request, policy=sources.policy_digest())
-        if applied.applied and latest["freshness"] != "fresh":
-            applied = judge.Applied(False, "source-not-fresh", {}, None)
-        record = {"version": 1, "kind": "oah-proposal-assessment", "proposal": proposal.key,
-                  "input_ref": digest_of(basis), "basis": basis, "judgement": result.to_record(),
-                  "applied": dataclasses.asdict(applied), "at": sources.now().isoformat()}
-        with sources.state.lock():
-            current, _current_view = _basis(sources, proposal, reader)
-            if current != latest:
-                raise ViewUnavailable("OAH_SOURCES_PROPOSAL_CHANGED")
-            pointers = _index(sources)
-            if len(pointers) >= INDEX_ENTRIES and proposal.key not in pointers:
-                raise StateProblem("oversize", "assessment-index.json", "assessment index is full; evidence is retained")
-            digest = sources.store_assessment(record)
-            pointers[proposal.key] = digest
-            sources.state.write_json("assessment-index.json", {"version": 1, "assessments": pointers})
-        rows.append(dataclasses.replace(proposal, assessment=_view(result.to_record(), applied, digest)))
+        try:
+            rows.append(_assess_one(sources, proposal, reader=reader, config=config, budget=budget,
+                                    env=env, keychain=keychain, providers=providers))
+        except ViewUnavailable:
+            rows.append(dataclasses.replace(proposal, assessment=unassessed("stale-or-unknown")))
     return rows
+
+
+def _assess_one(sources: Sources, proposal: Proposal, *, reader: Callable[[str, str], DesignView],
+                config: Mapping[str, Any], budget: judge.Budget, env: Mapping[str, str] | None,
+                keychain, providers: Mapping[str, Provider] | None) -> Proposal:
+    basis, view = _basis(sources, proposal, reader)
+    request = request_for(sources, proposal, basis, view)
+    if not any(type(field) is judge.PublicSnapshotField and role.endswith("excerpt") for role, field in request.fields):
+        result = judge.Judgement("unused(insufficient-input)", request.purpose, None)
+    else:
+        result = judge.judge(request, config=config, policy=sources.policy_digest(), sources=sources,
+                             state_dir=sources.state_dir, budget=budget, env=env, keychain=keychain, providers=providers)
+    latest, latest_view = _basis(sources, proposal, reader)
+    latest_request = request_for(sources, proposal, latest, latest_view)
+    applied = judge.apply(result, current_input_ref=digest_of(latest), config=config, sources=sources,
+                          request=latest_request, policy=sources.policy_digest())
+    if applied.applied and latest["freshness"] != "fresh":
+        applied = judge.Applied(False, "source-not-fresh", {}, None)
+    record = {"version": 1, "kind": "oah-proposal-assessment", "proposal": proposal.key,
+              "input_ref": digest_of(basis), "basis": basis, "judgement": result.to_record(),
+              "applied": dataclasses.asdict(applied), "at": sources.now().isoformat()}
+    with sources.state.lock():
+        current, _current_view = _basis(sources, proposal, reader)
+        if current != latest:
+            raise ViewUnavailable("OAH_SOURCES_PROPOSAL_CHANGED")
+        pointers = _index(sources)
+        if len(pointers) >= INDEX_ENTRIES and proposal.key not in pointers:
+            raise StateProblem("oversize", "assessment-index.json", "assessment index is full; evidence is retained")
+        digest = sources.store_assessment(record)
+        pointers[proposal.key] = digest
+        sources.state.write_json("assessment-index.json", {"version": 1, "assessments": pointers})
+    return dataclasses.replace(proposal, assessment=_view(result.to_record(), applied, digest))
 
 
 def recorded(sources: Sources, proposals: Sequence[Proposal], *, reader: Callable[[str, str], DesignView],

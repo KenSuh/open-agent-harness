@@ -26,7 +26,7 @@ from typing import Callable, Mapping
 from oah.design.sources import gitref, release, web
 from oah.design.sources import license as license_module
 from oah.design.sources.model import Head, Observation, SourceSpec
-from oah.design.sources.state import State, StateProblem, digest_of, sha256_hex
+from oah.design.sources.state import BLOB_LIMIT, State, StateProblem, digest_of, sha256_hex
 from oah.toolkit.catalog import CatalogError
 from oah.toolkit.fetch import FetchError, StageError, Tree, _checked, _git, check_portable_paths, fetch
 
@@ -58,8 +58,11 @@ class Settings:
 
 def _failed(exc: Exception, selection: str | None = None) -> Observation:
     if isinstance(exc, web.WebFailure):
-        retry = (dt.datetime.fromtimestamp(exc.retry_after, dt.timezone.utc)
-                 if isinstance(exc.retry_after, (int, float)) else None)
+        try:
+            retry = (dt.datetime.fromtimestamp(exc.retry_after, dt.timezone.utc)
+                     if isinstance(exc.retry_after, (int, float)) else None)
+        except (ValueError, OverflowError, OSError):
+            retry = None
         return Observation("failed", code=exc.code, http=exc.http, retry_after=retry, selection=selection)
     if isinstance(exc, gitref.RefError) and exc.code == "ls-remote-timeout":
         return Observation("failed", code="timeout", selection=selection)
@@ -84,6 +87,8 @@ class Observer:
                              resolve=dict(self.transport.resolve))
 
     def _store(self, data: bytes) -> str:
+        if len(data) > BLOB_LIMIT:
+            raise web.WebFailure("oversize")
         return self.state.put_blob(data)
 
     def _left(self, deadline: float) -> float:
@@ -118,7 +123,7 @@ class Observer:
                 problems.add("path-missing")
                 continue
             try:
-                check_portable_paths([name for _mode, _oid, name in entries])
+                check_portable_paths([name for _mode, _oid, name in entries], staging=False)
             except StageError:
                 problems.add("unsafe-entry")
                 continue
@@ -277,19 +282,24 @@ class Observer:
         header = result.headers.get("content-type", "")
         kind = header.split(";", 1)[0].strip().lower()
         charset = "utf-8"
-        for part in header.split(";")[1:]:
-            name, _, value = part.strip().partition("=")
-            if name.strip().lower() == "charset":
-                try:
+        try:
+            for part in header.split(";")[1:]:
+                name, _, value = part.strip().partition("=")
+                if name.strip().lower() == "charset":
                     charset = codecs.lookup(value.strip().strip('"')).name
-                except LookupError:
-                    charset = "utf-8"
-        text = result.body.decode(charset, errors="replace")
+            if charset in ("undefined", "idna", "punycode", "unicode-escape", "raw-unicode-escape"):
+                raise web.WebFailure("bad-response")
+            text = result.body.decode(charset)
+            text.encode("utf-8")
+        except (LookupError, UnicodeError):
+            raise web.WebFailure("bad-response") from None
         if kind in ("text/html", "application/xhtml+xml"):
             text = web.visible_text(text)
         else:
             text = text.replace("\r\n", "\n").replace("\r", "\n")
         text_bytes = text.encode("utf-8")
+        if len(text_bytes) > BLOB_LIMIT:
+            raise web.WebFailure("oversize")
         text_sha = sha256_hex(text_bytes)
         content = {"spec": spec.spec_digest, "type": kind, "text_sha256": text_sha}
         self._left(deadline)

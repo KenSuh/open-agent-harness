@@ -181,7 +181,7 @@ class State:
     def read(self, rel: str, limit: int) -> bytes | None:
         """The bytes of a regular file, or None when it does not exist."""
         path = self.path(rel)
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
             fd = os.open(path, flags)
         except FileNotFoundError:

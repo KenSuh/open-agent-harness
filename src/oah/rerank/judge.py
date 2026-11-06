@@ -65,7 +65,7 @@ LABELS = {
 # purpose -> (public roles: allowed tags), (authored roles), whether authored input is mandatory
 PURPOSES = {
     "source-change-impact": ({"release_note_excerpt": "snapshot", "document_excerpt": "snapshot",
-                              "file_excerpt": "snapshot", "version_delta": "label:version-delta",
+                              "version_delta": "label:version-delta",
                               "role": "label:role", "old_release_note_excerpt": "snapshot",
                               "new_release_note_excerpt": "snapshot", "from_tag": "snapshot",
                               "to_tag": "snapshot"}, {"relevance"}, False),
@@ -679,6 +679,8 @@ def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, 
     identity = record.get("identity")
     if record.get("status") not in (USED, "used(cache)") or not isinstance(identity, Mapping):
         return ["not-used"]
+    if config is not None and not config.get("enabled", False):
+        return ["disabled"]
     reasons = []
     if identity.get("constructor") != CONSTRUCTOR_VERSION:
         reasons.append("constructor-changed")

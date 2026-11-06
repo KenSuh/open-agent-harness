@@ -94,6 +94,18 @@ class LaunchdTest(ScheduleCase):
         self.assertEqual(data["desired_digest"], data["effective_digest"])
         self.assertEqual("3", result.os_run["runs"])
 
+    def test_launchd_logging_environment_is_benign_but_runtime_overrides_differ(self) -> None:
+        entry = self.entry("darwin")
+        text = self.print_text(entry, environment={"OSLogRateLimit": "64"}, spawn="background (5)")
+        result = self.inspect(entry, ok(text))
+        self.assertEqual(("scheduled", ()), (result.state, result.reasons))
+        for name in ("PYTHONPATH", "PYTHONHOME", "PATH", "OAH_STATE_DIR"):
+            with self.subTest(name=name):
+                text = self.print_text(entry, environment={"OSLogRateLimit": "64", name: "/elsewhere"})
+                result = self.inspect(entry, ok(text))
+                self.assertEqual("scheduled-different", result.state)
+                self.assertIn("environment-differs", result.reasons)
+
     def test_missing_interval_is_unverifiable_even_with_an_identical_plist(self) -> None:
         entry = self.entry("darwin")
         result = self.inspect(entry, ok(self.print_text(entry, interval=None)))
@@ -144,6 +156,13 @@ class LaunchdTest(ScheduleCase):
 
 class TaskSchedulerTest(ScheduleCase):
     START = dt.datetime(2026, 11, 1, 10, 0)
+
+    def test_a_query_error_does_not_claim_the_task_is_absent(self) -> None:
+        entry = self.entry("win32")
+        runner = Runner({"/Query": RunResult(1, "", "ERROR: Access is denied.", False)})
+        result = schedule.inspect_entry(entry, runner=runner, now=lambda: NOW)
+        self.assertEqual("unverifiable", result.state)
+        self.assertIn("query-failed", result.missing)
 
     def exported(self, entry: schedule.Entry, change=None) -> str:
         """The task XML as Task Scheduler exports it: the generated task plus fields it adds itself."""
@@ -243,7 +262,7 @@ class TaskSchedulerTest(ScheduleCase):
         self.assertEqual("unverifiable", unknown.state)
         self.assertIn("exec-field:Shell", unknown.missing)
         self.assertEqual("unverifiable", self.inspect(entry, self.exported(entry, no_anchor)).state)
-        self.assertEqual("absent", self.inspect(entry, None).state)
+        self.assertEqual("unverifiable", self.inspect(entry, None).state)
 
     def test_trigger_execution_limit_and_delay_change_the_effective_definition(self) -> None:
         entry = self.entry("win32")

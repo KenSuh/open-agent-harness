@@ -240,7 +240,7 @@ REGISTRATION_STATES = ("scheduled", "scheduled-different", "disabled", "unverifi
                        "unsupported", "tool-missing")
 OS_WAKEUP_SECONDS = DAY_SECONDS
 PRINT_LIMIT = 256 * 1024
-_IGNORED_ENVIRONMENT = {"XPC_SERVICE_NAME"}
+_IGNORED_ENVIRONMENT = {"XPC_SERVICE_NAME", "OSLogRateLimit"}
 _TRIGGER_MARKERS = (("event triggers", "event"), ("sockets", "socket"), ("calendar", "calendar"),
                     ("keepalive", "keep-alive"), ("keep alive", "keep-alive"), ("watch paths", "watch-path"),
                     ("queue directories", "queue-directory"), ("start on mount", "mount"))
@@ -630,7 +630,8 @@ def inspect_entry(entry: Entry, *, runner: Runner = run_command, search_path: st
         return Inspection("unverifiable", ("schtasks /Query did not answer in time",), desired_definition(entry),
                           missing=("query-timeout",))
     if result.returncode != 0:
-        return Inspection("absent", (), desired_definition(entry))
+        return Inspection("unverifiable", ("schtasks /Query failed",), desired_definition(entry),
+                          missing=("query-failed",))
     observations = (_observation("schtasks /Query /XML", result.stdout, at),)
     effective, unknown, different = parse_task_xml(result.stdout, entry, clock())
     anchor = _anchor(effective)

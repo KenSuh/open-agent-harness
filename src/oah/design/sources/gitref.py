@@ -13,6 +13,7 @@ import dataclasses
 import datetime as dt
 import hashlib
 import os
+import pathlib
 import re
 import subprocess
 import tempfile
@@ -109,6 +110,7 @@ def ls_remote(repository: str, patterns: Sequence[str] = (), *, tags: bool = Fal
     else:
         options["start_new_session"] = True
     with _git_env() as env, tempfile.TemporaryDirectory(prefix="oah-ls-remote-") as scratch:
+        env["GIT_CEILING_DIRECTORIES"] = str(pathlib.Path(scratch).parent)
         proc = subprocess.Popen([str(part) for part in argv], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, cwd=scratch, env=env, **options)
         try:

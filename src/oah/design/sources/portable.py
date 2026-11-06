@@ -20,10 +20,11 @@ import base64
 import binascii
 import dataclasses
 import hashlib
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 from oah.design.sources.model import SourceError, parse_observation
 from oah.design.sources import selection_proof, release as release_module, gitref, web
+import oah.design.sources.shapes as shapes
 from oah.design.sources import license as license_module
 from oah.design.sources.state import digest_of, hex_of, is_hex, record_digest
 
@@ -53,28 +54,76 @@ def _bad(message: str) -> PortableError:
     return PortableError("OAH_SOURCES_EVIDENCE_INVALID", message)
 
 
-def uses(manifest: Mapping, selection: Mapping | None = None) -> list[tuple[str, str, str]]:
+def _object(value: object, where: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise _bad(f"{where} is not an object")
+    return cast(Mapping[str, Any], value)
+
+
+def _objects(value: object, where: str) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        raise _bad(f"{where} is not a list")
+    return [_object(item, f"{where}[{index}]") for index, item in enumerate(value)]
+
+
+def _manifest_shape(manifest: Mapping[str, Any]) -> None:
+    try:
+        shapes.validate(manifest.get("files"), [shapes.FILE], "manifest.files")
+        spec = _object(manifest.get("spec"), "manifest.spec")
+        shapes.validate({"id": "manifest", **dict(spec)}, shapes.SOURCE, "manifest.spec")
+        license = manifest.get("license")
+        if license is not None:
+            license = _object(license, "manifest.license")
+            shapes.validate({key: license.get(key) for key in ("scopes", "files", "notices", "declared", "problems")},
+                            {"scopes": [shapes.SCOPE], "files": [shapes.ORIGINAL], "notices": [shapes.ORIGINAL],
+                             "declared": shapes.DECLARED, "problems": [str]}, "manifest.license")
+            if license.get("manifest") is not None:
+                shapes.validate(license["manifest"], shapes.ORIGINAL, "manifest.license.manifest")
+        document = manifest.get("document")
+        if document is not None:
+            shapes.validate(document, {"url": str, "final_url": str, "status": int, "content_type": str,
+                                      "charset": str, "bytes": int, "sha256": str, "text_sha256": str,
+                                      "text_bytes": int}, "manifest.document")
+        observed = _object(manifest.get("observed"), "manifest.observed")
+        for key in ("commit", "ref", "tree"):
+            shapes.validate(observed.get(key), shapes.TEXT, "manifest.observed." + key)
+        release = observed.get("release")
+        if release is not None:
+            schema = {"id": int, "tag": str, "tag_object": shapes.TEXT, "commit": str, "metadata_digest": str,
+                      "tree": str, "prerelease": bool, "published_at": shapes.TEXT, "release_observation": str,
+                      "notes": (type(None), {"bytes": int, "sha256": str}), "selection": str}
+            shapes.validate(release, schema, "manifest.observed.release")
+    except shapes.ShapeError as exc:
+        raise _bad(str(exc)) from None
+
+
+def uses(manifest: object, selection: object = None) -> list[tuple[str, str, str]]:
     """Every original a manifest names: (kind, path or field, sha256 hex), in a fixed order."""
     out: list[tuple[str, str, str]] = []
-    for item in manifest.get("files") or []:
-        out.append(("selected-file", item.get("path"), item.get("sha256")))
-    evidence = manifest.get("license") or {}
-    for item in evidence.get("files") or []:
-        out.append(("license", item.get("path"), item.get("sha256")))
-    for item in evidence.get("notices") or []:
-        out.append(("notice", item.get("path"), item.get("sha256")))
+    manifest = _object(manifest, "manifest")
+    _manifest_shape(manifest)
+    for item in _objects(manifest.get("files", []), "manifest.files"):
+        out.append(("selected-file", item["path"], item["sha256"]))
+    evidence = _object({} if manifest.get("license") is None else manifest["license"], "manifest.license")
+    for item in _objects(evidence.get("files", []), "manifest.license.files"):
+        out.append(("license", item["path"], item["sha256"]))
+    for item in _objects(evidence.get("notices", []), "manifest.license.notices"):
+        out.append(("notice", item["path"], item["sha256"]))
     if evidence.get("manifest") is not None:
-        out.append(("license-manifest", evidence["manifest"].get("path"), evidence["manifest"].get("sha256")))
-    document = manifest.get("document") or {}
+        package = _object(evidence["manifest"], "manifest.license.manifest")
+        out.append(("license-manifest", package["path"], package["sha256"]))
+    document = _object({} if manifest.get("document") is None else manifest["document"], "manifest.document")
     if document:
-        out.append(("document-body", "document.sha256", document.get("sha256")))
-        out.append(("document-text", "document.text_sha256", document.get("text_sha256")))
-    release = (manifest.get("observed") or {}).get("release") or {}
-    notes = release.get("notes") or {}
+        out.append(("document-body", "document.sha256", document["sha256"]))
+        out.append(("document-text", "document.text_sha256", document["text_sha256"]))
+    observed = _object(manifest.get("observed", {}), "manifest.observed")
+    release = _object({} if observed.get("release") is None else observed["release"], "manifest.observed.release")
+    notes = _object({} if release.get("notes") is None else release["notes"], "manifest.observed.release.notes")
     if notes.get("sha256"):
-        out.append(("release-notes", "observed.release.notes", notes.get("sha256")))
+        out.append(("release-notes", "observed.release.notes", notes["sha256"]))
     if selection is not None:
-        originals = selection.get("originals") or {}
+        selection = _object(selection, "selection")
+        originals = _object(selection.get("originals", {}), "selection.originals")
         for kind, entries in (("release-advertisement", originals.get("advertisements") or []),
                               ("release-metadata", originals.get("metadata") or [])):
             if not isinstance(entries, list) or len(entries) > release_module.REQUEST_LIMIT:
@@ -85,6 +134,8 @@ def uses(manifest: Mapping, selection: Mapping | None = None) -> list[tuple[str,
                     raise _bad("selection originals have invalid chunk membership")
                 for chunk, sha in enumerate(chunks):
                     out.append((kind, f"selection.{kind}.{index}.{chunk}", sha))
+    if any(not isinstance(where, str) for _kind, where, _sha in out):
+        raise _bad("an original has no path or field name")
     return out
 
 
@@ -227,6 +278,7 @@ def verify(envelope: object) -> Evidence:
     if not isinstance(provenance, Mapping) or set(provenance) != _PROVENANCE_KEYS \
             or provenance["claim"] != "local-observation":
         raise _bad("the provenance is malformed")
+    originals = uses(manifest, provenance["selection"])
     observation = provenance["observation"]
     if observation is not None:
         try:
@@ -261,7 +313,7 @@ def verify(envelope: object) -> Evidence:
     if not isinstance(raw, list) or len(raw) > MAX_BLOBS:
         raise _bad("blobs is not a list")
     memberships = {}
-    for kind, where, sha in uses(manifest, selection):
+    for kind, where, sha in originals:
         if not is_hex(sha):
             raise _bad("a required original has no valid digest")
         memberships.setdefault(sha, (kind, where))
