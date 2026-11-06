@@ -487,8 +487,9 @@ def _task_run(args: argparse.Namespace, store) -> int:
         command = (f"oah design task {args.task} --run {args.run} --transport-cleanup "
                    f"--evidence-plan {row['manifest']} --expect-origin {row['origin']} --expect-record "
                    f"{latest['sequence']}:{latest['record_digest']} --expect-task-basis {row['task_basis_digest']}")
-        print(f"  run: {command}" + ("" if row["quiescent"] else
-              " --settle aborted (only after confirming the original runner stopped; use failed for a failed run)"))
+        print(f"  run: {command}" + ("" if row["quiescent"] else " --settle aborted"))
+        if not row["quiescent"]:
+            print("  note: only after confirming the original runner stopped; use failed for a failed run")
         if row["exposure"] is not None:
             print(f"  exposure: {row['exposure'].get('state')} — {row['exposure'].get('why')} (sticky)")
         eligibility = row["eligibility"]

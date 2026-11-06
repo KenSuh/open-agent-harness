@@ -207,7 +207,7 @@ def strip_block(text: str) -> str:
     lines = text.splitlines(keepends=True)
     begins = [n for n, line in enumerate(lines) if line.rstrip("\r\n") == BEGIN]
     ends = [n for n, line in enumerate(lines) if line.rstrip("\r\n") == END]
-    if not begins and not ends and BEGIN not in text and END not in text:
+    if not begins and not ends:
         return text
     if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
         raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the stored brief has ambiguous design context markers; rebuild it from the current packet")
@@ -4437,9 +4437,11 @@ def _later_delivery(state_dir: pathlib.Path, task: str, current: Mapping, after:
                 if raw is None or saved is None:
                     continue
                 result, data = strict_json(raw.decode("utf-8")), strict_json(saved.decode("utf-8"))
+                started = datetime.fromisoformat(result["started_at"].replace("Z", "+00:00"))
                 finished = datetime.fromisoformat(result["finished_at"].replace("Z", "+00:00"))
                 receiving = data.get("receiving") or {}
-                if (finished > cutoff and result.get("status") == "finished" and result.get("stage") in ("initial", "correction", "review")
+                if (started > cutoff and finished >= started
+                        and result.get("status") == "finished" and result.get("stage") in ("initial", "correction", "review")
                         and result.get("exit_code") == 0 and result.get("timed_out") is False
                         and data.get("evidence_key") == record.key and data.get("fingerprint") == expected
                         and data.get("inline_complete") is True and receiving.get("delivered") is True):
@@ -4553,7 +4555,8 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
     own_work = [view for view in mine if current is not None
                 and view.record.get("task_identity", {}).get("task_instance_id") == current.get("task_instance_id")
                 and view.record.get("task_basis_digest") == current.get("task_basis_digest")
-                and (view.record.get("profile") or {}).get("operation") == "work"]
+                and (view.record.get("profile") or {}).get("operation") == "work"
+                and not (view.last("no-spawn") is not None and not view.spawned)]
     if own_work and not own_work[-1].delivered and not _later_delivery(
             state_dir, task, current, own_work[-1], mine):
         view = own_work[-1]

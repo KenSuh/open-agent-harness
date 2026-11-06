@@ -503,7 +503,7 @@ revision was approved. The AI runs these commands; you read the design pages in 
 
 ### Tasks that follow a design
 
-A task follows a design when its packet has a `## Design` section (`oah packet new <task> --design
+A task follows a design when its packet has a structured OAH `## Design` section (`oah packet new <task> --design
 <project>/<design>`, or `oah packet design <task>` to rewrite it). `oah start --packet` binds the task to the accepted
 revision for its exact inputs: the task and its instance, the project and design, the accepted intent, the normalized
 scope and the declared gates. A TTL renewal, or an exact restart after the lease expired, keeps that identity and the
@@ -516,8 +516,10 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
   revision, rewrite the Design section and start again. A decision made for other inputs does not apply
   (`OAH_DESIGN_TASK_INPUTS_CHANGED`).
 - **Packet upgrades.** A free-form `## Design` heading remains user prose. Only the structured binding fields make
-  it a task design; upgrading an existing lease does not replace that prose. A carry, like a rebind, needs a live
-  lease. Local task readouts keep the state, reason and recovery command even when a worktree path is private.
+  it a task design; upgrading an existing lease does not replace that prose. Carrying an open task requires its
+  current holder and a live lease; rebinding uses `oah start --packet`. A retained finished task can record a carry
+  or draft acknowledgment without an active lease; that decision grants no new execution authority. Local task
+  readouts keep the state, reason and recovery command even when a worktree path is private.
 - **Delivery.** Every managed brief carries the accepted parts and the newest distinct draft parts whole, within
   262,144 bytes. A design whose only large content is the verified public originals of a materials record (license
   and notice texts, documents) is sent with every semantic field inline and those originals as read-only files under
@@ -540,8 +542,10 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
   (`OAH_DESIGN_TRANSPORT_NONTERMINAL`).
   The run readout prints the exact cleanup command and expected origin/latest identities. A recorded exit needs no
   `--settle`; a partial install can be cleaned or acknowledged from its install-progress record. After cleanup, a
-  later complete delivery for the current task and exact design can satisfy an earlier incomplete read, including
-  a whole-inline delivery. Exposure and nonterminal runs still block completion.
+  complete delivery by a run that starts after the incomplete run's recorded exit, for the current task and exact
+  design, can satisfy that incomplete read, including a whole-inline delivery. An overlapping run does not qualify.
+  A proven no-spawn run needs its data accounted for but creates no undelivered work obligation. Exposure and
+  nonterminal runs still block completion.
 - **Finish, gates, reviews and land.** Each judges the design again at its own control point. Gate evidence carries
   the task's evidence key and goes stale when the design moves, without a rebind; unchanged checks keep their
   entries, and meaningful history rotates into create-only pages (`oah design task <task> --gate-history`). Finish

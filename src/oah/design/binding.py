@@ -40,6 +40,7 @@ from oah.design.model import (BINDING_INVALID_CODE, CONTEXT_STALE_CODE, CORRUPT_
 from oah.wiki.base import EXIT_ENVIRONMENT, EXIT_REFUSED
 
 SECTION_HEADING = "## Design"
+SECTION_MARKER = "<!-- The product design this task implements; oah packet design <task> rewrites this section. -->"
 SECTION_KEYS = ("design", "project uid", "revision", "digest")
 DESIGN_SCHEMA = 2
 MAX_DECISIONS = 64
@@ -133,7 +134,7 @@ class PacketDesign:
 
     def lines(self) -> list[str]:
         return [SECTION_HEADING,
-                "<!-- The product design this task implements; oah packet design <task> rewrites this section. -->",
+                SECTION_MARKER,
                 f"- design: {self.project}/{self.design}", f"- project uid: {self.uid}", f"- revision: {self.revision}",
                 f"- digest: {self.digest}"]
 
@@ -160,8 +161,18 @@ def _section_span(lines: Sequence[str]) -> tuple[list[int], int | None]:
                 if following.startswith(("## ", "# ")) or following in (BEGIN, END):
                     break
                 body.append(following.strip())
-            if any((match := _BULLET.fullmatch(item)) is not None and match.group(1) in SECTION_KEYS
-                   for item in body) or any("oah packet design <task> rewrites this section" in item for item in body):
+            structured = SECTION_MARKER in body
+            values = {match.group(1): match.group(2).strip() for item in body
+                      if (match := _BULLET.fullmatch(item)) is not None}
+            if not structured and all(key in values for key in SECTION_KEYS) and _REVISION.fullmatch(values["revision"]):
+                project, _, design = values["design"].partition("/")
+                try:
+                    PacketDesign.from_json({"project": project, "design": design, "uid": values["project uid"],
+                                            "revision": int(values["revision"]), "digest": values["digest"]})
+                    structured = True
+                except ValueError:
+                    structured = False
+            if structured:
                 heads.append(number)
     if not heads:
         return heads, None

@@ -215,9 +215,13 @@ def _line_offset(text: str, marker: str) -> int:
 def reusable_content(stored: str, *, stage: str, footer: str, has_footer: HasFooter) -> str:
     """Keep reusable instructions, discarding the previous dispatch's managed envelope."""
     from oah.design.task_context import strip_block
+    from oah.design.model import DesignError
 
     text = deliver(stored, footer=footer, has_footer=has_footer)
-    body = strip_block(text[:_line_offset(text, _marker(footer, has_footer))])  # an old design never carries over
+    try:
+        body = strip_block(text[:_line_offset(text, _marker(footer, has_footer))])
+    except DesignError as exc:
+        raise BriefError(exc.code, str(exc).partition(": ")[2]) from None
     verify = _line_offset(body, VERIFY_MARKER)
     generated = body.startswith("You are a dispatched oah worker (")
     if verify >= 0:

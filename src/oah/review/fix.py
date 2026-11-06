@@ -261,6 +261,8 @@ _ERROR_DIAGNOSTICS = {
                                   "the current design with oah review --task <task> before correcting.",
     "OAH_DESIGN_CHANGED": "the design changed while the correction was prepared; read it with oah design task "
                           "<task> and retry.",
+    "OAH_DESIGN_CHANGED_AFTER_RUN": "the run completed, but delivery is not marked because the design changed "
+                                    "during the run; read it with oah design task <task> before retrying.",
     "OAH_DESIGN_CONTEXT_TOO_LARGE": "the required design text does not fit a brief; split the design as oah design "
                                     "task <task> explains, then retry.",
     "OAH_DESIGN_CODEX_REFERENCE_PROFILE_PENDING": "this design needs original references, which no qualified Codex "
@@ -865,6 +867,9 @@ def _design_launch(t: _Task):
 
     store = Store(t.state)
     with _ExistingLock(store.lock_path):
+        if store.journal.path.exists():
+            from oah.journal import PendingTransaction
+            raise PendingTransaction("OAH_STATE_PENDING: recover the pending transaction before retrying.")
         stamp, live = _target(store.capture_document(), t.name)
         if stamp != t.stamp or live is None or live.expired(utc_now()):
             raise _PublicationConflict("OAH_LEASE_CHANGED", _ERROR_DIAGNOSTICS["OAH_LEASE_CHANGED"])

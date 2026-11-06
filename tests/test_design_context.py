@@ -293,7 +293,7 @@ class DesignTask(DesignRepo):
         return started
 
     def oah(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, "-m", "oah", *args], cwd=self.repo, capture_output=True, text=True,
+        return subprocess.run([sys.executable, "-B", "-m", "oah", *args], cwd=self.repo, capture_output=True, text=True,
                               encoding="utf-8", env=dict(self.env, **(env or {})), timeout=300)
 
     def events(self, prefix: str = "design_transport") -> list[dict]:
@@ -319,6 +319,47 @@ class DesignTask(DesignRepo):
 
         lease = next(lease for lease, _stale in Store(self.state_dir).snapshot() if lease.task == "t1")
         return lease, lease_design(lease, self.state_dir)
+
+
+class StoredBriefMarkerTest(DesignTask, unittest.TestCase):
+    def setUp(self):
+        self.build({"design": "People book a lesson.\n"})
+        git_commit(self.repo, {".oah/tasks/t2/PACKET.md": packet_text("t2", scope=("lib",))})
+        started = self.oah("start", "--task", "t2", "--agent", "claude", "--packet", ".oah/tasks/t2/PACKET.md")
+        self.assertEqual(started.returncode, 0, started.stderr)
+
+    def stored_call(self, task: str, content: str) -> subprocess.CompletedProcess[str]:
+        from oah import briefs
+
+        self.record.unlink(missing_ok=True)
+        brief = self.work / "stored.md"
+        packet = (self.repo / f".oah/tasks/{task}/PACKET.md").read_text()
+        section = briefs.raw_section(packet)
+        self.assertIsNotNone(section)
+        brief.write_text(f"{section}\n\n{content}")
+        return self.oah("call", "claude", "--stage", "initial", "--task", task, "--tier", "low",
+                        "--brief-file", str(brief), "--no-rerank")
+
+    def test_prose_marker_mentions_reach_designed_and_legacy_children_unchanged(self):
+        for task in ("t1", "t2"):
+            for mention in (tc.BEGIN, tc.END, f"{tc.BEGIN} and {tc.END}"):
+                with self.subTest(task=task, mention=mention):
+                    content = f"Document {mention} in prose.\n"
+                    result = self.stored_call(task, content)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(content, json.loads(self.record.read_text())["stdin"])
+
+    def test_ambiguous_whole_line_blocks_refuse_without_traceback_or_child(self):
+        block = f"{tc.BEGIN}\nold\n{tc.END}\n"
+        for task in ("t1", "t2"):
+            for content in (block + block, f"{tc.BEGIN}\nold\n", f"old\n{tc.END}\n"):
+                with self.subTest(task=task, content=content):
+                    result = self.stored_call(task, content)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertTrue(result.stderr.startswith(tc.REFERENCE_UNAVAILABLE_CODE), result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertIn("rebuild", result.stderr)
+                    self.assertFalse(self.record.exists())
 
 
 BIG_PARTS = {"design": "People book.\n", "request": "I want lessons.\n", "materials": materials_part(BIG)}
@@ -1652,6 +1693,18 @@ class TransportLedgerTest(DesignTask, unittest.TestCase):
     def proof(self, origin: str):
         return mock.Mock(holds=lambda value: value == origin)
 
+    @unittest.skipIf(os.name == "nt", "POSIX shell syntax check")
+    def test_nonterminal_readout_prints_a_shell_parseable_cleanup_command(self):
+        self.store.register_transport_origin(task="t1", lease_id=self.lease.id,
+                                             generation=self.lease.generation, record=self.origin_record)
+        readout = self.oah("design", "task", "t1", "--run", "rX")
+        self.assertEqual(readout.returncode, 0, readout.stderr)
+        commands = [line.removeprefix("  run: ") for line in readout.stdout.splitlines() if line.startswith("  run: ")]
+        self.assertEqual(len(commands), 1)
+        parsed = subprocess.run(["/bin/sh", "-n", "-c", commands[0]], capture_output=True, text=True)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        self.assertIn("--settle aborted", commands[0])
+
     def test_same_instance_rebind_allows_only_current_housekeeping_of_old_origin(self):
         from oah.lease import LeaseError
 
@@ -2168,7 +2221,7 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
                            "task_basis_digest": lease.design["basis"]}
                 if complete:
                     folder = self.last_run()
-                    for name, field in (("result.json", "status"), ("design.json", "origin"),
+                    for name, field in (("result.json", "status"), ("result.json", "started_at"), ("design.json", "origin"),
                                         ("design.json", "manifest")):
                         with self.subTest(field=field):
                             path = folder / name
@@ -2176,6 +2229,8 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
                             data = json.loads(original)
                             if field == "manifest":
                                 data["transport"]["read_plan"]["manifest_sha256"] = "sha256:" + "0" * 64
+                            elif field == "started_at":
+                                data[field] = "1900-01-01T00:00:00Z"
                             else:
                                 data[field] = "failed" if field == "status" else "sha256:" + "0" * 64
                             path.write_text(json.dumps(data), encoding="utf-8")
@@ -2224,6 +2279,7 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
         for name, key, invalid in (("design.json", "evidence_key", "sha256:" + "0" * 64),
                                    ("design.json", "fingerprint", {}),
                                    ("result.json", "status", "failed"),
+                                   ("result.json", "started_at", "1900-01-01T00:00:00Z"),
                                    ("result.json", "finished_at", "1900-01-01T00:00:00Z")):
             with self.subTest(name=name, key=key):
                 path = folder / name
@@ -2281,12 +2337,18 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
                 rc, output, errors = self.command_in_process(mock.patch.object(tc.os, "fchmod", side_effect=interrupted))
                 self.assertEqual(rc, 1, output + errors)
                 self.assertNotIn("OAH_STATE_IO", errors)
+                self.assertFalse(self.record.exists())
                 cleaned = self.oah(*self.cleanup_args(retain=retain))
                 self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
                 view = next(iter(tc.transport_views(self.state_dir, task="t1").values()))
                 self.assertIsNotNone(view.resolution)
                 if not retain:
                     self.assertFalse((self.repo / tc.DATA_DIR).exists())
+                self.assertIsNotNone(view.last("no-spawn"))
+                finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done",
+                                    "--return", str(self.returned()), "--allow-missing-wiki-maintenance",
+                                    "--allow-structural")
+                self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
 
 
 class CodexDeliveryTest(DesignTask, unittest.TestCase):

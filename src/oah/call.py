@@ -1977,7 +1977,7 @@ def _recorded_error(exc: BaseException, retain_worker_text: bool) -> str:
 
 def _finish_inline_delivery(prepared: Prepared) -> None:
     from oah.atomic import write_json_atomic
-    from oah.design import task_context
+    from oah.design import binding as design, task_context
 
     publication = _CORRECTION_PUBLICATION.get()
     if publication is not None:
@@ -1992,7 +1992,14 @@ def _finish_inline_delivery(prepared: Prepared) -> None:
         if after.get("changed") is not False:
             return
     else:
-        _check_design_unchanged(prepared, publication.holder(), saved)
+        try:
+            _check_design_unchanged(prepared, publication.holder(), saved)
+        except EngineError as exc:
+            if exc.code != design.CHANGED_CODE:
+                raise
+            raise EngineError("OAH_DESIGN_CHANGED_AFTER_RUN", "the run completed, but delivery is not marked because "
+                              "the design changed during the run; read it with oah design task "
+                              f"{prepared.task} before retrying") from None
     saved["receiving"] = dict(task_context._whole_receiving(), delivered=True,
                               provided=[{"inline_bytes": saved["block_bytes"], "references": 0}])
     saved["delivered"] = True

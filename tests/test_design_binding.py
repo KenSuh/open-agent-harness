@@ -752,13 +752,19 @@ class ReviewDesignTest(unittest.TestCase):
 
 class LegacyPacketDesignTest(unittest.TestCase):
     def test_main_shaped_lease_with_free_form_design_can_resume_read_and_finish(self):
+        for prose in ("A queue feeds the worker.", "- design: a queue in front of the worker",
+                      "- project uid: the local project name", "- revision: second pass", "- digest: weekly email"):
+            with self.subTest(prose=prose):
+                self.legacy_lease(prose)
+
+    def legacy_lease(self, prose: str) -> None:
         from oah import call, intent, packet
         from oah.lease import Store
         from oah.paths import repo_info
         from tests.test_intent_wiring import clean_env
 
         repo = make_git_repo(self)
-        text = packet_text().replace("## Plan", "## Design\nA queue feeds the worker.\n\n## Plan")
+        text = packet_text().replace("## Plan", f"## Design\n{prose}\n\n## Plan")
         git_commit(repo, {PACKET: text, "src/app.py": "x = 1\n"})
         state, home = make_tmp_dir(self), make_tmp_dir(self)
         binding = intent.parse(text).bind(PACKET)
@@ -782,6 +788,16 @@ class LegacyPacketDesignTest(unittest.TestCase):
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
         self.assertEqual((repo / PACKET).read_text(), text)
         self.assertNotIn("design_origin", (state / "events.jsonl").read_text())
+
+    def test_complete_binding_without_generator_comment_is_still_structured(self):
+        section = design.PacketDesign("acme", "a" * 32, "booking", 1, "sha256:" + "b" * 64)
+        text = "\n".join([section.lines()[0], *section.lines()[2:]])
+        self.assertEqual(design.parse_section(text), section)
+
+    def test_generator_marker_keeps_malformed_binding_a_refusal(self):
+        section = design.PacketDesign("acme", "a" * 32, "booking", 1, "sha256:" + "b" * 64)
+        with self.assertRaises(design.SectionInvalid):
+            design.parse_section(design.render_section(section).replace("- revision: 1", "- revision: second pass"))
 
 
 class FixTargetOnlyTest(unittest.TestCase):
@@ -856,7 +872,56 @@ class FixTargetOnlyTest(unittest.TestCase):
         self.assertTrue(any((project.state / "design-invalid").iterdir()))
 
 
+class CompletedCorrectionDesignChangeTest(unittest.TestCase):
+    def test_finished_fix_with_changed_design_reports_completed_run_without_marking_delivery(self):
+        from oah import call
+        from oah.review import ReviewError
+        from tests.test_fix import FIXED
+
+        project = design_fix_project(self)
+        project.changes_requested()
+        project.queue_fix({"write": FIXED})
+        stream = call._stream_correction
+
+        def changed(*args, **kwargs):
+            result = stream(*args, **kwargs)
+            current = project.design_store.context("acme", "booking").current
+            project.design_store.save("acme", "booking", expect_revision=current.revision,
+                expect_digest=current.digest, reason="concurrent wording",
+                parts={"design": "People book a lesson online.\n"}, today=TODAY)
+            return result
+
+        with mock.patch.object(call, "_stream_correction", changed), self.assertRaises(ReviewError) as caught:
+            project.fix()
+        self.assertEqual(caught.exception.code, "OAH_DESIGN_CHANGED_AFTER_RUN")
+        self.assertIn("run completed", str(caught.exception))
+        self.assertIn("delivery is not marked", str(caught.exception))
+        self.assertEqual(len(project.fix_calls()), 1)
+        run = sorted((project.state / "runs/t1").glob("r*/result.json"))[-1]
+        result = json.loads(run.read_bytes())
+        self.assertEqual((result["status"], result["exit_code"]), ("finished", 0))
+        delivered = json.loads((run.parent / "design.json").read_bytes())
+        self.assertFalse(delivered.get("delivered"))
+        self.assertFalse((delivered.get("receiving") or {}).get("delivered"))
+
+
 class CorrectionAuthorityTest(DesignTask, unittest.TestCase):
+    def test_launch_guard_refuses_pending_transaction_without_recovering_it(self):
+        from oah.journal import PendingTransaction
+        from oah.lease import Store
+        from oah.review import fix
+
+        self.build({"design": "People book.\n"})
+        store = Store(self.state_dir)
+        stamp, lease = fix._target(store.capture_document(), "t1")
+        task = fix._Task("t1", self.state_dir, lease, self.repo, json.dumps(lease.to_json()), stamp)
+        pending = b'{"pending": "must be recovered before dispatch"}\n'
+        store.journal.path.write_bytes(pending)
+        with self.assertRaises(PendingTransaction), fix._design_launch(task):
+            self.fail("the pending transaction granted launch authority")
+        self.assertEqual(store.journal.path.read_bytes(), pending)
+        self.assertFalse(self.record.exists())
+
     def test_malformed_open_task_replay_refuses_before_launch(self):
         from oah.atomic import append_jsonl
         from oah.lease_cli import lease_design
