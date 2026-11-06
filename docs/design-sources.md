@@ -42,6 +42,14 @@ state, the configuration or the OS scheduler cannot be used (for example `OAH_SO
 - **Licenses are read in full.** oah keeps the actual license text and any nested license files, and judges
   eligibility against `[sources] license_allow`. A license it cannot recognise stays unknown; it is never
   guessed.
+- **Copyright notices use a limited syntax.** Before a supported license body, oah accepts a copyright
+  marker, four-digit years (including ranges or comma-separated years), and one to four ASCII name tokens
+  starting with an uppercase letter. Name tokens may contain letters, digits, and apostrophe/hyphen joins
+  followed by an uppercase letter, as in `Jean-Luc O'Neil`. An optional comma-separated company suffix
+  (`Inc`, `Ltd`, `LLC`, `Corp`, `Co`), final period, `<email>` and exact `All rights reserved` are supported.
+  Extra clauses, conjunctions, lowercase holder prose and other unsupported spellings remain `unknown`,
+  with every original byte preserved. This is bounded syntax recognition, not legal certification of a
+  name-shaped string; unsupported legitimate notices may also need manual review.
 - **Requests are public and credential-free.** oah sends no cookie or authorization header and refuses to
   run through an HTTP proxy, because a proxy would choose the destination it cannot vet.
 

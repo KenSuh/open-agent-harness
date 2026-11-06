@@ -304,15 +304,28 @@ class InputBasisTest(MaterialsCase):
 class PortableEvidenceTest(MaterialsCase):
     """Complete originals survive an empty clone, with S1 times kept apart from S2 freshness."""
 
-    def test_restricted_copyright_preambles_stay_unknown_in_materials(self) -> None:
+    def test_copyright_notices_keep_license_eligibility_and_originals_offline(self) -> None:
         notice = "Copyright (c) 2026 Acme"
-        prefixes = (notice + ". Commercial use is forbidden.",
-                    notice + "\nCopyright notice: commercial use is forbidden.",
-                    notice + "\nAll rights reserved; commercial use is forbidden.")
-        for index, prefix in enumerate(prefixes):
+        cases = ((notice, "eligible"),
+                 ("Copyright (c) 2015-2026 Acme, Inc.\nAll rights reserved.", "eligible"),
+                 ("Copyright © 2026 Jane Doe <jane@example.org>", "eligible"),
+                 ("(c) 2026 Acme", "eligible"),
+                 ("Copyright (c) 2026 Jean-Luc O'Neil", "eligible"),
+                 ("Copyright (c) 2026 The Apache Software Foundation", "eligible"),
+                 (notice + ". Commercial use is forbidden.", "unknown"),
+                 (notice + "\nCopyright notice: commercial use is forbidden.", "unknown"),
+                 (notice + "\nAll rights reserved; commercial use is forbidden.", "unknown"),
+                 (notice + " commercial use is forbidden.", "unknown"),
+                 (notice + " and you may not use this software commercially.", "unknown"),
+                 (notice + " distribution requires written approval", "unknown"),
+                 (notice + " and Contributors", "unknown"),
+                 ("Copyright (c) 2026 the Acme project contributors", "unknown"),
+                 ("Copyright (c) 2026 One Two Three Four Five", "unknown"))
+        for index, (prefix, expected) in enumerate(cases):
             with self.subTest(prefix=prefix):
                 original = LICENSE.replace(notice, prefix).encode()
-                self.release(f"v1.0.{index + 1}", {"LICENSE": original.decode()})
+                self.release(f"v1.0.{index + 1}", {"LICENSE": original.decode(),
+                                                  "src/lib.rs": f"pub fn notice_{index}() {{}}\n"})
                 checked = self.sources.check_one(self.spec)
                 self.assertEqual("changed", checked.result)
                 assert checked.snapshot is not None
@@ -321,11 +334,15 @@ class PortableEvidenceTest(MaterialsCase):
                 saved = manifest["license"]["files"][0]
                 self.assertEqual(original, self.sources.blob(saved["sha256"]))
                 built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
-                self.assertEqual("unknown", built.record["materials"][0]["license"]["eligibility"])
                 empty = self.make_sources(make_tmp_dir(self) / "empty")
                 report = materials.check(built.text, empty, None, self.view())
-                self.assertEqual("unknown", report["source_reads"][0]["eligibility"])
+                embedded = portable.verify(built.record["portable_evidence"][0])
+                self.assertEqual(original, embedded.read(saved["sha256"]))
+                self.assertEqual((expected,) * 3, (self.sources.eligibility(manifest).status,
+                                 built.record["materials"][0]["license"]["eligibility"],
+                                 report["source_reads"][0]["eligibility"]))
                 self.assertEqual("verified-from-portable-bytes", report["source_reads"][0]["historical_evidence"])
+                self.assertEqual("unknown(offline-or-unregistered)", report["source_reads"][0]["upstream_freshness"])
 
     def test_registered_license_manifest_is_preserved_and_rechecked_offline(self) -> None:
         data = b'[package]\nname = "example"\nversion = "1.0.1"\nlicense = "MIT"\n'
