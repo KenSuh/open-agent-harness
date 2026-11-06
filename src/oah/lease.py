@@ -584,6 +584,10 @@ def serialize_lease_document(document: LeaseDocumentV1 | None, leases: Sequence[
 def persist_create_only(path: pathlib.Path, raw: bytes) -> None:
     from oah.atomic import _fsync_folder
 
+    if os.name == "nt":
+        from oah.design.task_context import _windows_persist_create_only
+
+        return _windows_persist_create_only(path, raw)
     flags = getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | flags, 0o600)
@@ -1090,7 +1094,14 @@ class Store:
             raise LeaseError(task_context.TRANSPORT_HISTORY_UNKNOWN, f"transport origin {origin} is not recorded")
         return view
 
-    def _transport_authority(self, leases: list[Lease], task: str, record: Mapping, authority: Mapping | None
+    def _action_authority(self, lease: Lease) -> dict:
+        record = self._document.record(lease.task)
+        return {"lease_id": lease.id, "generation": lease.generation, "task_basis_digest": lease.design["basis"],
+                "target": "sha256:" + hashlib.sha256(json.dumps([record.core, record.design.kind,
+                        record.design.raw], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()}
+
+    def _transport_authority(self, leases: list[Lease], task: str, record: Mapping, authority: Mapping | None,
+                             *, housekeeping: bool = False
                              ) -> Lease:
         """CURRENT authority for an authority-bearing transition: the task's unexpired lease (exactly this id and
         generation when given) on the origin's task instance and basis."""
@@ -1109,18 +1120,101 @@ class Store:
             design = lease.design if isinstance(lease.design, dict) else {}
             instance = (design.get("task_identity") or {}).get("task_instance_id")
             if (instance != (record.get("task_identity") or {}).get("task_instance_id")
-                    or design.get("basis") != record.get("task_basis_digest")):
+                    or (not housekeeping and design.get("basis") != record.get("task_basis_digest"))):
                 problem = "the task's current instance or basis is not the origin's"
+            elif authority is not None and authority.get("task_basis_digest", design.get("basis")) != design.get("basis"):
+                problem = "the current action basis changed"
+            elif authority is not None and authority.get("target", self._action_authority(lease)["target"]) != \
+                    self._action_authority(lease)["target"]:
+                problem = "the complete current action target changed"
+            else:
+                from oah.lease_cli import lease_design
+
+                judged = lease_design(lease, self.dir)
+                allowed = ("current", "needs-review") if (record.get("profile") or {}).get("operation") == "inspect" \
+                    else ("current",)
+                if judged.state not in allowed:
+                    problem = f"the actual current design or intent is {judged.state} ({judged.code})"
         if problem is not None:
             raise LeaseError(task_context.TRANSPORT_AUTHORITY, f"task {task}: no current authority for this design "
                              f"transport action ({problem}); nothing was changed")
         return lease
+
+    @contextmanager
+    def transport_action(self, *, task: str, origin: str, expected: Mapping, authority: Mapping | None = None,
+                         retired_roles=(), receiving_root: pathlib.Path | None = None):
+        from oah.design import task_context
+
+        with self._lock():
+            leases = self._load()
+            view = self._transport_view(origin)
+            if view.task != task or view.problem is not None:
+                raise LeaseError(task_context.TRANSPORT_HISTORY_UNKNOWN, "the original registration is unknown")
+            lease = self._transport_authority(leases, task, view.record, authority, housekeeping=True)
+            if view.latest != dict(expected):
+                raise LeaseError(task_context.TRANSPORT_CONFLICT, "the origin's latest checkpoint changed")
+            if not view.quiescent:
+                raise LeaseError(task_context.TRANSPORT_NONTERMINAL, "the original producer has no durable quiescence")
+            if view.exposure is not None:
+                raise LeaseError(task_context._P4_CODES[view.exposure["state"]], "the origin has sticky exposure")
+            if "live_roots" not in view.record and view.last("boot-settled") is None:
+                raise LeaseError(task_context.TRANSPORT_CHANGED, "the original complete role-root proof is unknown")
+            else:
+                root = receiving_root or pathlib.Path(lease.worktree)
+                roots = task_context.current_role_roots(lease, self.dir, root,
+                                                        retirement=bool(view.record.get("retirement")))
+                settled = view.last("boot-settled")
+                root_record = dict(view.record, live_roots=settled["fact"]["live_roots"]) if settled else view.record
+                problem = task_context.verify_live_roots(root_record, roots, retired_roles=retired_roles)
+                if problem is not None:
+                    raise LeaseError(task_context.TRANSPORT_CHANGED, problem)
+            yield lease, view
+
+    @contextmanager
+    def transport_install_guard(self, *, task: str, origin: str, expected: Callable, authority: Mapping, live_roots):
+        from oah.design import task_context
+
+        with self._lock():
+            leases = self._load()
+            view = self._transport_view(origin)
+            if view.task != task or view.problem is not None or view.latest != dict(expected()):
+                raise LeaseError(task_context.TRANSPORT_CONFLICT, "the installation origin or latest checkpoint changed")
+            self._transport_authority(leases, task, view.record, authority)
+            if not live_roots.current():
+                raise LeaseError(task_context.TRANSPORT_CHANGED, "the original installation role roots changed")
+            yield
+
+    def transport_action_basis(self, *, task: str, origin: str, expected: Mapping, receiving_root=None,
+                               retired_roles=()) -> dict:
+        with self.transport_action(task=task, origin=origin, expected=expected, receiving_root=receiving_root,
+                                   retired_roles=retired_roles) as (lease, _view):
+            return self._action_authority(lease)
+
+    @contextmanager
+    def transport_cleanup_guard(self, name: str, *, task: str, origin: str, expected: Callable,
+                                authority: Mapping, installation):
+        from oah.design import task_context
+
+        with self.transport_action(task=task, origin=origin, expected=expected(), authority=authority,
+                                   receiving_root=installation.root) as (_lease, view):
+            done = installation
+            if name not in (*done.leaves, done.manifest, task_context.DATA_DIR):
+                raise LeaseError(task_context.TRANSPORT_CHANGED, "the mutation is outside this origin's owned roster")
+            problem = task_context.check_cleanup_anchors(done)
+            checked = task_context.verify_transport_origin(view.record, done.root,
+                        installation=done if done.m_fd is not None else None,
+                        expect="live" if done.m_fd is not None else "cleaned")
+            if problem is not None or checked["state"] != "clean":
+                raise LeaseError(checked["code"] or task_context.TRANSPORT_CHANGED, problem or checked["why"])
+            yield
 
     def register_transport_origin(self, *, task: str, lease_id: str, generation: int, record: dict) -> dict:
         """PREPARED: the durable original tuple, before any DATA file exists. Returns the origin's E0."""
         from oah.design import task_context
 
         _refuse_worker_lease()
+        if task_context._origin_problem(record, task) is not None:
+            raise LeaseError(task_context.TRANSPORT_HISTORY_UNKNOWN, "the proposed origin registration is malformed")
         origin = task_context.origin_digest(record)
         with self._lock():
             leases = self._load()
@@ -1157,11 +1251,15 @@ class Store:
             if view.task != task or view.problem is not None:
                 raise LeaseError(task_context.TRANSPORT_HISTORY_UNKNOWN, f"transport origin {origin} is not a "
                                  f"readable origin of task {task}")
-            lease = self._transport_authority(leases, task, view.record, authority)
+            housekeeping = kind in task_context.HOUSEKEEPING
+            lease = self._transport_authority(leases, task, view.record, authority, housekeeping=housekeeping)
             if dict(expected) != view.latest:
                 raise LeaseError(task_context.TRANSPORT_CONFLICT, f"transport origin {origin} moved to "
                                  f"{view.latest['sequence']}:{view.latest['record_digest']}; nothing was changed. "
                                  "Read it again with oah design task --run")
+            if housekeeping:
+                fact = dict(fact, action_authority={"lease_id": lease.id, "generation": lease.generation,
+                            "task_basis_digest": lease.design["basis"]})
             return self._append_observation(leases, view, task, lease.agent, lease.id, kind, fact)
 
     def observe_transport_exit(self, *, original: Mapping, expected: Mapping, kind: str, fact: Mapping,
@@ -1174,9 +1272,8 @@ class Store:
 
         _refuse_worker_lease()
         origin = original.get("origin")
-        if kind not in task_context.FACTUAL or live_proof is None or not live_proof.holds(origin):
-            raise LeaseError(task_context.TRANSPORT_AUTHORITY, "only the original runner that still holds its "
-                             "process and root proof can record this exit")
+        if kind not in task_context.FACTUAL:
+            raise LeaseError(task_context.TRANSPORT_AUTHORITY, "this is not an original runner's factual event")
         with self._held_or_lock(held):
             leases = self._load()
             view = self._transport_view(origin)
@@ -1187,19 +1284,78 @@ class Store:
                                      f"recorded one of origin {origin}; nothing was changed")
             if view.problem is not None:
                 raise LeaseError(task_context.TRANSPORT_HISTORY_UNKNOWN, f"origin {origin}: {view.problem}")
+            if dict(expected) != view.latest:
+                raise LeaseError(task_context.TRANSPORT_CONFLICT, f"origin {origin} moved to sequence "
+                                 f"{view.latest['sequence']}; reread it before appending or replaying")
             same = next((item for item in reversed(view.observations)
-                         if item["kind"] == kind and item["fact"] == dict(fact)), None)
-            if same is not None:  # exact durable replay: the same fact bytes are already recorded
-                return {"sequence": same["sequence"], "record_digest": same["record_digest"]}, True
+                         if item["kind"] == kind and task_context.canonical(item["fact"]) ==
+                         task_context.canonical(dict(fact))), None)
+            if same is not None:
+                if any(item["kind"] not in task_context.COMPATIBLE for item in
+                       view.observations[same["sequence"]:]):
+                    raise LeaseError(task_context.TRANSPORT_CONFLICT, "the durable fact has incompatible successors")
+                return view.latest, True
             terminal = view.last(*task_context.QUIESCENT)
             if terminal is not None and kind in task_context.QUIESCENT:
                 raise LeaseError(task_context.TRANSPORT_CONFLICT, f"origin {origin} already records a different "
                                  f"terminal fact ({terminal['kind']}); both are kept, nothing was changed")
-            if dict(expected) != view.latest:
-                raise LeaseError(task_context.TRANSPORT_CONFLICT, f"origin {origin} moved to sequence "
-                                 f"{view.latest['sequence']}; reread it before appending")
+            if live_proof is None or not live_proof.holds(origin):
+                raise LeaseError(task_context.TRANSPORT_AUTHORITY, "only the original runner that still holds its "
+                                 "process and root proof can record a new fact")
+            if kind == "no-spawn" and view.spawned:
+                raise LeaseError(task_context.TRANSPORT_NONTERMINAL, "PREPARED no-spawn cannot follow a spawn intent")
             agent = (record.get("epoch") or {}).get("agent") or "oah"
             return self._append_observation(leases, view, view.task, agent, None, kind, fact), False
+
+    def settle_transport(self, *, task: str, origin: str, expected: Mapping, root: pathlib.Path, settle: str) -> dict:
+        from oah.design import task_context as tc
+
+        _refuse_worker_lease()
+        with self._lock():
+            leases = self._load()
+            view = self._transport_view(origin)
+            if view.problem is not None or view.task != task or view.latest != dict(expected):
+                raise LeaseError(tc.TRANSPORT_CONFLICT, "the settlement origin or latest checkpoint changed")
+            lease = self._transport_authority(leases, task, view.record, None, housekeeping=True)
+            if view.quiescent or settle not in ("failed", "aborted") or view.exposure is not None:
+                raise LeaseError(tc.TRANSPORT_NONTERMINAL, "the origin is already settled, exposed or has no valid settlement")
+            installed_event = view.last("installed")
+            installed = installed_event["fact"] if installed_event else {}
+            roots = tc.current_role_roots(lease, self.dir, root, retirement=bool(view.record.get("retirement")))
+            paths = tc.installation_node_paths(root, view.record["manifest"],
+                        [row["name"] for row in installed.get("leaves", [])],
+                        data_created=bool(installed.get("data_dir_created")))
+
+            def capture():
+                return (tc.capture_local_continuity(view.record["nonce"], roots), tc.boot_identity(),
+                        tc.capture_node_continuity(view.record["nonce"], paths))
+
+            current, boot, nodes = capture()
+            problem = tc.postboot_problem(view.record, current, boot, installed.get("persistent_nodes", {}), nodes)
+            if problem is not None:
+                raise LeaseError(tc.TRANSPORT_NONTERMINAL, problem)
+            done, states = tc.reopen(root, view.record["manifest"], installed, postboot_validated=True)
+            try:
+                if done is None or not states or any(state != "present-unchanged" for state in states.values()):
+                    raise LeaseError(tc.TRANSPORT_CHANGED, "the current complete installed roster is unknown or changed")
+                checked = tc.verify_transport_origin(view.record, root, installation=done)
+                if checked["state"] != "clean":
+                    raise LeaseError(checked["code"] or tc.TRANSPORT_HISTORY_UNKNOWN, checked["why"])
+                live_roots = tc.LiveRoots(roots)
+                try:
+                    if (current, boot, nodes) != capture() or not live_roots.current():
+                        raise LeaseError(tc.TRANSPORT_CHANGED, "native identity changed during settlement publication")
+                    return self._append_observation(leases, view, task, lease.agent, lease.id, "boot-settled",
+                        {"settle": settle, "quiescent": True, "quiescence_by": "boot-replaced",
+                         "returncode": None, "exit_observation": "lost", "continuity": current, "boot": boot,
+                         "persistent_nodes": nodes, "live_roots": live_roots.facts(view.record["nonce"]),
+                         "installed_current": done.facts(), "head": checked["head"],
+                         "action_authority": self._action_authority(lease)})
+                finally:
+                    live_roots.close()
+            finally:
+                if done is not None:
+                    done.close()
 
     def release(self, *, task: str, agent: str, reason: str, force: bool) -> Lease:
         _refuse_worker_lease()

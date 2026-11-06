@@ -15,6 +15,7 @@ import os
 import pathlib
 import platform
 import stat
+import struct
 import subprocess
 import sys
 import unittest
@@ -97,13 +98,39 @@ def materials_part(blobs, *, provider: str = "github", member: bool = True, narr
         digest = hashlib.sha256(data).hexdigest()
         if member:
             files.append({"path": name, "mode": "100644", "blob": "b" * 40, "size": len(data), "sha256": digest})
-        items.append({"id": digest, "kind": "license", "path_or_field": name, "encoding": "base64",
+        items.append({"id": "sha256:" + digest, "kind": "selected-file", "path_or_field": name, "encoding": "base64",
                       "bytes": len(data), "sha256": digest, "data": base64.b64encode(data).decode("ascii")})
-    evidence = {"id": hashlib.sha256(b"evidence").hexdigest(),
-                "source": {"provider": provider, "locator": "github.com/acme/lib"},
-                "manifest": {"digest": "c" * 64, "files": files}, "blobs": items}
+    def record_digest(value):
+        return "sha256:" + hashlib.sha256((json.dumps(value, ensure_ascii=False, sort_keys=True, indent=1)
+                                          + "\n").encode()).hexdigest()
+
+    spec = {"provider": provider, "locator": "https://github.com/acme/lib", "track": "commit", "tag_prefix": "",
+            "channel": "stable", "ref": "HEAD", "paths": [name for name, _data in blobs], "manifest_path": None,
+            "release_order": "", "selection_policy": None, "verification_policy": "source-verification-v1"}
+    spec_digest = "sha256:" + hashlib.sha256(canonical(spec)).hexdigest()
+    source = {"id": "lib", **spec}
+    manifest = {"kind": "oah-source-snapshot", "version": 1, "spec": spec, "spec_digest": spec_digest,
+                "verified": True, "files": files, "license": {"files": [], "notices": []}, "document": None,
+                "observed": {"commit": "c" * 40, "ref": "HEAD", "release": None}}
+    snapshot = record_digest(manifest)
+    times = {key: "2026-11-01T12:00:00+00:00" for key in
+             ("attempted_at", "observed_at", "confirmed_at", "verified_at")}
+    observation = {"version": 1, "kind": "oah-source-observation", "outcome": "established", "head_generation": 1,
+                   "source": {"id": "lib", "registration": "a" * 32, "spec_digest": spec_digest},
+                   "snapshot": snapshot, "previous": None, "selection_observation": None,
+                   "verification_policy": spec["verification_policy"], **times}
+    observed = record_digest(observation)
+    evidence = {"version": 1, "kind": "oah-portable-evidence", "source": source, "spec_digest": spec_digest,
+                "snapshot": {"digest": snapshot, "manifest": manifest}, "blobs": items,
+                "provenance": {"claim": "local-observation", "registration": "a" * 32,
+                               "observation": observation, "observation_digest": observed,
+                               "release_observation": None, "release_observation_digest": None}}
+    material = {"id": "lib", "source": source, "snapshot": snapshot, "spec_digest": spec_digest,
+                "portable_evidence_id": "sha256:" + hashlib.sha256(canonical(evidence)).hexdigest(),
+                "checked": {"historical": "verified", "observation": observed, **times},
+                "reviewed": {"files": files, "commit": "c" * 40, "ref": "HEAD"}, "release": None}
     record = {"version": 2, "lang": "en", "narrative": narrative, "decision_inputs": {"d1": {"need": "storage"}},
-              "decisions": [{"id": "d1", "need": "storage", "alternatives": ["a", "b"]}], "materials": [],
+              "decisions": [{"id": "d1", "need": "storage", "alternatives": ["a", "b"]}], "materials": [material],
               "stacks": [], "portable_evidence": [evidence], **(extra or {})}
     return f"## Materials\nThe library we chose and its license.\n```oah-materials\n{canonical(record).decode()}\n```\n"
 
@@ -161,12 +188,13 @@ class MaterialsRecordTest(unittest.TestCase):
                 self.assertIsNotNone(problem)
 
     def test_local_or_unlisted_evidence_stays_inline(self):
-        for options in ({"provider": "local"}, {"member": False}):
-            with self.subTest(options):
-                part, problem = tc.materials_part(materials_part(BIG[:1], **options))
-                self.assertIsNone(problem)
-                self.assertEqual([item.projectable for item in part.originals], [False])
-                self.assertIn("stays inline", part.originals[0].reason)
+        part, problem = tc.materials_part(materials_part(BIG[:1], provider="local"))
+        self.assertIsNone(problem)
+        self.assertEqual([item.projectable for item in part.originals], [False])
+        self.assertIn("stays inline", part.originals[0].reason)
+        part, problem = tc.materials_part(materials_part(BIG[:1], member=False))
+        self.assertIsNone(part)
+        self.assertIn("unlisted", problem)
 
 
 class CodecAndScreenTest(unittest.TestCase):
@@ -249,6 +277,21 @@ BIG_PARTS = {"design": "People book.\n", "request": "I want lessons.\n", "materi
 
 
 class TransportPlanTest(DesignTask, unittest.TestCase):
+    def test_inline_originals_and_semantic_strings_are_screened_before_delivery(self):
+        sensitive = ("s" + "k-" + "z" * 24).encode()
+        self.build({"design": "People book.\n"})
+        store = self.store(self.repo)
+        current = store.context("acme", "booking").current
+        saved = store.save("acme", "booking", expect_revision=current.revision, expect_digest=current.digest,
+                           reason="new original", parts={"materials": materials_part([("LICENSE", sensitive)])},
+                           today=TODAY)
+        store.accept("acme", "booking", revision=saved.revision, digest=saved.digest, reason="ok", today=TODAY)
+        _lease, judged = self.judged()
+        with self.assertRaises(DesignError) as caught:
+            tc.select(judged, task="t1", engine="codex")
+        self.assertIn("privacy rule key", str(caught.exception))
+        self.assertNotIn(sensitive.decode(), str(caught.exception))
+
     def test_small_designs_stay_whole_inline(self):
         self.build({"design": "People book a lesson.\n"})
         _lease, judged = self.judged()
@@ -335,10 +378,571 @@ class TransportPlanTest(DesignTask, unittest.TestCase):
 
 @unittest.skipIf(os.path.exists("/Library/Application Support/ClaudeCode")
                  or os.path.exists("/Library/Managed Preferences"), "this host has managed Claude Code policy")
+class CodexPolicyTest(unittest.TestCase):
+    class Preferences:
+        def __init__(self, value=None, *, forced=False, sync=True, stale=False):
+            self.value, self.forced, self.synced, self.stale = value, forced, sync, stale
+            self.calls = 0
+
+        def synchronize(self):
+            return self.synced
+
+        def is_forced(self, key):
+            self.calls += 1
+            return not self.forced if self.stale and self.calls == 2 else self.forced
+
+        def copy_string(self, key):
+            if not self.forced:
+                raise AssertionError("an observed unforced preference must not be adopted")
+            return self.value
+
+    def collect(self, *, user=b'', preferences=None, argv=(), files=None):
+        sources = {"/users/fixture/.codex/config.toml": user, **(files or {})}
+
+        def read(path):
+            raw = sources.get(str(path))
+            return ("present", raw, None) if raw is not None else ("absent", None, None)
+
+        def directory(path):
+            return tc._source("managed-directory", path, "absent", None, None), []
+
+        with mock.patch.object(tc, "_read_bracketed", side_effect=read), \
+                mock.patch.object(tc, "_policy_directory", side_effect=directory):
+            return tc.collect_process_policy(pathlib.Path('/workspace'), {'HOME': '/users/fixture'},
+                        operation='work', data_paths=['/workspace/.oah-design-data/aa/bb'], engine='codex',
+                        argv=['codex', *argv], cli_version='0.166.0', platform='darwin',
+                        native_preferences=preferences or self.Preferences())
+
+    def test_observed_unforced_is_local_evidence_and_reference_gate_stays_closed(self):
+        found = self.collect(user=b'model = "gpt-6.1-sol"\nsandbox_mode = "workspace-write"\n')
+        self.assertEqual(found['local_policy'], 'verified')
+        self.assertTrue(found['candidate_local_eligible'])
+        self.assertFalse(found['launch_eligible'])
+        self.assertEqual(found['reference_profile'], tc.CODEX_REFERENCE_PENDING_CODE)
+        self.assertEqual([x['presence'] for x in found['sources'] if x['kind'] == 'forced-preference'],
+                         ['observed-unforced', 'observed-unforced'])
+
+    def test_forced_deny_error_stale_and_selectors_drive_actual_reader(self):
+        deny = base64.b64encode(b'deny_read = ["**"]\n').decode()
+        forced = self.collect(preferences=self.Preferences(deny, forced=True),
+                              argv=['-c', 'sandbox_mode="workspace-write"'])
+        self.assertEqual(forced['local_policy'], 'denied')
+        for preferences in (self.Preferences(sync=False), self.Preferences('not base64!', forced=True),
+                            self.Preferences(deny, forced=True, stale=True)):
+            with self.subTest(preferences=preferences):
+                self.assertEqual(self.collect(preferences=preferences)['local_policy'], 'unknown')
+        self.assertEqual(self.collect(argv=['--profile', 'missing'])['local_policy'], 'unknown')
+        profile = self.collect(argv=['--profile', 'research'], files={
+            '/users/fixture/.codex/research.config.toml': b'model = "gpt-6.1-sol"\n'})
+        self.assertEqual(profile['local_policy'], 'verified')
+        self.assertEqual(self.collect(argv=['--ignore-user-config'])['local_policy'], 'unknown')
+        self.assertEqual(self.collect(user=b'hooks = { pre_tool_use = ["opaque"] }\n')['local_policy'], 'unknown')
+
+    def test_project_trust_selects_only_applicable_local_configuration(self):
+        files = {'/workspace/.codex/config.toml': b'deny_read = ["**"]\n'}
+        ignored = self.collect(files=files)
+        self.assertEqual(ignored['local_policy'], 'verified')
+        trusted = b'[projects."/workspace"]\ntrust_level = "trusted"\n'
+        found = self.collect(user=trusted, files=files)
+        self.assertEqual(found['local_policy'], 'denied')
+        self.assertEqual(next(row['trust_level'] for row in found['sources'] if row['kind'] == 'project-trust'),
+                         'trusted')
+        self.assertEqual(self.collect(user=trusted, files={'/workspace/.codex/config.toml':
+                         b'model = "gpt-6.1-sol"\n'})['local_policy'], 'verified')
+        self.assertEqual(self.collect(user=b'[projects."/workspace"]\ntrust_level = "maybe"\n',
+                                      files=files)['local_policy'], 'unknown')
+
+
+class WindowsNativeRosterTest(unittest.TestCase):
+    class Native:
+        def __init__(self):
+            self.nodes = {1: {'parent': None, 'name': 'root', 'type': 'directory', 'data': b'', 'mode': 0o755}}
+            self.nodes[2] = {'parent': 1, 'name': 'work', 'type': 'directory', 'data': b'', 'mode': 0o755}
+            self.handles, self.counter = {}, 100
+            self.next_inode = 2
+            self.root = self._handle(1)
+
+        def _handle(self, inode):
+            self.counter += 1
+            self.handles[self.counter] = inode
+            return self.counter
+
+        def open_anchor(self, path, *, writable=False):
+            handle = self._handle(1)
+            anchors = [handle]
+            for name in pathlib.PureWindowsPath(path).parts[1:]:
+                handle, _ = self.open_child(handle, name, directory=True)
+                anchors.append(handle)
+            return handle, anchors
+
+        def close(self, handle):
+            inode = self.handles.pop(handle)
+            if inode in self.nodes and self.nodes[inode].get('deleted'):
+                del self.nodes[inode]
+
+        def names(self, handle, *, limit=tc.ENTRY_LIMIT + 1):
+            return sorted(item['name'] for item in self.nodes.values() if item['parent'] == self.handles[handle])
+
+        def iter_names(self, handle):
+            yield from self.names(handle)
+
+        def open_child(self, parent, name, *, directory, create=False, writable=False, delete=False, inspect=False,
+                       enumerated=False):
+            parent_id = self.handles[parent]
+            matches = [key for key, item in self.nodes.items() if item['parent'] == parent_id and item['name'] == name]
+            if matches and create:
+                raise FileExistsError(name)
+            if not matches:
+                if not create:
+                    raise FileNotFoundError(name)
+                self.next_inode += 1
+                inode = self.next_inode
+                self.nodes[inode] = {'parent': parent_id, 'name': name, 'type': 'directory' if directory else 'file',
+                                     'data': b'', 'mode': 0o755 if directory else 0o644}
+            else:
+                inode = matches[0]
+            if directory is not None and self.nodes[inode]['type'] != ('directory' if directory else 'file'):
+                raise tc.InstallRefused('native fixture wrong object type')
+            return self._handle(inode), create
+
+        def info(self, handle):
+            inode = self.handles[handle]
+            item = self.nodes[inode]
+            if item.get('reparse') or item.get('nlink', 1) != 1:
+                raise tc.InstallRefused('native fixture reparse or hardlink')
+            return {'dev': 10, 'ino': inode, 'uid': 'sha256:' + '1' * 64, 'mode': item['mode'],
+                    'size': len(item['data']), 'nlink': 1, 'type': item['type']}
+
+        def read(self, handle, bound):
+            raw = self.nodes[self.handles[handle]]['data']
+            if len(raw) > bound:
+                raise tc.InstallRefused('native fixture over bound')
+            return raw
+
+        def write(self, handle, data):
+            self.nodes[self.handles[handle]]['data'] = data
+
+        def prefix(self, handle, limit):
+            return self.nodes[self.handles[handle]]['data'][:limit]
+
+        def digest(self, handle, size):
+            return hashlib.sha256(self.read(handle, size)).hexdigest()
+
+        def seal(self, handle):
+            item = self.nodes[self.handles[handle]]
+            item['mode'] = 0o555 if item['type'] == 'directory' else 0o444
+
+        def flush(self, handle):
+            pass
+
+        def delete(self, handle):
+            if self.names(handle):
+                raise tc.InstallRefused('native fixture nonempty directory')
+            self.nodes[self.handles[handle]]['deleted'] = True
+
+    def test_create_only_native_roster_checked_bytes_guarded_cleanup_and_reopen(self):
+        native = self.Native()
+        manifest, first, second = 'a' * 64, 'b' * 64, 'c' * 64
+        done = tc._install_windows(pathlib.PureWindowsPath(r'C:\work'), manifest,
+                                   {first: b'first\n', second: b'second\n'}, native=native)
+        self.assertIsNone(tc.check_leaves(done))
+        installed = done.facts()
+        done.close()
+        reopened, states = tc._reopen_windows(pathlib.PureWindowsPath(r'C:\work'), manifest,
+                                               installed, native=native)
+        self.assertEqual(set(states.values()), {'present-unchanged'})
+        progress = []
+        def before(name):
+            if name == second:
+                raise tc.InstallRefused('controlled current authority change')
+        with self.assertRaisesRegex(tc.InstallRefused, 'current authority'):
+            tc.remove_leaves(reopened, [first, second], before=before, after=lambda *row: progress.append(row))
+        self.assertEqual(progress, [(first, 'absent', 'file')])
+        self.assertIn(second, native.names(reopened.m_fd))
+        tc.remove_leaves(reopened, [second], before=lambda name: None, after=lambda *row: progress.append(row))
+        tc.remove_directories(reopened, before=lambda name: None, after=lambda *row: progress.append(row))
+        self.assertEqual(native.names(reopened.root_fd), [])
+        reopened.close()
+
+    def test_reparse_hardlink_replacement_and_ambiguous_paths_refuse(self):
+        for bad in (r'C:relative', r'\\server\share\x', r'C:\work\CON', r'C:\work\file:stream',
+                    r'C:\work\x.', r'C:\work\..\other'):
+            with self.subTest(path=bad), self.assertRaises(tc.PolicyReadError):
+                tc._safe_windows_path(bad)
+        for defect in ('reparse', 'nlink', 'data'):
+            with self.subTest(defect=defect):
+                native = self.Native()
+                done = tc._install_windows(pathlib.PureWindowsPath(r'C:\work'), 'a' * 64,
+                                           {'b' * 64: b'original\n'}, native=native)
+                leaf = native.nodes[native.handles[done.leaf_handles['b' * 64]]]
+                leaf[defect] = 2 if defect == 'nlink' else b'changed\n' if defect == 'data' else True
+                self.assertIsNotNone(tc.check_leaves(done))
+                with self.assertRaises(tc.InstallRefused):
+                    tc.remove_leaves(done, ['b' * 64], before=lambda name: None, after=lambda *row: None)
+                done.close()
+
+    def test_native_read_manifest_and_package_pin_use_owned_handles(self):
+        native = self.Native()
+        data, run, task = b'public original\n', 'rNative', 'native-task'
+        blob = hashlib.sha256(data).hexdigest()
+        raw = canonical({'target_identity': {'run': run, 'task_identity': {'task_id': task}},
+                         'files': [{'id': blob, 'bytes': len(data), 'sha256': 'sha256:' + blob}]})
+        manifest = hashlib.sha256(raw).hexdigest()
+        done = tc._install_windows(pathlib.PureWindowsPath(r'C:\work'), manifest,
+                                   {blob: data, manifest: raw}, native=native)
+        self.assertEqual(tc._windows_read_blob(pathlib.PureWindowsPath(r'C:\work'), task=task, run=run,
+                         manifest=manifest, blob=blob, native=native), data)
+        with self.assertRaises(DesignError):
+            tc._windows_read_blob(pathlib.PureWindowsPath(r'C:\work'), task='other', run=run,
+                                 manifest=manifest, blob=blob, native=native)
+        root = done.root_fd
+        image, _ = native.open_child(root, 'codex.exe', directory=False, create=True, writable=True)
+        header = bytearray(512)
+        header[:2] = b'MZ'
+        struct.pack_into('<I', header, 60, 128)
+        header[128:132] = b'PE\0\0'
+        struct.pack_into('<HHIIIHH', header, 132, 0x8664, 2, 0, 0, 0, 240, 2)
+        struct.pack_into('<H', header, 152, 0x20b)
+        struct.pack_into('<H', header, 220, 3)
+        native.write(image, bytes(header))
+        native.close(image)
+        candidate = tc.windows_package_candidate('codex', 'inspect', executable=r'C:\work\codex.exe',
+                         cli_version='0.166.0', tools=[], native=native)
+        self.assertEqual(candidate['candidate_status'], 'verified')
+        self.assertEqual(candidate['status'], 'unsupported')
+        self.assertEqual(candidate['machine'], 'x86_64')
+        self.assertEqual(candidate['executable_sha256'], 'sha256:' + hashlib.sha256(header).hexdigest())
+        bad = tc.windows_package_candidate('codex', 'inspect', executable=r'C:\work\codex.exe',
+                         cli_version='0.166.1', tools=[], native=native)
+        self.assertEqual(bad['candidate_status'], 'unknown')
+        done.close()
+
+    def test_native_snapshot_census_output_and_guarded_removal_share_exact_identity(self):
+        from oah.review import snapshot
+
+        native = self.Native()
+        parent = pathlib.PureWindowsPath(r'C:\work')
+        root, anchors = native.open_anchor(parent)
+        leaf, _ = native.open_child(root, 'product.txt', directory=False, create=True, writable=True)
+        native.write(leaf, b'product\n')
+        native.close(leaf)
+        entries = list(snapshot._windows_census(parent, native=native))
+        pages = make_tmp_dir(self)
+        allocation = {'run': 'rNative'}
+        fields = snapshot.write_pages(allocation, entries, pages)
+        descriptor = {'version': 1, 'allocation': allocation, **fields, 'output_slot': {'path': ['last-message.md']},
+                      'container_object': snapshot._native_container(native.info(root))}
+        plan = snapshot.RetirementPlan(descriptor, hashlib.sha256(snapshot._canonical(descriptor)).hexdigest(), pages)
+        output, _ = native.open_child(root, 'last-message.md', directory=False, create=True, writable=True)
+        native.write(output, b'final report\n')
+        native.close(output)
+        producer = {'run': 'rNative', 'checkpoint': 'sha256:' + '3' * 64}
+        final = snapshot.finalize_retirement_plan(plan, snapshot._windows_output_slot(parent,
+                    ['last-message.md'], producer=producer, native=native))
+        for held in reversed(anchors):
+            native.close(held)
+        with mock.patch.object(snapshot, '_container_object', return_value=descriptor['container_object']), \
+                mock.patch.object(snapshot, '_census', side_effect=lambda p: snapshot._windows_census(parent, native=native)), \
+                mock.patch.object(snapshot, 'capture_output_slot', side_effect=lambda p, c, producer:
+                                  snapshot._windows_output_slot(parent, c, producer=producer, native=native)):
+            validated = snapshot.validate_retirement_plan(final, parent, pages)
+        progress = []
+        self.assertTrue(snapshot._windows_guarded_remove(parent, validated,
+                         lambda item, state: progress.append((item['path'], state)), native=native))
+        self.assertEqual(progress[-1], ([], 'absent'))
+        self.assertNotIn(2, native.nodes)
+
+    def test_native_file_information_and_short_write_api_buffers_are_checked(self):
+        import ctypes as ct
+        import types
+
+        native = tc._WindowsIO.__new__(tc._WindowsIO)
+        native.ct = ct
+        defect = {'links': 1, 'reparse': 0}
+        def information(handle, kind, target, size):
+            raw = bytearray(size)
+            if kind == 18:
+                raw[:8] = (29).to_bytes(8, 'little')
+                raw[8:] = (41).to_bytes(16, 'little')
+            elif kind == 1:
+                struct.pack_into('<qI', raw, 8, 6, defect['links'])
+            elif kind == 9:
+                struct.pack_into('<II', raw, 0, 0x400 if defect['reparse'] else 0x80, defect['reparse'])
+            ct.memmove(target, bytes(raw), size)
+            return 1
+        native.kernel = types.SimpleNamespace(GetFileInformationByHandleEx=mock.Mock(side_effect=information),
+                                              GetFileType=mock.Mock(return_value=1))
+        native.security_digest = lambda handle: 'sha256:' + '2' * 64
+        self.assertEqual((native.info(7)['dev'], native.info(7)['ino']), (29, 41))
+        for key, value in (('links', 2), ('reparse', 0xA0000003)):
+            defect.update(links=1, reparse=0)
+            defect[key] = value
+            with self.assertRaises(tc.InstallRefused):
+                native.info(7)
+        stored = bytearray()
+        position, zero = [0], [False]
+        def write(handle, source, size, count, overlapped):
+            length = 0 if zero[0] else min(size, 3)
+            stored.extend(ct.string_at(source, length))
+            ct.cast(count, ct.POINTER(ct.c_uint32))[0] = length
+            return 1
+        def seek(handle, offset, result, method):
+            position[0] = offset
+            return 1
+        def read(handle, target, size, count, overlapped):
+            data = bytes(stored[position[0]:position[0] + size])
+            ct.memmove(target, data, len(data))
+            position[0] += len(data)
+            ct.cast(count, ct.POINTER(ct.c_uint32))[0] = len(data)
+            return 1
+        native.kernel.WriteFile = mock.Mock(side_effect=write)
+        native.kernel.ReadFile = mock.Mock(side_effect=read)
+        native.kernel.SetFilePointerEx = mock.Mock(side_effect=seek)
+        native.kernel.FlushFileBuffers = mock.Mock(return_value=1)
+        native.write(7, b'complete native bytes')
+        self.assertEqual(stored, b'complete native bytes')
+        zero[0] = True
+        with self.assertRaisesRegex(tc.InstallRefused, 'no-progress'):
+            native.write(7, b'cannot progress')
+
+
+class WindowsPolicyTest(unittest.TestCase):
+    class Registry:
+        HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER = 1, 2
+        KEY_READ, KEY_WOW64_64KEY, REG_SZ = 0x20019, 0x100, 1
+
+        def __init__(self):
+            self.values, self.accesses, self.error = {}, [], False
+
+        def OpenKey(self, hive, path, reserved, access):
+            self.accesses.append((hive, path, access))
+            if self.error:
+                raise PermissionError("controlled registry access failure")
+            if not any(key[:2] == (hive, path) for key in self.values):
+                raise FileNotFoundError()
+            return (hive, path)
+
+        def QueryValueEx(self, key, name):
+            try:
+                return self.values[(*key, name)]
+            except KeyError:
+                raise FileNotFoundError() from None
+
+        def CloseKey(self, key):
+            pass
+
+    def test_registry_deny_absence_and_access_error_are_distinct(self):
+        registry = self.Registry()
+        with mock.patch.object(tc, "_windows_known_folder", return_value="C:\\ProgramData", create=True):
+            factory = getattr(tc, "_WindowsPolicy", None)
+            self.assertIsNotNone(factory, "the local native Windows reader must consume registry state")
+            reader = factory(registry=registry)
+            empty = reader.collect("claude")
+            self.assertEqual(empty["problems"], [])
+            registry.values[(1, r"SOFTWARE\Policies\ClaudeCode", "Settings")] = \
+                ('{"permissions":{"deny":["Read"]}}', 1)
+            denied = reader.collect("claude")
+            self.assertEqual(json.loads(denied["values"][0][1])["permissions"]["deny"], ["Read"])
+            registry.error = True
+            self.assertTrue(reader.collect("claude")["problems"])
+
+    def test_codex_knownfolder_and_64bit_registry_override_are_not_environment_guesses(self):
+        registry = self.Registry()
+        registry.values[(1, r"SOFTWARE\Policies\OpenAI\Codex", "RequirementsPath")] = \
+            (r"D:\Policy\requirements.toml", 1)
+        with mock.patch.object(tc, "_windows_known_folder", return_value=r"C:\ProgramData", create=True):
+            factory = getattr(tc, "_WindowsPolicy", None)
+            self.assertIsNotNone(factory, "the selected Windows system sources need a native reader")
+            found = factory(registry=registry).collect("codex")
+        self.assertEqual(str(found["files"][1][1]), r"D:\Policy\requirements.toml")
+        self.assertTrue(all(access & 0x100 for _hive, _path, access in registry.accesses))
+
+
+class NativeContinuityTest(unittest.TestCase):
+    class Reader:
+        def __init__(self):
+            self.host_reads = 0
+            self.fail = None
+            self.mount_id = b"mount001"
+
+        def host_uuid(self):
+            self.host_reads += 1
+            return bytes.fromhex("12345678123456781234567812345678")
+
+        def principal(self):
+            return (501, 501)
+
+        def statfs(self, descriptor):
+            data = bytearray(2168)
+            data[48:56] = self.mount_id
+            struct.pack_into("<I", data, 64, 0x1000)
+            data[72:76] = b"hfs\0"
+            data[88:90] = b"/\0"
+            if self.fail == "remote":
+                struct.pack_into("<I", data, 64, 0)
+            if self.fail == "apfs":
+                data[72:77] = b"apfs\0"
+            return bytes(data)
+
+        def attributes(self, descriptor, volume):
+            size = 112 if volume else 32
+            data = bytearray(size)
+            struct.pack_into("<I", data, 0, size)
+            struct.pack_into("<IIIII", data, 4, 0x80000000 if volume else 0x80000040,
+                             0xC0060000 if volume else 0, 0, 0, 0)
+            if volume:
+                struct.pack_into("<I", data, 24, 0x24001)
+                struct.pack_into("<I", data, 40, 0x24001)
+                data[56:72] = b"volume-uuid-0001"
+                struct.pack_into("<II", data, 72, 0x40, 0xC0060000)
+                struct.pack_into("<II", data, 92, 0x40, 0xC0060000)
+            else:
+                data[24:32] = os.fstat(descriptor).st_ino.to_bytes(8, "little")
+            if self.fail == "short":
+                return bytes(data[:-1])
+            if self.fail == "invalid-mask":
+                data[4:24] = bytes(20)
+            if self.fail == "zero-object" and not volume:
+                data[24:32] = bytes(8)
+            return bytes(data)
+
+        def boot_uuid(self):
+            return bytes.fromhex("abcdefabcdefabcdefabcdefabcdefab")
+
+    def setUp(self):
+        self.root = make_tmp_dir(self)
+        self.reader = self.Reader()
+
+    def capture(self):
+        with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
+                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader, create=True):
+            return tc.capture_local_continuity("12" * 32, {"receiving": self.root, "holder": self.root})
+
+    def test_candidate_reads_are_real_but_do_not_assert_installed_qualification(self):
+        found = self.capture()
+        self.assertGreaterEqual(self.reader.host_reads, 2)
+        self.assertEqual(found["status"], "unsupported")
+        self.assertEqual(found["observation_provenance"]["candidate_status"], "verified")
+        self.assertEqual(found["roots"][0]["roles"], ["holder", "receiving"])
+        self.assertIsNotNone(found["roots"][0]["permanent_object_digest"])
+        self.assertNotIn(str(os.getuid()), json.dumps(found))
+
+    def test_native_buffers_remote_filesystem_and_invalid_attributes_refuse(self):
+        for failure in ("remote", "apfs", "short", "invalid-mask", "zero-object"):
+            with self.subTest(failure=failure):
+                self.reader.fail = failure
+                found = self.capture()
+                self.assertNotEqual(found["observation_provenance"].get("candidate_status"), "verified")
+                self.assertEqual(found["status"], "unknown" if failure in
+                                 ("short", "invalid-mask", "zero-object") else "unsupported")
+
+
+    def test_persistent_comparison_blocks_shared_state_other_host_and_all_unknown_sources(self):
+        import copy
+
+        old = self.capture()
+        old["status"] = old["host"]["status"] = "qualified"
+        for row in old["roots"]:
+            row["status"] = "qualified"
+        self.reader.mount_id = b"mount002"
+        current = self.capture()
+        current["status"] = current["host"]["status"] = "qualified"
+        for row in current["roots"]:
+            row["status"] = "qualified"
+        self.assertEqual(current["roots"], old["roots"])
+        boot = {"status": "qualified", "source": "kern.bootsessionuuid", "profile_id": tc.RECOVERY_PROFILE,
+                "source_abi_digest": tc._DARWIN_ABI_DIGEST, "value_digest": "sha256:" + "a" * 64}
+        next_boot = {**boot, "value_digest": "sha256:" + "b" * 64}
+        leaf = self.root / "controlled-node"
+        leaf.write_bytes(b"bytes")
+        with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
+                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader):
+            nodes = tc.capture_node_continuity("12" * 32, {"controlled-node": leaf})
+        nodes["status"] = "qualified"
+        record = {"nonce": "12" * 32, "continuity": old, "boot": boot}
+        self.assertIsNone(tc.postboot_problem(record, current, next_boot, nodes, nodes))
+        self.assertIsNotNone(tc.postboot_problem(record, current, boot, nodes, nodes))
+        for field in ("kernel_host_digest", "principal_digest", "namespace"):
+            changed = copy.deepcopy(current)
+            changed["host"][field] = "different"
+            self.assertIsNotNone(tc.postboot_problem(record, changed, next_boot, nodes, nodes))
+        for key in ("permanent_object_digest", "volume_uuid_digest", "owner_mode_digest", "path_bytes_digest"):
+            changed = copy.deepcopy(current)
+            changed["roots"][0][key] = "sha256:" + "f" * 64
+            self.assertIsNotNone(tc.postboot_problem(record, changed, next_boot, nodes, nodes))
+        self.assertIsNotNone(tc.postboot_problem(record, {**current, "status": "unknown"}, next_boot, nodes, nodes))
+        self.assertIsNotNone(tc.postboot_problem(record, current, next_boot, {}, nodes))
+
+    def test_node_candidate_uses_native_permanent_object_and_refuses_replacement(self):
+        leaf = self.root / "leaf"
+        leaf.write_bytes(b"bytes")
+        with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
+                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader):
+            before = tc.capture_node_continuity("12" * 32, {"leaf": leaf})
+            leaf.rename(self.root / "old-leaf")
+            leaf.write_bytes(b"bytes")
+            after = tc.capture_node_continuity("12" * 32, {"leaf": leaf})
+        self.assertEqual(before["candidate_status"], "verified")
+        self.assertEqual(before["status"], "unsupported")
+        self.assertNotEqual(before["nodes"][0]["object_digest"], after["nodes"][0]["object_digest"])
+
+    def test_settlement_rechecks_sources_and_cas_without_claiming_delivery(self):
+        from oah.lease import LeaseError
+
+        case = TransportLedgerTest("test_stale_expected_record_refuses_without_writing")
+        self.addCleanup(case.doCleanups)
+        case.setUp()
+        nonce = "12" * 32
+        roots = tc.current_role_roots(case.lease, case.state_dir, case.repo)
+        manifest_bytes = b'{}'
+        manifest = hashlib.sha256(manifest_bytes).hexdigest()
+        done = tc.install(case.repo, manifest, {manifest: manifest_bytes})
+        self.addCleanup(done.close)
+        paths = tc.installation_node_paths(case.repo, manifest, tuple(done.leaves), data_created=True)
+        with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
+                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader):
+            continuity = tc.capture_local_continuity(nonce, roots)
+            nodes = tc.capture_node_continuity(nonce, paths)
+        continuity["status"] = continuity["host"]["status"] = nodes["status"] = "qualified"
+        for row in continuity["roots"]:
+            row["status"] = "qualified"
+        boot = {"status": "qualified", "source": "kern.bootsessionuuid", "profile_id": tc.RECOVERY_PROFILE,
+                "source_abi_digest": tc._DARWIN_ABI_DIGEST, "value_digest": "sha256:" + "a" * 64}
+        record = tc.origin_record(transport={"read_plan": {"files": [], "manifest_sha256": "sha256:" + manifest},
+                                             "view": {}}, root=case.repo,
+                    repo=case.lease.design["task_identity"]["repo_common_identity"], run="rPostboot",
+                    task_identity=case.lease.design["task_identity"], basis=case.lease.design["basis"],
+                    epoch={"lease_id": case.lease.id, "generation": case.lease.generation},
+                    profile={"operation": "inspect"}, h0=tc.git_head(case.repo), policy={}, nonce=nonce,
+                    continuity=continuity, boot=boot, root_identity=done.root_identity)
+        start = case.store.register_transport_origin(task="t1", lease_id=case.lease.id,
+                                                      generation=case.lease.generation, record=record)
+        origin = start["record_digest"]
+        latest = case.store.observe_transport(task="t1", origin=origin, expected=start, kind="installed",
+                    fact={**done.facts(), "persistent_nodes": nodes})
+        with self.assertRaises(LeaseError):
+            case.store.settle_transport(task="t1", origin=origin, expected=latest, root=case.repo, settle="aborted")
+        self.assertEqual(tc.transport_views(case.state_dir)[origin].latest, latest)
+        changed_boot = {**boot, "value_digest": "sha256:" + "b" * 64}
+        with mock.patch.object(tc, "capture_local_continuity", return_value=continuity), \
+                mock.patch.object(tc, "capture_node_continuity", return_value=nodes), \
+                mock.patch.object(tc, "boot_identity", return_value=changed_boot):
+            with self.assertRaises(LeaseError):
+                case.store.settle_transport(task="t1", origin=origin, expected=start, root=case.repo, settle="aborted")
+            result = case.store.settle_transport(task="t1", origin=origin, expected=latest, root=case.repo,
+                                                  settle="aborted")
+        view = tc.transport_views(case.state_dir)[origin]
+        self.assertEqual(view.latest, result)
+        self.assertTrue(view.quiescent)
+        self.assertFalse(view.delivered)
+        self.assertEqual(view.record, record)
+        self.assertEqual(view.last("boot-settled")["fact"]["exit_observation"], "lost")
+
+
 class PolicyCollectorTest(unittest.TestCase):
     def setUp(self):
         self.home = make_tmp_dir(self)
-        self.root = make_tmp_dir(self)
+        self.root = make_git_repo(self)
         self.paths = [str(self.root / tc.DATA_DIR / ("a" * 64) / ("b" * 64))]
 
     def collect(self):
@@ -386,9 +990,87 @@ class PolicyCollectorTest(unittest.TestCase):
         self.settings(self.root / ".claude" / "settings.local.json", {"permissions": {"deny": ["Read(**)"]}})
         self.assertEqual(self.collect()["local_policy"], "denied")
 
+    def test_managed_directory_absence_plain_link_and_error_are_distinct(self):
+        concrete = type(self.root)
+        managed = self.home / "managed-settings.d"
+        linked = self.home / "external-managed"
+        linked.mkdir()
+        self.settings(linked / "deny.json", {"permissions": {"deny": ["Read"]}})
+
+        def redirected(value, *parts):
+            if str(value) == "/Library/Application Support/ClaudeCode/managed-settings.d":
+                return managed
+            return concrete(value, *parts)
+
+        with mock.patch.object(tc.pathlib, "Path", side_effect=redirected):
+            absent = self.collect()
+            self.assertEqual(absent["local_policy"], "verified")
+            managed.mkdir()
+            plain = self.collect()
+            self.assertEqual(plain["local_policy"], "verified")
+            self.assertNotEqual(plain["policy_sha256"], absent["policy_sha256"])
+            managed.rmdir()
+            managed.symlink_to(linked, target_is_directory=True)
+            self.assertEqual(self.collect()["local_policy"], "unknown")
+            managed.unlink()
+            managed.mkdir()
+            real = concrete.iterdir
+
+            def unreadable(path):
+                if path == managed:
+                    raise PermissionError("controlled directory failure")
+                return real(path)
+
+            with mock.patch.object(concrete, "iterdir", unreadable):
+                self.assertEqual(self.collect()["local_policy"], "unknown")
+
 
 @unittest.skipIf(os.name == "nt", "the anchored POSIX install is the qualified route")
 class InstallExposureTest(unittest.TestCase):
+    def test_replaced_root_and_lost_authority_refuse_before_the_next_install_mutation(self):
+        import contextlib
+
+        root = make_tmp_dir(self) / "root"
+        root.mkdir()
+        original = tc._identity(root.stat())
+        old = root.with_name("old")
+        root.rename(old)
+        root.mkdir()
+        with self.assertRaisesRegex(tc.InstallRefused, "root changed"):
+            tc.install(root, "a" * 64, {"b" * 64: b"bytes"}, expected_root=original)
+        self.assertFalse((root / tc.DATA_DIR).exists())
+        steps = []
+
+        @contextlib.contextmanager
+        def guard(name, done):
+            if steps:
+                raise tc.InstallRefused("current authority revoked")
+            yield
+
+        with self.assertRaisesRegex(tc.InstallRefused, "authority revoked"):
+            tc.install(root, "a" * 64, {"b" * 64: b"bytes"}, guard=guard,
+                       progress=lambda name, done: steps.append((name, done.facts())))
+        self.assertEqual([name for name, _fact in steps], [tc.DATA_DIR])
+        self.assertTrue((root / tc.DATA_DIR).is_dir())
+        self.assertFalse((root / tc.DATA_DIR / ("a" * 64)).exists())
+
+    def test_live_role_roots_reject_a_copied_state_and_changed_ancestor(self):
+        root = make_tmp_dir(self)
+        state = root / "state"
+        holder = root / "holder"
+        state.mkdir()
+        holder.mkdir()
+        roots = {"state-dir": state, "holder-worktree": holder}
+        live = tc.LiveRoots(roots)
+        self.addCleanup(live.close)
+        record = {"nonce": "c" * 64, "live_roots": live.facts("c" * 64)}
+        self.assertIsNone(tc.verify_live_roots(record, roots))
+        state.rename(root / "old-state")
+        state.mkdir()
+        self.assertFalse(live.current())
+        self.assertIsNotNone(tc.verify_live_roots(record, roots))
+        self.assertIsNotNone(tc.verify_live_roots(record, roots, retired_roles=["state-dir"]))
+
     def setUp(self):
         self.repo = make_git_repo(self)
         self.head = git_commit(self.repo, {"README.md": "x\n"}, "base")
@@ -573,6 +1255,105 @@ class TransportLedgerTest(DesignTask, unittest.TestCase):
     def proof(self, origin: str):
         return mock.Mock(holds=lambda value: value == origin)
 
+    def test_same_instance_rebind_allows_only_current_housekeeping_of_old_origin(self):
+        from oah.lease import LeaseError
+
+        start = self.store.register_transport_origin(task="t1", lease_id=self.lease.id,
+                                                     generation=self.lease.generation, record=self.origin_record)
+        origin = start["record_digest"]
+        changed = self.oah("start", "--task", "t1", "--agent", "claude", "--packet",
+                           ".oah/tasks/t1/PACKET.md", "--scope", "src,docs")
+        self.assertEqual(changed.returncode, 0, changed.stdout + changed.stderr)
+        latest = self.store.observe_transport(task="t1", origin=origin, expected=start, kind="cleanup-intent", fact={})
+        with self.assertRaises(LeaseError) as caught:
+            self.store.observe_transport(task="t1", origin=origin, expected=latest, kind="delivery-complete", fact={})
+        self.assertEqual(caught.exception.code, tc.TRANSPORT_AUTHORITY)
+        self.assertEqual(tc.transport_views(self.state_dir)[origin].record, self.origin_record)
+
+    def test_durable_exit_replay_needs_latest_checkpoint_but_no_fresh_handles(self):
+        from oah.lease import LeaseError
+
+        start = self.store.register_transport_origin(task="t1", lease_id=self.lease.id,
+                                                     generation=self.lease.generation, record=self.origin_record)
+        origin = start["record_digest"]
+        original = {"origin": origin, **{name: self.origin_record[name] for name in
+                    ("run", "task_identity", "task_basis_digest", "epoch", "root_digest", "manifest")}}
+        fact = {"quiescent": True, "return_code": 0}
+        exit_e, _ = self.store.observe_transport_exit(original=original, expected=start, kind="exit-observed",
+                                                      fact=fact, live_proof=self.proof(origin))
+        latest, _ = self.store.observe_transport_exit(original=original, expected=exit_e, kind="exposure",
+                        fact={"state": "staged", "why": "controlled exposure"}, live_proof=self.proof(origin))
+        with self.assertRaises(LeaseError) as caught:
+            self.store.observe_transport_exit(original=original, expected=start, kind="exit-observed", fact=fact,
+                                               live_proof=self.proof(origin))
+        self.assertEqual(caught.exception.code, tc.TRANSPORT_CONFLICT)
+        replay, durable = self.store.observe_transport_exit(original=original, expected=latest, kind="exit-observed",
+                                                             fact=fact, live_proof=None)
+        self.assertEqual((replay, durable), (latest, True))
+        self.assertEqual(tc.transport_views(self.state_dir)[origin].exposure["state"], "staged")
+
+    def test_a_published_spawn_intent_cannot_be_relabelled_prepared_no_spawn(self):
+        from oah.lease import LeaseError
+
+        start = self.store.register_transport_origin(task="t1", lease_id=self.lease.id,
+                                                      generation=self.lease.generation, record=self.origin_record)
+        origin = start["record_digest"]
+        latest = self.store.observe_transport(task="t1", origin=origin, expected=start, kind="spawn-intent", fact={})
+        original = {"origin": origin, **{name: self.origin_record[name] for name in
+                    ("run", "task_identity", "task_basis_digest", "epoch", "root_digest", "manifest")}}
+        with self.assertRaises(LeaseError) as caught:
+            self.store.observe_transport_exit(original=original, expected=latest, kind="no-spawn",
+                        fact={"quiescent": True, "spawn_intent": False}, live_proof=self.proof(origin))
+        self.assertEqual(caught.exception.code, tc.TRANSPORT_NONTERMINAL)
+        self.assertFalse(tc.transport_views(self.state_dir)[origin].quiescent)
+        self.assertEqual(tc.transport_views(self.state_dir)[origin].latest, latest)
+
+    def test_malformed_origin_registration_never_proves_absence_for_legacy_disposal(self):
+        from oah.review.runner import _snapshot_disposal
+        from oah.review import snapshot
+
+        parent = make_tmp_dir(self) / "snapshot"
+        parent.mkdir()
+        (parent / "owned").write_text("keep")
+        self.store._commit(self.store._load(), "design_transport_origin", "t1", "claude", self.lease.id,
+                           design_schema=2, transport={"version": 1, "origin": "sha256:" + "f" * 64,
+                                                      "record": self.origin_record})
+        disposition = []
+        outcome = _snapshot_disposal(self.state_dir, "rX", disposition)(parent, snapshot._object(parent.lstat()))
+        self.assertEqual(outcome[0], "retained")
+        self.assertTrue((parent / "owned").exists())
+
+    def test_malformed_optional_origin_ownership_is_unknown_even_with_an_exact_digest(self):
+        for field, value in (("retirement", "not-an-allocation"), ("live_roots", ["not-a-root-proof"])):
+            with self.subTest(field=field):
+                record = dict(self.origin_record, run="r-invalid-" + field, **{field: value})
+                origin = tc.origin_digest(record)
+                self.store._commit(self.store._load(), "design_transport_origin", "t1", "claude", self.lease.id,
+                            design_schema=2, transport={"version": 1, "origin": origin, "record": record})
+                views = tc.transport_views(self.state_dir, task="t1", run=record["run"])
+                self.assertTrue(views)
+                self.assertTrue(any(view.problem is not None for view in views.values()))
+                self.assertFalse(tc.transport_absence(self.state_dir, run=record["run"])[0])
+
+    def test_proved_disjoint_other_task_exposure_does_not_poison_completion(self):
+        record = dict(self.origin_record, task_identity={**self.origin_record['task_identity'], 'task_id': 'other'})
+        origin = tc.origin_digest(record)
+        initial = {"sequence": 0, "record_digest": origin}
+        fact = {"state": "staged", "why": "other task only"}
+        events = [{"event": "design_transport_origin", "task": "other", "design_schema": 2,
+                   "transport": {"version": 1, "origin": origin, "record": record}},
+                  {"event": "design_transport_observation", "task": "other", "design_schema": 2,
+                   "transport": {"version": 1, "origin": origin, "sequence": 1, "predecessor": initial,
+                                 "kind": "exposure", "fact": fact,
+                                 "record_digest": tc.observation_digest(origin, 1, initial, "exposure", fact)}}]
+        with mock.patch.object(tc, "intersects", return_value={"state": "clean", "code": None, "why": "disjoint"}):
+            found = tc.completion_guard(self.state_dir, "t1", root=self.repo, repo=None, current=None, events=events)
+        self.assertTrue(found.ok, found)
+        with mock.patch.object(tc, "intersects", return_value={"state": "unknown", "code": tc.TRANSPORT_HISTORY_UNKNOWN,
+                                                               "why": "unreadable candidate"}):
+            found = tc.completion_guard(self.state_dir, "t1", root=self.repo, repo=None, current=None, events=events)
+        self.assertEqual(found.code, tc.TRANSPORT_HISTORY_UNKNOWN)
+
     def test_stale_expected_record_refuses_without_writing(self):
         from oah.lease import LeaseError
 
@@ -609,7 +1390,7 @@ class TransportLedgerTest(DesignTask, unittest.TestCase):
         exit_record, durable = later.observe_transport_exit(original=original, expected=latest, kind="exit-observed",
                                                             fact=fact, live_proof=self.proof(origin))
         self.assertFalse(durable)
-        again, durable = later.observe_transport_exit(original=original, expected=latest, kind="exit-observed",
+        again, durable = later.observe_transport_exit(original=original, expected=exit_record, kind="exit-observed",
                                                       fact=fact, live_proof=self.proof(origin))
         self.assertEqual((again, durable), (exit_record, True))  # exact replay appends nothing
         with self.assertRaises(LeaseError) as caught:
@@ -660,8 +1441,14 @@ class ReferenceCallTest(DesignTask, unittest.TestCase):
         result = self.call()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         kinds = [event["transport"].get("kind") for event in self.events()]
-        self.assertEqual(kinds[:7], [None, "installed", "spawn-intent", "running", "exit-observed", "reads",
+        self.assertEqual([kind for kind in kinds if kind != "install-progress"][:7],
+                         [None, "installed", "spawn-intent", "running", "exit-observed", "reads",
                                      "delivery-complete"])
+        progress = [event["transport"]["fact"] for event in self.events()
+                    if event["transport"].get("kind") == "install-progress"]
+        self.assertEqual(progress[0]["step"], tc.DATA_DIR)
+        self.assertEqual(progress[-1]["step"], "sealed")
+        self.assertTrue(progress[-1]["leaves"])
         self.assertEqual(kinds[-1], "verified-cleaned")
         run = self.last_run()
         saved = json.loads((run / "design.json").read_text())
@@ -900,12 +1687,15 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
         plan = {"read_plan": {"files": files, "manifest_sha256": "sha256:" + self.manifest}, "view": {}}
         from oah.design.binding import repo_identity
 
+        roots = tc.LiveRoots(tc.current_role_roots(self.lease, self.state_dir, self.repo))
+        self.addCleanup(roots.close)
         record = tc.origin_record(
             transport=plan, root=self.repo, repo=repo_identity(self.repo), run="rR",
             task_identity=self.lease.design["task_identity"], basis=self.lease.design["basis"],
             epoch={"lease_id": self.lease.id, "generation": self.lease.generation, "agent": self.lease.agent},
             profile={"id": tc.CLAUDE_PROFILE, "operation": "inspect"},
-            h0=tc.git_head(self.repo), policy={}, nonce="00" * 32, continuity={}, boot={}, root_identity={})
+            h0=tc.git_head(self.repo), policy={}, nonce="00" * 32, continuity={}, boot={},
+            root_identity=roots.identity("receiving-root"), live_roots=roots.facts("00" * 32))
         start = self.store.register_transport_origin(task="t1", lease_id=self.lease.id,
                                                      generation=self.lease.generation, record=record)
         self.origin = start["record_digest"]
@@ -976,6 +1766,34 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
         self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
         self.assertFalse((self.repo / tc.DATA_DIR).exists())
         self.assertEqual(tc.transport_views(self.state_dir)[self.origin].state, "VERIFIED_CLEANED")
+
+    def test_expiry_after_intent_refuses_before_the_first_permission_change_or_unlink(self):
+        from oah import design_cli
+        from oah.design import open_store
+        from oah.lease import LeaseError, Store
+        from tests.fixtures.gates.support import build_args
+
+        directory = self.repo / tc.DATA_DIR / self.manifest
+        before = set(os.listdir(directory))
+        mode = stat.S_IMODE(directory.lstat().st_mode)
+        observe = Store.observe_transport
+
+        def expire_after_intent(writer, **kwargs):
+            result = observe(writer, **kwargs)
+            if kwargs["kind"] == "cleanup-intent":
+                path = self.state_dir / "leases.json"
+                data = json.loads(path.read_bytes())
+                data["leases"][0]["expires_at"] = "2000-01-01T00:00:00Z"
+                path.write_text(json.dumps(data))
+            return result
+
+        args = build_args(["design", "task", "t1", "--transport-cleanup", *self.expect()])
+        store = open_store(self.repo, env={"OAH_STATE_DIR": str(self.state_dir)})
+        with mock.patch.object(Store, "observe_transport", expire_after_intent):
+            with self.assertRaises((LeaseError, DesignError)):
+                design_cli._transport_cleanup(args, store)
+        self.assertEqual(set(os.listdir(directory)), before)
+        self.assertEqual(stat.S_IMODE(directory.lstat().st_mode), mode)
 
     def test_a_run_without_a_recorded_exit_blocks_finish(self):
         from oah.lease import Store
@@ -1114,6 +1932,100 @@ class SnapshotRetirementTest(unittest.TestCase):
         victim.write_bytes(b"x")  # same bytes, a different file object
         self.assertFalse(snapshot.remove(parent, expected_plan=validated, progress=lambda entry, state: None))
         self.assertTrue(victim.exists())  # never an rmtree fallback
+
+    def test_guarded_removal_rejects_a_replaced_parent_before_unlinking_its_original_child(self):
+        from oah.review import snapshot
+
+        parent = self.container(1)
+        captured, final = self.plan(parent)
+        validated = snapshot.validate_retirement_plan(final, parent, captured.pages_dir)
+        original = parent / "tree"
+        held_aside = parent.parent / "original-tree"
+        original.rename(held_aside)
+        original.mkdir()
+        leaf = original / "00000000"
+        (held_aside / leaf.name).rename(leaf)
+        self.assertFalse(snapshot.remove(parent, expected_plan=validated, progress=lambda _entry, _state: None))
+        self.assertEqual(leaf.read_bytes(), b"x")
+
+    def test_output_slot_keeps_the_final_object_through_validation_and_each_delete(self):
+        from oah.review import snapshot
+
+        for phase in ("validation", "delete"):
+            with self.subTest(phase=phase):
+                parent = self.container(1)
+                captured, _ = self.plan(parent)
+                output = parent / "last-message.md"
+                output.write_bytes(b"result")
+                final_slot = snapshot.capture_output_slot(parent, [output.name],
+                                    producer={"run": "rS", "checkpoint": "final-output"})
+                final = snapshot.finalize_retirement_plan(captured, final_slot)
+                validated = snapshot.validate_retirement_plan(final, parent, captured.pages_dir)
+                replacement = parent / "replacement"
+                replacement.write_bytes(b"result")
+                replacement.replace(output)
+                if phase == "validation":
+                    with self.assertRaises(snapshot.Retained):
+                        snapshot.validate_retirement_plan(final, parent, captured.pages_dir)
+                else:
+                    self.assertFalse(snapshot.remove(parent, expected_plan=validated,
+                                                       progress=lambda item, state: None))
+                self.assertEqual(output.read_bytes(), b"result")
+
+    def test_origin_bearing_snapshot_consumes_its_durable_complete_plan(self):
+        from oah.design.binding import repo_identity
+        from oah.lease import Store, persist_create_only
+        from oah.review import runner, snapshot
+
+        case = TransportLedgerTest("test_stale_expected_record_refuses_without_writing")
+        self.addCleanup(case.doCleanups)
+        case.setUp()
+        head = subprocess.run(["git", "-C", str(case.repo), "rev-parse", "HEAD"], check=True,
+                              text=True, capture_output=True).stdout.strip()
+        disposition = []
+        dispose = runner._snapshot_disposal(case.state_dir, "rS", disposition)
+        parent = None
+        with snapshot.make(case.repo, head, base=head, dispose=dispose) as snap:
+            parent = snap.parent
+            allocation = {"version": 1, "run": "rS", "task_identity": case.lease.design["task_identity"],
+                          "task_basis_digest": case.lease.design["basis"]}
+            captured = snapshot.capture_retirement_plan(allocation, parent, case.state_dir,
+                                                        output_slot={"path": ["last-message.md"]})
+            record = tc.origin_record(transport={"read_plan": {"files": [], "manifest_sha256": "sha256:" + "c" * 64},
+                                                 "view": {}},
+                        root=snap.tree, repo=repo_identity(case.repo), run="rS",
+                        task_identity=case.lease.design["task_identity"], basis=case.lease.design["basis"],
+                        epoch={"lease_id": case.lease.id, "generation": case.lease.generation},
+                        profile={"operation": "inspect"}, h0=tc.git_head(snap.tree), policy={}, nonce="00" * 32,
+                        continuity={}, boot={}, root_identity={})
+            record["retirement"] = {"descriptor": captured.descriptor, "sha256": captured.descriptor_sha256,
+                                    "pages_relative": list(captured.pages_dir.relative_to(case.state_dir).parts)}
+            live_roots = tc.LiveRoots(tc.current_role_roots(case.lease, case.state_dir, snap.tree, retirement=True))
+            try:
+                record["live_roots"] = live_roots.facts(record["nonce"])
+            finally:
+                live_roots.close()
+            writer = Store(case.state_dir)
+            start = writer.register_transport_origin(task="t1", lease_id=case.lease.id,
+                                                     generation=case.lease.generation, record=record)
+            origin = start["record_digest"]
+            original = {"origin": origin, **{k: record[k] for k in
+                        ("run", "task_identity", "task_basis_digest", "epoch", "root_digest", "manifest")}}
+            latest, _ = writer.observe_transport_exit(original=original, expected=start, kind="no-spawn",
+                        fact={"quiescent": True, "spawn_intent": False}, live_proof=case.proof(origin))
+            latest = writer.observe_transport(task="t1", origin=origin, expected=latest, kind="verified-cleaned",
+                                              fact={"head": head})
+            final = snapshot.finalize_retirement_plan(captured, {"presence": "absent"})
+            raw = snapshot._canonical(final)
+            final_sha = hashlib.sha256(raw).hexdigest()
+            relative = [*captured.pages_dir.parent.relative_to(case.state_dir).parts, final_sha + ".json"]
+            persist_create_only(case.state_dir.joinpath(*relative), raw)
+            writer.observe_transport(task="t1", origin=origin, expected=latest, kind="retirement-checkpoint",
+                        fact={"base_plan_sha256": captured.descriptor_sha256, "final_sha256": final_sha,
+                              "final_bytes": len(raw), "final_relative": relative, "data_checkpoint": latest,
+                              "head": head, "output_preserved": True})
+        self.assertEqual(disposition[-1][0], "disposed", disposition)
+        self.assertFalse(parent.exists())
 
     def test_the_disposal_callback_is_exclusive(self):
         from oah.review import snapshot

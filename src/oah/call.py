@@ -948,7 +948,7 @@ def dispatch_guard(prepared: Prepared):
             except EngineError as exc:
                 _record_refusal(prepared, exc)
                 raise
-            yield
+            yield live
         return
     try:
         saved = run._read_json("lease.json")
@@ -989,11 +989,11 @@ def dispatch_guard(prepared: Prepared):
                     raise _design_error(exc) from None
                 reference.held_store = store
                 try:
-                    yield
+                    yield live
                 finally:
                     reference.held_store = None
             else:
-                yield
+                yield live
     except (LeaseError, EngineError) as exc:
         error = EngineError(exc.code, str(exc).split(": ", 1)[1] if prepared.retain_worker_text else "")
         _record_refusal(prepared, error)
@@ -2309,14 +2309,56 @@ class _PosixTree:
                                  "running workers and the worktree before retrying") from None
 
 
+def _windows_job_state(child) -> dict:
+    import ctypes as ct
+
+    job = getattr(child, "_oah_job", None)
+    if job is None or job.handle is None or not getattr(child, "_handle", None):
+        raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: the original Windows process and Job are not held")
+    api = job.api
+    for name, args, result in (
+        ("QueryInformationJobObject", [ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_uint32,
+                                       ct.POINTER(ct.c_uint32)], ct.c_int32),
+        ("IsProcessInJob", [ct.c_void_p, ct.c_void_p, ct.POINTER(ct.c_int32)], ct.c_int32),
+        ("GetProcessId", [ct.c_void_p], ct.c_uint32),
+        ("GetProcessTimes", [ct.c_void_p, ct.c_void_p, ct.c_void_p, ct.c_void_p, ct.c_void_p], ct.c_int32),
+    ):
+        function = getattr(api, name)
+        function.argtypes, function.restype = args, result
+    process, member = int(child._handle), ct.c_int32()
+    accounting, size = ct.create_string_buffer(48), ct.c_uint32()
+    times = [ct.c_uint64() for _ in range(4)]
+    if (api.GetProcessId(process) != child.pid or not api.IsProcessInJob(process, job.handle, ct.byref(member))
+            or member.value != 1 or not api.GetProcessTimes(process, *(ct.byref(value) for value in times)) or
+            not times[0].value or not api.QueryInformationJobObject(job.handle, 1, accounting, 48, ct.byref(size))
+            or size.value != 48):
+        raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: Windows process identity or Job accounting is unknown")
+    import struct
+    identity = {"pid": child.pid, "creation": times[0].value, "job_handle": int(job.handle)}
+    digest = "sha256:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    old = getattr(child, "_oah_windows_identity", digest)
+    if old != digest:
+        raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: the original Windows process or Job was replaced")
+    child._oah_windows_identity = digest
+    return {"identity_digest": digest, "active": struct.unpack_from("<I", accounting.raw, 40)[0]}
+
+
 def _kill_owned_tree(child):
-    from oah.engines.proc import kill_tree
 
     tree = getattr(child, "_oah_posix_tree", None)
     if tree is not None:
         tree.kill()
     elif os.name == "nt" and getattr(child, "_oah_job", None) is not None:
-        kill_tree(child)
+        from oah.engines.proc import REAP_SECONDS
+
+        _windows_job_state(child)
+        child._oah_job.terminate()
+        child.wait(timeout=REAP_SECONDS)
+        deadline = time.monotonic() + REAP_SECONDS
+        while _windows_job_state(child)["active"] != 0:
+            if time.monotonic() >= deadline:
+                raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: the original Windows Job still has active processes")
+            time.sleep(0.01)
     else:
         raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: process-tree cleanup could not be verified; inspect "
                              "running workers and the worktree before retrying")
@@ -2411,10 +2453,18 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     reference = _REFERENCE_RUN.get()
     reference = reference if reference is not None and reference.run_id == prepared.run_id else None
     design_run = _DESIGN_RUN.get()
+    inline_roots = None
     # P5-F: what the owning runner actually established, appended before the tree/Job below are released.
     outcome = {"kind": "aborted", "returncode": None, "timed_out": False, "quiescent": False}
     try:
-        with _paid_dispatch(prepared), dispatch_guard(prepared):
+        with _paid_dispatch(prepared), dispatch_guard(prepared) as live:
+            if design_run and reference is None:
+                from oah.design import task_context
+
+                inline_roots = task_context.LiveRoots(task_context.current_role_roots(
+                    live, prepared.run.path.parents[2], pathlib.Path(prepared.cwd)))
+                if not inline_roots.current():
+                    raise EngineError("OAH_RUN_LAUNCH_INVALID", "the actual design run role roots changed before launch")
             with _deferred_creation_signals():
                 try:
                     child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -2423,9 +2473,12 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                     # Windows omits the executable; keep spawn errors out of the lease's state-I/O wrapper.
                     raise subprocess.SubprocessError(f"cannot launch {prepared.argv[0]}: {exc}. "
                                                      "Check the executable path and permissions, then retry") from None
+                if reference is not None:
+                    reference.child = child
                 if job is not None:
                     try:
                         job.start(child)
+                        _windows_job_state(child)
                     except BaseException:
                         child.kill()
                         child.communicate(timeout=REAP_SECONDS)
@@ -2435,7 +2488,10 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                 if reference is not None:
                     reference.running(reference.held_store, child)
         if not prepared.retain_worker_text:
-            return _stream_correction(child, prepared, prompt)
+            streamed = _stream_correction(child, prepared, prompt)
+            outcome.update(kind="failed" if streamed.timed_out else "exit-observed",
+                           returncode=streamed.returncode, timed_out=streamed.timed_out, quiescent=True)
+            return streamed
         output, errors = [], []
         exchanged = threading.Event()
 
@@ -2493,6 +2549,8 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
             child._oah_posix_tree.close()
         if job is not None:
             job.close()
+        if inline_roots is not None:
+            inline_roots.close()
 
 
 _BOOT = ("import sys; sys.path.insert(0, sys.argv[1]); import oah.call as c; "

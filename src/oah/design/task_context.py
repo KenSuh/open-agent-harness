@@ -13,6 +13,7 @@ part by revision, digest and size, and the exact block's sha256: evidence of the
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import pathlib
@@ -132,6 +133,8 @@ def render(task_design: TaskDesign, *, limit: int = DESIGN_BLOCK_LIMIT) -> Desig
                f"the design cannot be read ({task_design.state}: {task_design.reason})")
         return DesignBlock(None, record, False, why)
     required, shared = _parts(task_design)
+    for _role, revision, name, value in required:
+        _screen_materials(value, task=task_design.task.identity.task, part=name, revision=revision)
     pieces = ["\n".join(_header(task_design, shared)) + "\n"]
     included = []
     for role, revision, name, text in required:
@@ -219,6 +222,7 @@ import json
 import os
 import stat as stat_module
 import sys
+from contextvars import ContextVar
 
 from oah.design.model import canonical
 
@@ -235,7 +239,7 @@ READ_LINE_LIMIT = 2000  # characters per line the pinned Read tool returns whole
 WINDOWS_PENDING = "windows-process-profile-pending"
 MATERIALS_INFO = "oah-materials"
 PROJECTION_INFO = "oah-materials-projection"
-PUBLIC_PROVIDERS = frozenset({"github", "official-http"})
+PUBLIC_PROVIDERS = frozenset({"github", "http"})
 TOP_KEYS = frozenset({"version", "lang", "narrative", "decision_inputs", "decisions", "materials", "stacks",
                       "portable_evidence"})
 BLOB_KEYS = frozenset({"id", "kind", "path_or_field", "encoding", "bytes", "sha256", "data"})
@@ -245,6 +249,7 @@ KIND_PART = "managed-design-saved-part"
 FROZEN_DIR = "design-data"  # the run folder's private frozen copies
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _FENCE_OPEN = re.compile(r"(`{3,})oah-materials")
+RETIREMENT_CONTEXT: ContextVar[object | None] = ContextVar("oah_review_retirement", default=None)
 
 
 def _sha(data: bytes) -> str:
@@ -315,46 +320,257 @@ def _record_problem(record: object) -> str | None:
     return None
 
 
+_SPEC_KEYS = frozenset({"provider", "locator", "track", "tag_prefix", "channel", "ref", "paths",
+                        "manifest_path", "release_order", "selection_policy", "verification_policy"})
+_ENVELOPE_KEYS = frozenset({"version", "kind", "source", "spec_digest", "snapshot", "provenance", "blobs"})
+_PROVENANCE_KEYS = frozenset({"claim", "registration", "observation", "observation_digest",
+                              "release_observation", "release_observation_digest"})
+_OBSERVATION_KEYS = frozenset({"version", "kind", "source", "snapshot", "outcome", "head_generation",
+                               "attempted_at", "observed_at", "confirmed_at", "verified_at", "previous",
+                               "selection_observation", "verification_policy"})
+
+
+class _PortableInvalid(ValueError):
+    pass
+
+
+def _portable_record_digest(value: Mapping) -> str:
+    data = (json.dumps(dict(value), ensure_ascii=False, indent=1, sort_keys=True, allow_nan=False) + "\n").encode()
+    return "sha256:" + _sha(data)
+
+
+def _portable_uses(manifest: dict, selection: dict | None = None) -> dict[str, list[tuple[str, str, int | None]]]:
+    needed: dict[str, list[tuple[str, str, int | None]]] = {}
+
+    def add(kind, where, digest, size=None):
+        if (not isinstance(where, str) or not where or not isinstance(digest, str)
+                or _HEX64.fullmatch(digest) is None or
+                (size is not None and (type(size) is not int or size < 0))):
+            raise ValueError("malformed manifest membership")
+        needed.setdefault(digest, []).append((kind, where, size))
+
+    for key, kind in (("files", "selected-file"),):
+        for item in manifest.get(key) or []:
+            add(kind, item.get("path"), item.get("sha256"), item.get("size"))
+    license_ = manifest.get("license") or {}
+    for key, kind in (("files", "license"), ("notices", "notice")):
+        for item in license_.get(key) or []:
+            add(kind, item.get("path"), item.get("sha256"), item.get("size"))
+    document = manifest.get("document") or {}
+    if document:
+        add("document-body", "document.sha256", document.get("sha256"), document.get("bytes"))
+        add("document-text", "document.text_sha256", document.get("text_sha256"), document.get("text_bytes"))
+    notes = ((manifest.get("observed") or {}).get("release") or {}).get("notes") or {}
+    if notes.get("sha256"):
+        add("release-notes", "observed.release.notes", notes["sha256"], notes.get("bytes"))
+    if selection is not None:
+        originals = selection.get("originals")
+        if not isinstance(originals, dict) or set(originals) != {"advertisements", "metadata"}:
+            raise _PortableInvalid("missing selected release originals")
+        for key, kind in (("advertisements", "release-advertisement"), ("metadata", "release-metadata")):
+            rows = originals[key]
+            if not isinstance(rows, list) or len(rows) > ENTRY_LIMIT:
+                raise _PortableInvalid("invalid selected release original roster")
+            for index, row in enumerate(rows):
+                chunks = row.get("chunks") if isinstance(row, dict) else None
+                if not isinstance(chunks, list) or not chunks or len(chunks) > ENTRY_LIMIT:
+                    raise _PortableInvalid("missing selected release original chunks")
+                for ordinal, digest in enumerate(chunks):
+                    add(kind, f"selection.{kind}.{index}.{ordinal}", digest)
+    if len(needed) > ENTRY_LIMIT:
+        raise ValueError("too many portable original members")
+    return needed
+
+
+def _portable_envelope(evidence: dict, materials: list, n: int) -> list[Original]:
+    import datetime as datetime_module
+    import urllib.parse
+
+    def require(ok, reason):
+        if not ok:
+            raise _PortableInvalid(reason)
+
+    require(isinstance(evidence, dict) and set(evidence) == _ENVELOPE_KEYS and
+            type(evidence.get("version")) is int and evidence["version"] == 1 and
+            evidence.get("kind") == "oah-portable-evidence", "not the pinned portable envelope schema")
+    source = evidence["source"]
+    require(isinstance(source, dict) and set(source) == _SPEC_KEYS | {"id"} and
+            isinstance(source.get("id"), str), "incomplete SourceSpec")
+    spec = {key: source[key] for key in _SPEC_KEYS}
+    require("sha256:" + _sha(canonical(spec)) == evidence["spec_digest"], "SourceSpec digest mismatch")
+    require(isinstance(spec["locator"], str) and isinstance(spec["provider"], str) and
+            isinstance(spec["paths"], list) and all(isinstance(p, str) for p in spec["paths"]) and
+            spec["verification_policy"] == "source-verification-v1", "malformed SourceSpec semantics")
+    require(all(isinstance(spec[key], str) and len(spec[key]) <= 4096 for key in
+                ("locator", "provider", "track", "tag_prefix", "channel", "ref", "release_order"))
+            and (spec["selection_policy"] is None or isinstance(spec["selection_policy"], str))
+            and (spec["manifest_path"] is None or isinstance(spec["manifest_path"], str)) and
+            len(spec["paths"]) <= ENTRY_LIMIT, "invalid SourceSpec field types or bounds")
+    snapshot = evidence["snapshot"]
+    require(isinstance(snapshot, dict) and set(snapshot) == {"digest", "manifest"} and
+            isinstance(snapshot["manifest"], dict), "malformed nested snapshot")
+    manifest = snapshot["manifest"]
+    require(_portable_record_digest(manifest) == snapshot["digest"] and
+            manifest.get("kind") == "oah-source-snapshot" and manifest.get("version") == 1 and
+            manifest.get("spec") == spec and manifest.get("spec_digest") == evidence["spec_digest"],
+            "snapshot manifest identity mismatch")
+    provenance = evidence["provenance"]
+    require(isinstance(provenance, dict) and set(provenance) in
+            (_PROVENANCE_KEYS, _PROVENANCE_KEYS | {"selection", "selection_digest"}) and
+            provenance["claim"] == "local-observation", "malformed provenance")
+    observation = provenance["observation"]
+    if observation is not None:
+        require(isinstance(observation, dict) and set(observation) == _OBSERVATION_KEYS and
+                observation["kind"] == "oah-source-observation" and observation["version"] == 1 and
+                observation["outcome"] in ("established", "confirmed", "recovered") and
+                type(observation["head_generation"]) is int and observation["head_generation"] > 0 and
+                observation["verification_policy"] == spec["verification_policy"], "malformed observation")
+        require(observation["source"] == {"id": source["id"], "registration": provenance["registration"],
+                "spec_digest": evidence["spec_digest"]} and
+                isinstance(provenance["registration"], str) and
+                re.fullmatch("[0-9a-f]{32}", provenance["registration"]) is not None and
+                observation["snapshot"] == snapshot["digest"] and
+                _portable_record_digest(observation) == provenance["observation_digest"],
+                "observation registration or snapshot mismatch")
+        for key in ("attempted_at", "observed_at", "confirmed_at", "verified_at"):
+            value = observation[key]
+            require(isinstance(value, str) and value.endswith("+00:00") and
+                    datetime_module.datetime.fromisoformat(value).utcoffset() == datetime_module.timedelta(),
+                    "invalid observation time")
+        for key in ("previous", "selection_observation"):
+            require(observation[key] is None or _bare(observation[key]) is not None, "invalid provenance record link")
+    else:
+        require(provenance["observation_digest"] is None, "missing observation record")
+    release = (manifest.get("observed") or {}).get("release")
+    release_record = provenance["release_observation"]
+    if release:
+        require(isinstance(release_record, dict) and release_record.get("kind") == "oah-release-observation" and
+                _portable_record_digest(release_record) == provenance["release_observation_digest"] ==
+                release.get("release_observation") and release_record.get("spec_digest") == evidence["spec_digest"] and
+                all(release_record.get(a) == release.get(b) for a, b in
+                    (("metadata_digest", "metadata_digest"), ("release_id", "id"), ("tag", "tag"), ("notes", "notes"))),
+                "release observation mismatch")
+    else:
+        require(release_record is None and provenance["release_observation_digest"] is None,
+                "release provenance without a release")
+    selection = provenance.get("selection")
+    selection_digest = provenance.get("selection_digest")
+    if selection is not None:
+        require(isinstance(selection, dict) and selection.get("kind") == "oah-release-selection" and
+                selection.get("version") == 2 and _portable_record_digest(selection) == selection_digest and
+                selection.get("source_registration") == provenance["registration"] and
+                selection.get("spec_digest") == evidence["spec_digest"] and
+                (selection.get("policy") or {}).get("version") == spec["selection_policy"],
+                "release selection identity mismatch")
+        require(observation is not None and observation["selection_observation"] == selection_digest and
+                release is not None and release.get("selection") == selection_digest,
+                "release selection provenance mismatch")
+        selected = selection.get("selected") or {}
+        require(all(selected.get(a) == release.get(b) for a, b in
+                    (("release_id", "id"), ("tag", "tag"), ("tag_object", "tag_object"),
+                     ("peeled_commit", "commit"), ("fetched_commit", "commit"), ("tree_digest", "tree"),
+                     ("release_observation_digest", "release_observation"))), "selected release differs from snapshot")
+    else:
+        require(selection_digest is None, "a selection digest has no supplied selection record")
+        if set(provenance) != _PROVENANCE_KEYS:
+            require(not release or release.get("selection") is None, "selected release provenance is missing")
+        elif release and release.get("selection") is not None:
+            require(observation is not None and observation["selection_observation"] == release["selection"] and
+                    _bare(release["selection"]) is not None, "historical release selection links disagree")
+    ident = "sha256:" + _sha(canonical(evidence))
+    linked = [m for m in materials if isinstance(m, dict) and m.get("portable_evidence_id") == ident]
+    require(bool(linked), "the external envelope identity has no matching material")
+    for material in linked:
+        require(material.get("source") == source and material.get("snapshot") == snapshot["digest"] and
+                material.get("spec_digest") == evidence["spec_digest"], "material belongs to another source snapshot")
+        checked = material.get("checked") or {}
+        require(checked.get("observation") == provenance["observation_digest"], "material observation mismatch")
+        if observation is not None:
+            require(all(checked.get(key) == observation[key] for key in
+                        ("attempted_at", "observed_at", "confirmed_at", "verified_at")), "material time mismatch")
+        reviewed = material.get("reviewed") or {}
+        require(reviewed.get("files") == manifest.get("files") and
+                all(reviewed.get(key) == (manifest.get("observed") or {}).get(key) for key in ("commit", "ref")),
+                "reviewed membership differs from the manifest")
+        license_ = material.get("license")
+        if license_ is not None:
+            license_manifest = manifest.get("license") or {}
+            require(isinstance(license_, dict) and isinstance(license_.get("evidence"), list),
+                    "malformed material license membership")
+            members = {(row.get("path"), row.get("blob"), row.get("sha256"))
+                       for row in license_manifest.get("files", [])}
+            require(all(isinstance(row, dict) and (row.get("path"), row.get("blob"), row.get("sha256")) in members
+                        for row in license_["evidence"]) and all(license_.get(key) == license_manifest.get(key)
+                        for key in ("declared", "scopes", "problems", "notices")),
+                    "material license originals differ from the snapshot")
+        if release:
+            require(all(reviewed.get(key) == release.get(key) for key in ("tree", "tag_object")),
+                    "reviewed release object differs from the manifest")
+        if release:
+            require(all((material.get("release") or {}).get(key) == value for key, value in release.items()),
+                    "material release mismatch")
+    needed = _portable_uses(manifest, selection)
+    raw_blobs = evidence["blobs"]
+    require(isinstance(raw_blobs, list) and len(raw_blobs) <= ENTRY_LIMIT, "invalid portable blob roster")
+    locator = urllib.parse.urlsplit(spec["locator"])
+    public = (spec["provider"] in PUBLIC_PROVIDERS and locator.scheme == "https" and bool(locator.hostname)
+              and locator.username is None and locator.password is None and locator.port is None and
+              (spec["provider"] != "github" or locator.hostname == "github.com"))
+    qualified = (public and manifest.get("verified") is True and observation is not None and
+                 all((m.get("checked") or {}).get("historical") == "verified" for m in linked))
+    found, seen, total, decoded = [], set(), 0, {}
+    for m, blob in enumerate(raw_blobs):
+        require(isinstance(blob, dict) and set(blob) == BLOB_KEYS and blob["encoding"] == "base64" and
+                isinstance(blob["data"], str) and isinstance(blob["sha256"], str) and
+                _HEX64.fullmatch(blob["sha256"]) is not None and blob["id"] == "sha256:" + blob["sha256"] and
+                type(blob["bytes"]) is int and 0 <= blob["bytes"] <= BUNDLE_LIMIT, "malformed original blob")
+        sha = blob["sha256"]
+        require(sha not in seen and sha in needed, "duplicate or unlisted original")
+        seen.add(sha)
+        kind, path, _size = needed[sha][0]
+        require(blob["kind"] == kind and blob["path_or_field"] == path, "original path or role membership mismatch")
+        data = base64.b64decode(blob["data"].encode("ascii"), validate=True)
+        total += len(data)
+        require(total <= BUNDLE_LIMIT and len(data) == blob["bytes"] and _sha(data) == sha and
+                base64.b64encode(data).decode("ascii") == blob["data"] and
+                all(size is None or size == len(data) for _kind, _path, size in needed[sha]),
+                "original byte count, digest or manifest size mismatch")
+        reason = None if qualified else "its historical public provenance is unverified, so it stays inline"
+        found.append(Original(n, m, ident[7:], sha, kind, sha, data, qualified, reason))
+        decoded[sha] = data
+    require(seen == set(needed), "missing original manifest members")
+    if selection is not None:
+        originals = selection["originals"]
+        observations = selection.get("ref_observations")
+        require(isinstance(observations, list) and len(observations) == len(originals["advertisements"]),
+                "release advertisement observations are incomplete")
+        for index, row in enumerate(originals["advertisements"]):
+            data = b"".join(decoded[digest] for digest in row["chunks"])
+            observation_ = observations[index]
+            require(row.get("round") == observation_.get("round") and
+                    len(data) == observation_.get("bytes") and _sha(data) == observation_.get("raw_sha256"),
+                    "release advertisement original differs from its observation")
+        for row in originals["metadata"]:
+            data = b"".join(decoded[digest] for digest in row["chunks"])
+            require(len(data) == row.get("bytes") and _sha(data) == row.get("sha256"),
+                    "release metadata original differs from its observation")
+    return found
+
+
 def _originals(record: dict) -> tuple[list[Original], str | None]:
     found: list[Original] = []
+    known = {"sha256:" + _sha(canonical(item)) for item in record["portable_evidence"]}
+    if len(known) != len(record["portable_evidence"]):
+        return [], "duplicate external portable envelope identity"
+    if any(isinstance(m, dict) and m.get("portable_evidence_id") is not None and
+           m["portable_evidence_id"] not in known for m in record["materials"]):
+        return [], "a material names an unknown external envelope identity"
     for n, evidence in enumerate(record["portable_evidence"]):
-        where = f"portable_evidence[{n}]"
-        if not isinstance(evidence, dict) or _bare(evidence.get("id")) is None:
-            return [], f"{where} is not an object with a digest id"
-        blobs = evidence.get("blobs")
-        if not isinstance(blobs, list):
-            return [], f"{where} has no blobs list"
-        source, manifest = evidence.get("source"), evidence.get("manifest")
-        public = (isinstance(source, dict) and source.get("provider") in PUBLIC_PROVIDERS
-                  and isinstance(source.get("locator"), str) and bool(source.get("locator")))
-        members = set()
-        if isinstance(manifest, dict) and isinstance(manifest.get("files"), list):
-            for item in manifest["files"]:
-                if isinstance(item, dict) and _bare(item.get("sha256")) and type(item.get("size")) is int:
-                    members.add((_bare(item["sha256"]), item["size"]))
-        for m, blob in enumerate(blobs):
-            at = f"{where}.blobs[{m}]"
-            if not isinstance(blob, dict) or set(blob) != BLOB_KEYS:
-                return [], f"{at} does not hold exactly {', '.join(sorted(BLOB_KEYS))}"
-            digest, ident = _bare(blob["sha256"]), _bare(blob["id"])
-            if (blob["encoding"] != "base64" or not isinstance(blob["data"], str) or digest is None or ident is None
-                    or type(blob["bytes"]) is not int or blob["bytes"] < 0):
-                return [], f"{at} is not a base64 blob with digest id, byte count and sha256"
-            try:
-                raw = base64.b64decode(blob["data"].encode("ascii"), validate=True)
-            except (ValueError, UnicodeEncodeError):
-                return [], f"{at} is not strict base64"
-            if base64.b64encode(raw).decode("ascii") != blob["data"]:
-                return [], f"{at} is not canonical base64"
-            if len(raw) != blob["bytes"] or _sha(raw) != digest:
-                return [], f"{at} does not match its byte count and sha256"
-            reason = None
-            if not public:
-                reason = "its evidence has no supported public collector source, so it stays inline"
-            elif (digest, len(raw)) not in members:
-                reason = "the blob is not a member of its evidence manifest, so it stays inline"
-            found.append(Original(n, m, _bare(evidence["id"]), ident, blob["kind"] if isinstance(blob["kind"], str)
-                                  else "", digest, raw, reason is None, reason))
+        try:
+            found.extend(_portable_envelope(evidence, record["materials"], n))
+        except (ValueError, TypeError, AttributeError, KeyError, UnicodeEncodeError, RecursionError) as exc:
+            why = str(exc) if isinstance(exc, _PortableInvalid) else type(exc).__name__
+            return [], f"portable_evidence[{n}] failed its neutral wire validation ({why})"
     return found, None
 
 
@@ -375,7 +591,8 @@ def materials_part(text: str) -> tuple[MaterialsPart | None, str | None]:
         return None, "its oah-materials JSON holds a backtick run as long as its fence"
     try:
         record = strict_json(body)
-    except (ValueError, RecursionError) as exc:
+        _bounded_policy_value(record)
+    except (ValueError, RecursionError, PolicyReadError) as exc:
         return None, f"its oah-materials JSON is not strict JSON ({type(exc).__name__})"
     if canonical(record).decode("utf-8") != body:
         return None, "its oah-materials JSON is not canonical sorted compact JSON (an edited representation)"
@@ -422,6 +639,52 @@ def screen_hit(text: str) -> str | None:
         if pattern.search(text):
             return rule
     return None
+
+
+def _screen_materials(text: str, *, task: str, part: str, revision: int) -> None:
+    lines = text.split("\n")
+    opens = [n for n, line in enumerate(lines) if _FENCE_OPEN.fullmatch(line)]
+    if not opens:
+        return
+    if _bytes(text) >= PART_LIMIT:
+        raise _refuse(task, f"part {part} r{revision} exceeds the bounded materials inspection")
+    if len(opens) != 1 or opens[0] + 1 >= len(lines):
+        raise _refuse(task, f"part {part} r{revision} has an ambiguous materials record")
+    try:
+        value = strict_json(lines[opens[0] + 1])
+        _bounded_policy_value(value)
+    except (ValueError, RecursionError, PolicyReadError):
+        raise _refuse(task, f"part {part} r{revision} cannot be screened as bounded materials JSON") from None
+    if _record_problem(value) is not None:
+        raise _refuse(task, f"part {part} r{revision} has an unknown materials schema")
+    semantic = copy.deepcopy(value)
+    count, total = 0, 0
+    for evidence in semantic["portable_evidence"]:
+        blobs = evidence.get("blobs") if isinstance(evidence, dict) else None
+        if not isinstance(blobs, list):
+            raise _refuse(task, f"part {part} r{revision} has uninspectable originals")
+        for blob in blobs:
+            count += 1
+            if count > ENTRY_LIMIT:
+                raise DesignError(TOO_LARGE_CODE, f"part {part} r{revision} exceeds the original entry bound")
+            if not isinstance(blob, dict) or not isinstance(blob.get("data"), str):
+                raise _refuse(task, f"part {part} r{revision} has uninspectable originals")
+            try:
+                raw = base64.b64decode(blob["data"].encode("ascii"), validate=True)
+            except (ValueError, UnicodeEncodeError):
+                raise _refuse(task, f"part {part} r{revision} has an original that cannot be decoded") from None
+            total += len(raw)
+            if total > BUNDLE_LIMIT:
+                raise DesignError(TOO_LARGE_CODE, f"part {part} r{revision} exceeds the bounded original inspection")
+            hit = screen_hit(raw.decode("utf-8", errors="replace"))
+            if hit is not None:
+                raise _refuse(task, f"an original of part {part} r{revision} matches the privacy rule {hit}")
+            blob["data"] = None
+    hit = next((rule for rule in map(screen_hit, _strings(semantic)) if rule), None)
+    if hit is None:
+        hit = screen_hit("\n".join(lines[:opens[0]]))
+    if hit is not None:
+        raise _refuse(task, f"the materials record of part {part} r{revision} matches the privacy rule {hit}")
 
 
 def _strings(value: object):
@@ -537,7 +800,7 @@ def target_identity(task_design: TaskDesign, *, run: str, engine: str, operation
 
 
 def _refuse(task: str, why: str) -> DesignError:
-    return DesignError(REFERENCE_UNAVAILABLE_CODE, f"task {task}: the design needs reference delivery and {why}; "
+    return DesignError(REFERENCE_UNAVAILABLE_CODE, f"task {task}: the design cannot be delivered because {why}; "
                        "nothing was launched")
 
 
@@ -565,6 +828,7 @@ def prepare_transport(task_design: TaskDesign, *, task: str, run: str, root: pat
         return name
 
     for role, revision, name, text in required:
+        _screen_materials(text, task=task, part=name, revision=revision)
         snapshot = context.accepted if role == "accepted" else context.current
         digest = snapshot.info.parts[name]
         ref = {"role": role, "revision": revision, "part": name, "digest": digest}
@@ -785,6 +1049,9 @@ def frozen(run_dir: pathlib.Path, plan: Mapping) -> dict[str, bytes]:
 
 
 def _read_regular(path: pathlib.Path, limit: int) -> bytes | None:
+    if os.name == "nt":
+        _presence, data, _problem = _windows_policy_file(path, limit)
+        return data
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
@@ -823,6 +1090,10 @@ def qualify_profile(engine: str, operation: str, *, executable: str, cli_version
     """Why this process is not the pinned reference profile, or None. Reads executable bytes; never runs it."""
     import platform as platform_module
 
+    if _windows(platform):
+        candidate = windows_package_candidate(engine, operation, executable=executable, cli_version=cli_version,
+                                                tools=tools)
+        return f"unsupported({WINDOWS_PENDING}): {candidate['problem_code']}"
     if engine != "claude":
         return f"{engine} has no qualified reference-read profile"
     if (platform or sys.platform) != "darwin" or (machine or platform_module.machine()) != "arm64":
@@ -845,22 +1116,24 @@ def qualify_profile(engine: str, operation: str, *, executable: str, cli_version
 
 def _read_bracketed(path: pathlib.Path) -> tuple[str, bytes | None, str | None]:
     """(presence, bytes, problem): one bounded read bracketed by equal before/after stat identities."""
+    if os.name == "nt":
+        return _windows_policy_file(path)
     try:
         before = os.lstat(path)
     except FileNotFoundError:
         return "absent", None, None
     except OSError as exc:
         return "unreadable", None, f"cannot stat ({type(exc).__name__})"
-    if stat_module.S_ISLNK(before.st_mode) and not path.exists():
-        return "unreadable", None, "a broken link"
-    data = _read_regular(path.resolve(), POLICY_FILE_LIMIT)
+    if stat_module.S_ISLNK(before.st_mode):
+        return "unreadable", None, "a linked policy source is ambiguous"
+    data = _read_regular(path, POLICY_FILE_LIMIT)
     try:
         after = os.lstat(path)
     except OSError:
         return "unreadable", None, "changed while read"
     if data is None:
         return "unreadable", None, "not a regular file within the policy size bound"
-    if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+    if _policy_stat(before) != _policy_stat(after):
         return "unreadable", None, "changed while read"
     return "present", data, None
 
@@ -975,10 +1248,46 @@ def _source(kind: str, path: pathlib.Path, presence: str, data: bytes | None, pr
             "sha256": ("sha256:" + _sha(data)) if data is not None else None, "status": problem or "read"}
 
 
+def _policy_stat(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _policy_directory(path: pathlib.Path) -> tuple[dict, list[pathlib.Path]]:
+    if os.name == "nt":
+        return _windows_policy_directory(path)
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return _source("managed-directory", path, "absent", None, None), []
+    except OSError as exc:
+        return _source("managed-directory", path, "unreadable", None, type(exc).__name__), []
+    try:
+        if not stat_module.S_ISDIR(before.st_mode) or stat_module.S_ISLNK(before.st_mode):
+            raise ValueError("linked or non-directory policy source")
+        members = sorted(path.iterdir())
+        if len(members) > POLICY_FILES:
+            raise ValueError("too many managed directory members")
+        data = canonical({"identity": _policy_stat(before), "members": [p.name for p in members]})
+        if _policy_stat(path.lstat()) != _policy_stat(before):
+            raise ValueError("managed directory changed during enumeration")
+        return _source("managed-directory", path, "present", data, None), members
+    except (OSError, ValueError) as exc:
+        return _source("managed-directory", path, "unreadable", None, type(exc).__name__), []
+
+
 def collect_process_policy(root: pathlib.Path, env: Mapping[str, str], *, operation: str,
-                           data_paths: Sequence[str], user: str | None = None) -> dict:
+                           data_paths: Sequence[str], user: str | None = None, engine: str = "claude",
+                           argv: Sequence[str] = (), cli_version: str | None = None,
+                           native_preferences=None, platform: str | None = None, isolated: bool = False,
+                           packaged_defaults: pathlib.Path | None = None) -> dict:
     """ProcessReadAccessV2 for the pinned Claude profile: the locally declared policy it loads, read without running
     any helper. Remote server policy stays `cli-enforced-unobserved`; it is never called absent or current."""
+    if engine == "codex":
+        return _collect_codex_policy(root, env, operation=operation, data_paths=data_paths, argv=argv,
+                    cli_version=cli_version, native_preferences=native_preferences, platform=platform,
+                    isolated=isolated, packaged_defaults=packaged_defaults)
+    if engine != "claude":
+        raise ValueError("an unknown local policy engine")
     import getpass
     import plistlib
 
@@ -992,26 +1301,67 @@ def collect_process_policy(root: pathlib.Path, env: Mapping[str, str], *, operat
         user = user or getpass.getuser()
     except (KeyError, OSError):
         user = None
-    roster = [("user", config_dir / "settings.json"), ("project", pathlib.Path(root) / ".claude" / "settings.json"),
-              ("local", pathlib.Path(root) / ".claude" / "settings.local.json"),
-              ("managed", pathlib.Path("/Library/Application Support/ClaudeCode/managed-settings.json"))]
-    managed_dir = pathlib.Path("/Library/Application Support/ClaudeCode/managed-settings.d")
-    try:
-        members = sorted(managed_dir.iterdir()) if managed_dir.is_dir() and not managed_dir.is_symlink() else []
-    except OSError:
-        members = None
-        reasons.append("the managed settings directory cannot be listed")
-    for member in members or []:
+    root = pathlib.Path(root).absolute()
+    ancestors = [root, *root.parents]
+    for index, ancestor in enumerate(ancestors[:64]):
+        try:
+            marker = (ancestor / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            reasons.append("the project boundary cannot be inspected")
+            break
+        if stat_module.S_ISLNK(marker.st_mode):
+            reasons.append("the project boundary is linked")
+        ancestors = ancestors[:index + 1]
+        break
+    if len(ancestors) > 64:
+        reasons.append("the applicable project ancestry exceeds the inspection bound")
+    roster = [("user", config_dir / "settings.json")]
+    for ancestor in reversed(ancestors[:64]):
+        roster.extend((("project", ancestor / ".claude" / "settings.json"),
+                       ("local", ancestor / ".claude" / "settings.local.json")))
+    native_values = []
+    if _windows(platform):
+        try:
+            native = _WindowsPolicy().collect("claude")
+        except (OSError, ValueError, ImportError, AttributeError):
+            native = {"files": [], "values": [], "sources": [], "problems": ["native-windows-policy-unreadable"],
+                      "managed_dir": None}
+        roster.extend(native["files"])
+        native_values.extend(native["values"])
+        sources.extend(native["sources"])
+        reasons.extend(native["problems"])
+        managed_dir = native["managed_dir"]
+    else:
+        roster.append(("managed", pathlib.Path("/Library/Application Support/ClaudeCode/managed-settings.json")))
+        managed_dir = pathlib.Path("/Library/Application Support/ClaudeCode/managed-settings.d")
+    if managed_dir is None:
+        directory_source, members = {"kind": "managed-directory", "presence": "unreadable"}, []
+    else:
+        directory_source, members = _policy_directory(managed_dir)
+    sources.append(directory_source)
+    if directory_source["presence"] == "unreadable":
+        reasons.append("the managed settings directory is linked, ambiguous or unreadable")
+    for member in members:
         if member.suffix == ".json":
             roster.append(("managed-dropin", member))
-    plists = [("mdm-device", pathlib.Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"))]
-    if user:
+    plists = [] if _windows(platform) else [
+        ("mdm-device", pathlib.Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"))]
+    if user and not _windows(platform):
         plists.insert(0, ("mdm-user", pathlib.Path("/Library/Managed Preferences") / user /
                           "com.anthropic.claudecode.plist"))
-    else:
+    elif not _windows(platform):
         reasons.append("the local principal for managed preferences cannot be established")
     settings: list[tuple[str, dict]] = []
     total = 0
+    for kind, data in native_values:
+        total += len(data)
+        value, problem = _json_object(data)
+        if value is None:
+            reasons.append(f"{kind} registry settings {problem}")
+        else:
+            settings.append((kind, value))
     for kind, path in roster:
         budget[0] += 1
         presence, data, problem = _read_bracketed(path)
@@ -1076,6 +1426,9 @@ def collect_process_policy(root: pathlib.Path, env: Mapping[str, str], *, operat
                     problem = _plugin_problem(config_dir, enabled, sources, budget)
                     if problem is not None:
                         reasons.append(problem)
+    after_directory, _members = _policy_directory(managed_dir) if managed_dir is not None else ({}, [])
+    if managed_dir is not None and after_directory != directory_source:
+        reasons.append("the managed settings directory changed while its policy was read")
     if budget[0] > POLICY_FILES or total > POLICY_TOTAL:
         reasons.append("the local policy is larger than the inspection bound")
     local = "denied" if denied else ("unknown" if reasons else "verified")
@@ -1091,6 +1444,495 @@ def collect_process_policy(root: pathlib.Path, env: Mapping[str, str], *, operat
     return record
 
 
+CODEX_PIN = "0.166.0"
+CODEX_POLICY_PROFILE = "codex-0.166.0-local-policy-v1"
+CODEX_SOURCE_PIN = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856"
+_CODEX_DEFAULTS = b'''# Fixed defaults for packaged Codex clients.
+include_permissions_instructions = true
+include_apps_instructions = true
+include_collaboration_mode_instructions = true
+include_environment_context = true
+include_environment_context_time = true
+cli_auth_credentials_store = "file"
+mcp_oauth_credentials_store = "auto"
+project_doc_max_bytes = 32768
+project_doc_fallback_filenames = []
+background_terminal_max_timeout = 300000
+file_opener = "vscode"
+hide_agent_reasoning = false
+chatgpt_base_url = "https://chatgpt.com/backend-api/"
+project_root_markers = [".git"]
+
+[history]
+persistence = "save-all"
+'''
+
+
+class PolicyReadError(OSError):
+    pass
+
+
+def _safe_windows_path(value: str) -> pathlib.PureWindowsPath:
+    if not isinstance(value, str) or len(value.encode("utf-16-le")) > 2048 or "\0" in value:
+        raise PolicyReadError("windows-path-bound")
+    path = pathlib.PureWindowsPath(value)
+    if not re.fullmatch(r"[A-Za-z]:", path.drive) or not path.root or len(path.parts) > 64:
+        raise PolicyReadError("windows-path-not-local-absolute")
+    if any(part in (".", "..") for part in value.replace("/", "\\").split("\\")):
+        raise PolicyReadError("windows-path-dot-component")
+    for component in path.parts[1:]:
+        if (component in (".", "..") or component[-1:] in (".", " ") or
+                any(c in component for c in ':<>"|?*') or
+                re.fullmatch(r"(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", component)):
+            raise PolicyReadError("windows-path-ambiguous")
+    return path
+
+
+def _windows_known_folder(which: str) -> str:
+    import ctypes as ct
+    import uuid
+
+    identifiers = {"programdata": "62ab5d82-fdc1-4dc3-a9dd-070d1d495d97",
+                   "programfiles": "905e63b6-c1bf-494e-b29c-65b732d3d21a"}
+
+    class Guid(ct.Structure):
+        _fields_ = [("data", ct.c_ubyte * 16)]
+
+    shell, ole = ct.WinDLL("shell32", use_last_error=True), ct.WinDLL("ole32", use_last_error=True)
+    shell.SHGetKnownFolderPath.argtypes = [ct.POINTER(Guid), ct.c_uint32, ct.c_void_p, ct.POINTER(ct.c_void_p)]
+    shell.SHGetKnownFolderPath.restype = ct.c_int32
+    ole.CoTaskMemFree.argtypes, ole.CoTaskMemFree.restype = [ct.c_void_p], None
+    identifier = Guid((ct.c_ubyte * 16).from_buffer_copy(uuid.UUID(identifiers[which]).bytes_le))
+    pointer = ct.c_void_p()
+    try:
+        if shell.SHGetKnownFolderPath(ct.byref(identifier), 0, None, ct.byref(pointer)) != 0 or not pointer.value:
+            raise PolicyReadError("windows-knownfolder-unavailable")
+        chars = []
+        for offset in range(1025):
+            char = ct.c_wchar.from_address(pointer.value + offset * ct.sizeof(ct.c_wchar)).value
+            if char == "\0":
+                value = "".join(chars)
+                _safe_windows_path(value)
+                return value
+            chars.append(char)
+        raise PolicyReadError("windows-knownfolder-path-bound")
+    finally:
+        if pointer.value:
+            ole.CoTaskMemFree(pointer)
+
+
+class _WindowsPolicy:
+    def __init__(self, registry=None):
+        if registry is None:
+            import winreg
+            registry = winreg
+        self.registry = registry
+
+    def _value(self, hive, key: str, name: str, *, view64: bool) -> tuple[dict, str | None, str | None]:
+        registry = self.registry
+        source = {"kind": "windows-registry", "hive": "machine" if hive == registry.HKEY_LOCAL_MACHINE else "user",
+                  "key_sha256": "sha256:" + _sha((key + "\0" + name).encode("utf-16-le")), "view64": view64}
+        try:
+            flags = registry.KEY_READ | (registry.KEY_WOW64_64KEY if view64 else 0)
+            values = []
+            for _ in range(2):
+                handle = None
+                try:
+                    handle = registry.OpenKey(hive, key, 0, flags)
+                    values.append(registry.QueryValueEx(handle, name))
+                except FileNotFoundError:
+                    values.append(None)
+                finally:
+                    if handle is not None:
+                        registry.CloseKey(handle)
+            if values[0] != values[1]:
+                raise PolicyReadError("windows-registry-changed")
+            if values[0] is None:
+                source["presence"] = "absent"
+                return source, None, None
+            value, kind = values[0]
+            if (kind != registry.REG_SZ or not isinstance(value, str) or "\0" in value or
+                    len(value.encode("utf-8")) > POLICY_FILE_LIMIT):
+                raise PolicyReadError("windows-registry-value-type-or-bound")
+            raw = value.encode("utf-8")
+            source.update(presence="present", bytes=len(raw), sha256="sha256:" + _sha(raw))
+            return source, value, None
+        except (OSError, ValueError, UnicodeError):
+            source["presence"] = "unreadable"
+            return source, None, "windows-registry-unreadable-or-stale"
+
+    def collect(self, engine: str) -> dict:
+        registry = self.registry
+        files, values, sources, problems, managed_dir = [], [], [], [], None
+        try:
+            if engine == "codex":
+                base = _safe_windows_path(_windows_known_folder("programdata")) / "OpenAI" / "Codex"
+                files.append(("system", base / "config.toml"))
+                source, override, problem = self._value(registry.HKEY_LOCAL_MACHINE,
+                        r"SOFTWARE\Policies\OpenAI\Codex", "RequirementsPath", view64=True)
+                sources.append(source)
+                if problem:
+                    problems.append(problem)
+                requirements = _safe_windows_path(override) if override is not None else base / "requirements.toml"
+                files.append(("requirements", requirements))
+            elif engine == "claude":
+                base = _safe_windows_path(_windows_known_folder("programfiles")) / "ClaudeCode"
+                files.append(("managed", base / "managed-settings.json"))
+                managed_dir = base / "managed-settings.d"
+                for hive in (registry.HKEY_CURRENT_USER, registry.HKEY_LOCAL_MACHINE):
+                    source, text, problem = self._value(hive, r"SOFTWARE\Policies\ClaudeCode", "Settings", view64=False)
+                    sources.append(source)
+                    if problem:
+                        problems.append(problem)
+                    if text is not None:
+                        values.append(("managed-registry", text.encode("utf-8")))
+            else:
+                raise PolicyReadError("windows-policy-engine-unknown")
+        except (OSError, ValueError, AttributeError):
+            problems.append("windows-system-source-unavailable")
+        if os.name == "nt":
+            files = [(kind, pathlib.Path(str(path))) for kind, path in files]
+            managed_dir = pathlib.Path(str(managed_dir)) if managed_dir is not None else None
+        return {"files": files, "values": values, "sources": sources, "problems": problems, "managed_dir": managed_dir}
+
+
+class _CoreFoundationPreferences:
+    def __init__(self):
+        import ctypes as ct
+
+        if sys.platform != "darwin" or ct.sizeof(ct.c_void_p) != 8 or ct.sizeof(ct.c_long) != 8:
+            raise PolicyReadError("the selected CoreFoundation ABI is unavailable")
+        self.ct = ct
+        self.cf = ct.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        signatures = {
+            "CFStringCreateWithCString": ([ct.c_void_p, ct.c_char_p, ct.c_uint32], ct.c_void_p),
+            "CFPreferencesAppSynchronize": ([ct.c_void_p], ct.c_ubyte),
+            "CFPreferencesAppValueIsForced": ([ct.c_void_p, ct.c_void_p], ct.c_ubyte),
+            "CFPreferencesCopyAppValue": ([ct.c_void_p, ct.c_void_p], ct.c_void_p),
+            "CFGetTypeID": ([ct.c_void_p], ct.c_ulong),
+            "CFStringGetTypeID": ([], ct.c_ulong),
+            "CFStringGetLength": ([ct.c_void_p], ct.c_long),
+            "CFStringGetCString": ([ct.c_void_p, ct.c_void_p, ct.c_long, ct.c_uint32], ct.c_ubyte),
+            "CFRelease": ([ct.c_void_p], None),
+        }
+        for name, (arguments, result) in signatures.items():
+            function = getattr(self.cf, name)
+            function.argtypes, function.restype = arguments, result
+        self.domain = self._string("com.openai.codex")
+
+    def _string(self, text: str):
+        value = self.cf.CFStringCreateWithCString(None, text.encode("ascii"), 0x0600)
+        if not value:
+            raise PolicyReadError("a CoreFoundation key could not be allocated")
+        return value
+
+    def synchronize(self) -> bool:
+        return self.cf.CFPreferencesAppSynchronize(self.domain) == 1
+
+    def is_forced(self, key: str) -> bool:
+        value = self._string(key)
+        try:
+            result = self.cf.CFPreferencesAppValueIsForced(value, self.domain)
+            if result not in (0, 1):
+                raise PolicyReadError("an invalid forced-state observation")
+            return result == 1
+        finally:
+            self.cf.CFRelease(value)
+
+    def copy_string(self, key: str) -> str | None:
+        name = self._string(key)
+        value = None
+        try:
+            value = self.cf.CFPreferencesCopyAppValue(name, self.domain)
+            if not value:
+                return None
+            if self.cf.CFGetTypeID(value) != self.cf.CFStringGetTypeID():
+                raise PolicyReadError("the forced preference is not a string")
+            size = self.cf.CFStringGetLength(value)
+            if not 0 <= size <= POLICY_FILE_LIMIT:
+                raise PolicyReadError("the forced preference exceeds its native value bound")
+            buffer = self.ct.create_string_buffer(size * 4 + 1)
+            if self.cf.CFStringGetCString(value, buffer, len(buffer), 0x08000100) != 1:
+                raise PolicyReadError("the forced preference is not complete UTF-8")
+            raw = buffer.value
+            if len(raw) > POLICY_FILE_LIMIT:
+                raise PolicyReadError("the forced preference exceeds its text bound")
+            return raw.decode("utf-8", errors="strict")
+        finally:
+            if value:
+                self.cf.CFRelease(value)
+            self.cf.CFRelease(name)
+
+    def close(self) -> None:
+        if self.domain:
+            self.cf.CFRelease(self.domain)
+            self.domain = None
+
+
+def _forced_codex_preferences(api=None) -> tuple[list[dict], list[tuple[str, bytes]], list[str]]:
+    own = api is None
+    records, contributions, reasons = [], [], []
+    try:
+        api = api if api is not None else _CoreFoundationPreferences()
+        if api.synchronize() is not True:
+            raise PolicyReadError("local preference synchronization failed")
+        for key in ("config_toml_base64", "requirements_toml_base64"):
+            before = api.is_forced(key)
+            if type(before) is not bool:
+                raise PolicyReadError("the native forced state is unknown")
+            value = api.copy_string(key) if before else None
+            after = api.is_forced(key)
+            if type(after) is not bool or before != after:
+                raise PolicyReadError("the local preference changed while being read")
+            raw = None
+            if before:
+                if not isinstance(value, str) or len(value.encode("utf-8")) > POLICY_FILE_LIMIT:
+                    raise PolicyReadError("the forced value is missing, non-string or over its bound")
+                raw = base64.b64decode(value.strip().encode("ascii"), validate=True)
+                if len(raw) > POLICY_FILE_LIMIT:
+                    raise PolicyReadError("the decoded forced policy exceeds its bound")
+                raw.decode("utf-8", errors="strict")
+                contributions.append((key, raw))
+            records.append({"kind": "forced-preference", "domain": "com.openai.codex", "key": key,
+                            "presence": "present-forced" if before else "observed-unforced", "forced": before,
+                            "bytes": None if raw is None else len(raw),
+                            "sha256": None if raw is None else "sha256:" + _sha(raw), "synchronized": True})
+    except (OSError, ValueError, UnicodeError, AttributeError) as exc:
+        reasons.append(f"the local forced preference source is unknown ({type(exc).__name__})")
+        records.append({"kind": "forced-preference", "presence": "unknown", "status": type(exc).__name__})
+    finally:
+        if own and api is not None:
+            api.close()
+    return records, contributions, reasons
+
+
+def _bounded_policy_value(value) -> None:
+    stack, nodes = [(value, 0)], 0
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if depth > 64 or nodes > 65536:
+            raise PolicyReadError("policy depth or node bound exceeded")
+        if isinstance(item, dict):
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+
+
+def _codex_restrictions(value: dict, paths: Sequence[str]) -> tuple[bool, list[str]]:
+    denied, reasons, stack = False, [], [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, list):
+            stack.extend(current)
+            continue
+        if not isinstance(current, dict):
+            continue
+        for key, child in current.items():
+            if key in ("deny_read", "deny-read", "ask_read"):
+                if not isinstance(child, list) or not all(isinstance(rule, str) for rule in child):
+                    reasons.append("a declared local read restriction cannot be interpreted")
+                elif any(_rule_matches(f"Read({rule})", paths) for rule in child):
+                    denied = True
+                    reasons.append("a locally declared deny or ask covers the required native read")
+            elif key in ("hooks", "plugins", "enabled_plugins", "execpolicy", "rules") and child:
+                reasons.append(f"the local {key} contribution has no qualified required-read interpretation")
+            elif key in ("permission_profile", "default_permissions", "permissions", "experimental_use_profile") and child:
+                reasons.append(f"the local {key} rewrites required-read permissions")
+            elif key == "sandbox_mode" and child not in ("read-only", "workspace-write"):
+                reasons.append("the local sandbox mode is outside the selected simple profile")
+            stack.append(child)
+    return denied, reasons
+
+
+def _collect_codex_policy(root, env, *, operation, data_paths, argv, cli_version, native_preferences,
+                          platform, isolated, packaged_defaults):
+    import tomllib
+
+    platform = platform or sys.platform
+    root = pathlib.Path(root).absolute()
+    home = pathlib.Path(env.get("CODEX_HOME") or pathlib.Path(env.get("HOME") or "~").expanduser() / ".codex")
+    sources, reasons, contributions, bracketed = [], [], [], []
+    denied, total = False, 0
+    if cli_version != CODEX_PIN:
+        reasons.append("the native package version is not the pinned local policy loader")
+    profile, overrides, ignore_user, ignore_rules = None, [], False, False
+    tokens = list(argv[1:]) if argv else []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("--profile", "-p", "--config", "-c", "--sandbox", "-s", "--model", "-m", "-C", "--cd",
+                     "--output-schema", "--output-last-message", "-o"):
+            index += 1
+            if index >= len(tokens):
+                reasons.append("a local policy selector is missing its value")
+                break
+            argument = tokens[index]
+            if token in ("--profile", "-p"):
+                if profile is not None or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", argument) is None:
+                    reasons.append("the selected named profile is ambiguous")
+                profile = argument
+            elif token in ("--config", "-c"):
+                overrides.append(argument.encode("utf-8"))
+            elif token in ("--sandbox", "-s") and argument not in ("read-only", "workspace-write"):
+                reasons.append("the runtime sandbox selector is outside the simple profile")
+        elif token == "--ignore-user-config":
+            ignore_user = True
+        elif token == "--ignore-rules":
+            ignore_rules = True
+        elif token.startswith("-") and token not in ("-", "--ephemeral", "--skip-git-repo-check"):
+            reasons.append("an unrecognized runtime policy selector is present")
+        index += 1
+    if (ignore_user or ignore_rules) and not (isolated and operation == "inspect"):
+        reasons.append("ordinary calls cannot ignore local user policy or rules")
+    if any(key.startswith("CODEX_") and key not in ("CODEX_HOME", "CODEX_THREAD_ID", "CODEX_SANDBOX") for key in env):
+        reasons.append("an unrecognized local configuration environment selector is present")
+    sources.append({"kind": "compiled-defaults", "source_pin": CODEX_SOURCE_PIN,
+                    "presence": "source-pinned", "bytes": len(_CODEX_DEFAULTS),
+                    "sha256": "sha256:" + _sha(_CODEX_DEFAULTS)})
+    contributions.append(("compiled-defaults", _CODEX_DEFAULTS))
+    if _windows(platform):
+        try:
+            native = _WindowsPolicy().collect("codex")
+            roster = native["files"]
+            sources.extend(native["sources"])
+            contributions.extend(native["values"])
+            reasons.extend(native["problems"])
+        except (OSError, ValueError, ImportError, AttributeError):
+            reasons.append("native Windows system policy inventory cannot be read")
+            roster = []
+    else:
+        roster = [("system", pathlib.Path("/etc/codex/config.toml")),
+                  ("requirements", pathlib.Path("/etc/codex/requirements.toml")),
+                  ("legacy-managed", pathlib.Path("/etc/codex/managed_config.toml"))]
+    if not ignore_user:
+        roster.append(("user", home / "config.toml"))
+        if profile is not None:
+            roster.append(("named-profile", home / f"{profile}.config.toml"))
+    ancestors = [root, *root.parents]
+    if len(ancestors) > 64:
+        reasons.append("the project ancestry exceeds the native policy inspection bound")
+    roster.append(("cwd", root / "config.toml"))
+    for ancestor in ancestors[:64]:
+        roster.append(("project", ancestor / ".codex" / "config.toml"))
+    if packaged_defaults is not None:
+        roster.insert(0, ("packaged-defaults", pathlib.Path(packaged_defaults)))
+    policy_dirs = [home, *(ancestor / ".codex" for ancestor in ancestors[:64])]
+    for directory in policy_dirs:
+        roster.append(("hooks", directory / "hooks.json"))
+        if not ignore_rules:
+            for suffix in ("rules", "plugins"):
+                source, members = _policy_directory(directory / suffix)
+                source["kind"] = "codex-" + suffix + "-directory"
+                sources.append(source)
+                bracketed.append((directory / suffix, source))
+                if source["presence"] == "unreadable":
+                    reasons.append("a local rules or plugin directory is unknown")
+                for member in members:
+                    if member.suffix in (".rules", ".json", ".toml"):
+                        roster.append((suffix, member))
+                    else:
+                        reasons.append("a local rules or plugin layout is unsupported")
+    seen = set()
+    for kind, path in roster:
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
+        if len(sources) >= POLICY_FILES:
+            reasons.append("the local policy source count exceeds its bound")
+            break
+        presence, raw, problem = _read_bracketed(path)
+        source = _source(kind, path, presence, raw, problem)
+        sources.append(source)
+        if presence == "unreadable" or (kind in ("packaged-defaults", "named-profile") and presence != "present"):
+            reasons.append(f"the selected {kind} source cannot be read completely")
+        if presence == "present":
+            contributions.append((kind, raw, str(path)))
+    if platform == "darwin" or native_preferences is not None:
+        native_sources, native_values, native_reasons = _forced_codex_preferences(native_preferences)
+        sources.extend(native_sources)
+        contributions.extend(native_values)
+        reasons.extend(native_reasons)
+    for number, raw in enumerate(overrides):
+        contributions.append(("runtime", raw))
+        sources.append({"kind": "runtime", "ordinal": number, "bytes": len(raw), "sha256": "sha256:" + _sha(raw)})
+    parsed, trust = [], {}
+    for kind, raw, *source_path in contributions:
+        total += len(raw)
+        if len(raw) > POLICY_FILE_LIMIT or total > POLICY_TOTAL:
+            reasons.append("the complete local policy exceeds its byte bounds")
+            break
+        try:
+            text = raw.decode("utf-8", errors="strict")
+            if kind in ("rules", "plugins") and not text.lstrip().startswith(("{", "[")):
+                if any(line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()):
+                    reasons.append("a native rules or plugin source has unqualified semantics")
+                continue
+            value = strict_json(text) if kind == "hooks" or (kind == "plugins" and text.lstrip().startswith("{")) \
+                else tomllib.loads(text)
+            _bounded_policy_value(value)
+            if not isinstance(value, dict):
+                raise PolicyReadError("the native configuration contribution is not a table")
+        except (ValueError, UnicodeError, RecursionError, PolicyReadError):
+            reasons.append(f"the {kind} contribution is malformed or outside its bounds")
+            continue
+        parsed.append((kind, value, source_path))
+        if kind not in ("project", "cwd", "hooks", "rules", "plugins"):
+            projects = value.get("projects", {})
+            if not isinstance(projects, dict) or len(projects) > 64:
+                reasons.append("the project trust source is malformed or exceeds its bound")
+            else:
+                for selected_path, configuration in projects.items():
+                    if (not isinstance(selected_path, str) or not pathlib.Path(selected_path).is_absolute()
+                            or not isinstance(configuration, dict)
+                            or configuration.get("trust_level") not in ("trusted", "untrusted")):
+                        reasons.append("the project trust selector is outside the selected loader shape")
+                        continue
+                    normalized = os.path.normcase(os.path.abspath(selected_path))
+                    level = configuration["trust_level"]
+                    if normalized in trust and trust[normalized] != level:
+                        reasons.append("conflicting project trust contributions require full precedence qualification")
+                    trust[normalized] = level
+    trust_keys = [str(root)]
+    for ancestor in ancestors[:64]:
+        if os.path.lexists(ancestor / ".git"):
+            trust_keys.append(str(ancestor))
+            break
+    selected_trust = next((trust[os.path.normcase(os.path.abspath(key))] for key in trust_keys
+                           if os.path.normcase(os.path.abspath(key)) in trust), "untrusted")
+    sources.append({"kind": "project-trust", "source_pin": CODEX_SOURCE_PIN,
+                    "presence": "selected", "trust_level": selected_trust,
+                    "selector_sha256": "sha256:" + _sha(canonical(trust_keys))})
+    for kind, value, source_path in parsed:
+        project_source = kind in ("project", "cwd") or (kind in ("hooks", "rules", "plugins") and source_path and
+                         not str(pathlib.Path(source_path[0])).startswith(str(home) + os.sep))
+        if project_source and selected_trust != "trusted":
+            continue
+        if kind == "hooks" and value:
+            reasons.append("a native local hook contribution requires independent read-policy qualification")
+        if kind == "user" and (value.get("profile") or (profile is not None and value.get("profiles", {}).get(profile))):
+            reasons.append("legacy and named profile selection cannot be mixed")
+        found, problems = _codex_restrictions(value, data_paths)
+        denied = denied or found
+        reasons.extend(problems)
+    for path, old in bracketed:
+        source, _members = _policy_directory(path)
+        source["kind"] = old["kind"]
+        if source != old:
+            reasons.append("a local rules or plugin source changed during inventory")
+    if len(sources) > POLICY_FILES:
+        reasons.append("the native contribution count exceeds its bound")
+    local = "denied" if denied else "unknown" if reasons else "verified"
+    record = {"version": 2, "profile": CODEX_POLICY_PROFILE, "operation": operation, "sources": sources,
+              "selectors_sha256": "sha256:" + _sha(canonical({"home": str(home), "argv": list(argv),
+                                                               "profile": profile, "isolated": isolated})),
+              "local_policy": local, "remote_policy": "cli-enforced-unobserved", "host_files": "pending",
+              "candidate_local_eligible": local == "verified", "launch_eligible": False,
+              "reference_profile": CODEX_REFERENCE_PENDING_CODE, "reasons": list(dict.fromkeys(reasons))}
+    record["policy_sha256"] = "sha256:" + _sha(canonical(record))
+    return record
+
+
 def _recovery_problem(platform: str | None = None) -> str:
     import platform as platform_module
 
@@ -1101,9 +1943,260 @@ def _recovery_problem(platform: str | None = None) -> str:
     return "recovery-profile-not-installed-qualified"
 
 
+_DARWIN_DEFINITION = {
+    "xnu": "2c2f96dc2b9a4408a43d3150ae9c105355ca3daa",
+    "iokit": "323ead896d04424f87184d8f6ff0cce811aab106",
+    "cf": "dc54c6bb1c1e5e0b9486c1d26dd5bef110b20bf3",
+    "hfs": "d1bac2f062e6e9c0dfcce302d9aacb10173d0eea",
+    "abi": "darwin23-arm64-little-lp64-statfs2168-attrlist24-volume112-object32",
+}
+_DARWIN_ABI_DIGEST = "sha256:" + _sha(canonical(_DARWIN_DEFINITION))
+
+
+class ContinuityUnsupported(OSError):
+    pass
+
+
+def _native_uuid(raw: bytes) -> bytes:
+    import uuid
+
+    if len(raw) != 37 or raw[-1:] != b"\0":
+        raise PolicyReadError("native-uuid-size")
+    try:
+        text = raw[:-1].decode("ascii")
+        value = uuid.UUID(text)
+    except (ValueError, UnicodeError) as exc:
+        raise PolicyReadError("native-uuid-format") from exc
+    if str(value) != text.lower() or value.int == 0:
+        raise PolicyReadError("native-uuid-format")
+    return value.bytes
+
+
+class _DarwinContinuity:
+    def __init__(self):
+        import ctypes as ct
+
+        if sys.byteorder != "little" or ct.sizeof(ct.c_void_p) != 8 or ct.sizeof(ct.c_long) != 8:
+            raise ContinuityUnsupported("native-abi-not-lp64")
+        self.ct = ct
+        self.lib = ct.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        self.io = ct.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        self.cf = ct.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        self.port = ct.c_uint32.in_dll(self.io, "kIOMainPortDefault").value
+        for lib, name, args, result in (
+            (self.lib, "fstatfs64", [ct.c_int, ct.c_void_p], ct.c_int),
+            (self.lib, "fgetattrlist", [ct.c_int, ct.c_void_p, ct.c_void_p, ct.c_size_t, ct.c_ulong], ct.c_int),
+            (self.lib, "sysctlbyname", [ct.c_char_p, ct.c_void_p, ct.POINTER(ct.c_size_t), ct.c_void_p,
+                                       ct.c_size_t], ct.c_int),
+            (self.io, "IOServiceMatching", [ct.c_char_p], ct.c_void_p),
+            (self.io, "IOServiceGetMatchingServices", [ct.c_uint32, ct.c_void_p, ct.POINTER(ct.c_uint32)], ct.c_int),
+            (self.io, "IOIteratorNext", [ct.c_uint32], ct.c_uint32),
+            (self.io, "IOIteratorIsValid", [ct.c_uint32], ct.c_uint32),
+            (self.io, "IOObjectConformsTo", [ct.c_uint32, ct.c_char_p], ct.c_uint32),
+            (self.io, "IORegistryEntryCreateCFProperty", [ct.c_uint32, ct.c_void_p, ct.c_void_p,
+                                                         ct.c_uint32], ct.c_void_p),
+            (self.io, "IORegistryEntryGetRegistryEntryID", [ct.c_uint32, ct.POINTER(ct.c_uint64)], ct.c_int),
+            (self.io, "IOObjectRelease", [ct.c_uint32], ct.c_int),
+            (self.cf, "CFStringCreateWithCString", [ct.c_void_p, ct.c_char_p, ct.c_uint32], ct.c_void_p),
+            (self.cf, "CFGetTypeID", [ct.c_void_p], ct.c_ulong),
+            (self.cf, "CFStringGetTypeID", [], ct.c_ulong),
+            (self.cf, "CFStringGetLength", [ct.c_void_p], ct.c_long),
+            (self.cf, "CFStringGetCString", [ct.c_void_p, ct.c_void_p, ct.c_long, ct.c_uint32], ct.c_ubyte),
+            (self.cf, "CFRelease", [ct.c_void_p], None),
+        ):
+            function = getattr(lib, name)
+            function.argtypes, function.restype = args, result
+
+    def principal(self) -> tuple[int, int]:
+        return os.getuid(), os.geteuid()
+
+    def host_uuid(self) -> bytes:
+        ct = self.ct
+        iterator, entry, second, key, prop = ct.c_uint32(), 0, 0, None, None
+        matching = self.io.IOServiceMatching(b"IOPlatformExpertDevice")
+        if not matching:
+            raise PolicyReadError("iokit-matching-unavailable")
+        try:
+            # Matching consumes the dictionary even when the native call fails.
+            if self.io.IOServiceGetMatchingServices(self.port, matching, ct.byref(iterator)) != 0:
+                raise PolicyReadError("iokit-matching-failed")
+            entry = self.io.IOIteratorNext(iterator.value)
+            second = self.io.IOIteratorNext(iterator.value)
+            if not entry or second or self.io.IOIteratorIsValid(iterator.value) != 1:
+                raise PolicyReadError("iokit-platform-ambiguous")
+            if self.io.IOObjectConformsTo(entry, b"IOPlatformExpertDevice") != 1:
+                raise PolicyReadError("iokit-platform-wrong-class")
+            registry = ct.c_uint64()
+            if self.io.IORegistryEntryGetRegistryEntryID(entry, ct.byref(registry)) != 0 or not registry.value:
+                raise PolicyReadError("iokit-current-entry-unknown")
+            key = self.cf.CFStringCreateWithCString(None, b"IOPlatformUUID", 0x0600)
+            if not key:
+                raise PolicyReadError("iokit-key-unavailable")
+            prop = self.io.IORegistryEntryCreateCFProperty(entry, key, None, 0)
+            if (not prop or self.cf.CFGetTypeID(prop) != self.cf.CFStringGetTypeID()
+                    or self.cf.CFStringGetLength(prop) != 36):
+                raise PolicyReadError("iokit-platform-uuid-type")
+            buffer = ct.create_string_buffer(37)
+            if self.cf.CFStringGetCString(prop, buffer, 37, 0x0600) != 1:
+                raise PolicyReadError("iokit-platform-uuid-copy")
+            return _native_uuid(buffer.raw)
+        finally:
+            for value in (prop, key):
+                if value:
+                    self.cf.CFRelease(value)
+            for value in (second, entry, iterator.value):
+                if value:
+                    self.io.IOObjectRelease(value)
+
+    def statfs(self, descriptor: int) -> bytes:
+        buffer = self.ct.create_string_buffer(2168)
+        if self.lib.fstatfs64(descriptor, buffer) != 0:
+            raise PolicyReadError("native-statfs-failed")
+        return buffer.raw
+
+    def attributes(self, descriptor: int, volume: bool) -> bytes:
+        import struct
+
+        attrs = struct.pack("<HHIIIII", 5, 0, 0x80000000 | (0 if volume else 0x40),
+                            0xC0060000 if volume else 0, 0, 0, 0)
+        request = self.ct.create_string_buffer(attrs, 24)
+        buffer = self.ct.create_string_buffer(112 if volume else 32)
+        if self.lib.fgetattrlist(descriptor, request, buffer, len(buffer), 0x0C) != 0:
+            raise PolicyReadError("native-attributes-failed")
+        return buffer.raw
+
+    def boot_uuid(self) -> bytes:
+        buffer = self.ct.create_string_buffer(37)
+        size = self.ct.c_size_t(37)
+        if self.lib.sysctlbyname(b"kern.bootsessionuuid", buffer, self.ct.byref(size), None, 0) != 0:
+            raise PolicyReadError("native-boot-read-failed")
+        if size.value != 37:
+            raise PolicyReadError("native-boot-size")
+        return _native_uuid(buffer.raw)
+
+
+def _continuity_open(path: pathlib.Path) -> int:
+    raw = os.fsencode(path)
+    if not path.is_absolute() or len(raw) > 1024 or len(path.parts) > 64 or ".." in path.parts:
+        raise ContinuityUnsupported("native-root-path-bound")
+    held = _open_dir(path.anchor)
+    try:
+        for part in path.parts[1:]:
+            child = _open_dir(part, dir_fd=held)
+            os.close(held)
+            held = child
+        return held
+    except BaseException:
+        os.close(held)
+        raise
+
+
+def _continuity_statfs(raw: bytes) -> tuple[bytes, pathlib.Path]:
+    import struct
+
+    if len(raw) != 2168:
+        raise PolicyReadError("native-statfs-size")
+    if not struct.unpack_from("<I", raw, 64)[0] & 0x1000:
+        raise ContinuityUnsupported("native-root-not-local")
+    if raw[72:88].split(b"\0", 1)[0] != b"hfs":
+        raise ContinuityUnsupported("native-filesystem-not-hfs-profile")
+    mount = raw[88:1112]
+    if b"\0" not in mount:
+        raise PolicyReadError("native-mount-path-size")
+    return raw[48:56], pathlib.Path(os.fsdecode(mount.split(b"\0", 1)[0]))
+
+
+def _continuity_attrs(raw: bytes, *, volume: bool) -> dict:
+    import struct
+
+    size = 112 if volume else 32
+    if len(raw) != size or struct.unpack_from("<I", raw)[0] != size:
+        raise PolicyReadError("native-attributes-size")
+    common, vol, directory, file, fork = struct.unpack_from("<IIIII", raw, 4)
+    if common != (0x80000000 if volume else 0x80000040) or (directory, file, fork) != (0, 0, 0):
+        raise PolicyReadError("native-returned-attribute-mask")
+    if not volume:
+        if not common & 0x40 or vol or not any(raw[24:32]):
+            raise PolicyReadError("native-permanent-object-missing")
+        return {"permanent": raw[24:32]}
+    if vol != 0xC0060000:
+        raise PolicyReadError("native-volume-attribute-mask")
+    caps, valid = struct.unpack_from("<I", raw, 24)[0], struct.unpack_from("<I", raw, 40)[0]
+    required = 0x4001
+    if caps & valid & required != required or not valid & 0x20000:
+        raise ContinuityUnsupported("native-volume-persistence-capabilities")
+    for offset in (72, 92):
+        advertised_common, advertised_vol = struct.unpack_from("<II", raw, offset)
+        if not advertised_common & 0x40 or advertised_vol & 0xC0060000 != 0xC0060000:
+            raise ContinuityUnsupported("native-volume-persistent-attributes")
+    if not any(raw[56:72]):
+        raise PolicyReadError("native-volume-uuid-missing")
+    return {"uuid": raw[56:72], "id_width": 64 if caps & 0x20000 else 32,
+            "predicate": {"capabilities": caps, "valid": valid, "attributes": raw[72:112].hex()}}
+
+
+def _continuity_collection(reader, nonce: str, roots: Mapping[str, pathlib.Path]) -> tuple[dict, list[dict]]:
+    import struct
+
+    if len(roots) > 6 or _HEX64.fullmatch(nonce) is None:
+        raise PolicyReadError("native-continuity-input-bound")
+    host = reader.host_uuid()
+    if not isinstance(host, bytes) or len(host) != 16 or not any(host):
+        raise PolicyReadError("native-host-uuid-invalid")
+    real, effective = reader.principal()
+    if (type(real) is not int or type(effective) is not int or real != effective
+            or not 0 <= real <= 0xFFFFFFFF):
+        raise PolicyReadError("native-process-domain-ambiguous")
+    domain = {"source": "iokit-platform-uuid", "status": "unsupported",
+              "kernel_host_digest": _label_digest("oah-kernel-host", nonce, host),
+              "principal_digest": _label_digest("oah-native-principal", nonce, struct.pack("<II", real, effective)),
+              "namespace": "native-darwin-kernel"}
+    grouped, allocated = {}, 0
+    for role, path in sorted(roots.items()):
+        path = pathlib.Path(path).absolute()
+        fd = _continuity_open(path)
+        volume_fd = None
+        try:
+            before = os.fstat(fd)
+            fsid, mount = _continuity_statfs(reader.statfs(fd))
+            volume_fd = _continuity_open(mount)
+            volume_fsid, volume_mount = _continuity_statfs(reader.statfs(volume_fd))
+            if fsid != volume_fsid or mount != volume_mount:
+                raise PolicyReadError("native-volume-root-ambiguous")
+            volume = _continuity_attrs(reader.attributes(volume_fd, True), volume=True)
+            obj = _continuity_attrs(reader.attributes(fd, False), volume=False)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid) != \
+                    (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid):
+                raise PolicyReadError("native-root-changed")
+            allocated += 2168 * 2 + 112 + 32 + len(os.fsencode(path)) + len(os.fsencode(mount))
+            if allocated > 64 * 1024:
+                raise PolicyReadError("native-continuity-buffer-bound")
+            identity = (before.st_dev, before.st_ino)
+            if identity in grouped:
+                grouped[identity]["roles"].append(role)
+                continue
+            grouped[identity] = {
+                "roles": [role], "path_bytes_digest": _label_digest("oah-root-path", nonce, os.fsencode(path)),
+                "status": "unsupported", "volume_uuid_digest": _label_digest("oah-volume-uuid", nonce, volume["uuid"]),
+                "permanent_object_digest": _label_digest("oah-permanent-object", nonce, obj["permanent"]),
+                "id_width": volume["id_width"],
+                "capability_predicate_digest": _label_digest("oah-volume-capabilities", nonce,
+                                                             canonical(volume["predicate"])),
+                "owner_mode_digest": _label_digest("oah-root-owner-mode", nonce,
+                        canonical({"uid": before.st_uid, "gid": before.st_gid,
+                                   "type": stat_module.S_IFMT(before.st_mode),
+                                   "mode": stat_module.S_IMODE(before.st_mode)})),
+            }
+        finally:
+            if volume_fd is not None:
+                os.close(volume_fd)
+            os.close(fd)
+    return domain, sorted(grouped.values(), key=lambda entry: entry["roles"])
+
+
 def capture_local_continuity(nonce: str, roots: Mapping[str, pathlib.Path]) -> dict:
-    """LocalContinuityV1, recorded before the first DATA leaf. Qualification is NOT a launch prerequisite: this
-    build has no installed-qualified recovery profile, so every fact stays typed `unsupported` with null values."""
+    """Collect the selected bounded candidate; installed qualification is independently unavailable."""
     problem = _recovery_problem()
     grouped: dict[str, list[str]] = {}
     for role, path in roots.items():
@@ -1112,18 +2205,148 @@ def capture_local_continuity(nonce: str, roots: Mapping[str, pathlib.Path]) -> d
                 "status": "unsupported", "volume_uuid_digest": None, "permanent_object_digest": None,
                 "id_width": None, "capability_predicate_digest": None, "owner_mode_digest": None}
                for path, roles in sorted(grouped.items())]
-    return {"version": 1, "profile_id": RECOVERY_PROFILE, "source_abi_digest": None, "origin_nonce": nonce,
+    result = {"version": 1, "profile_id": RECOVERY_PROFILE, "source_abi_digest": _DARWIN_ABI_DIGEST, "origin_nonce": nonce,
             "status": "unsupported", "problem_code": problem,
-            "observation_provenance": {"reader": "oah-local-continuity-v1", "outcome": problem},
+            "observation_provenance": {"reader": "oah-local-continuity-v1", "outcome": problem,
+                                       "source_abi_digest": _DARWIN_ABI_DIGEST},
             "host": None, "roots": entries}
+    if problem != "recovery-profile-not-installed-qualified":
+        return result
+    try:
+        reader = _DarwinContinuity()
+        first = _continuity_collection(reader, nonce, roots)
+        second = _continuity_collection(reader, nonce, roots)
+        if first != second:
+            raise PolicyReadError("native-continuity-changed")
+        result["host"], result["roots"] = first
+        result["observation_provenance"]["candidate_status"] = "verified"
+    except (OSError, ValueError, AttributeError, OverflowError) as exc:
+        result["status"] = "unsupported" if isinstance(exc, ContinuityUnsupported) else "unknown"
+        result["problem_code"] = str(exc) if isinstance(exc, (ContinuityUnsupported, PolicyReadError)) \
+            else "native-continuity-read-failed"
+        result["observation_provenance"]["candidate_status"] = result["status"]
+        result["observation_provenance"]["outcome"] = result["problem_code"]
+    return result
 
 
 def boot_identity() -> dict:
-    """BootIdentityV1: typed and unsupported in this build (no installed-qualified boot reader)."""
+    """Read the selected source without granting unqualified changed-boot recovery."""
     problem = _recovery_problem()
-    return {"source": "kern.bootsessionuuid", "profile_id": RECOVERY_PROFILE, "source_abi_digest": None,
+    result = {"source": "kern.bootsessionuuid", "profile_id": RECOVERY_PROFILE, "source_abi_digest": _DARWIN_ABI_DIGEST,
             "status": "unsupported", "value_digest": None, "problem_code": problem,
             "observation_provenance": {"reader": "oah-boot-identity-v1", "outcome": problem}}
+    if problem != "recovery-profile-not-installed-qualified":
+        return result
+    try:
+        reader = _DarwinContinuity()
+        first, second = reader.boot_uuid(), reader.boot_uuid()
+        if len(first) != 16 or not any(first) or first != second:
+            raise PolicyReadError("native-boot-changed")
+        result["value_digest"] = "sha256:" + _sha(b"oah-boot-session\0" + first)
+        result["observation_provenance"]["candidate_status"] = "verified"
+    except (OSError, ValueError, AttributeError) as exc:
+        result["status"] = "unsupported" if isinstance(exc, ContinuityUnsupported) else "unknown"
+        result["problem_code"] = str(exc) if isinstance(exc, (ContinuityUnsupported, PolicyReadError)) \
+            else "native-boot-read-failed"
+        result["observation_provenance"]["candidate_status"] = result["status"]
+    return result
+
+
+def capture_node_continuity(nonce: str, paths: Mapping[str, pathlib.Path]) -> dict:
+    result = {"version": 1, "profile_id": RECOVERY_PROFILE, "source_abi_digest": _DARWIN_ABI_DIGEST,
+              "status": "unsupported", "problem_code": _recovery_problem(), "nodes": []}
+    if result["problem_code"] != "recovery-profile-not-installed-qualified":
+        return result
+    try:
+        if len(paths) > ENTRY_LIMIT + 3:
+            raise PolicyReadError("native-node-roster-bound")
+        reader = _DarwinContinuity()
+        for name, path in sorted(paths.items()):
+            parent, leaf, volume_fd = _continuity_open(path.parent), None, None
+            try:
+                leaf = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+                before = os.fstat(leaf)
+                if (not (stat_module.S_ISDIR(before.st_mode) or stat_module.S_ISREG(before.st_mode))
+                        or (stat_module.S_ISREG(before.st_mode) and before.st_nlink != 1)):
+                    raise PolicyReadError("native-node-type-or-link")
+                fsid, mount = _continuity_statfs(reader.statfs(leaf))
+                volume_fd = _continuity_open(mount)
+                if (fsid, mount) != _continuity_statfs(reader.statfs(volume_fd)):
+                    raise PolicyReadError("native-node-volume-changed")
+                volume = _continuity_attrs(reader.attributes(volume_fd, True), volume=True)
+                first = _continuity_attrs(reader.attributes(leaf, False), volume=False)
+                if first != _continuity_attrs(reader.attributes(leaf, False), volume=False):
+                    raise PolicyReadError("native-node-object-changed")
+                after = os.fstat(leaf)
+                if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid, before.st_size) != \
+                        (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid, after.st_size):
+                    raise PolicyReadError("native-node-changed")
+                result["nodes"].append({"name": name,
+                    "path_digest": _label_digest("oah-node-path", nonce, os.fsencode(path)),
+                    "volume_digest": _label_digest("oah-node-volume", nonce, volume["uuid"]),
+                    "object_digest": _label_digest("oah-node-object", nonce, first["permanent"]),
+                    "predicate_digest": _label_digest("oah-node-capabilities", nonce, canonical(volume["predicate"])),
+                    "owner_mode_digest": _label_digest("oah-node-owner-mode", nonce,
+                        canonical([before.st_uid, before.st_gid, stat_module.S_IFMT(before.st_mode),
+                                   stat_module.S_IMODE(before.st_mode)])), "id_width": volume["id_width"]})
+            finally:
+                for fd in (volume_fd, leaf, parent):
+                    if fd is not None:
+                        os.close(fd)
+        result["candidate_status"] = "verified"
+    except (OSError, ValueError, AttributeError, OverflowError) as exc:
+        result["status"] = "unsupported" if isinstance(exc, ContinuityUnsupported) else "unknown"
+        result["problem_code"] = str(exc) if isinstance(exc, (ContinuityUnsupported, PolicyReadError)) \
+            else "native-node-read-failed"
+    return result
+
+
+def installation_node_paths(root: pathlib.Path, manifest: str, names: Sequence[str], *, data_created=False) -> dict:
+    base = root / DATA_DIR / manifest
+    paths = {"manifest-node": base, **{name: base / name for name in names}}
+    if data_created:
+        paths["data-node"] = root / DATA_DIR
+    return paths
+
+
+def postboot_problem(record: Mapping, current: Mapping, boot: Mapping, old_nodes: Mapping,
+                     current_nodes: Mapping) -> str | None:
+    old, old_boot = record.get("continuity"), record.get("boot")
+    try:
+        for value in (old, current, old_boot, boot, old_nodes, current_nodes):
+            if (value["status"] != "qualified" or value["profile_id"] != RECOVERY_PROFILE
+                    or value["source_abi_digest"] != _DARWIN_ABI_DIGEST):
+                return "the selected installed continuity, boot or node source is not qualified"
+        if old["origin_nonce"] != record["nonce"] or current["origin_nonce"] != record["nonce"]:
+            return "the continuity nonce changed"
+        for value in (old_boot, boot):
+            if value["source"] != "kern.bootsessionuuid" or re.fullmatch(r"sha256:[0-9a-f]{64}", value["value_digest"]) is None:
+                return "the boot observation is unknown"
+        if old_boot["value_digest"] == boot["value_digest"]:
+            return "the native boot has not changed"
+        if old["host"] != current["host"] or old["host"]["status"] != "qualified":
+            return "the kernel host, principal or namespace differs"
+        for value in (old, current):
+            if (not 1 <= len(value["roots"]) <= 6 or
+                    any(row["status"] != "qualified" or any(row[key] is None for key in
+                        ("path_bytes_digest", "volume_uuid_digest", "permanent_object_digest", "id_width",
+                         "capability_predicate_digest", "owner_mode_digest")) for row in value["roots"])):
+                return "the complete persistent role roots are not qualified"
+        for value in (old_nodes, current_nodes):
+            names = set()
+            for node in value["nodes"]:
+                if (set(node) != {"name", "path_digest", "volume_digest", "object_digest", "predicate_digest",
+                                  "owner_mode_digest", "id_width"} or not isinstance(node["name"], str)
+                        or node["name"] in names or node["id_width"] not in (32, 64)
+                        or any(re.fullmatch(r"sha256:[0-9a-f]{64}", node[key]) is None for key in
+                               ("path_digest", "volume_digest", "object_digest", "predicate_digest", "owner_mode_digest"))):
+                    return "the persistent node roster is incomplete or malformed"
+                names.add(node["name"])
+        if old["roots"] != current["roots"] or old_nodes["nodes"] != current_nodes["nodes"] or not old_nodes["nodes"]:
+            return "a persistent role root, installed node or ownership changed"
+        return None
+    except (KeyError, TypeError, ValueError):
+        return "the original or current continuity evidence is incomplete"
 
 
 # Anchored DATA install (POSIX) -----------------------------------------------------------------------------------
@@ -1131,6 +2354,406 @@ def boot_identity() -> dict:
 
 class InstallRefused(Exception):
     pass
+
+
+class _WindowsIO:
+    def __init__(self):
+        import ctypes as ct
+
+        if ct.sizeof(ct.c_wchar) != 2 or ct.sizeof(ct.c_void_p) != 8:
+            raise InstallRefused("windows-native-llp64-required")
+        self.ct = ct
+        self.kernel = ct.WinDLL("kernel32", use_last_error=True)
+        self.nt = ct.WinDLL("ntdll", use_last_error=True)
+        self.security = ct.WinDLL("advapi32", use_last_error=True)
+
+        class UnicodeString(ct.Structure):
+            _fields_ = [("length", ct.c_uint16), ("maximum", ct.c_uint16), ("buffer", ct.c_void_p)]
+
+        class ObjectAttributes(ct.Structure):
+            _fields_ = [("length", ct.c_uint32), ("root", ct.c_void_p), ("name", ct.POINTER(UnicodeString)),
+                        ("attributes", ct.c_uint32), ("security", ct.c_void_p), ("qos", ct.c_void_p)]
+
+        class IoStatus(ct.Structure):
+            _fields_ = [("status", ct.c_void_p), ("information", ct.c_size_t)]
+
+        self.UnicodeString, self.ObjectAttributes, self.IoStatus = UnicodeString, ObjectAttributes, IoStatus
+        for library, name, args, result in (
+            (self.kernel, "CreateFileW", [ct.c_wchar_p, ct.c_uint32, ct.c_uint32, ct.c_void_p, ct.c_uint32,
+                                         ct.c_uint32, ct.c_void_p], ct.c_void_p),
+            (self.kernel, "CloseHandle", [ct.c_void_p], ct.c_int32),
+            (self.kernel, "GetFileType", [ct.c_void_p], ct.c_uint32),
+            (self.kernel, "GetFileInformationByHandleEx", [ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_uint32], ct.c_int32),
+            (self.kernel, "SetFileInformationByHandle", [ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_uint32], ct.c_int32),
+            (self.kernel, "GetVolumeInformationByHandleW", [ct.c_void_p, ct.c_void_p, ct.c_uint32,
+                ct.POINTER(ct.c_uint32), ct.POINTER(ct.c_uint32), ct.POINTER(ct.c_uint32), ct.c_void_p,
+                ct.c_uint32], ct.c_int32),
+            (self.kernel, "GetDriveTypeW", [ct.c_wchar_p], ct.c_uint32),
+            (self.kernel, "ReadFile", [ct.c_void_p, ct.c_void_p, ct.c_uint32, ct.POINTER(ct.c_uint32),
+                                       ct.c_void_p], ct.c_int32),
+            (self.kernel, "WriteFile", [ct.c_void_p, ct.c_void_p, ct.c_uint32, ct.POINTER(ct.c_uint32),
+                                        ct.c_void_p], ct.c_int32),
+            (self.kernel, "SetFilePointerEx", [ct.c_void_p, ct.c_int64, ct.c_void_p, ct.c_uint32], ct.c_int32),
+            (self.kernel, "FlushFileBuffers", [ct.c_void_p], ct.c_int32),
+            (self.kernel, "LocalFree", [ct.c_void_p], ct.c_void_p),
+            (self.kernel, "GetCurrentProcess", [], ct.c_void_p),
+            (self.nt, "NtCreateFile", [ct.POINTER(ct.c_void_p), ct.c_uint32, ct.POINTER(ObjectAttributes),
+                ct.POINTER(IoStatus), ct.c_void_p, ct.c_uint32, ct.c_uint32, ct.c_uint32, ct.c_uint32,
+                ct.c_void_p, ct.c_uint32], ct.c_int32),
+            (self.nt, "NtQueryDirectoryFile", [ct.c_void_p, ct.c_void_p, ct.c_void_p, ct.c_void_p,
+                ct.POINTER(IoStatus), ct.c_void_p, ct.c_uint32, ct.c_int, ct.c_ubyte, ct.c_void_p,
+                ct.c_ubyte], ct.c_int32),
+            (self.security, "GetSecurityInfo", [ct.c_void_p, ct.c_uint32, ct.c_uint32, ct.POINTER(ct.c_void_p),
+                ct.c_void_p, ct.POINTER(ct.c_void_p), ct.c_void_p, ct.POINTER(ct.c_void_p)], ct.c_uint32),
+            (self.security, "SetSecurityInfo", [ct.c_void_p, ct.c_uint32, ct.c_uint32, ct.c_void_p,
+                ct.c_void_p, ct.c_void_p, ct.c_void_p], ct.c_uint32),
+            (self.security, "InitializeAcl", [ct.c_void_p, ct.c_uint32, ct.c_uint32], ct.c_int32),
+            (self.security, "AddAccessAllowedAce", [ct.c_void_p, ct.c_uint32, ct.c_uint32, ct.c_void_p], ct.c_int32),
+            (self.security, "GetLengthSid", [ct.c_void_p], ct.c_uint32),
+            (self.security, "MakeSelfRelativeSD", [ct.c_void_p, ct.c_void_p, ct.POINTER(ct.c_uint32)], ct.c_int32),
+            (self.security, "OpenProcessToken", [ct.c_void_p, ct.c_uint32, ct.POINTER(ct.c_void_p)], ct.c_int32),
+            (self.security, "GetTokenInformation", [ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_uint32,
+                                                    ct.POINTER(ct.c_uint32)], ct.c_int32),
+            (self.security, "IsValidSid", [ct.c_void_p], ct.c_int32),
+            (self.security, "EqualSid", [ct.c_void_p, ct.c_void_p], ct.c_int32),
+        ):
+            function = getattr(library, name)
+            function.argtypes, function.restype = args, result
+
+    def _error(self, code: str):
+        raise InstallRefused(code)
+
+    def close(self, handle) -> None:
+        if handle is not None and not self.kernel.CloseHandle(handle):
+            self._error("windows-close-failed")
+
+    def info(self, handle) -> dict:
+        import struct
+
+        ct = self.ct
+        buffers = []
+        for kind, size in ((18, 24), (1, 24), (9, 8), (0, 40)):
+            buffer = ct.create_string_buffer(size)
+            if not self.kernel.GetFileInformationByHandleEx(handle, kind, buffer, size):
+                self._error("windows-file-information-failed")
+            buffers.append(buffer.raw)
+        ident, standard, tag, basic = buffers
+        attributes, reparse = struct.unpack("<II", tag)
+        size, links = struct.unpack_from("<qI", standard, 8)
+        delete_pending, directory = standard[20], standard[21]
+        if (self.kernel.GetFileType(handle) != 1 or attributes & 0x400 or reparse or delete_pending or
+                size < 0 or links == 0 or (not directory and links != 1)):
+            self._error("windows-reparse-device-link-or-deleting-object")
+        return {"dev": int.from_bytes(ident[:8], "little"), "ino": int.from_bytes(ident[8:], "little"),
+                "size": size, "nlink": links, "mode": (0o555 if directory else 0o444) if attributes & 1
+                    else (0o755 if directory else 0o644), "uid": self.security_digest(handle),
+                "type": "directory" if directory else "file", "attributes": attributes,
+                "write_time": struct.unpack_from("<q", basic, 16)[0],
+                "change_time": struct.unpack_from("<q", basic, 24)[0]}
+
+    def security_digest(self, handle) -> str:
+        ct = self.ct
+        owner, dacl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
+        try:
+            if self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(dacl), None,
+                                             ct.byref(descriptor)) != 0 or not owner.value or not dacl.value:
+                self._error("windows-owner-or-acl-unreadable")
+            size = ct.c_uint32(0)
+            self.security.MakeSelfRelativeSD(descriptor, None, ct.byref(size))
+            if not 20 <= size.value <= 65536:
+                self._error("windows-security-descriptor-bound")
+            buffer = ct.create_string_buffer(size.value)
+            if not self.security.MakeSelfRelativeSD(descriptor, buffer, ct.byref(size)):
+                self._error("windows-security-descriptor-copy-failed")
+            return "sha256:" + _sha(buffer.raw[:size.value])
+        finally:
+            if descriptor.value:
+                self.kernel.LocalFree(descriptor)
+
+    def seal(self, handle) -> None:
+        ct = self.ct
+        owner, old_acl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
+        try:
+            if self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(old_acl), None,
+                                             ct.byref(descriptor)) != 0 or not owner.value:
+                self._error("windows-owner-unreadable")
+            self._require_principal(owner)
+            sid_size = self.security.GetLengthSid(owner)
+            if not 8 <= sid_size <= 68:
+                self._error("windows-owner-sid-bound")
+            acl = ct.create_string_buffer(16 + sid_size)
+            if (not self.security.InitializeAcl(acl, len(acl), 2) or
+                    not self.security.AddAccessAllowedAce(acl, 2, 0x130089, owner) or
+                    self.security.SetSecurityInfo(handle, 1, 0x80000004, None, None, acl, None) != 0):
+                self._error("windows-readonly-acl-failed")
+            basic = ct.create_string_buffer(40)
+            if not self.kernel.GetFileInformationByHandleEx(handle, 0, basic, 40):
+                self._error("windows-basic-information-failed")
+            import struct
+            raw = bytearray(basic.raw)
+            struct.pack_into("<I", raw, 32, struct.unpack_from("<I", raw, 32)[0] | 1)
+            updated = ct.create_string_buffer(bytes(raw), 40)
+            if not self.kernel.SetFileInformationByHandle(handle, 0, updated, 40):
+                self._error("windows-readonly-attribute-failed")
+            self.flush(handle)
+        finally:
+            if descriptor.value:
+                self.kernel.LocalFree(descriptor)
+
+    def _require_principal(self, owner) -> None:
+        ct, token, size = self.ct, self.ct.c_void_p(), self.ct.c_uint32()
+        try:
+            if not self.security.OpenProcessToken(self.kernel.GetCurrentProcess(), 8, ct.byref(token)):
+                self._error("windows-principal-token-unreadable")
+            self.security.GetTokenInformation(token, 1, None, 0, ct.byref(size))
+            if not 16 <= size.value <= 65536:
+                self._error("windows-principal-buffer-bound")
+            buffer = ct.create_string_buffer(size.value)
+            if not self.security.GetTokenInformation(token, 1, buffer, len(buffer), ct.byref(size)):
+                self._error("windows-principal-token-read-failed")
+            sid = ct.c_void_p.from_buffer(buffer).value
+            if (not sid or not ct.addressof(buffer) <= sid < ct.addressof(buffer) + len(buffer) or
+                    self.security.IsValidSid(sid) != 1 or self.security.EqualSid(owner, sid) != 1):
+                self._error("windows-created-object-owner-is-not-the-current-principal")
+        finally:
+            if token.value:
+                self.close(token)
+
+    def _volume(self, handle) -> None:
+        ct = self.ct
+        serial, component, flags = ct.c_uint32(), ct.c_uint32(), ct.c_uint32()
+        fs = ct.create_unicode_buffer(32)
+        if (not self.kernel.GetVolumeInformationByHandleW(handle, None, 0, ct.byref(serial), ct.byref(component),
+                ct.byref(flags), fs, len(fs)) or fs.value != "NTFS" or flags.value & 0x1000008 != 0x1000008):
+            self._error("windows-local-ntfs-capabilities-required")
+
+    def open_anchor(self, root, *, writable=False) -> tuple[int, list[int]]:
+        path = _safe_windows_path(str(root))
+        if self.kernel.GetDriveTypeW(path.anchor) != 3:
+            self._error("windows-fixed-local-volume-required")
+        handle = self.kernel.CreateFileW(path.anchor, 0x120081, 3, None, 3, 0x02200000, None)
+        if not handle or handle == self.ct.c_void_p(-1).value:
+            self._error("windows-anchor-open-failed")
+        ancestors = [handle]
+        try:
+            self._volume(handle)
+            for index, component in enumerate(path.parts[1:]):
+                handle, _ = self.open_child(handle, component, directory=True,
+                                             writable=writable and index == len(path.parts) - 2)
+                ancestors.append(handle)
+            return handle, ancestors
+        except BaseException:
+            for acquired in reversed(ancestors):
+                self.close(acquired)
+            raise
+
+    def open_child(self, parent, name: str, *, directory: bool | None, create: bool = False,
+                   writable: bool = False, delete: bool = False, inspect: bool = False,
+                   enumerated: bool = False) -> tuple[int, bool]:
+        ct = self.ct
+        if not name or len(name.encode("utf-16-le")) > 510 or any(c in name for c in "/\\\0"):
+            self._error("windows-component-bound")
+        _safe_windows_path("C:\\" + name)
+        if not create and not enumerated:
+            matches = []
+            for entry in self.iter_names(parent):
+                if entry.casefold() == name.casefold():
+                    matches.append(entry)
+                    if len(matches) > 1:
+                        self._error("windows-case-ambiguous-component")
+            if not matches:
+                raise FileNotFoundError(name)
+            if matches != [name]:
+                self._error("windows-case-ambiguous-component")
+        text = ct.create_unicode_buffer(name)
+        length = len(name.encode("utf-16-le"))
+        string = self.UnicodeString(length, length + 2, ct.cast(text, ct.c_void_p))
+        attrs = self.ObjectAttributes(ct.sizeof(self.ObjectAttributes), parent, ct.pointer(string), 0x1000,
+                                      None, None)
+        status, result = self.IoStatus(), ct.c_void_p()
+        access = 0x120081 | (0x40000116 if writable else 0) | (0x10000 if delete else 0) | (0x40000 if create else 0)
+        share = 7 if inspect else (1 if delete or create or not directory else 3)
+        returned = self.nt.NtCreateFile(ct.byref(result), access, ct.byref(attrs), ct.byref(status), None, 0x80,
+                    share, 2 if create else 1, 0x200020 | (0 if directory is None else 1 if directory else 0x40), None, 0)
+        code = returned & 0xFFFFFFFF
+        if code == 0xC0000035:
+            raise FileExistsError(name)
+        if code in (0xC0000034, 0xC000003A):
+            raise FileNotFoundError(name)
+        if returned < 0 or not result.value:
+            self._error("windows-relative-open-failed")
+        try:
+            info = self.info(result.value)
+            if ((directory is not None and (info["type"] == "directory") != directory) or
+                    info["dev"] != self.info(parent)["dev"]):
+                self._error("windows-relative-object-or-volume-mismatch")
+            return result.value, status.information == 2
+        except BaseException:
+            self.close(result.value)
+            raise
+
+    def iter_names(self, handle):
+        import struct
+
+        ct, count, restart = self.ct, 0, True
+        while True:
+            buffer, status = ct.create_string_buffer(65536), self.IoStatus()
+            returned = self.nt.NtQueryDirectoryFile(handle, None, None, None, ct.byref(status), buffer,
+                                                   len(buffer), 12, 0, None, int(restart))
+            restart = False
+            if returned & 0xFFFFFFFF == 0x80000006:
+                break
+            if returned < 0 or not 12 <= status.information <= len(buffer):
+                self._error("windows-directory-census-failed")
+            raw, offset = buffer.raw[:status.information], 0
+            while True:
+                if offset + 12 > len(raw):
+                    self._error("windows-directory-entry-truncated")
+                following, _index, length = struct.unpack_from("<III", raw, offset)
+                if length % 2 or offset + 12 + length > len(raw):
+                    self._error("windows-directory-name-truncated")
+                name = raw[offset + 12:offset + 12 + length].decode("utf-16-le", errors="strict")
+                if name not in (".", ".."):
+                    count += 1
+                    if count > (1 << 64) - 1:
+                        self._error("windows-directory-census-bound")
+                    yield name
+                if not following:
+                    break
+                if following < 12 + length or following % 4 or offset + following >= len(raw):
+                    self._error("windows-directory-offset-invalid")
+                offset += following
+    def names(self, handle, *, limit=ENTRY_LIMIT + 1) -> list[str]:
+        names = []
+        for name in self.iter_names(handle):
+            names.append(name)
+            if len(names) > limit:
+                self._error("windows-DATA-roster-bound")
+        if len({name.casefold() for name in names}) != len(names):
+            self._error("windows-case-ambiguous-directory")
+        return sorted(names)
+
+    def read(self, handle, limit: int) -> bytes:
+        ct, chunks, total = self.ct, [], 0
+        if not self.kernel.SetFilePointerEx(handle, 0, None, 0):
+            self._error("windows-read-seek-failed")
+        while True:
+            buffer, count = ct.create_string_buffer(min(65536, limit + 1 - total)), ct.c_uint32()
+            if not self.kernel.ReadFile(handle, buffer, len(buffer), ct.byref(count), None):
+                self._error("windows-read-failed")
+            if count.value > len(buffer):
+                self._error("windows-read-count-invalid")
+            if count.value == 0:
+                return b"".join(chunks)
+            chunks.append(buffer.raw[:count.value])
+            total += count.value
+            if total > limit:
+                self._error("windows-read-bound")
+
+    def prefix(self, handle, limit: int) -> bytes:
+        ct = self.ct
+        buffer, count = ct.create_string_buffer(limit), ct.c_uint32()
+        if (not self.kernel.SetFilePointerEx(handle, 0, None, 0) or
+                not self.kernel.ReadFile(handle, buffer, limit, ct.byref(count), None) or count.value > limit):
+            self._error("windows-prefix-read-failed")
+        return buffer.raw[:count.value]
+
+    def digest(self, handle, size: int) -> str:
+        ct, digest, total = self.ct, hashlib.sha256(), 0
+        if not 0 <= size <= (1 << 64) - 1 or not self.kernel.SetFilePointerEx(handle, 0, None, 0):
+            self._error("windows-hash-size-or-seek-failed")
+        while True:
+            buffer, count = ct.create_string_buffer(65536), ct.c_uint32()
+            if not self.kernel.ReadFile(handle, buffer, len(buffer), ct.byref(count), None) or count.value > len(buffer):
+                self._error("windows-hash-read-failed")
+            if not count.value:
+                if total != size:
+                    self._error("windows-hash-truncated")
+                return digest.hexdigest()
+            total += count.value
+            if total > size:
+                self._error("windows-hash-grew")
+            digest.update(buffer.raw[:count.value])
+
+    def write(self, handle, data: bytes) -> None:
+        ct, offset = self.ct, 0
+        while offset < len(data):
+            chunk = data[offset:offset + 65536]
+            buffer, count = ct.create_string_buffer(chunk, len(chunk)), ct.c_uint32()
+            if not self.kernel.WriteFile(handle, buffer, len(chunk), ct.byref(count), None) or \
+                    not 0 < count.value <= len(chunk):
+                self._error("windows-write-failed-or-no-progress")
+            offset += count.value
+        self.flush(handle)
+        if self.read(handle, len(data)) != data:
+            self._error("windows-written-bytes-differ")
+
+    def flush(self, handle) -> None:
+        if not self.kernel.FlushFileBuffers(handle):
+            self._error("windows-flush-failed")
+
+    def delete(self, handle) -> None:
+        flags = self.ct.c_uint32(0x19)
+        if not self.kernel.SetFileInformationByHandle(handle, 21, self.ct.byref(flags), 4):
+            self._error("windows-guarded-disposition-failed")
+
+
+def _windows_pe(header: bytes) -> str:
+    import struct
+
+    if len(header) < 64 or header[:2] != b"MZ":
+        raise InstallRefused("windows-package-not-pe")
+    offset = struct.unpack_from("<I", header, 60)[0]
+    if offset < 64 or offset + 264 > len(header) or header[offset:offset + 4] != b"PE\0\0":
+        raise InstallRefused("windows-package-pe-header-bound")
+    machine, sections, _time, _symbols, _count, optional, flags = struct.unpack_from("<HHIIIHH", header, offset + 4)
+    if (machine not in (0x8664, 0xAA64) or not 1 <= sections <= 96 or optional < 240 or
+            not flags & 2 or flags & 0x2000 or struct.unpack_from("<H", header, offset + 24)[0] != 0x20B or
+            struct.unpack_from("<H", header, offset + 24 + 68)[0] != 3):
+        raise InstallRefused("windows-package-not-native-pe32plus-console")
+    return "arm64" if machine == 0xAA64 else "x86_64"
+
+
+def windows_package_candidate(engine: str, operation: str, *, executable: str, cli_version: str | None,
+                              tools: Sequence[str], native=None) -> dict:
+    from oah.engines.proc import UnsupportedBatchShim, classify
+
+    result = {"status": "unsupported", "candidate_status": "unknown", "problem_code": WINDOWS_PENDING,
+              "engine": engine, "operation": operation, "version": cli_version, "executable_sha256": None}
+    native, anchors, leaf = native, [], None
+    try:
+        pin = {"claude": CLAUDE_PIN, "codex": CODEX_PIN}.get(engine)
+        if pin is None or cli_version != pin or operation not in ("work", "inspect"):
+            raise InstallRefused("windows-package-version-or-operation-not-pinned")
+        if engine == "claude" and tools and "Read" not in tools:
+            raise InstallRefused("windows-required-Read-tool-not-offered")
+        resolved = classify(pathlib.Path(executable), engine, platform="win32", search_path=None)
+        if resolved.kind != "native" or len(resolved.argv) != 1 or pathlib.PureWindowsPath(executable).suffix.lower() != '.exe':
+            raise InstallRefused("windows-unqualified-shim-or-wrapper")
+        path = _safe_windows_path(executable)
+        native = native if native is not None else _WindowsIO()
+        parent, anchors = native.open_anchor(path.parent)
+        leaf, _ = native.open_child(parent, path.name, directory=False)
+        before = native.info(leaf)
+        if before["type"] != "file" or before["size"] > 512 * 1024 * 1024:
+            raise InstallRefused("windows-package-image-bound")
+        machine = _windows_pe(native.prefix(leaf, 65536))
+        digest = native.digest(leaf, before["size"])
+        if before != native.info(leaf):
+            raise InstallRefused("windows-package-image-changed")
+        result.update(candidate_status="verified", machine=machine, classification="native",
+                      profile_id=f"{engine}-{pin}-windows-{machine}-pe32plus-v1",
+                      executable_sha256="sha256:" + digest,
+                      source_pin=CODEX_SOURCE_PIN if engine == "codex" else "claude-native-package-2.1.318",
+                      object_digest="sha256:" + _sha(canonical(before)))
+    except (OSError, InstallRefused, ValueError, AttributeError, UnsupportedBatchShim) as exc:
+        result["problem_code"] = str(exc) if isinstance(exc, (InstallRefused, PolicyReadError)) else \
+            "windows-package-observation-unknown"
+    finally:
+        if native is not None:
+            for handle in ([leaf] if leaf is not None else []) + list(reversed(anchors)):
+                native.close(handle)
+    return result
 
 
 def _open_dir(name, dir_fd=None) -> int:
@@ -1144,7 +2767,7 @@ def _open_dir(name, dir_fd=None) -> int:
 
 def _identity(info: os.stat_result) -> dict:
     return {"dev": info.st_dev, "ino": info.st_ino, "mode": stat_module.S_IMODE(info.st_mode),
-            "nlink": info.st_nlink, "size": info.st_size, "uid": info.st_uid}
+            "nlink": info.st_nlink, "size": info.st_size, "uid": info.st_uid, "gid": info.st_gid}
 
 
 @dataclasses.dataclass
@@ -1173,7 +2796,12 @@ class Installation:
 
     def facts(self) -> dict:
         """Digest-only install facts for the durable observation."""
-        return {"data_dir_created": self.data_created,
+        anchors = {name: "sha256:" + _sha(canonical(_anchor_stamp(item))) for name, item in
+                   (("root", self.root_identity), ("data", self.data_identity), ("m", self.m_identity)) if item}
+        if self.m_identity is not None:
+            anchors["m_writable"] = "sha256:" + _sha(canonical(_anchor_stamp({**self.m_identity, "mode": 0o700})))
+            anchors["m_unsealed"] = "sha256:" + _sha(canonical(_anchor_stamp({**self.m_identity, "mode": 0o755})))
+        return {"data_dir_created": self.data_created, "anchors": anchors,
                 "leaves": [{"name": name, "bytes": item["size"], "sha256": item["sha256"], "mode": item["mode"],
                             "nlink": item["nlink"], "identity_digest": _leaf_identity_digest(item)}
                            for name, item in sorted(self.leaves.items())],
@@ -1184,9 +2812,420 @@ class Installation:
                                                                       name, item in self.leaves.items()}}))}
 
 
+def _anchor_stamp(item: Mapping) -> dict:
+    return {key: item.get(key) for key in ("dev", "ino", "uid", "gid", "mode", "type")}
+
+
+class LiveRoots:
+    def __init__(self, roots: Mapping[str, pathlib.Path]):
+        if not roots or len(roots) > 6:
+            raise InstallRefused("the live root role count is outside its bound")
+        self.native = _WindowsIO() if os.name == "nt" else None
+        self.rows, self.closed = [], False
+        grouped = {}
+        for role, path in roots.items():
+            path = pathlib.Path(path).absolute()
+            grouped.setdefault(str(path), (path, []))[1].append(role)
+        try:
+            for path, roles in grouped.values():
+                if len(path.parts) > 64 or len(os.fsencode(path)) > 1024 or ".." in path.parts:
+                    raise InstallRefused("the live root path exceeds its bound")
+                if self.native is not None:
+                    _root, handles = self.native.open_anchor(path)
+                    try:
+                        identities = [self.native.info(handle) for handle in handles]
+                    except BaseException:
+                        for handle in reversed(handles):
+                            self.native.close(handle)
+                        raise
+                else:
+                    handles = [_open_dir(path.anchor)]
+                    try:
+                        for name in path.parts[1:]:
+                            handles.append(_open_dir(name, dir_fd=handles[-1]))
+                        identities = [_identity(os.fstat(handle)) for handle in handles]
+                    except BaseException:
+                        for handle in reversed(handles):
+                            os.close(handle)
+                        raise
+                self.rows.append({"path": path, "roles": sorted(roles), "handles": handles,
+                                  "identities": identities})
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            for row in self.rows:
+                for handle in reversed(row["handles"]):
+                    if self.native is not None:
+                        self.native.close(handle)
+                    else:
+                        os.close(handle)
+
+    def holds(self) -> bool:
+        if self.closed:
+            return False
+        try:
+            for row in self.rows:
+                for handle, expected in zip(row["handles"], row["identities"], strict=True):
+                    current = self.native.info(handle) if self.native is not None else _identity(os.fstat(handle))
+                    if _anchor_stamp(current) != _anchor_stamp(expected):
+                        return False
+        except (OSError, InstallRefused, ValueError):
+            return False
+        return True
+
+    def current(self) -> bool:
+        if not self.holds():
+            return False
+        try:
+            for row in self.rows:
+                if self.native is not None:
+                    _root, opened = self.native.open_anchor(row["path"])
+                    try:
+                        current = [self.native.info(handle) for handle in opened]
+                        if list(map(_anchor_stamp, current)) != list(map(_anchor_stamp, row["identities"])):
+                            return False
+                    finally:
+                        for handle in reversed(opened):
+                            self.native.close(handle)
+                else:
+                    for index, name in enumerate(row["path"].parts):
+                        named = os.stat(name, dir_fd=None if index == 0 else row["handles"][index - 1],
+                                        follow_symlinks=False)
+                        if not stat_module.S_ISDIR(named.st_mode) or \
+                                _anchor_stamp(_identity(named)) != _anchor_stamp(row["identities"][index]):
+                            return False
+        except (OSError, InstallRefused, ValueError):
+            return False
+        return True
+
+    def facts(self, nonce: str) -> dict:
+        return {"version": 1, "profile": "windows-no-reparse-handles-v1" if self.native is not None else
+                "posix-no-link-handles-v1", "roots": sorted([
+                {"roles": row["roles"], "path_digest": _label_digest("oah-live-role-path", nonce,
+                        os.fsencode(row["path"])), "anchor_digest": _label_digest("oah-live-role-anchors", nonce,
+                        canonical(list(map(_anchor_stamp, row["identities"]))))} for row in self.rows],
+                key=lambda item: item["roles"])}
+
+    def identity(self, role: str) -> dict:
+        return dict(next(row["identities"][-1] for row in self.rows if role in row["roles"]))
+
+
+def current_role_roots(lease, state: pathlib.Path, receiving: pathlib.Path, *, retirement=False) -> dict:
+    from oah.paths import repo_info
+
+    holder = pathlib.Path(lease.worktree)
+    roots = {"holder-worktree": holder, "git-common-dir": repo_info(holder).common_dir,
+             "state-dir": pathlib.Path(state), "receiving-root": pathlib.Path(receiving)}
+    if retirement:
+        roots.update({"snapshot-parent": receiving.parent, "receiving-git-common": receiving / ".git"})
+    return roots
+
+
+def verify_live_roots(record: Mapping, roots: Mapping[str, pathlib.Path], *, retired_roles=()) -> str | None:
+    expected = record.get("live_roots")
+    if not isinstance(expected, dict) or expected.get("version") != 1 or not isinstance(expected.get("roots"), list):
+        return "the original complete role-root observations are unknown"
+    omitted = frozenset(retired_roles)
+    if not omitted <= {"receiving-root", "receiving-git-common", "snapshot-parent"}:
+        return "an unretirable holder, common or state role was omitted"
+    try:
+        original = {role: (row["path_digest"], row["anchor_digest"]) for row in expected["roots"]
+                    for role in row["roles"]}
+        if set(original) != set(roots):
+            return "the current role roster differs from the original"
+        with contextlib.closing(LiveRoots({role: path for role, path in roots.items() if role not in omitted})) as live:
+            current = live.facts(record["nonce"])
+            observed = {role: (row["path_digest"], row["anchor_digest"]) for row in current["roots"]
+                        for role in row["roles"]}
+            if not live.current() or observed != {role: value for role, value in original.items() if role not in omitted}:
+                return "a holder, common, state, receiving root or its ancestors changed"
+        return None
+    except (OSError, ValueError, TypeError, KeyError, InstallRefused):
+        return "the complete current role roots cannot be verified"
+
+
+@dataclasses.dataclass
+class WindowsInstallation(Installation):
+    native: object | None = None
+    ancestors: list = dataclasses.field(default_factory=list)
+    ancestor_identities: list = dataclasses.field(default_factory=list)
+    leaf_handles: dict = dataclasses.field(default_factory=dict)
+
+    def close(self) -> None:
+        handles = [*self.leaf_handles.values(), self.m_fd, self.data_fd, *reversed(self.ancestors)]
+        self.leaf_handles.clear()
+        self.m_fd = self.data_fd = self.root_fd = None
+        seen = set()
+        for handle in handles:
+            if handle is not None and handle not in seen:
+                seen.add(handle)
+                self.native.close(handle)
+
+    def check_anchors(self) -> str | None:
+        try:
+            for handle, expected in zip(self.ancestors, self.ancestor_identities, strict=True):
+                if _anchor_stamp(self.native.info(handle)) != _anchor_stamp(expected):
+                    return "a native ancestor identity, owner or mode changed"
+            fresh, anchors = self.native.open_anchor(self.root)
+            try:
+                if _anchor_stamp(self.native.info(fresh)) != _anchor_stamp(self.root_identity):
+                    return "the native receiving root path was replaced"
+            finally:
+                for handle in reversed(anchors):
+                    self.native.close(handle)
+            for parent, name, held, expected in ((self.root_fd, DATA_DIR, self.data_fd, self.data_identity),
+                                               (self.data_fd, self.manifest, self.m_fd, self.m_identity)):
+                if held is None:
+                    continue
+                child, _ = self.native.open_child(parent, name, directory=True, inspect=True)
+                try:
+                    if (_anchor_stamp(self.native.info(child)) != _anchor_stamp(expected) or
+                            _anchor_stamp(self.native.info(held)) != _anchor_stamp(expected)):
+                        return "a native DATA anchor changed"
+                finally:
+                    self.native.close(child)
+        except (OSError, InstallRefused, ValueError):
+            return "native anchors cannot be verified"
+        return None
+
+    def check(self) -> str | None:
+        problem = self.check_anchors()
+        if problem:
+            return problem
+        try:
+            if self.m_fd is None or set(self.native.names(self.m_fd)) != set(self.leaves):
+                return "the native DATA roster is not exact"
+            for name, expected in self.leaves.items():
+                held = self.leaf_handles[name]
+                before = self.native.info(held)
+                child, _ = self.native.open_child(self.m_fd, name, directory=False, inspect=True)
+                try:
+                    if self.native.info(child) != before:
+                        return "a native DATA path was replaced"
+                    data = self.native.read(held, expected["size"])
+                    if (self.native.info(held) != before or before != {key: value for key, value in expected.items()
+                            if key != "sha256"} or "sha256:" + _sha(data) != expected["sha256"]):
+                        return "a native DATA object, mode or full bytes changed"
+                finally:
+                    self.native.close(child)
+        except (OSError, InstallRefused, ValueError, KeyError):
+            return "the native DATA leaves cannot be verified"
+        return None
+
+    def remove_leaves(self, names, before, after) -> list[str]:
+        removed = []
+        for name in names:
+            with _mutation(before, name):
+                problem = self.check()
+                if problem or name not in self.leaf_handles:
+                    raise InstallRefused(problem or "native leaf ownership is missing")
+                handle = self.leaf_handles[name]
+                self.native.delete(handle)
+                self.native.close(handle)
+                del self.leaf_handles[name]
+                del self.leaves[name]
+                if name in self.native.names(self.m_fd):
+                    raise InstallRefused("native deletion is not observed absent")
+                removed.append(name)
+                after(name, "absent", "file")
+        return removed
+
+    def remove_directories(self, before, after) -> None:
+        for name, parent_field, field, owned in ((self.manifest, "data_fd", "m_fd", True),
+                                               (DATA_DIR, "root_fd", "data_fd", self.data_created)):
+            if not owned or getattr(self, field) is None:
+                continue
+            with _mutation(before, name):
+                problem = self.check_anchors()
+                handle = getattr(self, field)
+                if problem:
+                    raise InstallRefused(problem)
+                if self.native.names(handle):
+                    if name == DATA_DIR:
+                        continue
+                    raise InstallRefused("the native owned directory is not empty")
+                self.native.delete(handle)
+                self.native.close(handle)
+                setattr(self, field, None)
+                if name in self.native.names(getattr(self, parent_field)):
+                    raise InstallRefused("the native directory removal is not observed absent")
+                after(name, "absent", "dir")
+
+
+@dataclasses.dataclass
+class WindowsAnchor:
+    native: object
+    descriptor: int
+    ancestors: list
+
+    def close(self) -> None:
+        for handle in reversed(self.ancestors):
+            self.native.close(handle)
+        self.ancestors.clear()
+
+
+def _close_root(descriptor) -> None:
+    if isinstance(descriptor, WindowsAnchor):
+        descriptor.close()
+    else:
+        os.close(descriptor)
+
+
+def _windows_policy_directory(path):
+    native, anchors = None, []
+    try:
+        native = _WindowsIO()
+        held, anchors = native.open_anchor(path)
+        before = native.info(held)
+        names = native.names(held, limit=POLICY_FILES)
+        after = native.info(held)
+        if before != after:
+            raise InstallRefused("windows-policy-directory-changed")
+        data = canonical({"identity": before, "members": names})
+        return _source("managed-directory", path, "present", data, None), [path / name for name in names]
+    except FileNotFoundError:
+        return _source("managed-directory", path, "absent", None, None), []
+    except (OSError, ValueError, InstallRefused, AttributeError):
+        return _source("managed-directory", path, "unreadable", None, "windows-policy-directory-unknown"), []
+    finally:
+        if native is not None:
+            for handle in reversed(anchors):
+                native.close(handle)
+
+
+def _windows_policy_file(path, limit=POLICY_FILE_LIMIT) -> tuple[str, bytes | None, str | None]:
+    native, anchors, leaf = None, [], None
+    try:
+        path = _safe_windows_path(str(path))
+        native = _WindowsIO()
+        parent, anchors = native.open_anchor(path.parent)
+        leaf, _ = native.open_child(parent, path.name, directory=False)
+        before = native.info(leaf)
+        if before["size"] > limit:
+            raise InstallRefused("windows-policy-file-bound")
+        raw = native.read(leaf, limit)
+        if before != native.info(leaf) or len(raw) != before["size"]:
+            raise InstallRefused("windows-policy-file-changed")
+        return "present", raw, None
+    except FileNotFoundError:
+        return "absent", None, None
+    except (OSError, InstallRefused, ValueError, AttributeError):
+        return "unreadable", None, "windows-policy-source-unknown"
+    finally:
+        if native is not None:
+            for handle in ([leaf] if leaf is not None else []) + list(reversed(anchors)):
+                native.close(handle)
+
+
+def _windows_flush_directory(path) -> None:
+    native = _WindowsIO()
+    held, anchors = native.open_anchor(path, writable=True)
+    try:
+        native.flush(held)
+    except InstallRefused as exc:
+        raise OSError("native directory durability could not be established") from exc
+    finally:
+        for handle in reversed(anchors):
+            native.close(handle)
+
+
+def _windows_persist_create_only(path, raw: bytes) -> None:
+    native, anchors, leaf = _WindowsIO(), [], None
+    try:
+        path = _safe_windows_path(str(path))
+        parent, anchors = native.open_anchor(path.parent, writable=True)
+        try:
+            leaf, _ = native.open_child(parent, path.name, directory=False, create=True, writable=True)
+            native.write(leaf, raw)
+        except FileExistsError:
+            leaf, _ = native.open_child(parent, path.name, directory=False, writable=True)
+            if native.read(leaf, len(raw)) != raw:
+                raise InstallRefused("native create-only evidence bytes differ")
+        before = native.info(leaf)
+        if before["type"] != "file" or before["nlink"] != 1 or before["size"] != len(raw):
+            raise InstallRefused("native create-only evidence object is not exact")
+        native.flush(leaf)
+        native.flush(parent)
+        if before != native.info(leaf):
+            raise InstallRefused("native create-only evidence changed during durability checks")
+    except (InstallRefused, PolicyReadError) as exc:
+        raise OSError("native create-only evidence could not be persisted") from exc
+    finally:
+        for handle in ([leaf] if leaf is not None else []) + list(reversed(anchors)):
+            native.close(handle)
+
+
+def _install_windows(root, manifest: str, payloads: Mapping[str, bytes], *, native=None, expected_root=None,
+                     guard=None, progress=None) -> WindowsInstallation:
+    if (_HEX64.fullmatch(manifest) is None or len(payloads) > ENTRY_LIMIT + 1 or
+            any(_HEX64.fullmatch(name) is None for name in payloads) or
+            sum(len(data) for data in payloads.values()) > BUNDLE_LIMIT):
+        raise InstallRefused("native DATA roster identity or budget is invalid")
+    native = native if native is not None else _WindowsIO()
+    root_fd, ancestors = native.open_anchor(root, writable=True)
+    done = WindowsInstallation(root, manifest, root_fd, None, None, native.info(root_fd), False,
+                               native=native, ancestors=ancestors,
+                               ancestor_identities=[native.info(handle) for handle in ancestors])
+    if expected_root is not None and _anchor_stamp(done.root_identity) != _anchor_stamp(expected_root):
+        done.close()
+        raise InstallRefused("the original native receiving root changed before DATA installation")
+
+    @contextlib.contextmanager
+    def step(name):
+        with guard(name, done) if guard is not None else contextlib.nullcontext():
+            yield
+            if progress is not None:
+                progress(name, done)
+
+    try:
+        with step(DATA_DIR):
+            try:
+                done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, create=True, writable=True,
+                                                    delete=True)
+                done.data_created = True
+            except FileExistsError:
+                done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, writable=True)
+            done.data_identity = native.info(done.data_fd)
+            native.flush(root_fd)
+        with step(manifest):
+            done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, create=True, writable=True,
+                                             delete=True)
+            done.m_identity = native.info(done.m_fd)
+            native.flush(done.data_fd)
+        for name, data in sorted(payloads.items()):
+            with step(name):
+                leaf, _ = native.open_child(done.m_fd, name, directory=False, create=True, writable=True, delete=True)
+                done.leaf_handles[name] = leaf
+                native.write(leaf, data)
+                native.seal(leaf)
+                info = native.info(leaf)
+                if info["type"] != "file" or info["nlink"] != 1 or info["size"] != len(data):
+                    raise InstallRefused("the native created leaf is not a single-link exact file")
+                done.leaves[name] = {**info, "sha256": "sha256:" + _sha(data)}
+                native.flush(done.m_fd)
+        with step("sealed"):
+            native.seal(done.m_fd)
+            done.m_identity = native.info(done.m_fd)
+            native.flush(done.m_fd)
+            native.flush(done.data_fd)
+        problem = done.check()
+        if problem:
+            raise InstallRefused(problem)
+        return done
+    except BaseException:
+        done.close()
+        raise
+
+
 def open_root(root: pathlib.Path) -> tuple[int, dict]:
     if os.name == "nt":
-        raise InstallRefused(f"unsupported({WINDOWS_PENDING})")
+        native = _WindowsIO()
+        descriptor, ancestors = native.open_anchor(root)
+        return WindowsAnchor(native, descriptor, ancestors), native.info(descriptor)
     descriptor = _open_dir(str(root))
     held = os.fstat(descriptor)
     named = os.stat(root)
@@ -1196,56 +3235,90 @@ def open_root(root: pathlib.Path) -> tuple[int, dict]:
     return descriptor, _identity(held)
 
 
-def install(root: pathlib.Path, manifest: str, payloads: Mapping[str, bytes]) -> Installation:
+def install(root: pathlib.Path, manifest: str, payloads: Mapping[str, bytes], *, expected_root=None,
+            guard=None, progress=None) -> Installation:
     """Create R/.oah-design-data/M/{H..., M} create-only through anchored no-link descriptors. A preexisting M is
     refused (even if equal); an existing plain .oah-design-data is kept as user storage and none of its entries
     are adopted. Files end read-only and M non-writable; that does not stop git add, which the checks catch."""
+    if os.name == "nt":
+        return _install_windows(root, manifest, payloads, expected_root=expected_root, guard=guard,
+                                progress=progress)
     root_fd, root_identity = open_root(root)
     done = Installation(pathlib.Path(root), manifest, root_fd, None, None, root_identity, False)
+    if expected_root is not None and _anchor_stamp(root_identity) != _anchor_stamp(expected_root):
+        done.close()
+        raise InstallRefused("the original receiving root changed before DATA installation")
+
+    @contextlib.contextmanager
+    def step(name):
+        with guard(name, done) if guard is not None else contextlib.nullcontext():
+            yield
+            if progress is not None:
+                progress(name, done)
+
     try:
-        try:
-            os.mkdir(DATA_DIR, 0o755, dir_fd=root_fd)
-            done.data_created = True
-        except FileExistsError:
-            pass
-        done.data_fd = _open_dir(DATA_DIR, dir_fd=root_fd)
-        done.data_identity = _identity(os.fstat(done.data_fd))
-        try:
-            os.mkdir(manifest, 0o700, dir_fd=done.data_fd)
-        except FileExistsError:
-            raise InstallRefused(f"{DATA_DIR}/{manifest} already exists; it is never adopted") from None
-        done.m_fd = _open_dir(manifest, dir_fd=done.data_fd)
-        done.m_identity = _identity(os.fstat(done.m_fd))
-        for name in sorted(payloads):
-            data = payloads[name]
-            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
-                                 dir_fd=done.m_fd)
+        with step(DATA_DIR):
             try:
-                view = memoryview(data)
-                while view:
-                    view = view[os.write(descriptor, view):]
-                os.fsync(descriptor)
-                os.fchmod(descriptor, 0o444)
-                info = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            if not stat_module.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != len(data):
-                raise InstallRefused(f"{name} is not the single-link regular file just written")
-            done.leaves[name] = dict(_identity(info), sha256="sha256:" + _sha(data))
-        os.fsync(done.m_fd)
-        os.fchmod(done.m_fd, 0o555)
-        done.m_identity = _identity(os.fstat(done.m_fd))
-        os.fsync(done.data_fd)
-        if done.data_created:
+                os.mkdir(DATA_DIR, 0o755, dir_fd=root_fd)
+                done.data_created = True
+            except FileExistsError:
+                pass
+            done.data_fd = _open_dir(DATA_DIR, dir_fd=root_fd)
+            done.data_identity = _identity(os.fstat(done.data_fd))
             os.fsync(root_fd)
+        with step(manifest):
+            try:
+                os.mkdir(manifest, 0o700, dir_fd=done.data_fd)
+            except FileExistsError:
+                raise InstallRefused(f"{DATA_DIR}/{manifest} already exists; it is never adopted") from None
+            done.m_fd = _open_dir(manifest, dir_fd=done.data_fd)
+            done.m_identity = _identity(os.fstat(done.m_fd))
+            os.fsync(done.data_fd)
+        for name in sorted(payloads):
+            with step(name):
+                data = payloads[name]
+                descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
+                                     dir_fd=done.m_fd)
+                try:
+                    view = memoryview(data)
+                    while view:
+                        count = os.write(descriptor, view)
+                        if not 0 < count <= len(view):
+                            raise InstallRefused("the DATA write made no valid progress")
+                        view = view[count:]
+                    os.fchmod(descriptor, 0o444)
+                    os.fsync(descriptor)
+                    info = os.fstat(descriptor)
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    digest = hashlib.sha256()
+                    total = 0
+                    while chunk := os.read(descriptor, 65536):
+                        total += len(chunk)
+                        if total > len(data):
+                            raise InstallRefused("the DATA readback exceeds its exact size")
+                        digest.update(chunk)
+                finally:
+                    os.close(descriptor)
+                if (not stat_module.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != len(data)
+                        or total != len(data) or digest.hexdigest() != _sha(data)):
+                    raise InstallRefused(f"{name} is not the complete single-link regular file just written")
+                done.leaves[name] = dict(_identity(info), sha256="sha256:" + _sha(data))
+                os.fsync(done.m_fd)
+        with step("sealed"):
+            os.fchmod(done.m_fd, 0o555)
+            done.m_identity = _identity(os.fstat(done.m_fd))
+            os.fsync(done.m_fd)
+            os.fsync(done.data_fd)
         return done
     except BaseException:
-        # Keep what exists: an incomplete installation stays for the retained-origin accounting.
+        done.close()
         raise
 
 
 def check_leaves(done: Installation) -> str | None:
     """Why the installed roster is not exactly unchanged (a changed, added or missing entry), or None."""
+    if isinstance(done, WindowsInstallation):
+        return done.check()
     try:
         if done.m_fd is None:
             return "the original descriptors are no longer held"
@@ -1263,13 +3336,28 @@ def check_leaves(done: Installation) -> str | None:
             info = os.stat(name, dir_fd=done.m_fd, follow_symlinks=False)
             if (not stat_module.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (item["dev"], item["ino"])
                     or info.st_nlink != 1 or info.st_size != item["size"]
-                    or stat_module.S_IMODE(info.st_mode) != item["mode"]):
+                    or stat_module.S_IMODE(info.st_mode) != item["mode"] or info.st_uid != item["uid"]
+                    or info.st_gid != item.get("gid", info.st_gid)):
                 return f"data file {name} changed"
             descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=done.m_fd)
             try:
+                opened = os.fstat(descriptor)
+                if not os.path.samestat(info, opened):
+                    return f"data file {name} changed while it was opened"
                 digest = hashlib.sha256()
+                count = 0
                 while chunk := os.read(descriptor, 1 << 20):
+                    count += len(chunk)
+                    if count > item["size"]:
+                        return f"data file {name} grew while it was checked"
                     digest.update(chunk)
+                after = os.fstat(descriptor)
+                named = os.stat(name, dir_fd=done.m_fd, follow_symlinks=False)
+                def stamp(value):
+                    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                if count != item["size"] or stamp(info) != stamp(after) or stamp(info) != stamp(named):
+                    return f"data file {name} changed during its complete check"
             finally:
                 os.close(descriptor)
             if "sha256:" + digest.hexdigest() != item["sha256"]:
@@ -1307,11 +3395,12 @@ def git_head(root: pathlib.Path) -> dict:
     found = _git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
     if found.returncode == 0 and _HEX40.fullmatch(found.stdout.strip()):
         return {"head": found.stdout.strip(), "unborn": False}
-    symbolic = _git(root, "symbolic-ref", "--quiet", "HEAD")
-    if symbolic.returncode == 0 and _git(root, "rev-list", "-n", "1", "--all").stdout.strip() == "":
-        return {"head": None, "unborn": True}
-    if symbolic.returncode == 0:
-        return {"head": None, "unborn": True}
+    if not found.timed_out:
+        symbolic = _git(root, "symbolic-ref", "--quiet", "HEAD")
+        if symbolic.returncode == 0 and not symbolic.timed_out and symbolic.stdout.strip().startswith("refs/heads/"):
+            absent = _git(root, "show-ref", "--verify", "--quiet", symbolic.stdout.strip())
+            if absent.returncode == 1 and not absent.timed_out and not absent.stderr:
+                return {"head": None, "unborn": True}
     raise DesignError(TRANSPORT_HISTORY_UNKNOWN, f"the HEAD of {root} cannot be read")
 
 
@@ -1438,7 +3527,7 @@ def intersects(record: Mapping, root: pathlib.Path, head: str | None = None) -> 
 
 def origin_record(*, transport: Mapping, root: pathlib.Path, repo: str, run: str, task_identity: Mapping,
                   basis: str, epoch: Mapping, profile: Mapping, h0: Mapping, policy: Mapping, nonce: str,
-                  continuity: Mapping, boot: Mapping, root_identity: Mapping) -> dict:
+                  continuity: Mapping, boot: Mapping, root_identity: Mapping, live_roots: Mapping | None = None) -> dict:
     """The closed digest-only original tuple (O = its external sha256): who, where, what and from which start."""
     plan = transport["read_plan"]
     roster = [{"name": _bare(item["sha256"]), "kind": item["kind"], "bytes": item["bytes"],
@@ -1446,13 +3535,16 @@ def origin_record(*, transport: Mapping, root: pathlib.Path, repo: str, run: str
     manifest = _bare(plan["manifest_sha256"])
     roster.append({"name": manifest, "kind": KIND_INDEX, "bytes": None, "sha256": plan["manifest_sha256"],
                    "obligation": "available"})
-    return {"version": 1, "repo_common_identity": repo, "root_digest": _label_digest(
+    record = {"version": 1, "repo_common_identity": repo, "root_digest": _label_digest(
                 "oah-receiving-root", nonce, os.fsencode(os.path.realpath(root))),
             "task_identity": dict(task_identity), "task_basis_digest": basis, "run": run, "epoch": dict(epoch),
             "profile": dict(profile), "h0": dict(h0), "index": {"roster_absent": True},
             "view": transport["view"], "manifest": manifest, "data_dir": DATA_DIR, "roster": roster,
             "policy_sha256": policy.get("policy_sha256"), "nonce": nonce, "continuity": dict(continuity),
             "boot": dict(boot), "live_root": "sha256:" + _sha(canonical(dict(root_identity)))}
+    if live_roots is not None:
+        record["live_roots"] = dict(live_roots)
+    return record
 
 
 def origin_digest(record: Mapping) -> str:
@@ -1464,9 +3556,96 @@ def observation_digest(origin: str, sequence: int, predecessor: Mapping, kind: s
                                        "kind": kind, "fact": dict(fact)}))
 
 
-QUIESCENT = ("exit-observed", "failed", "aborted", "no-spawn")
-FACTUAL = (*QUIESCENT, "running", "reads", "exposure")  # the original runner's facts, needing no current authority
+FACTUAL = ("exit-observed", "failed", "aborted", "no-spawn", "running", "reads", "exposure")
+QUIESCENT = ("exit-observed", "failed", "aborted", "no-spawn", "boot-settled")
 STICKY = ("committed", "staged")
+HOUSEKEEPING = frozenset({"cleanup-intent", "cleanup-progress", "verified-cleaned", "ack-retained",
+                          "retirement-intent", "retirement-progress", "retirement-checkpoint", "retired",
+                          "retirement-ack-retained", "retirement-cancel"})
+
+
+def _origin_problem(record: Mapping, task: object) -> str | None:
+    from oah.design.binding import TaskIdentity
+
+    fields = {"version", "repo_common_identity", "root_digest", "task_identity", "task_basis_digest", "run", "epoch",
+              "profile", "h0", "index", "view", "manifest", "data_dir", "roster", "policy_sha256", "nonce",
+              "continuity", "boot", "live_root"}
+    try:
+        _bounded_policy_value(record)
+        if not fields <= set(record) <= fields | {"retirement", "live_roots"} or \
+                type(record["version"]) is not int or record["version"] != 1:
+            raise ValueError()
+        identity = TaskIdentity.from_json(record["task_identity"])
+        if identity.task != task or not isinstance(record["run"], str) or not record["run"]:
+            raise ValueError()
+        for key in ("repo_common_identity", "root_digest", "task_basis_digest", "live_root"):
+            if not isinstance(record[key], str) or re.fullmatch(r"sha256:[0-9a-f]{64}", record[key]) is None:
+                raise ValueError()
+        if (_HEX64.fullmatch(record["manifest"]) is None or _HEX64.fullmatch(record["nonce"]) is None or
+                record["data_dir"] != DATA_DIR or record["index"] != {"roster_absent": True}):
+            raise ValueError()
+        if any(not isinstance(record[key], dict) for key in ("epoch", "profile", "h0", "view", "continuity", "boot")):
+            raise ValueError()
+        if "live_roots" in record:
+            live = record["live_roots"]
+            roles = set()
+            allowed = {"holder-worktree", "git-common-dir", "state-dir", "receiving-root",
+                       "snapshot-parent", "receiving-git-common"}
+            if (not isinstance(live, dict) or set(live) != {"version", "profile", "roots"}
+                    or type(live["version"]) is not int or live["version"] != 1
+                    or live["profile"] not in ("posix-no-link-handles-v1", "windows-no-reparse-handles-v1")
+                    or not isinstance(live["roots"], list) or not 1 <= len(live["roots"]) <= 6):
+                raise ValueError()
+            for root in live["roots"]:
+                if (not isinstance(root, dict) or set(root) != {"roles", "path_digest", "anchor_digest"}
+                        or not isinstance(root["roles"], list) or not root["roles"]
+                        or any(not isinstance(role, str) or role not in allowed or role in roles
+                               for role in root["roles"]) or len(set(root["roles"])) != len(root["roles"])
+                        or any(not isinstance(root[key], str) or re.fullmatch(r"sha256:[0-9a-f]{64}", root[key]) is None
+                               for key in ("path_digest", "anchor_digest"))):
+                    raise ValueError()
+                roles.update(root["roles"])
+            required = allowed if "retirement" in record else allowed - {"snapshot-parent", "receiving-git-common"}
+            if roles != required:
+                raise ValueError()
+        if "retirement" in record:
+            retirement = record["retirement"]
+            if (not isinstance(retirement, dict) or set(retirement) != {"descriptor", "sha256", "pages_relative"}
+                    or not isinstance(retirement["descriptor"], dict)
+                    or hashlib.sha256(canonical(retirement["descriptor"])).hexdigest() != retirement["sha256"]):
+                raise ValueError()
+            allocation = retirement["descriptor"].get("allocation")
+            if (not isinstance(allocation, dict) or allocation.get("run") != record["run"]
+                    or allocation.get("task_identity") != record["task_identity"]
+                    or allocation.get("task_basis_digest") != record["task_basis_digest"]):
+                raise ValueError()
+            path = retirement["pages_relative"]
+            if (not isinstance(path, list) or not 2 <= len(path) <= 8 or path[0] != "design-retirement"
+                    or any(not isinstance(p, str) or p in ("", ".", "..") or "/" in p or "\\" in p or "\0" in p
+                           for p in path)):
+                raise ValueError()
+        roster = record["roster"]
+        if not isinstance(roster, list) or not 1 <= len(roster) <= ENTRY_LIMIT + 1:
+            raise ValueError()
+        names = set()
+        for item in roster:
+            if (not isinstance(item, dict) or set(item) != {"name", "kind", "bytes", "sha256", "obligation"}
+                    or not isinstance(item["name"], str) or _HEX64.fullmatch(item["name"]) is None
+                    or item["name"] in names or item["sha256"] != "sha256:" + item["name"]
+                    or item["obligation"] not in ("whole", "available")
+                    or item["kind"] not in (KIND_INDEX, KIND_ORIGINAL, KIND_PART)):
+                raise ValueError()
+            names.add(item["name"])
+            if item["name"] == record["manifest"]:
+                if item["kind"] != KIND_INDEX or item["bytes"] is not None:
+                    raise ValueError()
+            elif type(item["bytes"]) is not int or not 0 <= item["bytes"] <= BUNDLE_LIMIT:
+                raise ValueError()
+        if record["manifest"] not in names:
+            raise ValueError()
+    except (KeyError, TypeError, ValueError, PolicyReadError, RecursionError):
+        return "the origin registration has no complete usable typed ownership tuple"
+    return None
 
 
 @dataclasses.dataclass
@@ -1520,6 +3699,13 @@ class TransportView:
         if self.problem is not None:
             return "unknown"
         kinds = self.kinds()
+        settled = self.last("boot-settled")
+        if settled is not None and not self.resolution:
+            return "FAILED" if settled["fact"].get("settle") == "failed" else "ABORTED"
+        if "retired" in kinds:
+            return "RETIRED"
+        if "retirement-ack-retained" in kinds:
+            return "ACK_RETAINED"
         for kind, name in (("verified-cleaned", "VERIFIED_CLEANED"), ("ack-retained", "ACK_RETAINED")):
             if kind in kinds:
                 return name
@@ -1538,12 +3724,19 @@ class TransportView:
         return "PREPARED"
 
     def summary(self) -> dict:
+        def member(key, name):
+            value = self.record.get(key)
+            return value.get(name) if isinstance(value, dict) else None
+
         return {"origin": self.origin, "task": self.task, "run": self.record.get("run"),
                 "manifest": self.record.get("manifest"), "state": self.state, "latest": self.latest,
                 "quiescent": self.quiescent, "delivered": self.delivered, "exposure": self.exposure,
                 "task_basis_digest": self.record.get("task_basis_digest"),
-                "task_instance_id": (self.record.get("task_identity") or {}).get("task_instance_id"),
-                "operation": (self.record.get("profile") or {}).get("operation"), "problem": self.problem}
+                "task_instance_id": member("task_identity", "task_instance_id"),
+                "operation": member("profile", "operation"), "problem": self.problem,
+                "retirement": {"plan_sha256": member("retirement", "sha256"),
+                               "checkpoint": self.last("retirement-checkpoint"), "retired": "retired" in self.kinds(),
+                               "ack_retained": self.last("retirement-ack-retained") is not None}}
 
 
 def transport_views(state_dir: pathlib.Path, *, task: str | None = None, run: str | None = None,
@@ -1555,38 +3748,75 @@ def transport_views(state_dir: pathlib.Path, *, task: str | None = None, run: st
 
         events = read_jsonl(pathlib.Path(state_dir) / "events.jsonl")
     views: dict[str, TransportView] = {}
+    def invalid(event, payload, reason):
+        from oah.lease import TASK_RE
+
+        record = payload.get("record") if isinstance(payload, dict) else None
+        record = record if isinstance(record, dict) else {}
+        key = "invalid:" + _sha(canonical(event))
+        task_name = event.get("task") if isinstance(event, dict) else None
+        task_name = task_name if isinstance(task_name, str) and TASK_RE.fullmatch(task_name) else ""
+        views[key] = TransportView(key, record, task_name, problem=reason)
+
     for event in events:
+        if not isinstance(event, dict):
+            invalid(event, None, "an unreadable event cannot establish transport absence")
+            continue
         kind = event.get("event")
         if kind not in ("design_transport_origin", "design_transport_observation"):
             continue
         payload = event.get("transport")
-        if event.get("design_schema") != 2 or not isinstance(payload, dict):
+        if (event.get("design_schema") != 2 or not isinstance(payload, dict)
+                or type(payload.get("version")) is not int or payload.get("version") != 1):
             origin = payload.get("origin") if isinstance(payload, dict) else None
             if isinstance(origin, str) and origin in views:
                 views[origin].problem = "a malformed transport event"
+            else:
+                invalid(event, payload, "a malformed transport event cannot establish origin absence")
             continue
         origin = payload.get("origin")
         if kind == "design_transport_origin":
             record = payload.get("record")
-            if not isinstance(record, dict) or origin != origin_digest(record) or origin in views:
+            if (not isinstance(record, dict) or not isinstance(origin, str) or origin != origin_digest(record)
+                    or origin in views or _origin_problem(record, event.get("task")) is not None):
+                if isinstance(origin, str) and origin in views:
+                    views[origin].problem = "a duplicate or invalid origin registration"
+                else:
+                    invalid(event, payload, "an invalid origin registration cannot establish origin absence")
                 continue
             views[origin] = TransportView(origin, record, str(event.get("task")))
             continue
-        view = views.get(origin)
+        view = views.get(origin) if isinstance(origin, str) else None
         if view is None:
+            invalid(event, payload, "an observation has no verified origin registration")
             continue
         expected = view.latest
         sequence, predecessor = payload.get("sequence"), payload.get("predecessor")
         name, fact = payload.get("kind"), payload.get("fact")
         if (sequence != expected["sequence"] + 1 or predecessor != expected or not isinstance(name, str)
                 or not isinstance(fact, dict)
+                or event.get("task") != view.task or type(sequence) is not int
                 or payload.get("record_digest") != observation_digest(origin, sequence, predecessor, name, fact)):
             view.problem = "the origin's observation chain is broken"
             continue
         view.observations.append({"sequence": sequence, "kind": name, "fact": fact,
                                   "record_digest": payload["record_digest"], "ts": event.get("ts")})
     return {origin: view for origin, view in views.items()
-            if (task is None or view.task == task) and (run is None or view.record.get("run") == run)}
+            if (task is None or view.task in (task, ""))
+            and (run is None or view.record.get("run") == run or
+                 (view.problem is not None and not isinstance(view.record.get("run"), str)))}
+
+
+def transport_absence(state_dir: pathlib.Path, *, run: str) -> tuple[bool, str]:
+    from oah.atomic import StateCorrupt
+
+    try:
+        views = transport_views(state_dir, run=run)
+    except (OSError, ValueError, RecursionError, StateCorrupt) as exc:
+        return False, f"origin registration history is unreadable ({type(exc).__name__})"
+    if views:
+        return False, "the run has an origin or unknown registration evidence"
+    return True, "a complete checked replay proves no origin registration for this run"
 
 
 # Claude stream-json read observation (P2-O) ------------------------------------------------------------------------
@@ -1743,12 +3973,72 @@ def observe_reads(events: Sequence[Mapping], *, root: pathlib.Path, manifest: st
 
 def _leaf_identity_digest(item: Mapping) -> str:
     return "sha256:" + _sha(canonical([item["dev"], item["ino"], item["mode"], item["nlink"], item["size"],
-                                       item["uid"], item["sha256"]]))
+                                       item["uid"], item.get("gid"), item["sha256"]]))
 
 
-def reopen(root: pathlib.Path, manifest: str, installed: Mapping) -> tuple[Installation | None, dict]:
+def _reopened_anchors(done: Installation, installed: Mapping, progress: Sequence[Mapping], *, missing=False) -> bool:
+    expected = installed.get("anchors")
+    if not isinstance(expected, dict) or set(expected) != {"root", "data", "m", "m_writable", "m_unsealed"}:
+        return False
+    current = done.facts()["anchors"]
+    if any(current.get(name) != expected[name] for name in ("root", "data")):
+        return False
+    if current.get("m") == expected["m"]:
+        return True
+    if missing and current.get("m") in (expected["m_writable"], expected["m_unsealed"]):
+        return True
+    writable = any(item.get("kind") == "cleanup-progress" and item.get("fact", {}).get("entry") == "mode"
+                   and item["fact"].get("name") == done.manifest and item["fact"].get("observed") == "writable"
+                   for item in progress)
+    return writable and current.get("m") == expected["m_writable"]
+
+
+def _reopen_windows(root, manifest: str, installed: Mapping, progress=(), *, native=None):
+    native = native if native is not None else _WindowsIO()
+    recorded = {item["name"]: item for item in installed.get("leaves", [])}
+    states = dict.fromkeys(recorded, "unknown")
+    done = None
+    try:
+        root_fd, ancestors = native.open_anchor(root)
+        done = WindowsInstallation(root, manifest, root_fd, None, None, native.info(root_fd),
+                    bool(installed.get("data_dir_created")), native=native, ancestors=ancestors,
+                    ancestor_identities=[native.info(handle) for handle in ancestors])
+        done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, delete=done.data_created)
+        done.data_identity = native.info(done.data_fd)
+        done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, delete=True)
+        done.m_identity = native.info(done.m_fd)
+        present = set(native.names(done.m_fd))
+        states.update({name: "unexpected" for name in present - set(recorded)})
+        for name, expected in recorded.items():
+            if name not in present:
+                states[name] = "absent"
+                continue
+            leaf, _ = native.open_child(done.m_fd, name, directory=False, delete=True)
+            done.leaf_handles[name] = leaf
+            before = native.info(leaf)
+            raw = native.read(leaf, BUNDLE_LIMIT)
+            current = {**before, "sha256": "sha256:" + _sha(raw)}
+            if (native.info(leaf) != before or before["type"] != "file" or
+                    _leaf_identity_digest(current) != expected.get("identity_digest")):
+                states[name] = "changed"
+            else:
+                states[name] = "present-unchanged"
+                done.leaves[name] = current
+        if not _reopened_anchors(done, installed, progress, missing="absent" in states.values()):
+            return done, dict.fromkeys(states, "changed")
+        return done, states
+    except FileNotFoundError:
+        return done, states
+    except (OSError, InstallRefused, ValueError, KeyError):
+        return done, states
+
+
+def reopen(root: pathlib.Path, manifest: str, installed: Mapping, *,
+           progress: Sequence[Mapping] = (), postboot_validated=False) -> tuple[Installation | None, dict]:
     """Anchored reopen of a recorded installation for later same-host housekeeping: (installation of the leaves
     still present and matching, per-leaf state present-unchanged|absent|changed)."""
+    if os.name == "nt":
+        return _reopen_windows(root, manifest, installed, progress)
     states: dict[str, str] = {}
     try:
         root_fd, root_identity = open_root(root)
@@ -1776,41 +4066,94 @@ def reopen(root: pathlib.Path, manifest: str, installed: Mapping) -> tuple[Insta
             continue
         try:
             info = os.stat(name, dir_fd=done.m_fd, follow_symlinks=False)
+            if not stat_module.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > BUNDLE_LIMIT:
+                states[name] = "changed"
+                continue
             descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=done.m_fd)
             try:
                 digest = hashlib.sha256()
+                count = 0
                 while chunk := os.read(descriptor, 1 << 20):
+                    count += len(chunk)
+                    if count > BUNDLE_LIMIT:
+                        raise OSError("the reopened leaf exceeds its bound")
                     digest.update(chunk)
+                after = os.fstat(descriptor)
+                named = os.stat(name, dir_fd=done.m_fd, follow_symlinks=False)
+                def stamp(value):
+                    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                if stamp(info) != stamp(after) or stamp(info) != stamp(named) or count != info.st_size:
+                    raise OSError("the reopened leaf changed while read")
             finally:
                 os.close(descriptor)
         except OSError:
             states[name] = "changed"
             continue
         current = dict(_identity(info), sha256="sha256:" + digest.hexdigest())
-        if stat_module.S_ISREG(info.st_mode) and _leaf_identity_digest(current) == item.get("identity_digest"):
+        persistent_match = (postboot_validated and current["sha256"] == item.get("sha256")
+                            and current["size"] == item.get("bytes") and current["mode"] == item.get("mode")
+                            and current["nlink"] == item.get("nlink") == 1)
+        if stat_module.S_ISREG(info.st_mode) and (persistent_match or
+                                                _leaf_identity_digest(current) == item.get("identity_digest")):
             states[name] = "present-unchanged"
             done.leaves[name] = current
         else:
             states[name] = "changed"
+    if not postboot_validated and not _reopened_anchors(done, installed, progress, missing="absent" in states.values()):
+        return done, dict.fromkeys(states, "changed")
     return done, states
 
 
+def _mutation(before, name: str):
+    from contextlib import nullcontext
+
+    result = before(name)
+    return nullcontext() if result is None else result
+
+
+def check_cleanup_anchors(done: Installation) -> str | None:
+    if isinstance(done, WindowsInstallation):
+        return done.check_anchors()
+    try:
+        for descriptor, parent, name, identity in (
+                (done.root_fd, None, str(done.root), done.root_identity),
+                (done.data_fd, done.root_fd, DATA_DIR, done.data_identity),
+                (done.m_fd, done.data_fd, done.manifest, done.m_identity)):
+            if descriptor is None:
+                continue
+            held = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (not stat_module.S_ISDIR(named.st_mode) or not os.path.samestat(held, named)
+                    or _anchor_stamp(_identity(held)) != _anchor_stamp(identity)):
+                return "an owned directory or its current path was replaced"
+    except OSError as exc:
+        return f"the owned path cannot be checked ({type(exc).__name__})"
+    return None
+
+
 def remove_leaves(done: Installation, names: Sequence[str], *, before, after) -> list[str]:
+    if isinstance(done, WindowsInstallation):
+        return done.remove_leaves(names, before, after)
     """Unlink exactly these unchanged owned leaves through the pinned descriptors: `before(name)` publishes each
     delete intent first, `after(name, observed)` its observed result. Stops at the first changed entry."""
     removed = []
     if done.m_fd is None:
         raise InstallRefused("the data directory is not held")
-    os.fchmod(done.m_fd, 0o700)
+    with _mutation(before, done.manifest):
+        os.fchmod(done.m_fd, 0o700)
+        done.m_identity = _identity(os.fstat(done.m_fd))
+        after(done.manifest, "writable", "mode")
     for name in names:
-        item = done.leaves.get(name)
-        info = os.stat(name, dir_fd=done.m_fd, follow_symlinks=False)
-        if item is None or (info.st_dev, info.st_ino, info.st_size) != (item["dev"], item["ino"], item["size"]):
-            raise InstallRefused(f"data file {name} changed before its removal")
-        before(name)
-        os.unlink(name, dir_fd=done.m_fd)
-        observed = "absent" if not _exists_at(done.m_fd, name) else "present"
-        after(name, observed, "file")
+        with _mutation(before, name):
+            item = done.leaves.get(name)
+            if check_cleanup_anchors(done) is not None or check_leaves(done) is not None or item is None:
+                raise InstallRefused(f"data file {name} or its owned path changed before removal")
+            os.unlink(name, dir_fd=done.m_fd)
+            observed = "absent" if not _exists_at(done.m_fd, name) else "present"
+            if observed == "absent":
+                done.leaves.pop(name)
+            after(name, observed, "file")
         if observed != "absent":
             raise InstallRefused(f"data file {name} is still present after its removal")
         removed.append(name)
@@ -1826,20 +4169,24 @@ def _exists_at(directory: int, name: str) -> bool:
 
 
 def remove_directories(done: Installation, *, before, after) -> None:
+    if isinstance(done, WindowsInstallation):
+        return done.remove_directories(before, after)
     """rmdir the now-empty M directory, then .oah-design-data only when this origin created it and it is empty."""
-    if os.listdir(done.m_fd):
-        raise InstallRefused("the data directory is not empty")
-    os.close(done.m_fd)
-    done.m_fd = None
-    before(done.manifest)
-    os.rmdir(done.manifest, dir_fd=done.data_fd)
-    after(done.manifest, "absent" if not _exists_at(done.data_fd, done.manifest) else "present", "dir")
+    with _mutation(before, done.manifest):
+        if check_cleanup_anchors(done) is not None or os.listdir(done.m_fd):
+            raise InstallRefused("the owned data directory changed or is not empty")
+        os.rmdir(done.manifest, dir_fd=done.data_fd)
+        os.close(done.m_fd)
+        done.m_fd = None
+        after(done.manifest, "absent" if not _exists_at(done.data_fd, done.manifest) else "present", "dir")
     if done.data_created and not os.listdir(done.data_fd):
-        os.close(done.data_fd)
-        done.data_fd = None
-        before(DATA_DIR)
-        os.rmdir(DATA_DIR, dir_fd=done.root_fd)
-        after(DATA_DIR, "absent" if not _exists_at(done.root_fd, DATA_DIR) else "present", "dir")
+        with _mutation(before, DATA_DIR):
+            if check_cleanup_anchors(done) is not None or os.listdir(done.data_fd):
+                raise InstallRefused("the owned DATA directory changed or is not empty")
+            os.rmdir(DATA_DIR, dir_fd=done.root_fd)
+            os.close(done.data_fd)
+            done.data_fd = None
+            after(DATA_DIR, "absent" if not _exists_at(done.root_fd, DATA_DIR) else "present", "dir")
 
 
 def acknowledged_problem(root: pathlib.Path, manifest: str, acknowledged: Mapping) -> str | None:
@@ -1888,7 +4235,7 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
     Refusals come in a fixed order across all origins: unreadable history, a run without a recorded exit, sticky
     exposure, current exposure, unresolved data, then missing delivery."""
     views = [view for view in transport_views(state_dir, events=events).values()
-             if repo is None or view.record.get("repo_common_identity") == repo]
+             if repo is None or view.record.get("repo_common_identity") == repo or view.problem is not None]
     if not views:
         return Completion(None, "no design transport origin")
     summaries = tuple(view.summary() for view in views)
@@ -1900,6 +4247,16 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
     for view in views:
         if view.problem is not None:
             return Completion(TRANSPORT_HISTORY_UNKNOWN, f"{where(view)}: {view.problem}", origins=summaries)
+    relevant = []
+    for view in views:
+        if view.task != task:
+            checked = intersects(view.record, root, head)
+            if checked["state"] == "unknown":
+                return Completion(checked["code"], f"{where(view)}: {checked['why']}", origins=summaries)
+            if checked["state"] == "clean":
+                continue
+        relevant.append(view)
+    views = relevant
     for view in mine:
         if not view.quiescent:
             return Completion(TRANSPORT_NONTERMINAL, f"{where(view)} has no recorded exit or settlement "
@@ -1930,6 +4287,9 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
     exempt: list[str] = []
     for view in mine:
         expect, checked = checks[view.origin]
+        if view.record.get("retirement") and view.last("retired", "retirement-ack-retained") is None:
+            return Completion(TRANSPORT_RETAINED, f"{where(view)} has an unresolved owned review snapshot",
+                              origins=summaries)
         if expect == "unresolved":
             return Completion(TRANSPORT_RETAINED, f"{where(view)} still has its design data ({view.state}); clean or "
                               f"acknowledge it with oah design task {task} --run {view.record.get('run')} "
@@ -1955,6 +4315,62 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
 # ReadChunkV1: the guarded read-only chunk command ---------------------------------------------------------------
 
 
+def _read_manifest_blob(read, *, task: str, run: str, manifest: str, blob: str) -> bytes:
+    raw = read(manifest, BUNDLE_LIMIT)
+    if _sha(raw) != manifest:
+        raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the read plan does not match its name")
+    plan = strict_json(raw.decode("utf-8"))
+    target = plan.get("target_identity") or {}
+    identity = target.get("task_identity") or {}
+    if target.get("run") != run or identity.get("task_id") != task:
+        raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the read plan belongs to another task or run")
+    item = next((entry for entry in plan.get("files") or [] if entry.get("id") == blob), None)
+    if (item is None or type(item.get("bytes")) is not int or not 0 <= item["bytes"] <= BUNDLE_LIMIT or
+            item.get("sha256") != "sha256:" + blob):
+        raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the blob is not a valid bounded read-plan member")
+    data = read(blob, item["bytes"])
+    if len(data) != item["bytes"] or "sha256:" + _sha(data) != item["sha256"]:
+        raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the blob does not match its plan entry")
+    return data
+
+
+def _windows_read_blob(root, *, task: str, run: str, manifest: str, blob: str, native=None) -> bytes:
+    native = native if native is not None else _WindowsIO()
+    anchors, opened = [], []
+    try:
+        directory, anchors = native.open_anchor(root)
+        for name in (DATA_DIR, manifest):
+            directory, _ = native.open_child(directory, name, directory=True, inspect=True)
+            opened.append(directory)
+        def read(name, limit):
+            held, _ = native.open_child(directory, name, directory=False, inspect=True)
+            try:
+                before = native.info(held)
+                if before["type"] != "file" or before["nlink"] != 1 or before["size"] > limit:
+                    raise InstallRefused("the native read member is not a bounded single-link regular file")
+                raw = native.read(held, limit)
+                if before != native.info(held) or len(raw) != before["size"]:
+                    raise InstallRefused("the native read member changed during the complete read")
+                return raw
+            finally:
+                native.close(held)
+        return _read_manifest_blob(read, task=task, run=run, manifest=manifest, blob=blob)
+    finally:
+        for handle in reversed([*anchors, *opened]):
+            native.close(handle)
+
+
+def _chunk_result(data: bytes, *, run: str, manifest: str, blob: str, offset: int, length: int) -> dict:
+    piece = data[offset:offset + length]
+    try:
+        text, encoding = piece.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        text, encoding = base64.b64encode(piece).decode("ascii"), "base64"
+    return {"version": 1, "run": run, "manifest": manifest, "item": blob, "offset": offset, "length": len(piece),
+            "full_bytes": len(data), "full_sha256": "sha256:" + _sha(data), "slice_sha256": "sha256:" + _sha(piece),
+            "encoding": encoding, "data": text}
+
+
 def read_chunk(root: pathlib.Path, *, task: str, run: str, manifest: str, blob: str, offset: int,
                length: int) -> dict:
     """One bounded exact slice of a sealed in-root DATA file, after checking the manifest's own sha256, its target
@@ -1964,6 +4380,12 @@ def read_chunk(root: pathlib.Path, *, task: str, run: str, manifest: str, blob: 
     if not (0 <= offset and 0 < length <= CHUNK_LIMIT):
         raise DesignError(REFERENCE_UNAVAILABLE_CODE, f"the chunk length must be 1 to {CHUNK_LIMIT} bytes and the "
                           "offset not negative")
+    if os.name == "nt":
+        try:
+            data = _windows_read_blob(root, task=task, run=run, manifest=manifest, blob=blob)
+        except (OSError, InstallRefused, ValueError) as exc:
+            raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the native design read cannot be verified") from exc
+        return _chunk_result(data, run=run, manifest=manifest, blob=blob, offset=offset, length=length)
     root_fd, _identity_now = open_root(root)
     try:
         data_fd = _open_dir(DATA_DIR, dir_fd=root_fd)
@@ -2005,14 +4427,7 @@ def read_chunk(root: pathlib.Path, *, task: str, run: str, manifest: str, blob: 
         raise DesignError(REFERENCE_UNAVAILABLE_CODE, f"the design data cannot be read ({type(exc).__name__})") from None
     finally:
         os.close(root_fd)
-    piece = data[offset:offset + length]
-    try:
-        text, encoding = piece.decode("utf-8"), "utf-8"
-    except UnicodeDecodeError:
-        text, encoding = base64.b64encode(piece).decode("ascii"), "base64"
-    return {"version": 1, "run": run, "manifest": manifest, "item": blob, "offset": offset, "length": len(piece),
-            "full_bytes": len(data), "full_sha256": "sha256:" + _sha(data), "slice_sha256": "sha256:" + _sha(piece),
-            "encoding": encoding, "data": text}
+    return _chunk_result(data, run=run, manifest=manifest, blob=blob, offset=offset, length=length)
 
 
 # The ORIGINAL runner of one reference run (SC4-P3/P5/P5-F) --------------------------------------------------------
@@ -2048,6 +4463,7 @@ class ReferenceRun:
         self.exit_fact: tuple[str, dict] | None = None
         self.exit_problem: str | None = None
         self.held_store = None  # dispatch_guard's locked Store during the checked launch interval
+        self.live_roots: LiveRoots | None = None
 
     @classmethod
     def load(cls, prepared, env: Mapping[str, str], tools: Sequence[str]) -> "ReferenceRun | None":
@@ -2076,7 +4492,16 @@ class ReferenceRun:
             return False
         if self.no_spawn:
             return True  # the exclusive no-spawn control: this runner never published a spawn intent
-        return self.installation is not None and self.installation.root_fd is not None
+        done = self.installation
+        if done is None or done.root_fd is None:
+            return False
+        try:
+            current = done.native.info(done.root_fd) if isinstance(done, WindowsInstallation) else \
+                _identity(os.fstat(done.root_fd))
+            return (_anchor_stamp(current) == _anchor_stamp(done.root_identity) and
+                    self.live_roots is not None and self.live_roots.holds())
+        except (OSError, InstallRefused, ValueError):
+            return False
 
     @property
     def original(self) -> dict:
@@ -2130,13 +4555,16 @@ class ReferenceRun:
         if (design.get("task_identity") != self.plan["task_identity"]
                 or design.get("basis") != self.plan["task_basis_digest"]):
             raise _refuse(self.task, "the task's identity or basis is no longer the one the brief was built for")
-        root_fd, root_identity = open_root(self.root)
-        os.close(root_fd)
         info = repo_info(self.root)
+        holder_info = repo_info(pathlib.Path(live.worktree))
         nonce = secrets_module.token_hex(32)
-        continuity = capture_local_continuity(nonce, {"holder-worktree": pathlib.Path(live.worktree),
-                                                      "git-common-dir": info.common_dir, "state-dir": self.state_dir,
-                                                      "receiving-root": self.root})
+        roots = {"holder-worktree": pathlib.Path(live.worktree), "git-common-dir": holder_info.common_dir,
+                 "state-dir": self.state_dir, "receiving-root": self.root}
+        if RETIREMENT_CONTEXT.get() is not None:
+            roots.update({"snapshot-parent": self.root.parent, "receiving-git-common": info.common_dir})
+        self.live_roots = LiveRoots(roots)
+        root_identity = self.live_roots.identity("receiving-root")
+        continuity = capture_local_continuity(nonce, roots)
         from oah.design.binding import repo_identity
 
         self.record = origin_record(
@@ -2147,14 +4575,31 @@ class ReferenceRun:
             profile={"id": CLAUDE_PROFILE, "engine": "claude", "operation": self.operation,
                      "argv_sha256": "sha256:" + _sha(canonical(list(self.argv))), "executable": self.executable},
             h0=head, policy=self.policy, nonce=nonce, continuity=continuity, boot=boot_identity(),
-            root_identity=root_identity)
+            root_identity=root_identity, live_roots=self.live_roots.facts(nonce))
+        retirement = RETIREMENT_CONTEXT.get()
+        if retirement is not None:
+            self.record = retirement.adopt(self.record)
+            self.record["repo_common_identity"] = self.plan["task_identity"]["repo_common_identity"]
         self.origin = origin_digest(self.record)
         self.expected = store.register_transport_origin(task=self.task, lease_id=live.id, generation=live.generation,
                                                         record=self.record)
         try:
-            self.installation = install(self.root, self.manifest, self.payloads)
+            def guard(_name, _done):
+                return store.transport_install_guard(task=self.task, origin=self.origin,
+                            expected=lambda: self.expected, authority=self.lease_snapshot, live_roots=self.live_roots)
+
+            def progress(name, done):
+                self.expected = store.observe_transport(task=self.task, origin=self.origin, expected=self.expected,
+                                    kind="install-progress", fact={"step": name, **done.facts()},
+                                    authority=self.lease_snapshot, held=True)
+
+            self.installation = install(self.root, self.manifest, self.payloads, expected_root=root_identity,
+                                        guard=guard, progress=progress)
+            nodes = capture_node_continuity(nonce, installation_node_paths(self.root, self.manifest,
+                        tuple(self.installation.leaves), data_created=self.installation.data_created))
             self.expected = store.observe_transport(task=self.task, origin=self.origin, expected=self.expected,
-                                                    kind="installed", fact=self.installation.facts(),
+                                                    kind="installed", fact={**self.installation.facts(),
+                                                                            "persistent_nodes": nodes},
                                                     authority=self.lease_snapshot)
         except BaseException as exc:
             self.abandon(f"install-failed:{type(exc).__name__}")
@@ -2168,6 +4613,10 @@ class ReferenceRun:
 
         if self.origin is None or self.child is not None or self.no_spawn:
             return
+        view = transport_views(self.state_dir).get(self.origin)
+        if view is None or view.problem is not None or view.spawned:
+            self.exit_problem = "the prepared no-spawn proof is unknown or a spawn intent already exists"
+            return
         self.no_spawn = True
         try:
             (store or Store(self.state_dir)).observe_transport_exit(
@@ -2179,6 +4628,9 @@ class ReferenceRun:
     # SPAWN_INTENT -> RUNNING (inside dispatch_guard's checked interval) -------------------------------------------
 
     def spawn_intent(self, store) -> None:
+        if self.live_roots is None or not self.live_roots.current():
+            self.abandon("owned-role-root-changed-before-launch", store=store, held=True)
+            raise _refuse(self.task, "an original holder, common, state or receiving root changed before launch")
         problem = check_leaves(self.installation)
         if problem is not None:
             self.abandon("data-changed-before-launch", store=store, held=True)
@@ -2201,10 +4653,13 @@ class ReferenceRun:
         self.child = child
         tree = getattr(child, "_oah_posix_tree", None)
         birth = tree.owned.get(child.pid) if tree is not None else None
+        birth_digest = getattr(child, "_oah_windows_identity", None)
+        if birth_digest is None:
+            birth_digest = "sha256:" + _sha(canonical([child.pid, list(birth) if birth else None]))
         try:
             self.expected, _ = store.observe_transport_exit(
                 original=self.original, expected=self.expected, kind="running",
-                fact={"birth_digest": "sha256:" + _sha(canonical([child.pid, list(birth) if birth else None]))},
+                fact={"birth_digest": birth_digest},
                 live_proof=self, held=True)
         except Exception as exc:  # the exit fact still follows; RUNNING is a compatible observation
             self.exit_problem = f"the running observation could not be recorded: {type(exc).__name__}"
@@ -2274,9 +4729,15 @@ class ReferenceRun:
         return warnings
 
     def release(self) -> None:
-        if self.installation is not None:
-            self.installation.close()
-        self.released = True
+        try:
+            if self.installation is not None:
+                self.installation.close()
+        finally:
+            try:
+                if self.live_roots is not None:
+                    self.live_roots.close()
+            finally:
+                self.released = True
 
     # After the run: reads, exposure, delivery and cleanup ------------------------------------------------------------
 
@@ -2360,34 +4821,50 @@ class ReferenceRun:
     def clean(self) -> str | None:
         """CLEANUP_INTENT, observed per-entry progress, VERIFIED_CLEANED; None once verified, else why it stopped."""
         import secrets as secrets_module
+        from oah.lease import LeaseError, Store
 
+        writer = Store(self.state_dir)
+        try:
+            authority = writer.transport_action_basis(task=self.task, origin=self.origin, expected=self.expected,
+                                                       receiving_root=self.root)
+        except LeaseError as exc:
+            return str(exc)
         operation = secrets_module.token_hex(8)
         names = sorted(self.installation.leaves)
         planned = [{"name": name, "identity_digest": _leaf_identity_digest(self.installation.leaves[name])}
                    for name in names]
         dirs = [self.manifest] + ([DATA_DIR] if self.installation.data_created else [])
-        problem = self._act("cleanup-intent", {"operation": operation, "planned": planned, "dirs": dirs})
-        if problem is not None:
-            return problem.split(": ", 1)[-1]
-        failures: list[str] = []
+        try:
+            self.expected = writer.observe_transport(task=self.task, origin=self.origin, expected=self.expected,
+                                kind="cleanup-intent", fact={"operation": operation, "planned": planned, "dirs": dirs},
+                                authority=authority)
+        except LeaseError as exc:
+            return str(exc)
+
+        def before(name: str):
+            return writer.transport_cleanup_guard(name, task=self.task, origin=self.origin,
+                        expected=lambda: self.expected, authority=authority, installation=self.installation)
 
         def after(name: str, observed: str, entry: str) -> None:
-            found = self._act("cleanup-progress", {"operation": operation, "name": name, "entry": entry,
-                                                   "observed": observed})
-            if found is not None:
-                failures.append(found)
-                raise InstallRefused(found)
+            self.expected = writer.observe_transport(task=self.task, origin=self.origin, expected=self.expected,
+                                kind="cleanup-progress", fact={"operation": operation, "name": name, "entry": entry,
+                                "observed": observed}, authority=authority, held=True)
 
         try:
-            remove_leaves(self.installation, names, before=lambda name: None, after=after)
-            remove_directories(self.installation, before=lambda name: None, after=after)
-        except (OSError, InstallRefused) as exc:
+            remove_leaves(self.installation, names, before=before, after=after)
+            remove_directories(self.installation, before=before, after=after)
+        except (OSError, InstallRefused, LeaseError) as exc:
             return f"cleanup stopped: {exc}"
         checked = verify_transport_origin(self.record, self.root, expect="cleaned")
         if checked["state"] != "clean":
             return checked["why"]
-        problem = self._act("verified-cleaned", {"operation": operation, "head": checked["head"]})
-        return problem.split(": ", 1)[-1] if problem is not None else None
+        try:
+            self.expected = writer.observe_transport(task=self.task, origin=self.origin, expected=self.expected,
+                                kind="verified-cleaned", fact={"operation": operation, "head": checked["head"]},
+                                authority=authority)
+        except LeaseError as exc:
+            return str(exc)
+        return None
 
 
 def update_sidecar(run_dir: pathlib.Path, **fields) -> None:

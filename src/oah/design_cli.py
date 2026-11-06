@@ -423,8 +423,13 @@ def _transport_eligibility(store, task: str, view) -> dict:
     lease = next((entry for entry, stale in Store(store.state).snapshot() if entry.task == task and not stale), None)
     design = lease.design if lease is not None and isinstance(lease.design, dict) else {}
     current = (lease is not None and (design.get("task_identity") or {}).get("task_instance_id")
-               == (view.record.get("task_identity") or {}).get("task_instance_id")
-               and design.get("basis") == view.record.get("task_basis_digest"))
+               == (view.record.get("task_identity") or {}).get("task_instance_id"))
+    if current:
+        from oah.lease_cli import lease_design
+
+        allowed = ("current", "needs-review") if (view.record.get("profile") or {}).get("operation") == "inspect" \
+            else ("current",)
+        current = lease_design(lease, store.state).state in allowed
     blocked = []
     if not view.quiescent:
         blocked.append("no recorded exit or settlement")
@@ -433,7 +438,7 @@ def _transport_eligibility(store, task: str, view) -> dict:
     if view.resolution is not None:
         blocked.append(f"already {view.state}")
     if not current:
-        blocked.append("no current unexpired lease on the origin's task instance and basis")
+        blocked.append("no checked current unexpired authority on the origin's task instance")
     return {"current_authority": bool(current), "cleanup": "eligible" if not blocked else "blocked",
             "blocked_by": blocked}
 
@@ -512,15 +517,50 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
         raise DesignError(tc.TRANSPORT_CONFLICT, f"origin {view.origin} is now at "
                           f"{view.latest['sequence']}:{view.latest['record_digest']} for basis "
                           f"{view.record.get('task_basis_digest')}; nothing was changed. Read it again with --run")
+    receiving = store.root
+    if view.record.get("retirement"):
+        raw = tc._read_regular(store.state / "runs" / args.task / args.run / "result.json", tc.POLICY_FILE_LIMIT)
+        result = tc.strict_json(raw.decode("utf-8")) if raw is not None else {}
+        cwd = result.get("cwd") if isinstance(result, dict) else None
+        if not isinstance(cwd, str) or not pathlib.Path(cwd).is_absolute() or tc._label_digest(
+                "oah-receiving-root", view.record["nonce"], os.fsencode(os.path.realpath(cwd))) != view.record["root_digest"]:
+            raise DesignError(tc.TRANSPORT_HISTORY_UNKNOWN, "the original review allocation cannot be located")
+        receiving = pathlib.Path(cwd)
     if not view.quiescent:
-        raise DesignError(tc.TRANSPORT_NONTERMINAL, f"run {args.run} has no recorded exit, so its process may still "
-                          "be writing. Settling a lost runner needs a qualified same-host changed-boot profile, which "
-                          "this build does not provide (recovery continuity is recorded as unsupported); nothing was "
-                          "changed")
+        writer = Store(store.state)
+        expected = writer.settle_transport(task=args.task, origin=view.origin, expected=expected,
+                                          root=receiving, settle=args.settle)
+        view = tc.transport_views(store.state, task=args.task, run=args.run)[view.origin]
     if view.exposure is not None:
         raise DesignError(tc._P4_CODES[view.exposure["state"]], f"run {args.run}'s design data was "
                           f"{view.exposure['state']}; remove it from the index and every new commit first. Nothing "
                           "was changed (the exposure stays recorded)")
+    if view.record.get("retirement") and view.last("retired") is None:
+        from oah.review.runner import retire_snapshot
+
+        run_path = store.state / "runs" / args.task / args.run / "result.json"
+        data = tc._read_regular(run_path, tc.POLICY_FILE_LIMIT)
+        result = tc.strict_json(data.decode("utf-8")) if data is not None else {}
+        cwd = result.get("cwd") if isinstance(result, dict) else None
+        if not isinstance(cwd, str) or not pathlib.Path(cwd).is_absolute() or tc._label_digest(
+                "oah-receiving-root", view.record["nonce"], os.fsencode(os.path.realpath(cwd))) != \
+                view.record["root_digest"]:
+            raise DesignError(tc.TRANSPORT_HISTORY_UNKNOWN, "the original review allocation cannot be located")
+        if args.retain:
+            writer = Store(store.state)
+            authority = writer.transport_action_basis(task=args.task, origin=view.origin, expected=expected,
+                                                       receiving_root=pathlib.Path(cwd))
+            writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
+                        kind="retirement-ack-retained", authority=authority,
+                        fact={"plan_sha256": view.record["retirement"]["sha256"], "counted": False,
+                              "reason": "retained by explicit dispatcher request"})
+            print(f"OAH_DESIGN_TRANSPORT_ACK_RETAINED run={args.run} snapshot=true counted=false")
+            return EXIT_OK
+        outcome, reason = retire_snapshot(store.state, view, pathlib.Path(cwd).parent)
+        if outcome != "disposed":
+            raise DesignError(tc.TRANSPORT_RETAINED, reason or "the review snapshot was retained")
+        print(f"OAH_DESIGN_TRANSPORT_RETIRED run={args.run}")
+        return EXIT_OK
     if view.resolution is not None:
         print(f"OAH_DESIGN_TRANSPORT_RESOLVED run={args.run} state={view.state}: nothing to do")
         return EXIT_OK
@@ -528,8 +568,10 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
     checked = tc.intersects(view.record, root)
     if checked["state"] != "clean":
         raise DesignError(checked["code"] or tc.TRANSPORT_HISTORY_UNKNOWN, f"{checked['why']}; nothing was changed")
-    installed = next((item["fact"] for item in view.observations if item["kind"] == "installed"), {})
-    done, states = tc.reopen(root, view.record["manifest"], installed)
+    settled = view.last("boot-settled")
+    installed = settled["fact"]["installed_current"] if settled else \
+        next((item["fact"] for item in view.observations if item["kind"] == "installed"), {})
+    done, states = tc.reopen(root, view.record["manifest"], installed, progress=view.observations)
     try:
         intents = {name for item in view.observations if item["kind"] == "cleanup-intent"
                    for name in [entry["name"] for entry in item["fact"].get("planned", [])]}
@@ -538,7 +580,13 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
             raise DesignError(tc.TRANSPORT_CHANGED, f"the design data of run {args.run} changed ({unknown[:3]}); "
                               "nothing is removed or adopted")
         writer = Store(store.state)
+        authority = writer.transport_action_basis(task=args.task, origin=view.origin, expected=expected)
         operation = secrets.token_hex(8)
+
+        def before(name: str):
+            return writer.transport_cleanup_guard(name, task=args.task, origin=view.origin,
+                        expected=lambda: expected, authority=authority, installation=done)
+
         leaves = {}
         for name, state in sorted(states.items()):
             item = next(entry for entry in installed.get("leaves", []) if entry["name"] == name)
@@ -551,7 +599,8 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
             removed = []
             if not args.retain and present and done is not None:
                 expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
-                                                    kind="cleanup-intent", fact={"operation": operation,
+                                                    kind="cleanup-intent", authority=authority,
+                                                    fact={"operation": operation,
                                                     "planned": [{"name": name, "identity_digest": next(
                                                         entry["identity_digest"] for entry in installed["leaves"]
                                                         if entry["name"] == name)} for name in present], "dirs": []})
@@ -560,14 +609,15 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
                     nonlocal expected
                     expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
                                                         kind="cleanup-progress", fact={"operation": operation,
-                                                        "name": name, "entry": entry, "observed": observed})
+                                                        "name": name, "entry": entry, "observed": observed},
+                                                        authority=authority, held=True)
 
-                tc.remove_leaves(done, present, before=lambda name: None, after=after)
+                tc.remove_leaves(done, present, before=before, after=after)
                 removed = present
                 for name in removed:
                     leaves[name] = {"state": "removed-under-intent"}
             writer.observe_transport(task=args.task, origin=view.origin, expected=expected, kind="ack-retained",
-                                     fact={"operation": operation, "settle": args.settle,
+                                     authority=authority, fact={"operation": operation, "settle": args.settle,
                                            "reason": "retained by request" if args.retain else "partial or missing",
                                            "leaves": leaves, "missing": sorted(name for name, item in leaves.items()
                                                                                if item["state"].startswith("absent"))})
@@ -576,7 +626,8 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
                   f"removed={len(removed)}")
             return EXIT_OK
         expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
-                                            kind="cleanup-intent", fact={"operation": operation, "planned": [
+                                            kind="cleanup-intent", authority=authority,
+                                            fact={"operation": operation, "planned": [
                                                 {"name": name, "identity_digest": next(
                                                     entry["identity_digest"] for entry in installed["leaves"]
                                                     if entry["name"] == name)} for name in present],
@@ -587,15 +638,16 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
             nonlocal expected
             expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
                                                 kind="cleanup-progress", fact={"operation": operation, "name": name,
-                                                                               "entry": entry, "observed": observed})
+                                                                               "entry": entry, "observed": observed},
+                                                authority=authority, held=True)
 
-        tc.remove_leaves(done, present, before=lambda name: None, after=progress)
-        tc.remove_directories(done, before=lambda name: None, after=progress)
+        tc.remove_leaves(done, present, before=before, after=progress)
+        tc.remove_directories(done, before=before, after=progress)
         final = tc.verify_transport_origin(view.record, root, expect="cleaned")
         if final["state"] != "clean":
             raise DesignError(final["code"] or tc.TRANSPORT_HISTORY_UNKNOWN, final["why"])
         writer.observe_transport(task=args.task, origin=view.origin, expected=expected, kind="verified-cleaned",
-                                 fact={"operation": operation, "head": final["head"]})
+                                 authority=authority, fact={"operation": operation, "head": final["head"]})
         print(f"OAH_DESIGN_TRANSPORT_CLEANED run={args.run} removed={len(present)}")
         return EXIT_OK
     except tc.InstallRefused as exc:

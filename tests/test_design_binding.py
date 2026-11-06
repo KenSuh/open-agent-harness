@@ -416,6 +416,126 @@ def design_fix_project(test: unittest.TestCase):
 class ReviewDesignTest(unittest.TestCase):
     """B-T13 (test_review) and SC4-P4-R through real review rounds of a design-bound task."""
 
+    def test_simulated_origin_flows_through_all_review_retirement_boundaries(self):
+        from oah.design import task_context as tc
+        from oah.design.binding import repo_identity
+        from oah.lease import Store
+        from oah.review import runner
+
+        project = design_fix_project(self)
+        project.commit({"probe.txt": "written by the fake reviewer\n"})
+        prepare, execute = runner.call.prepare, runner.call.execute
+        writer = Store(project.state)
+        observed = {}
+
+        def prepared(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            disposal = tc.RETIREMENT_CONTEXT.get()
+            self.assertIsNotNone(disposal)
+            lease = writer.inspect("t1")
+            root = pathlib.Path(result.cwd)
+            live = tc.LiveRoots(tc.current_role_roots(lease, project.state, root, retirement=True))
+            self.addCleanup(live.close)
+            record = tc.origin_record(
+                transport={"read_plan": {"files": [], "manifest_sha256": "sha256:" + "c" * 64}, "view": {}},
+                root=root, repo=repo_identity(project.repo), run=result.run_id,
+                task_identity=lease.design["task_identity"], basis=lease.design["basis"],
+                epoch={"lease_id": lease.id, "generation": lease.generation},
+                profile={"operation": "inspect", "fixture": "simulated-producer-proof"},
+                h0=tc.git_head(root), policy={}, nonce="01" * 32, continuity={}, boot={},
+                root_identity=live.identity("receiving-root"), live_roots=live.facts("01" * 32))
+            record = disposal.adopt(record)
+            start = writer.register_transport_origin(task="t1", lease_id=lease.id,
+                                                     generation=lease.generation, record=record)
+            origin = start["record_digest"]
+            observed.update(origin=origin, root=root, record=record,
+                            expected=writer.observe_transport(task="t1", origin=origin, expected=start,
+                                                               kind="spawn-intent", fact={}))
+            self.assertEqual(project.calls(), [])
+            return result
+
+        def completed(*args, **kwargs):
+            result = execute(*args, **kwargs)
+            self.assertIsNotNone(tc.RETIREMENT_CONTEXT.get())
+            record, origin = observed["record"], observed["origin"]
+            original = {"origin": origin, **{key: record[key] for key in
+                        ("run", "task_identity", "task_basis_digest", "epoch", "root_digest", "manifest")}}
+            latest, _ = writer.observe_transport_exit(original=original, expected=observed["expected"],
+                        kind="exit-observed", fact={"quiescent": True, "return_code": 0},
+                        live_proof=mock.Mock(holds=lambda value: value == origin))
+            latest = writer.observe_transport(task="t1", origin=origin, expected=latest,
+                                               kind="delivery-complete", fact={"fixture": True})
+            writer.observe_transport(task="t1", origin=origin, expected=latest, kind="verified-cleaned",
+                                       fact={"head": tc.git_head(observed["root"])["head"]})
+            return result
+
+        with mock.patch.object(runner.call, "prepare", prepared), mock.patch.object(runner.call, "execute", completed):
+            result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertEqual(len(project.calls()), 1)
+        view = tc.transport_views(project.state)[observed["origin"]]
+        self.assertIsNone(view.problem)
+        self.assertIsNotNone(view.last("retirement-checkpoint"))
+        self.assertEqual(view.observations[-1]["kind"], "retired")
+        self.assertFalse(observed["root"].parent.exists())
+        self.assertEqual(list(project.temp_root.iterdir()), [])
+
+    def test_prelaunch_plan_failure_is_typed_and_spends_no_attempt(self):
+        from oah.review import ReviewError, receipts, runner, snapshot
+
+        project = design_fix_project(self)
+        with mock.patch.object(runner._SnapshotDisposal, "prepare",
+                               side_effect=snapshot.PlanUnavailable("allocation unavailable")):
+            with self.assertRaises(ReviewError) as caught:
+                project.review()
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertEqual(project.calls(), [])
+        self.assertEqual(receipts.read_round_log(project.state, "t1"), [])
+        self.assertEqual(list(project.temp_root.iterdir()), [])
+
+    def test_final_capture_failure_closes_the_started_attempt_once(self):
+        from oah.review import ReviewError, receipts, runner, snapshot
+
+        project = design_fix_project(self)
+        with mock.patch.object(runner._SnapshotDisposal, "capture_final",
+                               side_effect=snapshot.Retained("final object changed")):
+            with self.assertRaises(ReviewError) as caught:
+                project.review()
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_RETAINED")
+        self.assertEqual(len(project.calls()), 1)
+        lines = receipts.read_round_log(project.state, "t1")
+        self.assertEqual([line["event"] for line in lines], ["start", "finish"])
+        self.assertFalse(lines[-1]["counted"])
+        self.assertEqual(lines[-1]["code"], "OAH_REVIEW_SNAPSHOT_RETAINED")
+        self.assertEqual(lines[-1]["snapshot_disposition"], "legacy-disposed")
+        self.assertIn("final object changed", lines[-1]["message"])
+        self.assertEqual(receipts.load(project.state, "t1").entries, ())
+
+    def test_child_error_keeps_its_reason_and_the_finalizer_outcome(self):
+        from oah.review import receipts, runner
+
+        project = design_fix_project(self)
+        original = RuntimeError("original simulated child failure")
+
+        def retained(disposal, _parent, _created):
+            outcome = ("retained", "producer proof unavailable")
+            disposal.disposition.append(outcome)
+            return outcome
+
+        with mock.patch.object(runner.call, "execute", side_effect=original), \
+                mock.patch.object(runner._SnapshotDisposal, "__call__", retained):
+            with self.assertRaises(RuntimeError) as caught:
+                project.review()
+        self.assertIs(caught.exception, original)
+        lines = receipts.read_round_log(project.state, "t1")
+        self.assertEqual([line["event"] for line in lines], ["start", "finish"])
+        self.assertFalse(lines[-1]["counted"])
+        self.assertEqual(lines[-1]["code"], "RuntimeError")
+        self.assertIn("original simulated child failure", lines[-1]["message"])
+        self.assertEqual(lines[-1]["snapshot_disposition"], "retained")
+        self.assertEqual(lines[-1]["snapshot_reason"], "producer proof unavailable")
+        self.assertEqual(len(list(project.temp_root.iterdir())), 1)
+
     def test_a_design_review_keeps_its_key_and_disposes_its_snapshot(self):
         project = design_fix_project(self)
         result = project.review()

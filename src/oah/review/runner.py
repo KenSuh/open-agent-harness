@@ -30,6 +30,7 @@ failed and interrupted calls retain that spend.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
@@ -263,33 +264,274 @@ def _check_design(root: pathlib.Path, state: pathlib.Path, lease, binding: oah_i
     return judged
 
 
-def _snapshot_disposal(state: pathlib.Path, run_id: str, disposition: list):
-    """The exclusive run-bound finalizer of a design-bound review snapshot (SC4-P4-R). An exact-run replay proving
-    NO transport origin, plus the still-owned folder, takes the controlled legacy disposal; anything else retains
-    (an origin-bearing review needs its complete captured plan, see snapshot.validate_retirement_plan)."""
+class _SnapshotDisposal:
+    def __init__(self, state: pathlib.Path, run_id: str, disposition: list):
+        self.state, self.run_id, self.disposition = state, run_id, disposition
+        self.plan: snapshot.RetirementPlan | None = None
 
-    def dispose(parent: pathlib.Path, created: dict) -> tuple[str, str | None]:
+    def prepare(self, parent: pathlib.Path, design, *, metadata: dict | None = None) -> None:
+        allocation = {"version": 1, "run": self.run_id, "task_identity": design.task.identity.to_json(),
+                      "task_basis_digest": design.task.basis, "container_object": snapshot._container_object(parent),
+                      "review": dict(metadata or {})}
+        if os.path.lexists(parent / "last-message.md"):
+            raise snapshot.PlanUnavailable("the designated output slot was not absent before launch")
+        self.plan = snapshot.capture_retirement_plan(allocation, parent, self.state,
+                    output_slot={"path": ["last-message.md"], "producer": {"run": self.run_id, "engine": ENGINE}})
+
+    def adopt(self, record: dict) -> dict:
+        if (self.plan is None or record.get("run") != self.run_id or
+                record.get("task_identity") != self.plan.descriptor["allocation"]["task_identity"] or
+                record.get("task_basis_digest") != self.plan.descriptor["allocation"]["task_basis_digest"]):
+            raise snapshot.PlanUnavailable("the origin does not match the prelaunch allocation")
+        return dict(record, retirement={"descriptor": self.plan.descriptor, "sha256": self.plan.descriptor_sha256,
+                    "pages_relative": list(self.plan.pages_dir.relative_to(self.state).parts)})
+
+    def capture_final(self, parent: pathlib.Path, source: bytes, copied: bytes) -> None:
+        from oah.design import task_context
+        from oah.lease import persist_create_only
+
+        absent, _reason = task_context.transport_absence(self.state, run=self.run_id)
+        if absent:
+            return
+        views = list(task_context.transport_views(self.state, run=self.run_id).values())
+        if self.plan is None or len(views) != 1 or views[0].problem is not None:
+            raise snapshot.Retained("the review has no single verified prelaunch origin allocation")
+        view = views[0]
+        terminal = view.last(*task_context.QUIESCENT)
+        cleaned = view.last("verified-cleaned")
+        if terminal is None or cleaned is None or not view.quiescent or view.exposure is not None:
+            raise snapshot.Retained("the original producer and DATA cleanup have no durable clean checkpoint")
+        slot = snapshot.capture_output_slot(parent, ["last-message.md"],
+                    producer={"run": self.run_id, "checkpoint": terminal["record_digest"], "origin": view.origin})
+        if (slot["presence"] == "present" and (slot["sha256"] != "sha256:" + hashlib.sha256(source).hexdigest()
+                or slot["size"] != len(source))) or (slot["presence"] == "absent" and source):
+            raise snapshot.Retained("the copied review output is not the final owned output bytes")
+        final = snapshot.finalize_retirement_plan(self.plan, slot)
+        snapshot.validate_retirement_plan(final, parent, self.plan.pages_dir)
+        raw = snapshot._canonical(final)
+        digest = hashlib.sha256(raw).hexdigest()
+        target = self.plan.pages_dir.parent / (digest + ".json")
+        persist_create_only(target, raw)
+        writer = Store(self.state)
+        authority = writer.transport_action_basis(task=view.task, origin=view.origin, expected=view.latest,
+                                                   receiving_root=parent / "tree")
+        checked = task_context.verify_transport_origin(view.record, parent / "tree", expect="cleaned")
+        if checked["state"] != "clean":
+            raise snapshot.Retained(checked["why"])
+        writer.observe_transport(task=view.task, origin=view.origin, expected=view.latest,
+                    kind="retirement-checkpoint", authority=authority,
+                    fact={"base_plan_sha256": self.plan.descriptor_sha256, "final_sha256": digest,
+                          "final_bytes": len(raw), "final_relative": list(target.relative_to(self.state).parts),
+                          "data_checkpoint": {"sequence": cleaned["sequence"], "record_digest": cleaned["record_digest"]},
+                          "head": checked["head"], "output_preserved": True,
+                          "copied_sha256": hashlib.sha256(copied).hexdigest(), "copied_bytes": len(copied)})
+
+    def __call__(self, parent: pathlib.Path, created: dict) -> tuple[str, str | None]:
         from oah.design import task_context
 
-        views = task_context.transport_views(state, run=run_id)
-        if views:
-            outcome = ("retained", "this review registered a design transport origin; only its complete paged "
-                                   "retirement plan may remove the snapshot")
-        else:
-            try:
-                current = snapshot._object(os.lstat(parent))
-            except OSError:
-                current = None
-            if current != created:
-                outcome = ("retained", "the snapshot folder is not the one this review created")
-            elif snapshot.remove(parent):
-                outcome = ("legacy-disposed", None)
+        try:
+            absent, reason = task_context.transport_absence(self.state, run=self.run_id)
+            if absent:
+                if snapshot._container_object(parent) != created:
+                    outcome = ("retained", "the snapshot folder is not the one this review created")
+                elif snapshot.remove(parent):
+                    outcome = ("legacy-disposed", None)
+                else:
+                    outcome = ("retained", "the snapshot folder could not be removed")
             else:
-                outcome = ("retained", "the snapshot folder could not be removed")
-        disposition.append(outcome)
+                views = list(task_context.transport_views(self.state, run=self.run_id).values())
+                if len(views) != 1 or views[0].problem is not None:
+                    outcome = ("retained", reason)
+                else:
+                    outcome = retire_snapshot(self.state, views[0], parent)
+        except (OSError, ValueError, snapshot.Retained, snapshot.PlanUnavailable) as exc:
+            outcome = ("retained", f"the checked retirement stopped ({type(exc).__name__})")
+        self.disposition.append(outcome)
         return outcome
 
-    return dispose
+
+def _snapshot_disposal(state: pathlib.Path, run_id: str, disposition: list):
+    return _SnapshotDisposal(state, run_id, disposition)
+
+
+@contextlib.contextmanager
+def _snapshot_failure(record_failure):
+    try:
+        yield
+    except BaseException as exc:
+        problem = exc
+        if isinstance(exc, (snapshot.PlanUnavailable, snapshot.Retained)):
+            code = ("OAH_REVIEW_SNAPSHOT_RETAINED" if isinstance(exc, snapshot.Retained)
+                    else "OAH_REVIEW_SNAPSHOT_FAILED")
+            problem = ReviewError(code, str(exc))
+        try:
+            record_failure(problem)
+        except Exception as logging_error:
+            problem.add_note(f"the failed attempt could not be recorded ({type(logging_error).__name__})")
+        if problem is exc:
+            raise
+        raise problem from exc
+
+
+def _retirement_path(state: pathlib.Path, components, *, file: bool) -> pathlib.Path:
+    if (not isinstance(components, list) or not components or components[0] != snapshot.RETIREMENT_DIR or
+            len(components) > 8 or any(not isinstance(p, str) or p in ("", ".", "..") or "/" in p or "\\" in p
+                                      for p in components)):
+        raise snapshot.Retained("the retirement evidence path is outside its allocation")
+    path = state
+    for part in components:
+        path = path / part
+        if path.is_symlink():
+            raise snapshot.Retained("a retirement evidence path is linked")
+    if file and not path.is_file():
+        raise snapshot.Retained("the final retirement evidence is missing")
+    return path
+
+
+def retire_snapshot(state: pathlib.Path, view, parent: pathlib.Path) -> tuple[str, str | None]:
+    from oah.design import task_context as tc
+    from oah.lease import LeaseError
+
+    registration = view.record.get("retirement") or {}
+    checkpoint = view.last("retirement-checkpoint")
+    if checkpoint is None or checkpoint["fact"].get("output_preserved") is not True:
+        return "retained", "there is no durable final output and retirement checkpoint"
+    fact = checkpoint["fact"]
+    descriptor = registration.get("descriptor")
+    if (not isinstance(descriptor, dict) or hashlib.sha256(snapshot._canonical(descriptor)).hexdigest() !=
+            registration.get("sha256") or fact.get("base_plan_sha256") != registration["sha256"] or
+            descriptor.get("allocation", {}).get("run") != view.record.get("run") or
+            descriptor["allocation"].get("task_identity") != view.record.get("task_identity") or
+            descriptor["allocation"].get("task_basis_digest") != view.record.get("task_basis_digest")):
+        return "retained", "the immutable origin does not own the exact complete plan"
+    pages = _retirement_path(state, registration.get("pages_relative"), file=False)
+    target = _retirement_path(state, fact.get("final_relative"), file=True)
+    raw = snapshot.read_evidence(target, 256 * 1024)
+    if (len(raw) != fact.get("final_bytes") or hashlib.sha256(raw).hexdigest() != fact.get("final_sha256")
+            or len(raw) > 256 * 1024):
+        return "retained", "the final plan bytes changed or exceed their bound"
+    final = tc.strict_json(raw.decode("utf-8"))
+    if final.get("base_plan") != descriptor or final.get("base_plan_sha256") != registration["sha256"]:
+        return "retained", "the final plan belongs to another allocation"
+    slot = final.get("output_slot_final") or {}
+    if slot.get("presence") == "present":
+        producer = slot.get("producer") or {}
+        if (producer.get("run") != view.record["run"] or producer.get("origin") != view.origin or
+                not any(item["kind"] in tc.QUIESCENT and item["record_digest"] == producer.get("checkpoint")
+                        and item["fact"].get("quiescent") is True for item in view.observations)):
+            return "retained", "the final output is not bound to its original durable producer"
+    data_e = fact.get("data_checkpoint")
+    if not any(item["kind"] == "verified-cleaned" and data_e ==
+               {"sequence": item["sequence"], "record_digest": item["record_digest"]} for item in view.observations):
+        return "retained", "the checkpoint lacks the original verified DATA cleanup"
+    pending, recorded, finalized = None, [], False
+    for event in view.observations[checkpoint["sequence"]:]:
+        if event["kind"] == "retired":
+            if (pending is not None or finalized or event != view.observations[-1]
+                    or event["fact"].get("plan_sha256") != registration["sha256"]
+                    or event["fact"].get("final_sha256") != fact["final_sha256"]
+                    or event["fact"].get("removed_entries") != len(recorded)):
+                return "retained", "the durable retirement completion is incompatible with its exact progress"
+            finalized = True
+            continue
+        if event["kind"] not in ("retirement-intent", "retirement-progress", "retirement-cancel"):
+            return "retained", "the retirement checkpoint has an incompatible successor"
+        progress_fact = event["fact"]
+        if (progress_fact.get("plan_sha256") != registration["sha256"] or
+                progress_fact.get("final_sha256") != fact["final_sha256"] or
+                type(progress_fact.get("cursor")) is not int or progress_fact["cursor"] != len(recorded)):
+            return "retained", "the retirement cursor or allocation changed"
+        if event["kind"] == "retirement-intent":
+            if pending is not None or progress_fact.get("observed") != "intent":
+                return "retained", "the retirement has a conflicting pending delete"
+            pending = progress_fact
+        elif event["kind"] == "retirement-cancel":
+            if (pending is None or progress_fact.get("observed") != "present-unchanged"
+                    or any(progress_fact.get(key) != pending.get(key) for key in ("path", "entry_sha256"))):
+                return "retained", "the pending delete was not cancelled against the exact unchanged entry"
+            pending = None
+        else:
+            if (pending is None or progress_fact.get("observed") != "absent" or
+                    any(progress_fact.get(key) != pending.get(key) for key in ("path", "entry_sha256"))):
+                return "retained", "a deletion has no exact preceding durable intent"
+            recorded.append(progress_fact)
+            pending = None
+    removed = frozenset(tuple(item["path"]) for item in recorded)
+    if len(removed) != len(recorded):
+        return "retained", "the retirement cursor repeats a path"
+    root_removed = () in removed
+    planned = snapshot.validate_retirement_plan(final, parent, pages, removed=removed - {()},
+                                               container_removed=root_removed)
+    entries_recorded = recorded[:-1] if root_removed else recorded
+    for item, progress_fact in zip(planned.all_entries, entries_recorded):
+        if (item["path"] != progress_fact["path"] or
+                hashlib.sha256(snapshot._canonical(item)).hexdigest() != progress_fact["entry_sha256"]):
+            return "retained", "recorded progress is not the exact prefix of the immutable complete plan"
+    if len(entries_recorded) > len(planned.all_entries):
+        return "retained", "the recorded retirement exceeds its complete plan"
+    if root_removed and (len(entries_recorded) != len(planned.all_entries) or recorded[-1]["path"] != [] or
+            recorded[-1]["entry_sha256"] != hashlib.sha256(snapshot._canonical({"path": [], "type": "root"})).hexdigest()):
+        return "retained", "the container removal is not the last exact complete progress entry"
+    if finalized:
+        return ("disposed", None) if root_removed else ("retained", "the durable retirement has no root progress")
+    writer = Store(state)
+    expected = view.latest
+    removed_paths = set(removed)
+
+    def retired_roles():
+        roles = []
+        for name, path in (("receiving-git-common", ("tree", ".git")), ("receiving-root", ("tree",)),
+                           ("snapshot-parent", ())):
+            if path in removed_paths:
+                roles.append(name)
+        return roles
+
+    authority = writer.transport_action_basis(task=view.task, origin=view.origin, expected=expected,
+                    receiving_root=parent / "tree", retired_roles=retired_roles())
+    if pending is not None:
+        remaining = next(iter(planned.entries), {"path": [], "type": "root"})
+        if (pending["path"] != remaining["path"] or pending["entry_sha256"] !=
+                hashlib.sha256(snapshot._canonical(remaining)).hexdigest()):
+            return "retained", "the pending delete is absent, changed or not the exact next entry; absence is unattributed"
+        with writer.transport_action(task=view.task, origin=view.origin, expected=expected, authority=authority,
+                    receiving_root=parent / "tree", retired_roles=retired_roles()):
+            snapshot.validate_retirement_plan(final, parent, pages, removed=removed - {()})
+            expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected,
+                        kind="retirement-cancel", authority=authority, held=True,
+                        fact={**pending, "observed": "present-unchanged"})
+    if not removed:
+        checked = tc.verify_transport_origin(view.record, parent / "tree", expect="cleaned")
+        if checked["state"] != "clean" or checked["head"] != fact.get("head"):
+            return "retained", "the pre-delete Git and DATA checkpoint cannot be verified"
+    cursor = len(removed)
+
+    def guard(item):
+        return writer.transport_action(task=view.task, origin=view.origin, expected=expected, authority=authority,
+                    receiving_root=parent / "tree", retired_roles=retired_roles())
+
+    def progress(item, observed):
+        nonlocal expected, cursor
+        kind = "retirement-intent" if observed == "intent" else "retirement-progress"
+        expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected, kind=kind,
+                    authority=authority, held=True,
+                    fact={"plan_sha256": registration["sha256"], "final_sha256": fact["final_sha256"],
+                          "cursor": cursor, "path": item["path"], "observed": observed,
+                          "entry_sha256": hashlib.sha256(snapshot._canonical(item)).hexdigest()})
+        if observed == "absent":
+            cursor += 1
+            removed_paths.add(tuple(item["path"]))
+        return True
+
+    try:
+        disposed = root_removed or snapshot.remove(parent, expected_plan=planned, progress=progress, guard=guard)
+    except (LeaseError, OSError) as exc:
+        return "retained", f"retirement stopped ({getattr(exc, 'code', type(exc).__name__)})"
+    if not disposed:
+        return "retained", "guarded deletion stopped; the exact progress and remainder were kept"
+    writer.observe_transport(task=view.task, origin=view.origin, expected=expected, kind="retired", authority=authority,
+                              fact={"plan_sha256": registration["sha256"], "final_sha256": fact["final_sha256"],
+                                    "removed_entries": cursor})
+    return "disposed", None
 
 
 def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Binding) -> tuple[tuple[str, str], ...]:
@@ -507,12 +749,29 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     disposition: list[tuple[str, str | None]] = []
     dispose = (_snapshot_disposal(state, planned_run[0].id, disposition)
                if design is not None and design.task is not None else None)
-    with snapshot.make(root, span.head, base=span.base, temp_root=temp_root, warnings=warnings,
-                       dispose=dispose) as snap:
+    where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
+             "run_id": planned_run[0].id}
+    started_round = []
+
+    def record_failure(exc):
+        if started_round:
+            outcome = disposition[-1] if disposition else ("retained", "the disposal outcome is unavailable")
+            receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
+                               "code": getattr(exc, "code", type(exc).__name__),
+                               "message": redact(str(exc))[:600],
+                               "snapshot_disposition": outcome[0],
+                               "snapshot_reason": redact(outcome[1])[:600] if outcome[1] else None})
+
+    with _snapshot_failure(record_failure), snapshot.make(
+            root, span.head, base=span.base, temp_root=temp_root, warnings=warnings, dispose=dispose) as snap:
         value = canary.plant(snap.tree)
         schema_path = snap.tree.parent / "output-schema.json"
         schema_path.write_bytes(schema.text().encode("utf-8"))  # the bytes the receipt's digest names
         final_path = snap.tree.parent / "last-message.md"
+        if dispose is not None:
+            dispose.prepare(snap.tree.parent, design, metadata={"base": span.base, "head": span.head,
+                            "stripped": list(snap.stripped), "canary_sha256": hashlib.sha256(value.encode()).hexdigest(),
+                            "schema_sha256": hashlib.sha256(schema.text().encode("utf-8")).hexdigest()})
         context_ = prompt.PromptContext(
             task=task, number=number, series_round=s.series_round, base=span.base, head=span.head,
             scope=tuple(lease.scope), conditions=conditions, diff_stat=context.diff_stat(root, span.base, span.head),
@@ -528,10 +787,6 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             impact=impact, impact_rows=impact_rows,
             design_line=(f"{design.task.binding.line()}, state {design.state}"
                          if design is not None and design.task is not None else None))
-        where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
-                 "run_id": planned_run[0].id}
-        started_round = []
-
         def start_round() -> None:
             receipts.log_round(state, task, {"event": "start", **where, "head": span.head, "extra_round": extra,
                                              "extra_attempt": extra_attempt, "decision": request.decision,
@@ -546,37 +801,41 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                 Store(state).log(task=task, agent=lease.agent,
                                  message=f"review R{number} attempt {attempt}: one additional call (--extra-attempt)")
 
+        from oah.design import task_context as design_context
+
+        token = call._PREPARATION_RUN.set(planned_run)
+        start_token = call._PREPARATION_START.set(start_round)
+        retirement_token = design_context.RETIREMENT_CONTEXT.set(dispose)
         try:
-            token = call._PREPARATION_RUN.set(planned_run)
-            start_token = call._PREPARATION_START.set(start_round)
-            try:
-                prepared = call.prepare(
-                    call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
-                                     round_instructions=redact(prompt.round_instructions(context_)),
-                                     output_schema=str(schema_path), ephemeral=True, isolated=True,
-                                     timeout_s=request.timeout_s, output_last_message=str(final_path)),
-                    call_settings, root=snap.tree, state_dir=state, env=launch_env,
-                    footer=tools.footer, has_footer=tools.has_footer,
-                    parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
-            finally:
-                call._PREPARATION_START.reset(start_token)
-                call._PREPARATION_RUN.reset(token)
-            warnings.extend(prepared.warnings)
+            prepared = call.prepare(
+                call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
+                                 round_instructions=redact(prompt.round_instructions(context_)),
+                                 output_schema=str(schema_path), ephemeral=True, isolated=True,
+                                 timeout_s=request.timeout_s, output_last_message=str(final_path)),
+                call_settings, root=snap.tree, state_dir=state, env=launch_env,
+                footer=tools.footer, has_footer=tools.has_footer,
+                parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
+        finally:
+            call._PREPARATION_START.reset(start_token)
+            call._PREPARATION_RUN.reset(token)
+            design_context.RETIREMENT_CONTEXT.reset(retirement_token)
+        warnings.extend(prepared.warnings)
+        retirement_token = design_context.RETIREMENT_CONTEXT.set(dispose)
+        try:
             run = call.execute(prepared, base_env=launch_env, rules=rules, redact=redact)
-        except BaseException as exc:
-            if started_round:
-                receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
-                                                 "code": getattr(exc, "code", type(exc).__name__),
-                                                 "message": redact(str(exc))[:600]})
-            raise
+        finally:
+            design_context.RETIREMENT_CONTEXT.reset(retirement_token)
         last = runs._contained_path(snap.tree.parent, final_path.name)
         raw = last.read_bytes() if last.is_file() else b""
+        original_output = raw
         output_error = None
         try:
             raw = _safe_output(raw, redact)
         except ReviewError as exc:
             output_error, raw = exc, b""
         prepared.run._write_text("last-message.md", raw.decode("utf-8"))
+        if dispose is not None:
+            dispose.capture_final(snap.tree.parent, original_output, raw)
     finished = dt.datetime.now(dt.timezone.utc)
     code = message = None
     output = None

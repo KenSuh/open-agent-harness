@@ -143,8 +143,13 @@ def _lease_generation(store: BindingStore) -> int | None:
 def require_design_work(store: BindingStore, root: pathlib.Path):
     """P0 for a design-origin task: refuse before any CHECK unless its design permits work."""
     provenance = _provenance(store, root)
+    from oah.design.binding import task_view
+
+    if provenance is not None and task_view(store.state_dir, store.task).lease is None:
+        raise GateRefused("OAH_DESIGN_BINDING_REQUIRED", "new gate evidence requires the task's current unexpired "
+                          "lease; resume the task before checking gates")
     if provenance is not None and provenance.state != "current":
-        code = _DESIGN_STATE_CODES.get(provenance.state, "OAH_DESIGN_BINDING_INVALID")
+        code = _DESIGN_STATE_CODES.get(provenance.state or "invalid", "OAH_DESIGN_BINDING_INVALID")
         raise GateRefused(code, f"task {store.task}'s design is {provenance.state} ({provenance.problem}); no gate can "
                           "certify it. Resolve the design (oah design task shows the next step), then run oah gates "
                           "check again")
@@ -404,7 +409,11 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
         return report
 
     def unchanged():  # P1 under the publication lock: the design and the lease must not have moved
-        later = _provenance(store, root)
+        try:
+            later = require_design_work(store, root)
+        except GateRefused:
+            raise GateRefused("OAH_DESIGN_CHANGED", "the current task authority no longer permits the gate "
+                              "publication; nothing new was recorded") from None
         if later is None or _observation(later, _lease_generation(store)) != p0:
             raise GateRefused("OAH_DESIGN_CHANGED", f"task {store.task}'s design or lease changed while its gates were "
                               "checked; nothing new was recorded and earlier evidence is unchanged. Run oah gates "
