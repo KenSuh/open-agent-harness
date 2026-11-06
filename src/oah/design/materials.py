@@ -1403,10 +1403,12 @@ def check(text: str | None, sources=None, policy: Mapping | None = None, context
         except portable.PortableError as exc:
             envelope_errors[key] = f"portable-evidence-invalid: {str(exc).partition(': ')[2]}"
     try:
-        edited = False if material_errors or envelope_errors else render(record) != normalized
+        edited = None if material_errors else render(record) != normalized
     except MaterialsError:
-        edited = True
-    if edited:
+        edited = None
+    if edited is None:
+        report["problems"].append("OAH_MATERIALS_EDIT_UNKNOWN")
+    elif edited:
         report["problems"].append("OAH_MATERIALS_EDITED")
     materials = {item["id"]: item for item in record["materials"]}
     heads = _heads(sources, {key: value for key, value in materials.items() if key not in material_errors})
@@ -1474,7 +1476,9 @@ def check(text: str | None, sources=None, policy: Mapping | None = None, context
         attached += [name for name in [decision["chosen"], *decision["alternatives"]] if name and name not in attached]
         bad_materials = [name for name in attached if material_problems.get(name)]
         inputs = record["decision_inputs"][ident]
-        if edited:
+        if edited is None:
+            problems.append("materials-edit-unknown")
+        elif edited:
             problems.append("materials-edited")
         if bad_materials:
             problems += [f"material-invalid:{name}" for name in sorted(bad_materials)]
@@ -1496,7 +1500,7 @@ def check(text: str | None, sources=None, policy: Mapping | None = None, context
                     if ref["uid"] != view.uid or history_refs.get(ref["revision"]) != ref["digest"]:
                         problems.append("resolution-ref-unknown")
         if problems:
-            status = "invalid"
+            status = "unknown" if problems == ["materials-edit-unknown"] else "invalid"
         elif view is None or view.problems():
             status = "unknown"
             problems.extend([f"authority-unavailable:{unavailable or 'unknown'}"] if view is None

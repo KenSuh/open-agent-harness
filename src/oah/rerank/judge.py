@@ -675,6 +675,8 @@ def _read(rubric, answers: Mapping[str, Mapping], thresholds: Mapping = THRESHOL
 def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, provider: str | None,
             model: str | None, config: Mapping | None = None) -> list[str]:
     """Why a result or cached record may not be applied now ([] when every identity still holds)."""
+    from oah.design.sources.state import StateProblem
+
     record = judgement.to_record() if isinstance(judgement, Judgement) else dict(judgement)
     identity = record.get("identity")
     if record.get("status") not in (USED, "used(cache)") or not isinstance(identity, Mapping):
@@ -707,7 +709,7 @@ def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, 
                 digest = _slice(data, field["offset"], field["length"], field["part_or_decision_input"])[1]
             else:
                 continue
-        except (JudgeError, KeyError, TypeError, AttributeError):
+        except (JudgeError, StateProblem, KeyError, TypeError, AttributeError):
             reasons.append(f"field-unavailable:{field.get('role')}")
             continue
         if digest != field.get("bytes_digest"):

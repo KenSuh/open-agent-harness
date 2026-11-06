@@ -282,15 +282,22 @@ class Observer:
         header = result.headers.get("content-type", "")
         kind = header.split(";", 1)[0].strip().lower()
         charset = "utf-8"
-        try:
-            for part in header.split(";")[1:]:
-                name, _, value = part.strip().partition("=")
-                if name.strip().lower() == "charset":
+        for part in header.split(";")[1:]:
+            name, _, value = part.strip().partition("=")
+            if name.strip().lower() == "charset":
+                try:
                     charset = codecs.lookup(value.strip().strip('"')).name
+                except LookupError:
+                    charset = "utf-8"
+        try:
             if charset in ("undefined", "idna", "punycode", "unicode-escape", "raw-unicode-escape"):
                 raise web.WebFailure("bad-response")
-            text = result.body.decode(charset)
-            text.encode("utf-8")
+            try:
+                text = result.body.decode(charset)
+                text.encode("utf-8")
+            except UnicodeError:
+                charset = "utf-8"
+                text = result.body.decode(charset, errors="replace")
         except (LookupError, UnicodeError):
             raise web.WebFailure("bad-response") from None
         if kind in ("text/html", "application/xhtml+xml"):

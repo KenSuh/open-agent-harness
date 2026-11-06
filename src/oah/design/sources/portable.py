@@ -68,6 +68,10 @@ def _objects(value: object, where: str) -> list[Mapping[str, Any]]:
 
 def _manifest_shape(manifest: Mapping[str, Any]) -> None:
     try:
+        for key in ("notices", "problems"):
+            shapes.validate(manifest.get(key), [str], "manifest." + key)
+        shapes.validate(manifest.get("verified"), bool, "manifest.verified")
+        shapes.validate(manifest.get("content_key"), str, "manifest.content_key")
         shapes.validate(manifest.get("files"), [shapes.FILE], "manifest.files")
         spec = _object(manifest.get("spec"), "manifest.spec")
         shapes.validate({"id": "manifest", **dict(spec)}, shapes.SOURCE, "manifest.spec")

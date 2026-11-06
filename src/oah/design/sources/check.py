@@ -387,12 +387,67 @@ class Sources:
             return CheckResult(spec.id, "state-corrupt", notable=True)
         current = freshness(head, started, self.settings["fresh_hours"])
         retry = parse_iso(head.retry_after) if head is not None else None
+        if retry is not None and head is not None:
+            anchor = min(parse_iso(head.attempted_at) or started, started)
+            capped = min(retry, anchor + dt.timedelta(days=7))
+            if started < capped < retry:
+                with self.state.lock():
+                    registry, _raw = self.registry()
+                    entry = registry.sources.get(spec.id)
+                    latest, latest_generation = self._base(spec)
+                    if (entry is None or entry.registration != spec.registration
+                            or entry.spec_digest != spec.spec_digest or latest_generation != generation):
+                        return CheckResult(spec.id, "superseded", notable=True, freshness=current)
+                    head = dataclasses.replace(head, generation=head.generation + 1, retry_after=iso(capped))
+                    self.state.write_json(f"heads/{spec.id}.json", head.to_json())
+            retry = capped
         if retry is not None and started < retry:
             return CheckResult(spec.id, "skipped-rate-limited", problems=("rate-limited",),
-                               freshness=current, retry_after=head.retry_after)
+                               freshness=current, retry_after=iso(retry))
         if skip_fresh and current == "fresh":
             return CheckResult(spec.id, "skipped-fresh", freshness="fresh",
                                observation=None if head is None else head.observation)
+        try:
+            result = self._attempt_one(spec, head, started, deadline=deadline, fault=fault)
+        except Exception:
+            result = self._failed_attempt(spec, head, started)
+        if result.result in ("changed", "unchanged", "recovered", "failed", "blocked", "unverified"):
+            fault("after-head")
+        return result
+
+    def _failed_attempt(self, spec: SourceSpec, before: Head | None, started: dt.datetime) -> CheckResult:
+        with self.state.lock():
+            registry, _raw = self.registry()
+            entry = registry.sources.get(spec.id)
+            if entry is None or entry.registration != spec.registration or entry.spec_digest != spec.spec_digest:
+                return CheckResult(spec.id, "superseded", notable=True)
+            try:
+                latest, generation = self._base(spec)
+            except StateProblem:
+                latest, generation = None, None
+                writable = False
+            else:
+                writable = True
+            if writable and generation != (None if before is None else before.generation):
+                return CheckResult(spec.id, "superseded", notable=True)
+            problems = ("attempt-failed",)
+            if writable:
+                failed, _word = transition(latest or Head(spec.id, spec.registration, spec.spec_digest),
+                                           Observation("failed", code="attempt-failed"), self.now(), started)
+                try:
+                    if latest is None:
+                        self._retire_head(spec.id)
+                    self.state.write_json(f"heads/{spec.id}.json", failed.to_json())
+                except Exception:
+                    writable = False
+            if not writable:
+                problems += ("failure-record-unavailable",)
+        return CheckResult(spec.id, "failed", problems=problems, notable=True, freshness="unavailable")
+
+    def _attempt_one(self, spec: SourceSpec, head: Head | None, started: dt.datetime, *, deadline: float,
+                     fault: Fault) -> CheckResult:
+        generation = None if head is None else head.generation
+        current = freshness(head, started, self.settings["fresh_hours"])
         observation = self.observer.observe(spec, head, deadline=deadline)
         fault("after-store")
         with self.state.lock():
@@ -423,7 +478,6 @@ class Sources:
                 observation = Observation("failed", code="timeout", selection=observation.selection)
                 updated, word = transition(start, observation, self.now(), started)
             self.state.write_json(f"heads/{spec.id}.json", updated.to_json())
-        fault("after-head")
         first_trouble = word in ("failed", "blocked") and (start.outcome != updated.outcome
                                                            or start.problems != updated.problems)
         return CheckResult(spec.id, word, snapshot=observation.snapshot,

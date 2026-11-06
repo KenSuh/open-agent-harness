@@ -651,9 +651,9 @@ class FairQueueTest(unittest.TestCase):
 
         def crash(step: str) -> None:
             if step == "after-store":
-                raise RuntimeError("killed")
+                raise KeyboardInterrupt()
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(KeyboardInterrupt):
             sources.scheduled(fault=crash)
         self.clock.advance(60)
         self.assertEqual("busy", sources.scheduled().outcome)
@@ -999,8 +999,128 @@ class ResponseIsolationTest(LoopbackCase):
         self.clock = Clock(dt.datetime.now(dt.timezone.utc).replace(microsecond=0))
         self.reply("/good", body=b"healthy", headers=(("Content-Type", "text/plain; charset=utf-8"),))
 
-    def test_bogus_charsets_fail_without_stopping_healthy_sources(self) -> None:
-        for charset in ("undefined", "base64", "zlib", "rot13", "hex", "bz2", "uu", "quopri", "idna", "not-a-codec"):
+    def test_source_storage_failure_is_recorded_without_stalling_siblings_or_later_cycles(self) -> None:
+        from oah.design.sources.view import DesignRef, DesignView, SnapshotView
+
+        ref = DesignRef("acme", "u" * 8, "booking", 1, "sha256:" + "a" * 64)
+        view = DesignView("acme", "u" * 8, "authority", "booking", SnapshotView(ref, "Booking", {}, {}),
+                          None, None, "clean", False, "current", "worktree")
+        for mode in ("check", "scheduled", "refresh"):
+            with self.subTest(mode=mode):
+                sources = self.store(fresh_hours=1)
+                bad = sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True,
+                                                  for_designs=["acme/booking"]))[1]
+                good = sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True,
+                                                   for_designs=["acme/booking"]))[1]
+                self.reply("/bad", body=b"prior good proof", headers=(("Content-Type", "text/plain"),))
+                self.assertEqual("changed", sources.check_one(bad).result)
+                before = sources.head(bad)
+                assert before is not None
+                body = b"new response with source-local damaged storage"
+                sha = hashlib.sha256(body).hexdigest()
+                blob = sources.state.path(f"blobs/{sha[:2]}/{sha}")
+                blob.parent.mkdir(parents=True, exist_ok=True)
+                blob.write_bytes(b"wrong bytes under the response digest")
+                self.reply("/bad", body=body, headers=(("Content-Type", "text/plain"),))
+                for _ in range(3 if mode == "scheduled" else 1):
+                    self.clock.advance(86400)
+                    if mode == "check":
+                        results = sources.check()
+                    else:
+                        report = (sources.scheduled() if mode == "scheduled" else sources.refresh_for(
+                            None, "acme", "booking", reason="resume", reader=lambda: view))
+                        results = report.results
+                        if mode == "scheduled":
+                            from oah.design.sources.check import ScanReport
+                            assert isinstance(report, ScanReport)
+                            self.assertEqual(("complete", ()), (report.outcome, report.outstanding))
+                            self.assertIsNotNone(sources.schedule_state()["scan"]["last_complete_scan_at"])
+                    result = next(item for item in results if item.source == bad.id)
+                    self.assertEqual(("failed", ("attempt-failed",)), (result.result, result.problems))
+                    after, good_head = sources.head(bad), sources.head(good)
+                    assert after is not None and good_head is not None
+                    self.assertEqual((before.verified, before.confirmed_at, before.observation),
+                                     (after.verified, after.confirmed_at, after.observation))
+                    self.assertEqual(self.clock.now().isoformat(), after.attempted_at)
+                    self.assertEqual(self.clock.now().isoformat(), good_head.attempted_at)
+                    self.assertEqual("unavailable", sources.status(bad).freshness)
+                    self.assertEqual("fresh", sources.status(good).freshness)
+                    self.assertEqual(b"wrong bytes under the response digest", blob.read_bytes())
+
+    def test_unexpected_source_exception_has_a_closed_code_but_interrupts_propagate(self) -> None:
+        for exception in (RuntimeError("private value"), OSError("private value"), KeyboardInterrupt(), SystemExit()):
+            with self.subTest(exception=type(exception).__name__):
+                sources = self.store()
+                spec = sources.register(build_spec(url=self.base + "/bad", allow_loopback=True))[1]
+                with mock.patch.object(sources.observer, "observe", side_effect=exception):
+                    if isinstance(exception, (KeyboardInterrupt, SystemExit)):
+                        with self.assertRaises(type(exception)):
+                            sources.check_one(spec)
+                    else:
+                        result = sources.check_one(spec)
+                        self.assertEqual(("failed", ("attempt-failed",)), (result.result, result.problems))
+                        self.assertEqual("unavailable", sources.status(spec).freshness)
+                        self.assertNotIn("private value", json.dumps(result.to_json()))
+
+    def test_source_publication_failure_finishes_the_turn_even_when_failure_cannot_be_saved(self) -> None:
+        for failure in ("observations", "head"):
+            with self.subTest(failure=failure):
+                sources = self.store(fresh_hours=1)
+                bad = sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True))[1]
+                good = sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True))[1]
+                self.reply("/bad", body=b"old proof", headers=(("Content-Type", "text/plain"),))
+                self.assertEqual("changed", sources.check_one(bad).result)
+                before = sources.head(bad)
+                assert before is not None
+                self.reply("/bad", body=b"new proof", headers=(("Content-Type", "text/plain"),))
+                record, write = sources.state.put_record, sources.state.write_json
+
+                def store(group, value):
+                    if group == "observations" and value["source"]["id"] == bad.id:
+                        raise RuntimeError("private value")
+                    return record(group, value)
+
+                def publish(rel, value):
+                    if rel == f"heads/{bad.id}.json":
+                        raise OSError("private value")
+                    return write(rel, value)
+
+                with mock.patch.object(sources.state, "put_record", side_effect=store if failure == "observations" else record), \
+                        mock.patch.object(sources.state, "write_json", side_effect=publish if failure == "head" else write):
+                    self.clock.advance(86400)
+                    report = sources.scheduled()
+                results = {item.source: item for item in report.results}
+                self.assertEqual(("complete", ()), (report.outcome, report.outstanding))
+                problems = ("attempt-failed",) + (("failure-record-unavailable",) if failure == "head" else ())
+                self.assertEqual(("failed", problems, "unavailable"),
+                                 (results[bad.id].result, results[bad.id].problems, results[bad.id].freshness))
+                after = sources.head(bad)
+                assert after is not None
+                self.assertEqual((before.verified, before.confirmed_at), (after.verified, after.confirmed_at))
+                self.assertEqual("fresh", sources.status(good).freshness)
+                self.assertNotIn("private value", json.dumps(report.to_json()))
+
+    def test_legacy_far_future_retry_expires_after_a_fixed_seven_day_cap(self) -> None:
+        sources = self.store()
+        spec = sources.register(build_spec(url=self.base + "/good", allow_loopback=True))[1]
+        self.assertEqual("changed", sources.check_one(spec).result)
+        head = sources.head(spec)
+        assert head is not None
+        head = dataclasses.replace(head, retry_after="3000-01-01T00:00:00+00:00")
+        sources.state.write_json(f"heads/{spec.id}.json", head.to_json())
+        early = sources.check_one(spec)
+        self.assertEqual("skipped-rate-limited", early.result)
+        self.assertEqual((self.clock.now() + dt.timedelta(days=7)).isoformat(), early.retry_after)
+        saved = sources.head(spec)
+        assert saved is not None
+        self.assertEqual(early.retry_after, saved.retry_after)
+        self.clock.advance(86400)
+        self.assertEqual(early.retry_after, sources.check_one(spec).retry_after)
+        self.clock.advance(30 * 86400)
+        self.assertEqual("unchanged", sources.check_one(spec).result)
+
+    def test_non_text_codecs_fail_without_stopping_healthy_sources(self) -> None:
+        for charset in ("undefined", "base64", "zlib", "rot13", "hex", "bz2", "uu", "quopri", "idna"):
             with self.subTest(charset=charset):
                 self.reply("/bad", body=b"public text", headers=(("Content-Type", f"text/plain; charset={charset}"),))
                 sources = self.store()
@@ -1076,9 +1196,18 @@ class ResponseIsolationTest(LoopbackCase):
         self.assertEqual(1, code)
         self.assertEqual("skipped-rate-limited", json.loads(out.getvalue())["results"][0]["result"])
 
-    def test_undecodable_bytes_fail_and_tolerated_html_keeps_other_sources_usable(self) -> None:
-        for body, kind, expected in ((b"\xff", "text/plain; charset=utf-8", "failed"),
-                                     (b"<![bogus]>", "text/html; charset=utf-8", "changed")):
+    def test_text_charset_fallback_and_tolerated_html_keep_other_sources_usable(self) -> None:
+        cases = ((b"\xff", "text/plain; charset=utf-8", "\ufffd"),
+                 (b"a\x81b", "text/plain; charset=cp1252", "a\ufffdb"),
+                 (b"caf\xe9", "text/plain; charset=ISO-8859-1", "caf\u00e9"),
+                 (b"\x93yes\x94", "text/plain; charset=windows-1252", "\u201cyes\u201d"),
+                 ("\u65e5\u672c".encode("shift_jis"), "text/plain; charset=Shift_JIS", "\u65e5\u672c"),
+                 ("hello".encode("utf-16"), "text/plain; charset=utf-16", "hello"),
+                 (b"<![bogus]>", "text/html; charset=utf-8", ""),
+                 (b'<meta charset="windows-1252"><p>caf\xe9</p>', "text/html", "caf\ufffd"))
+        cases += tuple((b"caf\xe9", "text/plain" + suffix, "caf\ufffd") for suffix in
+                       ("", "; charset=", "; charset=x-user-defined", "; charset=utf8mb4", "; charset=not-a-codec"))
+        for body, kind, expected in cases:
             with self.subTest(kind=kind):
                 sources = self.store()
                 bad = sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True))[1]
@@ -1087,10 +1216,13 @@ class ResponseIsolationTest(LoopbackCase):
                 self.assertEqual("changed", sources.check_one(bad).result)
                 self.reply("/bad", body=body, headers=(("Content-Type", kind),))
                 results = {item.source: item for item in sources.check()}
-                self.assertEqual((expected, "changed"), (results["a-bad"].result, results["z-good"].result))
-                if expected == "failed":
-                    self.assertEqual(("bad-response",), results["a-bad"].problems)
-                    self.assertNotEqual("fresh", sources.status(bad).freshness)
+                self.assertEqual(("changed", "changed"), (results["a-bad"].result, results["z-good"].result))
+                snapshot = results["a-bad"].snapshot
+                assert snapshot is not None
+                manifest = sources.snapshot(snapshot)
+                assert manifest is not None
+                self.assertEqual(expected.encode("utf-8"), sources.blob(manifest["document"]["text_sha256"]))
+                self.assertEqual("fresh", sources.status(bad).freshness)
 
     def test_reset_and_retry_headers_with_thousands_of_digits_stay_bounded(self) -> None:
         for key in ("Retry-After", "X-RateLimit-Reset"):

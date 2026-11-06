@@ -30,6 +30,7 @@ Sources live in this clone's oah state folder (inside the repository's git folde
 a partial pass, a source that could not be verified or a decision that needs attention, and `69` when the
 state, the configuration or the OS scheduler cannot be used (for example `OAH_SOURCES_STATE_CORRUPT`,
 `OAH_SCHEDULE_TOOL_MISSING`, `OAH_SCHEDULE_UNSUPPORTED`).
+An `over-budget` result exits `1` because the requested check did not attempt every source; it is a partial pass.
 
 ## What a check records
 
@@ -69,10 +70,19 @@ state, the configuration or the OS scheduler cannot be used (for example `OAH_SO
   classification is `unknown`.
 - **Requests are public and credential-free.** oah sends no cookie or authorization header and refuses to
   run through an HTTP proxy, because a proxy would choose the destination it cannot vet.
+- **Document text has a bounded decoding fallback.** A recognized text charset is used when it decodes
+  successfully. A missing, empty or unknown charset uses UTF-8; malformed text in a recognized charset also
+  falls back to UTF-8 with replacement characters. HTML meta tags do not select the charset. Non-text codecs
+  and transform codecs are refused as `bad-response`. Original response bytes are preserved, and decoded UTF-8
+  text must still fit the blob limit; replacement never bypasses that limit.
 
 A check reports one result per source: `unchanged`, `recovered`, `changed`, `unverified`, `blocked`,
 `failed`, `superseded`, `skipped-fresh`, `skipped-rate-limited`, `over-budget`, `disabled` or
 `state-corrupt`.
+Unexpected source-local exceptions, including storage failures during observation or publication, become a
+closed `attempt-failed` result and finish that source's turn. They never echo the exception value or confirm
+freshness. If its failed head cannot be persisted, the report also says `failure-record-unavailable`;
+the prior evidence stays in place. Shared registry, queue or lock failures remain errors, and process interrupts propagate.
 
 ## Comparing two snapshots
 
@@ -153,7 +163,8 @@ stopped instead of starting over, and sources that time out early never keep the
 attempted. `complete` means every source received an attempt or a recorded cooldown result in this cycle,
 not that every check succeeded. A rate-limited result finishes that source's turn; its cooldown never
 holds the cycle open or prevents the next cycle from checking other sources. Both `Retry-After` and
-`x-ratelimit-reset` are capped at seven days. A manual check during cooldown reports
+`x-ratelimit-reset` are capped at seven days. Stored legacy deadlines are capped again relative to their
+original attempt, with any future cap persisted so reading it cannot extend the wait. A manual check during cooldown reports
 `skipped-rate-limited` and exits `1`.
 A pass reports `complete`, `partial(over-budget)`, `partial(interrupted)`,
 `not-due`, `busy` or `disabled`, and exits `1` when partial.

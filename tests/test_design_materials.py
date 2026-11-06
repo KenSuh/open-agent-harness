@@ -359,6 +359,86 @@ class InputBasisTest(MaterialsCase):
 
 
 class MaterialShapeTest(MaterialsCase):
+    def two_decisions(self):
+        guide = self.sources.register(build_spec(url=LOCATOR, source_id="guide", track="commit", ref="HEAD",
+                                                paths=["src"]))[1]
+        self.assertEqual("changed", self.sources.check_one(guide).result)
+        selection = self.selection()
+        selection["decision_inputs"]["docs"] = dict(selection["decision_inputs"]["storage"], need="Write docs")
+        selection["decisions"].append({"id": "docs", "status": "selected", "chosen": "guide",
+                                       "alternatives": [], "reason": "Public guide"})
+        selection["materials"].append({"id": "guide", "source": "guide", "choice": "selected", "decision": "docs"})
+        return materials.build(selection, self.sources, view=self.view())
+
+    def test_invalid_sibling_never_hides_another_decisions_prose_edit(self) -> None:
+        built = self.two_decisions()
+        for corrupt in ("material", "envelope"):
+            with self.subTest(corrupt=corrupt):
+                record = json.loads(materials.canonical_json(built.record))
+                bad = next(item for item in record["materials"] if item["id"] == "guide")
+                if corrupt == "material":
+                    bad["license"] = "MIT"
+                else:
+                    envelope = next(item for item in record["portable_evidence"]
+                                    if portable.envelope_id(item) == bad["portable_evidence_id"])
+                    envelope["blobs"][0]["data"] = base64.b64encode(b"tampered").decode("ascii")
+                    bad["portable_evidence_id"] = portable.envelope_id(envelope)
+                    record["portable_evidence"].sort(key=portable.envelope_id)
+                text = built.text[:built.text.rindex(materials.FENCE)] + materials.FENCE + "\n" \
+                    + materials.canonical_json(record) + "\n```\n"
+                text = text.replace("Small and offline", "Changed without updating the record", 1)
+                report = materials.check(text, self.sources, None, self.view())
+                self.assertTrue(all(item["input_status"] != "current" for item in report["decisions"]))
+                self.assertIn("OAH_MATERIALS_EDIT_UNKNOWN" if corrupt == "material" else "OAH_MATERIALS_EDITED",
+                              report["problems"])
+                reads = {item["material"]: item for item in report["source_reads"]}
+                self.assertEqual(portable.HISTORICAL, reads["lib"]["historical_evidence"])
+
+    def test_malformed_manifest_notices_are_typed_and_keep_a_healthy_sibling(self) -> None:
+        from oah.design.sources.model import SourceError
+        from oah.design.sources.state import record_digest
+
+        built = self.two_decisions()
+        for notices in (7, ["notice", 7]):
+            with self.subTest(notices=notices):
+                record = json.loads(materials.canonical_json(built.record))
+                bad = next(item for item in record["materials"] if item["id"] == "lib")
+                envelope = next(item for item in record["portable_evidence"]
+                                if portable.envelope_id(item) == bad["portable_evidence_id"])
+                manifest = envelope["snapshot"]["manifest"]
+                manifest["notices"] = notices
+                snapshot = record_digest(manifest)
+                envelope["snapshot"]["digest"] = snapshot
+                observation = envelope["provenance"]["observation"]
+                observation["snapshot"] = snapshot
+                envelope["provenance"]["observation_digest"] = record_digest(observation)
+                bad["portable_evidence_id"], bad["snapshot"] = portable.envelope_id(envelope), snapshot
+                record["portable_evidence"].sort(key=portable.envelope_id)
+                with self.subTest(path="verify"):
+                    with self.assertRaises(portable.PortableError) as caught:
+                        portable.verify(envelope)
+                    self.assertEqual("OAH_SOURCES_EVIDENCE_INVALID", caught.exception.code)
+                with self.subTest(path="diff"):
+                    with self.assertRaises(SourceError) as caught:
+                        self.sources.diff("lib", snapshot, snapshot, evidence=[envelope])
+                    self.assertEqual("OAH_SOURCES_EVIDENCE_INVALID", caught.exception.code)
+                with self.subTest(path="materials"):
+                    report = materials.check(materials.render(record), self.sources, None, self.view())
+                    reads = {item["material"]: item for item in report["source_reads"]}
+                    self.assertEqual("invalid", report["overall"])
+                    self.assertEqual(portable.HISTORICAL, reads["guide"]["historical_evidence"])
+                with self.subTest(path="cli"):
+                    self.save({"materials": materials.render(record)})
+                    out, err = io.StringIO(), io.StringIO()
+                    with mock.patch("oah.sources_cli._sources", return_value=self.sources), \
+                            mock.patch("oah.design.open_store", return_value=self.store), \
+                            contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        code = main(["sources", "materials", "check", "--design", "acme/booking", "--json"])
+                    self.assertEqual((1, ""), (code, err.getvalue()))
+                    report = json.loads(out.getvalue())
+                    reads = {item["material"]: item for item in report["source_reads"]}
+                    self.assertEqual("invalid", report["overall"])
+                    self.assertEqual(portable.HISTORICAL, reads["guide"]["historical_evidence"])
     def test_same_policy_license_claims_must_match_the_portable_originals(self) -> None:
         built = materials.build(self.selection(), self.sources, view=self.view())
         record = json.loads(materials.canonical_json(built.record))

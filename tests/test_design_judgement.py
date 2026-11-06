@@ -563,6 +563,23 @@ class TypeSafeJudgementTest(JudgementCase):
 
 
 class AdvisoryTest(JudgementCase):
+    def test_saved_advice_with_a_corrupt_snapshot_is_unused_and_retained(self) -> None:
+        request = judge.Request("source-change-impact", "source-change-impact/v2",
+                                (("release_note_excerpt", self.notes()),), input_ref="same-input")
+        result = self.run_judge(request)
+        self.assertTrue(judge.apply(result, current_input_ref=request.input_ref, config=config(), sources=self.store,
+                                    request=request, policy=POLICY).applied)
+        saved = result.to_record()
+        assert self.first is not None
+        sha = self.first.removeprefix("sha256:")
+        snapshot = self.store.state.path(f"snapshots/{sha[:2]}/{sha}.json")
+        snapshot.write_bytes(b"{}\n")
+        applied = judge.apply(result, current_input_ref=request.input_ref, config=config(), sources=self.store,
+                              request=request, policy=POLICY)
+        self.assertEqual((False, "field-unavailable:release_note_excerpt"), (applied.applied, applied.reason))
+        self.assertEqual(saved, result.to_record())
+        self.assertEqual(b"{}\n", snapshot.read_bytes())
+
     def test_saved_advice_stops_applying_when_rerank_is_disabled(self) -> None:
         request = judge.Request("source-change-impact", "source-change-impact/v2",
                                 (("release_note_excerpt", self.notes()),), input_ref="same-input")

@@ -46,7 +46,7 @@ PROBLEMS = ("tag-moved", "ref-mismatch", "path-missing", "unsafe-entry", "oversi
             "changed-during-check", "tag-disappeared", "release-metadata-invalid")
 FAILURES = ("timeout", "network", "dns", "rate-limited", "not-found", "gone", "moved", "proxy-configured",
             "private-destination", "insecure-url", "redirect-off-origin", "too-many-redirects", "oversize",
-            "content-type", "content-encoding", "bad-response", "git-failed", "http-error")
+            "content-type", "content-encoding", "bad-response", "git-failed", "http-error", "attempt-failed")
 FRESHNESS = ("unknown", "fresh", "stale", "unverified", "unavailable")
 
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")

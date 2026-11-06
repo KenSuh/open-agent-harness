@@ -1,3 +1,4 @@
+# 출처 증거 모양 — 재료와 휴대 증거의 중첩 JSON을 경계에서 검사하고, 값 대신 필드 경로로 오류를 알린다.
 from __future__ import annotations
 
 from typing import TypeAlias, assert_never
