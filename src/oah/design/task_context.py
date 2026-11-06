@@ -4410,7 +4410,8 @@ class Completion:
         return self.code is None
 
 
-def _later_inline_delivery(state_dir: pathlib.Path, task: str, current: Mapping, after: TransportView) -> bool:
+def _later_delivery(state_dir: pathlib.Path, task: str, current: Mapping, after: TransportView,
+                    origins: Sequence[TransportView]) -> bool:
     from datetime import datetime
     from oah.design.binding import judge, task_view
 
@@ -4424,7 +4425,10 @@ def _later_inline_delivery(state_dir: pathlib.Path, task: str, current: Mapping,
         where = view.lease.worktree if view.lease is not None else (view.epoch or {}).get("worktree")
         if not isinstance(where, str):
             return False
-        expected = judge(record, root=pathlib.Path(where)).fingerprint()
+        judged = judge(record, root=pathlib.Path(where))
+        if judged.context is None:
+            return False
+        expected = judged.fingerprint()
         folder = pathlib.Path(state_dir) / "runs" / task
         for path in sorted(folder.iterdir(), reverse=True):
             try:
@@ -4438,9 +4442,21 @@ def _later_inline_delivery(state_dir: pathlib.Path, task: str, current: Mapping,
                 if (finished > cutoff and result.get("status") == "finished" and result.get("stage") in ("initial", "correction", "review")
                         and result.get("exit_code") == 0 and result.get("timed_out") is False
                         and data.get("evidence_key") == record.key and data.get("fingerprint") == expected
-                        and data.get("inline_complete") is True and receiving.get("reference_delivery") == "not-required"
-                        and receiving.get("delivered") is True and data.get("delivered") is True):
-                    return True
+                        and data.get("inline_complete") is True and receiving.get("delivered") is True):
+                    transport = data.get("transport")
+                    if (receiving.get("reference_delivery") == "not-required" and transport is None
+                            and data.get("delivered") is True):
+                        return True
+                    linked = next((item for item in origins if item.origin == data.get("origin")
+                                   and item.record.get("run") == path.name), None)
+                    if (receiving.get("reference_delivery") == "complete" and isinstance(transport, dict)
+                            and linked is not None and linked.delivered and linked.quiescent
+                            and transport.get("task_identity") == linked.record.get("task_identity")
+                            and transport.get("task_basis_digest") == linked.record.get("task_basis_digest")
+                            and transport.get("view") == linked.record.get("view")
+                            and (transport.get("read_plan") or {}).get("manifest_sha256") ==
+                                "sha256:" + linked.record["manifest"]):
+                        return True
             except (OSError, ValueError, TypeError, AttributeError, KeyError):
                 continue
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
@@ -4538,8 +4554,8 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
                 and view.record.get("task_identity", {}).get("task_instance_id") == current.get("task_instance_id")
                 and view.record.get("task_basis_digest") == current.get("task_basis_digest")
                 and (view.record.get("profile") or {}).get("operation") == "work"]
-    if own_work and not own_work[-1].delivered and not _later_inline_delivery(
-            state_dir, task, current, own_work[-1]):
+    if own_work and not own_work[-1].delivered and not _later_delivery(
+            state_dir, task, current, own_work[-1], mine):
         view = own_work[-1]
         return Completion(TRANSPORT_NOT_DELIVERED, f"the latest design-bound run {view.record.get('run')} did not "
                           "receive its complete design (its required originals were not all read); its edits stay, "

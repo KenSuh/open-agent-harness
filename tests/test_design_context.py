@@ -2151,6 +2151,52 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
         self._later_inline_delivery_case("correction")
 
     @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_later_complete_reference_inspection_satisfies_finish_and_land(self):
+        from oah.design.binding import repo_identity
+
+        for complete in (False, True):
+            with self.subTest(complete=complete):
+                self.build(BIG_PARTS, scope="repo")
+                first = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low",
+                                 env={"FAKE_STREAM_MODE": "partial"})
+                self.assertEqual(first.returncode, 0, first.stderr)
+                second = self.oah("call", "claude", "--stage", "review", "--task", "t1", "--tier", "high",
+                                  "--override-stage", env={} if complete else {"FAKE_STREAM_MODE": "partial"})
+                self.assertEqual(second.returncode, 0, second.stderr)
+                lease, _judged = self.judged()
+                current = {"task_instance_id": lease.design["task_identity"]["task_instance_id"],
+                           "task_basis_digest": lease.design["basis"]}
+                if complete:
+                    folder = self.last_run()
+                    for name, field in (("result.json", "status"), ("design.json", "origin"),
+                                        ("design.json", "manifest")):
+                        with self.subTest(field=field):
+                            path = folder / name
+                            original = path.read_bytes()
+                            data = json.loads(original)
+                            if field == "manifest":
+                                data["transport"]["read_plan"]["manifest_sha256"] = "sha256:" + "0" * 64
+                            else:
+                                data[field] = "failed" if field == "status" else "sha256:" + "0" * 64
+                            path.write_text(json.dumps(data), encoding="utf-8")
+                            try:
+                                denied = tc.completion_guard(self.state_dir, "t1", root=self.repo,
+                                    repo=repo_identity(self.repo), current=current)
+                                self.assertEqual(denied.code, tc.TRANSPORT_NOT_DELIVERED, denied.reason)
+                            finally:
+                                path.write_bytes(original)
+                for worktree in (True, False):
+                    checked = tc.completion_guard(self.state_dir, "t1", root=self.repo,
+                                                   repo=repo_identity(self.repo), current=current, worktree=worktree)
+                    self.assertEqual(checked.ok, complete, checked.reason)
+                    if not complete:
+                        self.assertEqual(checked.code, tc.TRANSPORT_NOT_DELIVERED)
+                if complete:
+                    finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done",
+                        "--return", str(self.returned()), "--allow-missing-wiki-maintenance", "--allow-structural")
+                    self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
     def test_later_whole_inline_review_satisfies_finish_and_land_after_partial_reference(self):
         self._later_inline_delivery_case("review")
 
