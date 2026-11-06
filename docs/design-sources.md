@@ -44,16 +44,20 @@ state, the configuration or the OS scheduler cannot be used (for example `OAH_SO
   guessed.
 - **Copyright holders are single identifiers.** One shared parser checks every populated holder/name
   field before case or whitespace normalization: preamble copyright lines in all supported licenses,
-  the BSD-3 third-clause name, and the Apache appendix copyright notices. Each holder must be one ASCII
+  the populated BSD-3 third-clause name, and the Apache appendix copyright notices. Each holder must be one ASCII
   identifier with no whitespace; capitalization never makes extra holder words safe. Each additional
-  copyright line must independently match the same rule. A BSD-3 name field cannot absorb a second line.
+  copyright line must independently match the same rule. A populated BSD-3 name field cannot absorb a second line.
   Supported lines have `Copyright`, `Portions Copyright`, `(c)` or `©`, four-digit years (including ranges
   or comma-separated years), then that identifier. It starts with an uppercase letter and may contain
   letters, digits, or apostrophe/hyphen joins followed by an uppercase letter (`Acme`, `Jean-Luc`, `O'Neil`).
   Optional components are a comma and one company suffix (`Inc`, `Ltd`, `LLC`, `Corp`, `Co`), a final period,
   `<email>`, and `All rights reserved` (case-insensitive, optional final period). For example,
   `Copyright (c) 2026 Acme-Labs, LLC.` is supported; a BSD-3 name may use the same identifier, company
-  suffix and email without a copyright marker or years. The Apache appendix may instead contain the
+  suffix and email without a copyright marker or years. The BSD-3 third clause also supports the fixed phrases
+  `the copyright holder` and `the copyright owner`, separately from populated names, with `its` or `their`.
+  These fixed alternatives use the template's case and whitespace rules, including line wrapping and clause
+  list markers; added prose such as `the copyright holder, no commercial use` remains unknown.
+  The Apache appendix may instead contain the
   exact fixed unfilled example `Copyright [yyyy] [name of copyright owner]`; modified examples are unknown.
   Any unsupported field makes the whole governing license `unknown`: this includes
   `Acme No Commercial Use`, `Acme NONCOMMERCIAL ONLY`,

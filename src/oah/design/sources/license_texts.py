@@ -5,11 +5,13 @@ Normalization (see `license.normalize`): typographic quotes and dashes become AS
 every run of whitespace becomes one space. BSD-2 drops list markers; BSD-3 permits them before its three clauses.
 Both read "copyright owner" as "copyright holder", their two common spellings. The templates were compared with real license files
 (six MIT, two Apache-2.0, three BSD) before use; tests pin them.
+BSD-3's fixed "the copyright holder" and "the copyright owner" name phrases use the template's case/whitespace
+rules separately from populated names; its/their and clause list markers remain finite alternatives.
 
 Apache-2.0 is long, so its terms (from "apache license version 2.0, january 2004" through "end of terms and
 conditions") are pinned by the sha256 of their normalized text, with `https://www.apache.org/` read as `http://`.
 The optional appendix accepts only the exact unfilled example or populated copyright notices checked by the
-same raw single-identifier holder parser as preambles and the BSD-3 name slot, before case/whitespace normalization.
+same raw single-identifier holder parser as preambles and populated BSD-3 names, before case/whitespace normalization.
 """
 from __future__ import annotations
 

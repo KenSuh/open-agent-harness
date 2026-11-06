@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import sys
+import textwrap
 import unittest
 from unittest import mock
 
@@ -65,6 +66,26 @@ def populated_holder_cases() -> list[tuple[str, bytes, str]]:
     for index, example in enumerate(("Copyright [yyyy] [name of copyright owner] No Commercial Use",
                                      "Copyright [2026] [Acme]", "Copyright [yyyy] [name of copyright owner]\nCopyright 2026 Acme")):
         rows.append((f"apache-modified-example-{index}", apache.replace(populated, example).encode(), "unknown"))
+    for holder in ("the copyright holder", "the copyright owner"):
+        for pronoun in ("its", "their"):
+            plain = bsd.format(HOLDER=holder, ITS=pronoun)
+            numbered = plain.replace("redistributions of source", "\n1. redistributions of source")
+            numbered = numbered.replace("redistributions in binary", "\n2. redistributions in binary")
+            numbered = numbered.replace("neither the name", "\n3. neither the name")
+            bulleted = re.sub(r"\n[123]\.", "\n*", numbered)
+            wrapped = notice + textwrap.fill(plain[len(notice):], width=72)
+            for style, original in (("plain", plain), ("numbered", numbered), ("bulleted", bulleted),
+                                    ("wrapped", wrapped)):
+                name = f"bsd3-fixed-{holder.rsplit(' ', 1)[1]}-{pronoun}-{style}"
+                rows.append((name, original.encode(), "eligible"))
+                if (holder, pronoun, style) in (("the copyright holder", "its", "numbered"),
+                                               ("the copyright owner", "their", "bulleted")):
+                    titled = original.replace(notice, "BSD 3-Clause License\n\n" + notice + "All rights reserved.\n", 1)
+                    rows.append((name + "-title-rights", titled.encode(), "eligible"))
+    for index, holder in enumerate(("THE COPYRIGHT HOLDER", "the\ncopyright\towner")):
+        rows.append((f"bsd3-fixed-raw-{index}", bsd.format(HOLDER=holder, ITS="its").encode(), "eligible"))
+    for index, holder in enumerate(("the copyright holder, no commercial use", "the copyright owner No Commercial Use")):
+        rows.append((f"bsd3-fixed-extra-prose-{index}", bsd.format(HOLDER=holder, ITS="its").encode(), "unknown"))
     return rows
 
 

@@ -12,6 +12,8 @@ one file or control characters read as unrecognized. A few other licenses are na
 enough to call them excluded, never eligible.
 
 Populated preamble, BSD-3 name and Apache appendix fields share one raw single-identifier holder parser.
+The BSD-3 fixed phrases "the copyright holder" and "the copyright owner" are separate template alternatives,
+matched with the template's case/whitespace rules rather than the populated-name parser.
 
 `verdict(evidence, read)` → form single | choice | conjunction | unknown; `eligibility(verdict, allow)` → eligible |
 eligible-by-choice | excluded | unknown. Both are recomputed on every read, so a policy or matcher change needs no
@@ -92,7 +94,7 @@ _MIT = re.compile(re.escape(texts.MIT_BODY))
 _BSD2 = _template(texts.BSD_OPENING + " " + texts.BSD_DISCLAIMER, {})
 _BSD3 = _template(texts.BSD_OPENING.replace("redistributions", "{MARKER}redistributions")
                   + " {MARKER}" + texts.BSD_THIRD + " " + texts.BSD_DISCLAIMER,
-                  {"HOLDER": r"(?P<holder>[\s\S]{1,200}?)", "ITS": r"(?:its|their)",
+                  {"HOLDER": r"(?:the\s+copyright\s+(?:holder|owner)|(?P<holder>[\s\S]{1,200}?))", "ITS": r"(?:its|their)",
                    "MARKER": rf"(?:{_LIST_MARKER.pattern}\s+)?"}, raw=True)
 _ISC = _template(texts.ISC_BODY, {"AND": r"(?:and/or|and)", "DISCLAIM": r"(?:author disclaims|authors disclaim)",
                                   "AUTHOR": r"authors?"})
@@ -155,7 +157,8 @@ def classify_text(data: bytes) -> TextVerdict:
                           "or Apache-2.0) with supported holder fields")
     bsd3 = _BSD3.fullmatch(raw_body)
     if bsd3:
-        return TextVerdict("BSD-3-Clause", True) if _valid_holder(bsd3["holder"]) else unknown
+        holder = bsd3["holder"]
+        return TextVerdict("BSD-3-Clause", True) if holder is None or _valid_holder(holder) else unknown
     end = _APACHE_END.search(raw_body)
     if end:
         rest = raw_body[end.end():].strip()
