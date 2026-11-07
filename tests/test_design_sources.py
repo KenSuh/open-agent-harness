@@ -28,6 +28,7 @@ from oah.design.sources.model import SourceError, build_spec, freshness
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 
 LOCATOR = "https://github.com/acme/lib"
+SRC = str(pathlib.Path(__file__).resolve().parents[1] / "src")
 LICENSE = ("MIT License\n\nCopyright (c) 2026 Acme\n\n"
            "Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software and "
            "associated documentation files (the \"Software\"), to deal\nin the Software without restriction, "
@@ -155,7 +156,7 @@ class SourceCase(unittest.TestCase):
         lines = [f"{commit} refs/tags/{name}" for name in names]
         packed = self.upstream / ".git" / "packed-refs"
         existing = packed.read_text(encoding="utf-8").splitlines() if packed.exists() else ["# pack-refs with: peeled"]
-        packed.write_text("\n".join(existing + lines) + "\n", encoding="utf-8")
+        packed.write_text("\n".join(existing + lines) + "\n", encoding="utf-8", newline="\n")
 
     def register(self, sources: Sources, **kwargs):
         kwargs.setdefault("paths", ["src"])
@@ -513,7 +514,9 @@ class AdvertisementTest(unittest.TestCase):
         oid = "a" * 40
         good = f"{oid}\trefs/tags/v1\n{'b' * 40}\trefs/tags/v1^{{}}\n".encode()
         self.assertEqual({"refs/tags/v1": oid, "refs/tags/v1^{}": "b" * 40}, gitref.parse(good, tags_only=True))
-        for bad in (good[:-1], f"{oid} refs/tags/v1\n".encode(), f"{oid}\trefs/tags/v1\n{oid}\trefs/tags/v1\n"
+        for bad in (good[:-1], good.replace(b"\n", b"\r"), good.replace(b"\n", b"\r\r\n"),
+                    good.replace(b"refs/tags/v1", b"refs/tags/v\r1"),
+                    f"{oid} refs/tags/v1\n".encode(), f"{oid}\trefs/tags/v1\n{oid}\trefs/tags/v1\n"
                     .encode(), f"{'b' * 40}\trefs/tags/v2^{{}}\n".encode(), f"{oid}\trefs/heads/main\n".encode(),
                     f"{'A' * 40}\trefs/tags/v1\n".encode(), b"\xff\trefs/tags/v1\n"):
             with self.assertRaises(gitref.RefError, msg=bad):
@@ -522,12 +525,26 @@ class AdvertisementTest(unittest.TestCase):
             gitref.parse(good, tags_only=True, row_limit=1)
         self.assertEqual("ls-remote-overflow", caught.exception.code)
 
+    def test_collector_preserves_crlf_evidence_and_caps_original_bytes(self) -> None:
+        raw = ("a" * 40 + "\trefs/tags/v1\r\n" + "b" * 40 + "\trefs/tags/v1^{}\r\n").encode()
+        script = make_tmp_dir(self) / "git.py"
+        script.write_text(f"import sys; sys.stdout.buffer.write({raw!r})\n", encoding="utf-8")
+        with mock.patch.object(gitref, "git_argv", return_value=[sys.executable, "-B", str(script)]):
+            advertisement = gitref.ls_remote(LOCATOR, tags=True, byte_limit=len(raw))
+            self.assertEqual({"refs/tags/v1": "a" * 40, "refs/tags/v1^{}": "b" * 40}, advertisement.refs)
+            self.assertEqual(raw, advertisement.raw)
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), advertisement.raw_sha256)
+            for limits in ({"byte_limit": len(raw) - 1}, {"row_limit": 1}):
+                with self.subTest(limits=limits), self.assertRaises(gitref.RefError) as caught:
+                    gitref.ls_remote(LOCATOR, tags=True, **limits)
+                self.assertEqual("ls-remote-overflow", caught.exception.code)
+
     def test_collector_caps_bytes(self) -> None:
         repo = make_git_repo(self)
         head = git_commit(repo, {"a": "1\n"})
         lines = [f"{head} refs/tags/t{n:05d}" for n in range(2000)]
         (repo / ".git" / "packed-refs").write_text("# pack-refs with: peeled\n" + "\n".join(lines) + "\n",
-                                                   encoding="utf-8")
+                                                   encoding="utf-8", newline="\n")
         with self.assertRaises(gitref.RefError) as caught:
             gitref.ls_remote(str(repo), tags=True, byte_limit=4096)
         self.assertEqual("ls-remote-overflow", caught.exception.code)
@@ -1884,7 +1901,8 @@ class SourceSafetyTest(SourceCase):
                 "try: s.read('heads/x.json', 1000)\n"
                 "except StateProblem as exc: print(exc.code)\n")
         result = subprocess.run([sys.executable, "-B", "-c", code, str(root)],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=5,
+                                env=dict(os.environ, PYTHONPATH=SRC))
         self.assertEqual((0, "not-a-file\n", ""), (result.returncode, result.stdout, result.stderr))
 
     def test_malformed_queue_members_are_a_scoped_state_problem(self) -> None:

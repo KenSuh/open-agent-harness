@@ -72,6 +72,7 @@ def parse(raw: bytes, *, tags_only: bool, row_limit: int = ROW_LIMIT) -> dict[st
     refs: dict[str, str] = {}
     width = None
     for line in lines:
+        line = line.removesuffix("\r")
         oid, tab, name = line.partition("\t")
         if not tab or not _OID.fullmatch(oid) or not _REF.fullmatch(name) or name in refs:
             raise RefError("ls-remote-malformed")
