@@ -969,7 +969,7 @@ class LegacyPacketDesignTest(unittest.TestCase):
         finished = oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", str(returned),
                        "--allow-missing-wiki-maintenance", "--allow-structural")
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-        self.assertEqual((repo / PACKET).read_bytes().decode("utf-8"), text)
+        self.assertEqual((repo / PACKET).read_text(encoding="utf-8"), text)
         self.assertNotIn("design_origin", (state / "events.jsonl").read_text(encoding="utf-8"))
 
     def test_complete_binding_without_generator_comment_is_still_structured(self):
