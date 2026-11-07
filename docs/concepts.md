@@ -579,13 +579,17 @@ manifest profile without that intent; it records missing leaves as unattributed 
 deleted them or reports `VERIFIED_CLEANED`. A mismatch refuses
 before deleting data. Cleanup records the permission transition before leaf progress; retained acknowledgments
 still require their exact captured metadata. Inside the current authority guard and after recording intent, oah
-closes every pin on the target before opening a dedicated mutation handle with `DELETE`, then rechecks its
+grants only the verified existing owner `FILE_WRITE_ATTRIBUTES` on the held, identity-checked object, then
+closes every pin on the target before opening a dedicated mutation handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
+The grant preserves the object apart from its owner-only DACL and change time; oah then rechecks its
 identity and complete file bytes (or directory emptiness). Leaves close before their manifest directory, and that
 directory closes before the owned DATA parent; snapshot entries retire from children to parents. No observer
 reopens the target while its mutation handle is held. Oah calls `SetFileInformationByHandle` with
 `FileDispositionInfoEx` and `DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` (`0x13`), closes the deletion handle,
 and establishes both name absence and a successful writable-parent flush before recording progress. There is no
-weaker deletion fallback; a refused disposition preserves the Win32 error code. Clearing the only read-only
+weaker deletion fallback; any grant, open, identity or disposition refusal leaves that object uncounted, and a
+refused disposition preserves the Win32 error code. The attribute right and ignore flag are both required for
+read-only leaves and directories, including snapshot retirement. Clearing the only read-only
 attribute writes `FILE_ATTRIBUTE_NORMAL` (`0x80`), since a zero attribute mask means no change. Windows candidate
 tests exercise sharing and this close/reopen contract with fake APIs; native
 Windows CI remains required and does not qualify reference delivery or reboot recovery.

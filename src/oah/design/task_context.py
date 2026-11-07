@@ -2631,6 +2631,14 @@ class _WindowsIO:
     def grant_writes(self, handle) -> None:
         self._owner_acl(handle, 0x1F01FF)
 
+    def grant_delete(self, handle) -> dict[str, int | str]:
+        before = self.info(handle)
+        self._owner_acl(handle, 0x130189)
+        after = self.info(handle)
+        if any(after.get(key) != value for key, value in before.items() if key not in ("uid", "change_time")):
+            self._error("windows-object-changed-during-delete-grant")
+        return after
+
     def writable(self, handle) -> None:
         self._readonly(handle, False)
 
@@ -2714,7 +2722,7 @@ class _WindowsIO:
         attrs = self.ObjectAttributes(ct.sizeof(self.ObjectAttributes), parent, ct.pointer(string), 0x1000,
                                       None, None)
         status, result = self.IoStatus(), ct.c_void_p()
-        access = (0x120081 | (0x40000116 if writable else 0) | (0x10000 if delete else 0)
+        access = (0x120081 | (0x40000116 if writable else 0) | (0x10100 if delete else 0)
                   | (0x40000 if create or acl else 0))
         share = 3 if inspect or (directory and not (delete or create or writable)) else 1
         returned = self.nt.NtCreateFile(ct.byref(result), access, ct.byref(attrs), ct.byref(status), None, 0x80,
@@ -3200,12 +3208,13 @@ class WindowsInstallation(Installation):
                 if problem or name not in self.leaf_handles:
                     raise InstallRefused(problem or "native leaf ownership is missing")
                 expected = self.leaves[name]
+                prepared = self.native.grant_delete(self.leaf_handles[name])
                 self.native.close(self.leaf_handles.pop(name))
                 handle, _ = self.native.open_child(self.m_fd, name, directory=False, delete=True)
                 try:
                     current = self.native.info(handle)
                     raw = self.native.read(handle, expected["size"])
-                    if (current != {key: value for key, value in expected.items() if key != "sha256"} or
+                    if (current != prepared or
                             self.native.info(handle) != current or "sha256:" + _sha(raw) != expected["sha256"]):
                         raise InstallRefused("the native leaf changed before its guarded disposition")
                     self.native.delete(handle)
@@ -3233,7 +3242,7 @@ class WindowsInstallation(Installation):
                     if name == DATA_DIR:
                         continue
                     raise InstallRefused("the native owned directory is not empty")
-                expected = _anchor_stamp(self.native.info(handle))
+                expected = _anchor_stamp(self.native.grant_delete(handle))
                 setattr(self, field, None)
                 self.native.close(handle)
                 handle, _ = self.native.open_child(getattr(self, parent_field), name, directory=True, delete=True)
@@ -4240,7 +4249,7 @@ def _reopen_windows(root, manifest: str, installed: Mapping, progress=(), *, nat
                     ancestor_identities=[native.info(handle) for handle in ancestors],
                     native_anchors={key: value for key, value in installed.get("anchors", {}).items()
                                     if key in ("m_writable", "m_unsealed") and isinstance(value, str)})
-        done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, writable=True)
+        done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, writable=True, acl=True)
         done.data_identity = native.info(done.data_fd)
         done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, acl=True)
         done.m_identity = native.info(done.m_fd)
@@ -4250,7 +4259,7 @@ def _reopen_windows(root, manifest: str, installed: Mapping, progress=(), *, nat
             if name not in present:
                 states[name] = "absent"
                 continue
-            leaf, _ = native.open_child(done.m_fd, name, directory=False)
+            leaf, _ = native.open_child(done.m_fd, name, directory=False, acl=True)
             done.leaf_handles[name] = leaf
             before = native.info(leaf)
             raw = native.read(leaf, BUNDLE_LIMIT)
