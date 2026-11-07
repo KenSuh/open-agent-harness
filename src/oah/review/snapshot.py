@@ -1032,8 +1032,8 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
     slot = tuple(plan.final["base_plan"]["output_slot"]["path"])
     try:
         root_path = tc._safe_windows_path(str(parent))
-        containing, anchors = native.open_anchor(root_path.parent)
-        root, _ = native.open_child(containing, root_path.name, directory=True, delete=True)
+        containing, anchors = native.open_anchor(root_path.parent, writable=True)
+        root, _ = native.open_child(containing, root_path.name, directory=True, writable=True, delete=True)
         require_creation_identity(parent, created, descriptor.get("container_object"),
                                   _native_container(native.info(root)), current=False)
 
@@ -1053,7 +1053,7 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
                     prefix = []
                     for name in item["path"][:-1]:
                         prefix.append(name)
-                        directory, _ = native.open_child(directory, name, directory=True, inspect=True)
+                        directory, _ = native.open_child(directory, name, directory=True, writable=True)
                         handles.append(directory)
                         expected = plan.all_entries.at(prefix)
                         if expected is None or _native_entry(native, directory, prefix) != expected:

@@ -557,6 +557,37 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
 - **Limits.** A run whose process was lost before its exit was recorded can only be settled after a qualified
   same-host reboot, and this release qualifies no such profile, so that run stays blocked; nothing is deleted.
 
+On native Windows, DATA retention and snapshot retirement use the same `_WindowsIO` object identity: volume and
+file ID, the owner SID and DACL security-descriptor digest, attributes, size and complete content. Ancestor checks
+include each directory's file ID and security digest. The `mode` value describes the DOS read-only attribute;
+POSIX owner/group/execute bits do not describe Windows access. Tests that simulate a foreign change grant the
+owner write access through `GetSecurityInfo` / `SetSecurityInfo` and change the native attribute, restoring the
+original DACL and attribute when testing content alone. Simulated owner changes alter the native identity readout.
+
+Read-only observer anchors use `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` (`7`), including both the
+volume's `CreateFileW` and relative directory `NtCreateFile` opens. Creation and mutation handles retain their
+exclusive write/delete sharing restriction. Such handles must close before another lifecycle reopens the object;
+a simulated restart must also close the original installation. Every directory handle used for
+`FlushFileBuffers` needs write access. After a sealed installation has closed, exact cleanup grants the same
+owner a writable DACL under its existing cleanup intent and authority guard, closes the read/delete handle,
+reopens the exact directory with write/delete access and verifies its file ID and the writable owner/DACL digest
+captured at installation. The native writable and ACL-only intermediate profiles are factual hashes, rather than
+POSIX mode guesses; only a recorded cleanup intent permits recovery through those profiles. A mismatch refuses
+before deleting data. Cleanup records the permission transition before leaf progress; retained acknowledgments
+still require their exact captured metadata. During exact deletion, oah opens the checked object
+with `DELETE`, rechecks its identity and current authority, records intent, calls `SetFileInformationByHandle` with
+`FileDispositionInfoEx` and `DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` (`0x13`), closes the deletion handle,
+flushes the parent and verifies name absence before recording progress. There is no weaker deletion fallback.
+This sequence also lets retirement recheck role roots while its deletion handle is held, without an observer
+blocking that handle's `DELETE` access. Windows candidate tests exercise this contract with fake APIs; native
+Windows CI remains required and does not qualify reference delivery or reboot recovery.
+
+The platform contracts are [CreateFileW sharing](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
+[NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile),
+[extended disposition flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)
+and [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle).
+Directory durability also follows the [FlushFileBuffers access contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+
 ## Gates
 
 "Done" is not something an agent says; it is a ledger of evidence. A **gate** is one checkable result with a

@@ -1253,26 +1253,25 @@ def _rule_matches(rule: str, paths: Sequence[str]) -> bool:
         return True
     if not (rule.startswith("Read(") and rule.endswith(")")):
         return False
-    pattern = rule[5:-1].strip().replace("\\", "/")
-    if pattern in ("", "*", "**", "/**", "./**", "//**"):
-        return True
-    if pattern.startswith("~"):
-        return True
-    if pattern.startswith("//"):
-        pattern = pattern[1:]  # an absolute path pattern
-    elif pattern.startswith("./"):
-        pattern = pattern[2:]
-    elif pattern.startswith("/"):
-        pattern = pattern[1:]  # relative to the settings' project root
-    glob = pattern.replace("**", "*")
-    for path in paths:
-        path = path.replace("\\", "/")
-        parts = path.strip("/").split("/")
-        suffixes = ["/".join(parts[n:]) for n in range(len(parts))]
-        if fnmatch.fnmatchcase(path, glob) or any(fnmatch.fnmatchcase(item, glob) for item in suffixes):
+    raw = rule[5:-1].strip()
+    for pattern, candidates in ((raw, paths), (raw.replace("\\", "/"),
+                                               [path.replace("\\", "/") for path in paths])):
+        if pattern in ("", "*", "**", "/**", "./**", "//**") or pattern.startswith("~"):
             return True
-        if "/" not in pattern and any(fnmatch.fnmatchcase(part, glob) for part in parts):
-            return True
+        if pattern.startswith("//"):
+            pattern = pattern[1:]
+        elif pattern.startswith("./"):
+            pattern = pattern[2:]
+        elif pattern.startswith("/"):
+            pattern = pattern[1:]
+        glob = pattern.replace("**", "*")
+        for path in candidates:
+            parts = path.strip("/").split("/")
+            suffixes = ["/".join(parts[n:]) for n in range(len(parts))]
+            if fnmatch.fnmatchcase(path, glob) or any(fnmatch.fnmatchcase(item, glob) for item in suffixes):
+                return True
+            if "/" not in pattern and any(fnmatch.fnmatchcase(part, glob) for part in parts):
+                return True
     return False
 
 
@@ -2477,6 +2476,11 @@ def _trusted_root(root: pathlib.Path) -> pathlib.Path:
 
 
 class _WindowsIO:
+    """One native identity for DATA and retirement: file ID, owner/DACL digest, attributes, size and bytes.
+
+    `mode` represents only the DOS read-only attribute; Windows permissions come from `security_digest`.
+    Observer anchors share read/write/delete. Mutation handles stay exclusive until disposition and close.
+    """
     def __init__(self):
         import ctypes as ct
 
@@ -2586,7 +2590,7 @@ class _WindowsIO:
             if descriptor.value:
                 self.kernel.LocalFree(descriptor)
 
-    def seal(self, handle) -> None:
+    def _owner_acl(self, handle, access: int) -> None:
         ct = self.ct
         owner, old_acl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
         try:
@@ -2599,22 +2603,36 @@ class _WindowsIO:
                 self._error("windows-owner-sid-bound")
             acl = ct.create_string_buffer(16 + sid_size)
             if (not self.security.InitializeAcl(acl, len(acl), 2) or
-                    not self.security.AddAccessAllowedAce(acl, 2, 0x130089, owner) or
+                    not self.security.AddAccessAllowedAce(acl, 2, access, owner) or
                     self.security.SetSecurityInfo(handle, 1, 0x80000004, None, None, acl, None) != 0):
-                self._error("windows-readonly-acl-failed")
-            basic = ct.create_string_buffer(40)
-            if not self.kernel.GetFileInformationByHandleEx(handle, 0, basic, 40):
-                self._error("windows-basic-information-failed")
-            import struct
-            raw = bytearray(basic.raw)
-            struct.pack_into("<I", raw, 32, struct.unpack_from("<I", raw, 32)[0] | 1)
-            updated = ct.create_string_buffer(bytes(raw), 40)
-            if not self.kernel.SetFileInformationByHandle(handle, 0, updated, 40):
-                self._error("windows-readonly-attribute-failed")
-            self.flush(handle)
+                self._error("windows-owner-acl-failed")
         finally:
             if descriptor.value:
                 self.kernel.LocalFree(descriptor)
+
+    def _readonly(self, handle, enabled: bool) -> None:
+        import struct
+
+        ct, basic = self.ct, self.ct.create_string_buffer(40)
+        if not self.kernel.GetFileInformationByHandleEx(handle, 0, basic, 40):
+            self._error("windows-basic-information-failed")
+        raw = bytearray(basic.raw)
+        flags = struct.unpack_from("<I", raw, 32)[0]
+        struct.pack_into("<I", raw, 32, flags | 1 if enabled else flags & ~1)
+        updated = ct.create_string_buffer(bytes(raw), 40)
+        if not self.kernel.SetFileInformationByHandle(handle, 0, updated, 40):
+            self._error("windows-readonly-attribute-failed")
+        self.flush(handle)
+
+    def seal(self, handle) -> None:
+        self._owner_acl(handle, 0x130089)
+        self._readonly(handle, True)
+
+    def grant_writes(self, handle) -> None:
+        self._owner_acl(handle, 0x1F01FF)
+
+    def writable(self, handle) -> None:
+        self._readonly(handle, False)
 
     def _require_principal(self, owner) -> None:
         ct, token, size = self.ct, self.ct.c_void_p(), self.ct.c_uint32()
@@ -2655,7 +2673,8 @@ class _WindowsIO:
         path = _safe_windows_path(str(root))
         if self.kernel.GetDriveTypeW(path.anchor) != 3:
             self._error("windows-fixed-local-volume-required")
-        handle = self.kernel.CreateFileW(path.anchor, 0x120081, 3, None, 3, 0x02200000, None)
+        access = 0x120081 | (0x40000116 if writable and len(path.parts) == 1 else 0)
+        handle = self.kernel.CreateFileW(path.anchor, access, 7, None, 3, 0x02200000, None)
         if not handle or handle == self.ct.c_void_p(-1).value:
             self._error("windows-anchor-open-failed")
         ancestors = [handle]
@@ -2673,7 +2692,7 @@ class _WindowsIO:
 
     def open_child(self, parent, name: str, *, directory: bool | None, create: bool = False,
                    writable: bool = False, delete: bool = False, inspect: bool = False,
-                   enumerated: bool = False) -> tuple[int, bool]:
+                   enumerated: bool = False, acl: bool = False) -> tuple[int, bool]:
         ct = self.ct
         if not name or len(name.encode("utf-16-le")) > 510 or any(c in name for c in "/\\\0"):
             self._error("windows-component-bound")
@@ -2695,8 +2714,9 @@ class _WindowsIO:
         attrs = self.ObjectAttributes(ct.sizeof(self.ObjectAttributes), parent, ct.pointer(string), 0x1000,
                                       None, None)
         status, result = self.IoStatus(), ct.c_void_p()
-        access = 0x120081 | (0x40000116 if writable else 0) | (0x10000 if delete else 0) | (0x40000 if create else 0)
-        share = 7 if inspect else (1 if delete or create or not directory else 3)
+        access = (0x120081 | (0x40000116 if writable else 0) | (0x10000 if delete else 0)
+                  | (0x40000 if create or acl else 0))
+        share = 7 if inspect or (directory and not (delete or create or writable)) else 1
         returned = self.nt.NtCreateFile(ct.byref(result), access, ct.byref(attrs), ct.byref(status), None, 0x80,
                     share, 2 if create else 1, 0x200020 | (0 if directory is None else 1 if directory else 0x40), None, 0)
         code = returned & 0xFFFFFFFF
@@ -2817,7 +2837,7 @@ class _WindowsIO:
             self._error("windows-flush-failed")
 
     def delete(self, handle) -> None:
-        flags = self.ct.c_uint32(0x19)
+        flags = self.ct.c_uint32(0x13)
         if not self.kernel.SetFileInformationByHandle(handle, 21, self.ct.byref(flags), 4):
             self._error("windows-guarded-disposition-failed")
 
@@ -2925,6 +2945,8 @@ class Installation:
         if self.m_identity is not None:
             anchors["m_writable"] = "sha256:" + _sha(canonical(_anchor_stamp({**self.m_identity, "mode": 0o700})))
             anchors["m_unsealed"] = "sha256:" + _sha(canonical(_anchor_stamp({**self.m_identity, "mode": 0o755})))
+        if isinstance(self, WindowsInstallation):
+            anchors.update(self.native_anchors)
         return {"data_dir_created": self.data_created, "anchors": anchors,
                 "leaves": [{"name": name, "bytes": item["size"], "sha256": item["sha256"], "mode": item["mode"],
                             "nlink": item["nlink"], "identity_digest": _leaf_identity_digest(item)}
@@ -3080,6 +3102,8 @@ class WindowsInstallation(Installation):
     ancestors: list = dataclasses.field(default_factory=list)
     ancestor_identities: list = dataclasses.field(default_factory=list)
     leaf_handles: dict = dataclasses.field(default_factory=dict)
+    native_anchors: dict[str, str] = dataclasses.field(default_factory=dict)
+    m_write_handle: bool = False
 
     def close(self) -> None:
         handles = [*self.leaf_handles.values(), self.m_fd, self.data_fd, *reversed(self.ancestors)]
@@ -3144,6 +3168,31 @@ class WindowsInstallation(Installation):
 
     def remove_leaves(self, names, before, after) -> list[str]:
         removed = []
+        if self.m_fd is not None and not self.m_write_handle:
+            native = self.native
+            if native is None:
+                raise InstallRefused("the native writable parent reader is unavailable")
+            with _mutation(before, self.manifest):
+                problem = self.check()
+                if problem:
+                    raise InstallRefused(problem)
+                original = native.info(self.m_fd)
+                native.grant_writes(self.m_fd)
+                native.close(self.m_fd)
+                self.m_fd = None
+                self.m_fd, _ = native.open_child(self.data_fd, self.manifest, directory=True,
+                                                  writable=True, delete=True, acl=True)
+                current = native.info(self.m_fd)
+                if ((current["dev"], current["ino"]) != (original["dev"], original["ino"]) or
+                        "sha256:" + _sha(canonical(_anchor_stamp(dict(current, mode=0o755)))) !=
+                        self.native_anchors.get("m_writable")):
+                    raise InstallRefused("the native writable parent identity, owner or ACL changed")
+                native.writable(self.m_fd)
+                self.m_identity = native.info(self.m_fd)
+                if "sha256:" + _sha(canonical(_anchor_stamp(self.m_identity))) != self.native_anchors["m_writable"]:
+                    raise InstallRefused("the native writable parent changed during its permission transition")
+                self.m_write_handle = True
+                after(self.manifest, "writable", "mode")
         for name in names:
             with _mutation(before, name):
                 problem = self.check()
@@ -3332,7 +3381,11 @@ def _install_windows(root, manifest: str, payloads: Mapping[str, bytes], *, nati
         with step(manifest):
             done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, create=True, writable=True,
                                              delete=True)
+            done.m_write_handle = True
+            native.grant_writes(done.m_fd)
             done.m_identity = native.info(done.m_fd)
+            done.native_anchors = {name: "sha256:" + _sha(canonical(_anchor_stamp(dict(done.m_identity, mode=mode))))
+                                   for name, mode in (("m_writable", 0o755), ("m_unsealed", 0o555))}
             native.flush(done.data_fd)
         for name, data in sorted(payloads.items()):
             with step(name):
@@ -4146,6 +4199,10 @@ def _reopened_anchors(done: Installation, installed: Mapping, progress: Sequence
         return True
     if missing and current.get("m") in (expected["m_writable"], expected["m_unsealed"]):
         return True
+    if (isinstance(done, WindowsInstallation) and
+            any(item.get("kind") == "cleanup-intent" and done.manifest in item.get("fact", {}).get("dirs", [])
+                for item in progress)):
+        return current.get("m") in (expected["m_writable"], expected["m_unsealed"])
     writable = any(item.get("kind") == "cleanup-progress" and item.get("fact", {}).get("entry") == "mode"
                    and item["fact"].get("name") == done.manifest and item["fact"].get("observed") == "writable"
                    for item in progress)
@@ -4163,13 +4220,15 @@ def _reopen_windows(root, manifest: str, installed: Mapping, progress=(), *, nat
     states = dict.fromkeys(recorded, "unknown")
     done = None
     try:
-        root_fd, ancestors = native.open_anchor(root)
+        root_fd, ancestors = native.open_anchor(root, writable=True)
         done = WindowsInstallation(root, manifest, root_fd, None, None, native.info(root_fd),
                     bool(installed.get("data_dir_created")), native=native, ancestors=ancestors,
-                    ancestor_identities=[native.info(handle) for handle in ancestors])
-        done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, delete=done.data_created)
+                    ancestor_identities=[native.info(handle) for handle in ancestors],
+                    native_anchors={key: value for key, value in installed.get("anchors", {}).items()
+                                    if key in ("m_writable", "m_unsealed") and isinstance(value, str)})
+        done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, writable=True, delete=done.data_created)
         done.data_identity = native.info(done.data_fd)
-        done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, delete=True)
+        done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, delete=True, acl=True)
         done.m_identity = native.info(done.m_fd)
         present = set(native.names(done.m_fd))
         states.update({name: "unexpected" for name in present - set(recorded)})
