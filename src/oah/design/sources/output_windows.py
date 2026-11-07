@@ -39,6 +39,7 @@ class Native:
                                                    wintypes.DWORD], wintypes.BOOL),
                 "GetFinalPathNameByHandleW": ([wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD,
                                                 wintypes.DWORD], wintypes.DWORD),
+                "GetLongPathNameW": ([wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD], wintypes.DWORD),
                 "GetVolumeInformationByHandleW": ([wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD,
                     ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
                     wintypes.LPWSTR, wintypes.DWORD], wintypes.BOOL),
@@ -71,6 +72,14 @@ class Native:
     def open_directory(self, path: str) -> int:
         return self._open(path, directory=True)
 
+    def long_path(self, path: str) -> str:
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = self.api.GetLongPathNameW(path, buffer, len(buffer))
+        self._ok(size)
+        if size >= len(buffer):
+            raise OutputError(UNVERIFIABLE_CODE, "root-path-unavailable", "the full root spelling cannot be inspected")
+        return buffer.value
+
     def create_file(self, path: str) -> int:
         return self._open(path, directory=False)
 
@@ -94,7 +103,8 @@ class Native:
         self._ok(self.api.GetFileInformationByHandleEx(handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)))
         buffer = ctypes.create_unicode_buffer(2048)
         size = self.api.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
-        if not 0 < size < len(buffer):
+        self._ok(size)
+        if size >= len(buffer):
             raise OutputError(UNVERIFIABLE_CODE, "handle-path-unavailable", "the final handle path cannot be inspected")
         path = buffer.value
         if path.startswith("\\\\?\\"):
@@ -136,7 +146,7 @@ class Native:
                         ("length", wintypes.DWORD), ("name", wintypes.WCHAR * 1)]
 
         name = destination.encode("utf-16-le")
-        size = Rename.name.offset + len(name)
+        size = Rename.name.offset + len(name) + 2
         buffer = ctypes.create_string_buffer(max(size, ctypes.sizeof(Rename)))
         information = Rename.from_buffer(buffer)
         information.replace, information.root, information.length = False, None, len(name)
@@ -179,70 +189,93 @@ def write_new(root: Path, parts: list[str], data: bytes, fault: Callable[[str], 
     api = Native()
     directories: list[tuple[int, Path, Info]] = []
     temporary, published = None, False
+    stage = "root-normalize"
     try:
-        path = root
+        path = Path(api.long_path(str(root)))
+        stage = "root-open"
         handle = api.open_directory(str(path))
         try:
+            stage = "root-inspect"
             info = _inspect(api, handle, path, directory=True, volume=None)
+            stage = "volume-check"
             api.volume(handle)
         except BaseException:
             api.close(handle)
             raise
         directories.append((handle, path, info))
         for part in parts[:-1]:
+            stage = "parent-case-check"
             _case(api, handle, part)
             path = path / part
+            stage = "parent-open"
             child = api.open_directory(str(path))
             try:
+                stage = "parent-inspect"
                 info = _inspect(api, child, path, directory=True, volume=directories[0][2].volume)
             except BaseException:
                 api.close(child)
                 raise
             directories.append((child, path, info))
             handle = child
+        stage = "final-name-check"
         _case(api, handle, parts[-1])
         if parts[-1] in api.names(handle):
             raise OutputError(EXISTS_CODE, "final-exists", "the output already exists; choose a new file name")
         fault("parent-pinned")
+        stage = "parent-verify"
         for directory, expected_path, expected_info in directories:
             if _inspect(api, directory, expected_path, directory=True, volume=expected_info.volume) != expected_info:
                 raise OutputError(UNVERIFIABLE_CODE, "identity-changed", "a pinned output directory changed")
         temporary_path = path / f".{parts[-1]}.oah-{secrets.token_hex(8)}.tmp"
+        stage = "temporary-create"
         temporary = api.create_file(str(temporary_path))
+        stage = "temporary-inspect"
         owned = _inspect(api, temporary, temporary_path, directory=False, volume=directories[0][2].volume)
+        stage = "temporary-write"
         api.write(temporary, data)
+        stage = "temporary-flush"
         api.flush(temporary)
         fault("temporary-written")
+        stage = "parent-verify"
         for directory, expected_path, expected_info in directories:
             if _inspect(api, directory, expected_path, directory=True, volume=expected_info.volume) != expected_info:
                 raise OutputError(UNVERIFIABLE_CODE, "identity-changed", "a pinned output directory changed")
         destination = path / parts[-1]
+        stage = "publish-rename"
         api.rename(temporary, str(destination))
         published = True
+        stage = "publication-verify-open"
         verification = api.open_file(str(destination))
         try:
+            stage = "publication-verify-inspect"
             actual = _inspect(api, verification, destination, directory=False, volume=owned.volume)
             if actual.file_id != owned.file_id:
                 raise OutputError(UNVERIFIABLE_CODE, "identity-changed", "the published path no longer names our file")
         finally:
             api.close(verification)
-        return destination
+        return root.joinpath(*parts)
     except OSError as exc:
         code = getattr(exc, "winerror", None)
+        detail = f"stage={stage}, winerror={code}"
+        if published:
+            raise OutputError(UNVERIFIABLE_CODE, "publication-unverified", "Windows cannot verify the published "
+                              f"output ({detail})") from None
         if code in (80, 183):
-            raise OutputError(EXISTS_CODE, "final-exists", "the output appeared while writing; it was not replaced") from None
-        if code in (2, 3):
-            raise OutputError(PATH_INVALID_CODE, "missing-parent", "an output parent does not exist") from None
+            raise OutputError(EXISTS_CODE, "final-exists", "the output appeared while writing; it was not replaced "
+                              f"({detail})") from None
+        if code in (2, 3) and stage in ("root-normalize", "root-open", "parent-open"):
+            raise OutputError(PATH_INVALID_CODE, "missing-parent", f"an output parent does not exist ({detail})") from None
         raise OutputError(UNVERIFIABLE_CODE, "windows-handle-refused", "Windows cannot establish the required "
-                          "handle, filesystem or sharing guarantees") from None
+                          f"handle, filesystem or sharing guarantees ({detail})") from None
     finally:
         try:
             if temporary is not None and not published:
                 try:
                     api.discard(temporary)
-                except OSError:
+                except OSError as exc:
                     raise OutputError(UNVERIFIABLE_CODE, "cleanup-refused", "Windows refused cleanup through the "
-                                      "owned file handle") from None
+                                      f"owned file handle (stage=cleanup-discard, winerror={getattr(exc, 'winerror', None)}; "
+                                      f"after stage={stage})") from None
         finally:
             if temporary is not None:
                 api.close(temporary)

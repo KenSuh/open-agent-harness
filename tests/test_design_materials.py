@@ -1206,11 +1206,176 @@ class WindowsOutputTest(unittest.TestCase):
         handle, kind, buffer, size = api.SetFileInformationByHandle.call_args.args
         self.assertEqual((7, 3), (handle, kind))
         self.assertEqual(0, ctypes.string_at(buffer, 1)[0])
-        self.assertTrue(ctypes.string_at(buffer, size).endswith("C:/repo/out/materials.md".encode("utf-16-le")))
+        self.assertTrue(ctypes.string_at(buffer, size).endswith("C:/repo/out/materials.md".encode("utf-16-le") + b"\0\0"))
         native.discard(7)
         self.assertEqual((7, 4), api.SetFileInformationByHandle.call_args.args[:2])
         self.assertEqual(7, native.open_file("C:/repo/out/materials.md"))
         self.assertEqual((0x80, 7, None, 3, 0x00200080, None), api.CreateFileW.call_args.args[1:])
+
+    def test_native_rename_uses_a_terminated_full_name_and_a_null_root(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+        from types import SimpleNamespace
+        from oah.design.sources.output_windows import Native
+
+        for root in (r"C:\CI\RUNNER~1\AppData\Local\Temp\repo",
+                     r"C:\CI\runneradmin\AppData\Local\Temp\repo"):
+            with self.subTest(root=root):
+                api = SimpleNamespace(SetFileInformationByHandle=mock.Mock(return_value=1))
+                native = object.__new__(Native)
+                destination = root + "\\out\\materials-\U0001f9ed.md"
+                with mock.patch.object(native, "api", api, create=True):
+                    native.rename(7, destination)
+                handle, kind, buffer, size = api.SetFileInformationByHandle.call_args.args
+                pointer_size = ctypes.sizeof(wintypes.HANDLE)
+                name_offset = pointer_size * 2 + ctypes.sizeof(wintypes.DWORD)
+                self.assertEqual((7, 3), (handle, kind))
+                self.assertEqual(0, ctypes.string_at(buffer, 1)[0])
+                self.assertIsNone(wintypes.HANDLE.from_buffer(buffer, pointer_size).value)
+                self.assertEqual(len(destination.encode("utf-16-le")),
+                                 wintypes.DWORD.from_buffer(buffer, pointer_size * 2).value)
+                self.assertEqual(destination.encode("utf-16-le") + b"\0\0",
+                                 ctypes.string_at(buffer, size)[name_offset:])
+
+    def windows_api(self, root_name):
+        from oah.design.sources.output_windows import Info
+
+        root = pathlib.Path(root_name)
+        canonical = pathlib.PureWindowsPath(r"C:\CI\runneradmin\AppData\Local\Temp\repo")
+        temporary = canonical / "out" / ".materials.md.oah-0123456789abcdef.tmp"
+        destination = canonical / "out" / "materials.md"
+        identities = {1: Info(str(canonical), 11, b"r" * 16, 0x10),
+                      2: Info(str(canonical / "out"), 11, b"d" * 16, 0x10),
+                      3: Info(str(temporary), 11, b"f" * 16, 0x80),
+                      4: Info(str(destination), 11, b"f" * 16, 0x80)}
+        api = mock.Mock()
+        api.long_path.return_value = str(canonical)
+        api.open_directory.side_effect = [1, 2]
+        api.create_file.return_value = 3
+        api.open_file.return_value = 4
+        api.info.side_effect = identities.__getitem__
+        api.names.return_value = []
+        return root, canonical, api, identities
+
+    def test_native_long_path_expands_the_requested_root_spelling(self) -> None:
+        from types import SimpleNamespace
+        from oah.design.sources.output_windows import Native
+
+        cases = ((r"C:\CI\RUNNER~1\repo", r"C:\CI\runneradmin\repo"),
+                 (r"C:\CI\runneradmin\repo", r"C:\CI\runneradmin\repo"),
+                 (r"D:\ANOTHE~1\repo", r"D:\another user\repo"))
+        for spelling, expanded in cases:
+            with self.subTest(spelling=spelling):
+                def expand(path, buffer, size):
+                    self.assertEqual(spelling, path)
+                    self.assertEqual(len(buffer), size)
+                    buffer.value = expanded
+                    return len(expanded)
+
+                api = SimpleNamespace(GetLongPathNameW=mock.Mock(side_effect=expand))
+                native = object.__new__(Native)
+                with mock.patch.object(native, "api", api, create=True):
+                    self.assertEqual(expanded, native.long_path(spelling))
+                self.assertEqual(1, api.GetLongPathNameW.call_count)
+
+    def test_windows_short_and_long_roots_publish_then_verify_the_destination(self) -> None:
+        from oah.design.sources import output_windows
+
+        for spelling in (r"C:\CI\RUNNER~1\AppData\Local\Temp\repo",
+                         r"C:\CI\runneradmin\AppData\Local\Temp\repo"):
+            with self.subTest(root=spelling):
+                root, canonical, api, _identities = self.windows_api(spelling)
+                temporary = str(canonical / "out" / ".materials.md.oah-0123456789abcdef.tmp")
+                destination = str(canonical / "out" / "materials.md")
+                with mock.patch.object(output_windows, "Native", return_value=api), \
+                        mock.patch.object(output_windows, "Path", pathlib.PureWindowsPath), \
+                        mock.patch.object(output_windows.secrets, "token_hex", return_value="0123456789abcdef"):
+                    result = output_windows.write_new(root, ["out", "materials.md"], b"ours", lambda _step: None)
+                self.assertEqual(root / "out" / "materials.md", result)
+                self.assertEqual([mock.call.long_path(spelling), mock.call.open_directory(str(canonical)),
+                    mock.call.info(1), mock.call.volume(1), mock.call.names(1),
+                    mock.call.open_directory(str(canonical / "out")), mock.call.info(2),
+                    mock.call.names(2), mock.call.names(2), mock.call.info(1), mock.call.info(2),
+                    mock.call.create_file(temporary), mock.call.info(3), mock.call.write(3, b"ours"),
+                    mock.call.flush(3), mock.call.info(1), mock.call.info(2), mock.call.rename(3, destination),
+                    mock.call.open_file(destination), mock.call.info(4), mock.call.close(4), mock.call.close(3),
+                    mock.call.close(2), mock.call.close(1)], api.mock_calls)
+
+    def test_windows_replaced_destination_after_rename_is_refused_and_handles_close(self) -> None:
+        from oah.design.sources import output_windows
+
+        root, _canonical, api, identities = self.windows_api(r"C:\CI\RUNNER~1\AppData\Local\Temp\repo")
+        identities[4] = dataclasses.replace(identities[4], file_id=b"x" * 16)
+        with mock.patch.object(output_windows, "Native", return_value=api), \
+                mock.patch.object(output_windows, "Path", pathlib.PureWindowsPath), \
+                mock.patch.object(output_windows.secrets, "token_hex", return_value="0123456789abcdef"), \
+                self.assertRaises(output.OutputError) as caught:
+            output_windows.write_new(root, ["out", "materials.md"], b"ours", lambda _step: None)
+        self.assertEqual((output.UNVERIFIABLE_CODE, "identity-changed"),
+                         (caught.exception.code, caught.exception.reason))
+        self.assertEqual([mock.call.rename(3, identities[4].path), mock.call.open_file(identities[4].path),
+                          mock.call.info(4), mock.call.close(4), mock.call.close(3), mock.call.close(2),
+                          mock.call.close(1)], api.mock_calls[-7:])
+        api.discard.assert_not_called()
+
+    def test_windows_errors_identify_the_stage_and_winerror_without_false_missing_parent(self) -> None:
+        from oah.design.sources import output_windows
+
+        cases = (("long_path", "root-normalize", 3, output.PATH_INVALID_CODE, "missing-parent"),
+                 ("open_directory", "root-open", 2, output.PATH_INVALID_CODE, "missing-parent"),
+                 ("open_directory", "parent-open", 3, output.PATH_INVALID_CODE, "missing-parent"),
+                 ("create_file", "temporary-create", 3, output.UNVERIFIABLE_CODE, "windows-handle-refused"),
+                 ("write", "temporary-write", 5, output.UNVERIFIABLE_CODE, "windows-handle-refused"),
+                 ("rename", "publish-rename", 3, output.UNVERIFIABLE_CODE, "windows-handle-refused"),
+                 ("rename", "publish-rename", 183, output.EXISTS_CODE, "final-exists"),
+                 ("open_file", "publication-verify-open", 2, output.UNVERIFIABLE_CODE, "publication-unverified"),
+                 ("open_file", "publication-verify-open", 3, output.UNVERIFIABLE_CODE, "publication-unverified"),
+                 ("open_file", "publication-verify-open", 183, output.UNVERIFIABLE_CODE, "publication-unverified"),
+                 ("info", "publication-verify-inspect", 6, output.UNVERIFIABLE_CODE, "publication-unverified"),
+                 ("discard", "cleanup-discard", 32, output.UNVERIFIABLE_CODE, "cleanup-refused"))
+        for operation, stage, code, expected_code, reason in cases:
+            with self.subTest(stage=stage, winerror=code):
+                root, _canonical, api, identities = self.windows_api(
+                    r"C:\CI\runneradmin\AppData\Local\Temp\repo")
+                error = OSError("injected Windows failure")
+                error.winerror = code
+                if stage == "parent-open":
+                    api.open_directory.side_effect = [1, error]
+                elif operation == "info":
+                    def inspect(handle):
+                        if handle == 4:
+                            raise error
+                        return identities[handle]
+                    api.info.side_effect = inspect
+                elif operation == "discard":
+                    api.write.side_effect = OSError("injected write failure")
+                    api.discard.side_effect = error
+                else:
+                    getattr(api, operation).side_effect = error
+                with mock.patch.object(output_windows, "Native", return_value=api), \
+                        mock.patch.object(output_windows, "Path", pathlib.PureWindowsPath), \
+                        mock.patch.object(output_windows.secrets, "token_hex", return_value="0123456789abcdef"), \
+                        self.assertRaises(output.OutputError) as caught:
+                    output_windows.write_new(root, ["out", "materials.md"], b"ours", lambda _step: None)
+                self.assertEqual((expected_code, reason), (caught.exception.code, caught.exception.reason))
+                self.assertIn(f"stage={stage}", str(caught.exception))
+                self.assertIn(f"winerror={code}", str(caught.exception))
+
+    def test_windows_existing_final_name_refuses_before_creating_a_temporary(self) -> None:
+        from oah.design.sources import output_windows
+
+        root, _canonical, api, _identities = self.windows_api(
+            r"C:\CI\runneradmin\AppData\Local\Temp\repo")
+        api.names.side_effect = [[], ["materials.md"], ["materials.md"]]
+        with mock.patch.object(output_windows, "Native", return_value=api), \
+                mock.patch.object(output_windows, "Path", pathlib.PureWindowsPath), \
+                mock.patch.object(output_windows.secrets, "token_hex", return_value="0123456789abcdef"), \
+                self.assertRaises(output.OutputError) as caught:
+            output_windows.write_new(root, ["out", "materials.md"], b"ours", lambda _step: None)
+        self.assertEqual((output.EXISTS_CODE, "final-exists"), (caught.exception.code, caught.exception.reason))
+        api.create_file.assert_not_called()
+        api.rename.assert_not_called()
+        self.assertEqual([mock.call.close(2), mock.call.close(1)], api.mock_calls[-2:])
 
     def test_native_identity_reads_the_full_volume_serial_and_128_bit_file_id(self) -> None:
         from types import SimpleNamespace
@@ -1254,6 +1419,9 @@ class WindowsOutputTest(unittest.TestCase):
                 self.reparse = False
                 self.unsupported = False
                 self.fail_write = False
+
+            def long_path(self, name):
+                return name
 
             def open_directory(self, name):
                 return self.pin(name)
