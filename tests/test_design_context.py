@@ -865,6 +865,75 @@ class RootAnchoringTest(unittest.TestCase):
 
 
 class WindowsNativeRosterTest(unittest.TestCase):
+    def test_seal_accepts_token_user_or_default_owner_and_refuses_other_owners(self):
+        import ctypes as ct
+        import types
+
+        user = struct.pack('<BB6sII', 1, 2, b'\0\0\0\0\0\5', 21, 1001)
+        default = struct.pack('<BB6sII', 1, 2, b'\0\0\0\0\0\5', 32, 544)
+        other = struct.pack('<BB6sII', 1, 2, b'\0\0\0\0\0\5', 21, 1002)
+        for owner_bytes, failure in ((user, None), (default, None), (other, 'foreign'),
+                                     (default, 'read'), (default, 'size'), (default, 'pointer'),
+                                     (default, 'owner-read'), (default, 'owner-size'), (default, 'owner-pointer'),
+                                     (default, 'sid-size'), (default, 'invalid-sid')):
+            with self.subTest(owner=owner_bytes, failure=failure):
+                owner_sid = ct.create_string_buffer(owner_bytes)
+                descriptor = ct.create_string_buffer(32)
+                queries, accepted = [], []
+
+                def security_info(handle, kind, fields, owner, group, dacl, sacl, result):
+                    owner._obj.value = ct.addressof(owner_sid)
+                    result._obj.value = ct.addressof(descriptor)
+                    return 0
+
+                def open_token(process, access, result):
+                    self.assertEqual((process, access), (9, 8))
+                    result._obj.value = 11
+                    return 1
+
+                def token_info(token, kind, buffer, length, size):
+                    self.assertEqual(token.value, 11)
+                    queries.append((kind, length))
+                    offset = 16 if kind == 1 else 8  # TOKEN_USER vs TOKEN_OWNER on LLP64
+                    fault = failure.removeprefix('owner-') if kind == 4 and failure else failure
+                    size._obj.value = offset + 16 if fault != 'size' else 65537
+                    if buffer is None:
+                        return 0  # the documented size query reports insufficient buffer
+                    if fault == 'read':
+                        return 0
+                    address = ct.addressof(buffer) + offset
+                    ct.c_void_p.from_buffer(buffer).value = address if fault != 'pointer' else 1
+                    ct.memmove(address, user if kind == 1 else default, 16)
+                    return 1
+
+                native = tc._WindowsIO.__new__(tc._WindowsIO)
+                native.ct = ct
+                native.kernel = types.SimpleNamespace(GetCurrentProcess=lambda: 9,
+                    CloseHandle=mock.Mock(return_value=1), LocalFree=mock.Mock(),
+                    GetFileInformationByHandleEx=mock.Mock(return_value=1),
+                    SetFileInformationByHandle=mock.Mock(return_value=1), FlushFileBuffers=mock.Mock(return_value=1))
+                native.security = types.SimpleNamespace(GetSecurityInfo=security_info, OpenProcessToken=open_token,
+                    GetTokenInformation=token_info, IsValidSid=lambda sid: int(failure != 'invalid-sid'),
+                    GetLengthSid=lambda sid: 68 if failure == 'sid-size' else 16,
+                    EqualSid=lambda first, second: int(ct.string_at(first, 16) == ct.string_at(second, 16)),
+                    InitializeAcl=mock.Mock(return_value=1),
+                    AddAccessAllowedAce=lambda acl, revision, access, sid: accepted.append(ct.string_at(sid, 16)) or 1,
+                    SetSecurityInfo=mock.Mock(return_value=0))
+                if failure is None:
+                    native.seal(7)
+                    self.assertEqual(accepted, [owner_bytes])
+                    self.assertEqual(queries, [(1, 0), (1, 32)] +
+                                     ([(4, 0), (4, 24)] if owner_bytes == default else []))
+                else:
+                    with self.assertRaises(tc.InstallRefused):
+                        native.seal(7)
+                    self.assertEqual(accepted, [])
+                    if failure == 'foreign':
+                        self.assertEqual(queries, [(1, 0), (1, 32), (4, 0), (4, 24)])
+                native.kernel.CloseHandle.assert_called_once_with(mock.ANY)
+                self.assertEqual(native.kernel.CloseHandle.call_args.args[0].value, 11)
+                native.kernel.LocalFree.assert_called_once_with(mock.ANY)
+
     class Native:
         def __init__(self):
             self.nodes = {1: {'parent': None, 'name': 'root', 'type': 'directory', 'data': b'', 'mode': 0o755}}
@@ -1486,6 +1555,8 @@ class PolicyCollectorTest(unittest.TestCase):
         user = self.home / ".claude" / "settings.json"
         cases = [
             ({"permissions": {"deny": ["Read(.oah-design-data/**)"]}}, "denied"),
+            ({"permissions": {"deny": ["Read(.oah-design-data\\**)"]}}, "denied"),
+            ({"permissions": {"deny": ["Read(unrelated/**)"]}}, "verified"),
             ({"permissions": {"ask": ["Read"]}}, "denied"),
             ({"hooks": {"PreToolUse": [{"matcher": "Read|Grep", "hooks": []}]}}, "unknown"),
             ({"hooks": {"PreToolUse": [{"matcher": "WebSearch", "hooks": []}]}}, "verified"),
@@ -1494,10 +1565,12 @@ class PolicyCollectorTest(unittest.TestCase):
             ({"policyHelper": "x"}, "unknown"),
             ({"enabledPlugins": {"p@m": True}}, "unknown"),
         ]
-        for value, expected in cases:
-            with self.subTest(value=value):
-                self.settings(user, value)
-                self.assertEqual(self.collect()["local_policy"], expected)
+        for separator in ('/', '\\'):
+            self.paths = [str(self.root / tc.DATA_DIR / ('a' * 64) / ('b' * 64)).replace('/', separator)]
+            for value, expected in cases:
+                with self.subTest(value=value, separator=separator):
+                    self.settings(user, value)
+                    self.assertEqual(self.collect()["local_policy"], expected)
 
     def test_enabled_plugins_are_inventoried_without_running_them(self):
         base = self.home / "plugin"

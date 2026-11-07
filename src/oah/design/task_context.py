@@ -1253,7 +1253,7 @@ def _rule_matches(rule: str, paths: Sequence[str]) -> bool:
         return True
     if not (rule.startswith("Read(") and rule.endswith(")")):
         return False
-    pattern = rule[5:-1].strip()
+    pattern = rule[5:-1].strip().replace("\\", "/")
     if pattern in ("", "*", "**", "/**", "./**", "//**"):
         return True
     if pattern.startswith("~"):
@@ -1266,6 +1266,7 @@ def _rule_matches(rule: str, paths: Sequence[str]) -> bool:
         pattern = pattern[1:]  # relative to the settings' project root
     glob = pattern.replace("**", "*")
     for path in paths:
+        path = path.replace("\\", "/")
         parts = path.strip("/").split("/")
         suffixes = ["/".join(parts[n:]) for n in range(len(parts))]
         if fnmatch.fnmatchcase(path, glob) or any(fnmatch.fnmatchcase(item, glob) for item in suffixes):
@@ -2620,16 +2621,24 @@ class _WindowsIO:
         try:
             if not self.security.OpenProcessToken(self.kernel.GetCurrentProcess(), 8, ct.byref(token)):
                 self._error("windows-principal-token-unreadable")
-            self.security.GetTokenInformation(token, 1, None, 0, ct.byref(size))
-            if not 16 <= size.value <= 65536:
-                self._error("windows-principal-buffer-bound")
-            buffer = ct.create_string_buffer(size.value)
-            if not self.security.GetTokenInformation(token, 1, buffer, len(buffer), ct.byref(size)):
-                self._error("windows-principal-token-read-failed")
-            sid = ct.c_void_p.from_buffer(buffer).value
-            if (not sid or not ct.addressof(buffer) <= sid < ct.addressof(buffer) + len(buffer) or
-                    self.security.IsValidSid(sid) != 1 or self.security.EqualSid(owner, sid) != 1):
-                self._error("windows-created-object-owner-is-not-the-current-principal")
+            for kind in (1, 4):  # TokenUser, then TokenOwner (the default owner for newly created objects).
+                size.value = 0
+                self.security.GetTokenInformation(token, kind, None, 0, ct.byref(size))
+                if not 16 <= size.value <= 65536:
+                    self._error("windows-principal-buffer-bound")
+                buffer = ct.create_string_buffer(size.value)
+                if not self.security.GetTokenInformation(token, kind, buffer, len(buffer), ct.byref(size)):
+                    self._error("windows-principal-token-read-failed")
+                sid = ct.c_void_p.from_buffer(buffer).value
+                if (not sid or not ct.addressof(buffer) + ct.sizeof(ct.c_void_p) <= sid <=
+                        ct.addressof(buffer) + len(buffer) - 8 or self.security.IsValidSid(sid) != 1):
+                    self._error("windows-principal-sid-invalid")
+                sid_size = self.security.GetLengthSid(sid)
+                if not 8 <= sid_size <= 68 or sid + sid_size > ct.addressof(buffer) + len(buffer):
+                    self._error("windows-principal-sid-bound")
+                if self.security.EqualSid(owner, sid) == 1:
+                    return
+            self._error("windows-created-object-owner-is-not-the-current-principal")
         finally:
             if token.value:
                 self.close(token)
