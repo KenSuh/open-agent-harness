@@ -53,6 +53,7 @@ class PromptContext:
     extra_round: bool
     impact: dict | None = None
     impact_rows: tuple[str, ...] = ()
+    design_line: str | None = None  # the bound design and its state; None keeps a task without a design unchanged
 
 
 def _fence(text: str, language: str = "text") -> str:
@@ -86,6 +87,11 @@ def round_instructions(ctx: PromptContext) -> str:
     conditions = "\n".join(f"- {ident}: {text}" for ident, text in ctx.conditions)
     parts.append("### Success conditions\nThe intent section above is the goal. Report each of its success "
                  f"conditions in intent_return:\n{conditions}")
+    if ctx.design_line is not None:
+        parts.append("### Design\nThe Design context section above holds the accepted product design this task "
+                     f"implements ({ctx.design_line}). Report a gap between the change and that accepted design as a "
+                     "finding against the success condition it affects. A newer draft shown there is not accepted: say "
+                     "what it would change, but judge the change against the accepted design.")
     critical = ("\nCritical paths changed (review them with extra care): " + ", ".join(ctx.critical)
                 if ctx.critical else "\nNo configured critical path changed.")
     parts.append(f"### What changed\n{_fence(ctx.diff_stat)}{critical}")

@@ -17,6 +17,10 @@ lines name the skill and its origin, never a path, because the packet is committ
   (`OAH_PACKET_PLACEHOLDER`).
 
 Scope entries are the top-level bullets of `## Scope`, without backticks; HTML comments are ignored.
+
+An optional `## Design` section names the design the requirements were written from
+(`oah.design.binding.parse_section`); `CheckResult.design` holds it and a malformed one is the error
+`OAH_DESIGN_SECTION_INVALID`. `create(..., design=...)` appends it to a new packet.
 """
 from __future__ import annotations
 
@@ -87,6 +91,8 @@ class CheckResult:
     intent: intent.Intent | None
     scope: tuple[str, ...]
     problems: tuple[Problem, ...]
+    design: object | None = None  # oah.design.binding.PacketDesign, when the packet has a valid ## Design section
+    text: str | None = dataclasses.field(default=None, repr=False, compare=False)  # the packet as read
 
     @property
     def errors(self) -> tuple[Problem, ...]:
@@ -120,19 +126,27 @@ def task_of(path: pathlib.Path) -> str | None:
     return None
 
 
-def render(task: str, *, plan: str | None = None, scope: Sequence[str] = ()) -> str:
-    """The packet template for `task`, as a draft, with this `## Plan` body and these Scope paths."""
+def render(task: str, *, plan: str | None = None, scope: Sequence[str] = (), design: object | None = None) -> str:
+    """The packet template for `task`, as a draft, with this `## Plan` body and these Scope paths.
+
+    `design` (an `oah.design.binding.PacketDesign`) appends a `## Design` section after the template."""
     _check_task(task)
     template = importlib.resources.files("oah").joinpath("templates/packet/PACKET.md")
     text = template.read_text(encoding="utf-8").replace("\r\n", "\n").replace(_TASK_TOKEN, task)
     body = plan if plan is not None else DEFAULT_PLAN
     text = text.replace(_PLAN_TOKEN, body if body.endswith("\n") else body + "\n")
-    return text.replace(_SCOPE_TOKEN, "".join(f"- {entry}\n" for entry in scope))
+    text = text.replace(_SCOPE_TOKEN, "".join(f"- {entry}\n" for entry in scope))
+    if design is not None:
+        from oah.design.binding import replace_section
+
+        text = replace_section(text, design)
+    return text
 
 
-def create(root: pathlib.Path, task: str, *, plan: str | None = None, scope: Sequence[str] = ()) -> pathlib.Path:
+def create(root: pathlib.Path, task: str, *, plan: str | None = None, scope: Sequence[str] = (),
+           design: object | None = None) -> pathlib.Path:
     """Write the draft packet for `task`; refuses with OAH_PACKET_EXISTS rather than overwrite."""
-    text = render(task, plan=plan, scope=scope)
+    text = render(task, plan=plan, scope=scope, design=design)
     path = packet_path(root, task)
     if os.path.lexists(path):
         raise PacketError("OAH_PACKET_EXISTS", f"{path} already exists; edit it, and raise its Revision when "
@@ -347,7 +361,14 @@ def check_text(text: str, *, task: str | None = None, require_accepted: bool = T
         issues = check_gates(gates_text)
         if issues:
             problems.append(Problem("OAH_GATES_INVALID", f"{GATES_NAME}: " + "; ".join(issues)))
-    return CheckResult(path=path, intent=parsed, scope=scope, problems=tuple(problems))
+    from oah.design.binding import SectionInvalid, parse_section
+
+    design = None
+    try:
+        design = parse_section(text)
+    except SectionInvalid as exc:
+        problems.append(Problem(exc.code, str(exc).split(": ", 1)[1]))
+    return CheckResult(path=path, intent=parsed, scope=scope, problems=tuple(problems), design=design, text=text)
 
 
 def check(path: pathlib.Path, *, task: str | None = None, require_accepted: bool = True) -> CheckResult:

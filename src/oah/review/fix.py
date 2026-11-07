@@ -244,6 +244,41 @@ _ERROR_DIAGNOSTICS = {
     "OAH_NOT_A_REPO": "no repository is available; run oah fix inside the leased Git worktree.",
     "OAH_GIT_MISSING": "Git is unavailable; install Git and retry in the leased worktree.",
     "OAH_USAGE": "the correction arguments are invalid; run oah fix --help and retry with the required options.",
+    "OAH_DESIGN_BINDING_REQUIRED": "the task follows a design but its lease has no design binding; restore the "
+                                   "packet's Design section and bind it with oah start --packet, then retry.",
+    "OAH_DESIGN_NEEDS_REVIEW": "a newer design draft is unresolved; read it with oah design task <task>, then carry "
+                               "it or rebind, before correcting.",
+    "OAH_DESIGN_CONTEXT_STALE": "the accepted design moved past the task's binding; carry or rebind with oah design "
+                                "carry or oah start --packet, then retry.",
+    "OAH_DESIGN_BINDING_INVALID": "the design binding does not match this repository's design history; restore the "
+                                  "records or rebind the task, then retry.",
+    "OAH_DESIGN_UNREGISTERED_EDIT": "the design page was edited after oah wrote it; register or discard the edit, "
+                                    "then retry.",
+    "OAH_DESIGN_NOT_FOUND": "the bound design is missing; restore it or rebind the task, then retry.",
+    "OAH_DESIGN_FRESHNESS_UNKNOWN": "the design authority cannot be read; make it readable, then retry.",
+    "OAH_DESIGN_RECOVERY_PENDING": "an interrupted design write is pending; run oah design recover, then retry.",
+    "OAH_DESIGN_SOURCE_MISMATCH": "the packet or receipt names another design binding than the task follows; review "
+                                  "the current design with oah review --task <task> before correcting.",
+    "OAH_DESIGN_CHANGED": "the design changed while the correction was prepared; read it with oah design task "
+                          "<task> and retry.",
+    "OAH_DESIGN_CHANGED_AFTER_RUN": "the run completed, but delivery is not marked because the design changed "
+                                    "during the run; read it with oah design task <task> before retrying.",
+    "OAH_DESIGN_CONTEXT_TOO_LARGE": "the required design text does not fit a brief; split the design as oah design "
+                                    "task <task> explains, then retry.",
+    "OAH_DESIGN_CODEX_REFERENCE_PROFILE_PENDING": "this design needs original references, which no qualified Codex "
+                                                  "profile can observe yet; nothing was sent.",
+    "OAH_DESIGN_REFERENCE_UNAVAILABLE": "the design's original references cannot be offered to this engine; nothing "
+                                        "was sent.",
+    "OAH_DESIGN_RECORD_INVALID": "the task's stored design record is invalid evidence; its bytes are kept. Start the "
+                                 "task again with oah start --packet.",
+    "OAH_DESIGN_TASK_INPUTS_CHANGED": "the task's intent, scope or gates changed since its design was bound; rebind "
+                                      "with oah start --packet, then retry.",
+    "OAH_DESIGN_ORIGIN_INVALID": "the task's design origin record is malformed; repair the state records by hand, "
+                                 "then retry.",
+    "OAH_DESIGN_ORIGIN_UNKNOWN": "whether the task follows a design cannot be read; repair the state folder, then "
+                                 "retry.",
+    "OAH_DESIGN_SECTION_INVALID": "the packet's Design section is invalid; rewrite it with oah packet design <task>, "
+                                  "then retry.",
 }
 
 _WARNING_DIAGNOSTICS = {
@@ -429,6 +464,31 @@ class _Task:
     lease: object  # oah.lease.Lease
     root: pathlib.Path
     lease_json: str
+    stamp: object = None  # _TargetStamp: compared again at every publication
+
+
+@dataclasses.dataclass(frozen=True)
+class _TargetStamp:
+    """TargetLeaseStampV1: the complete validated target record (every member and its presence), the design field's
+    presence/validity and its exact own value bytes. Unrelated leases and raw document offsets never matter."""
+
+    record: str  # canonical JSON of the target's core members
+    design_kind: str
+    design_sha256: str | None
+    design_bytes: int
+    design_value: bytes | None
+
+
+def _target(document, task: str):
+    """(stamp, lease) of the task's lease in a captured lease document, or (None, None)."""
+    record = document.record(task)
+    if record is None:
+        return None, None
+    field = record.design
+    raw = field.raw.encode("utf-8") if field.raw is not None else None
+    stamp = _TargetStamp(json.dumps(record.core, sort_keys=True, ensure_ascii=False), field.kind,
+                         hashlib.sha256(raw).hexdigest() if raw is not None else None, len(raw or b""), raw)
+    return stamp, record.lease
 
 
 def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) -> _Task:
@@ -444,16 +504,21 @@ def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) ->
     receipts.review_dir(state, task)
     store = Store(state)
     store.journal.check_pending()
-    _raw, lease_data = runs._captured_state(store.leases_path, default={"version": 1, "leases": []})
+    document = store.capture_document()  # the one bounded lease reader; leases.json stays out of the capture
     runs._CORRECTION_CAPTURE.get().pop(store.leases_path, None)  # Compare only this task's complete lease.
-    lease = next((lease for lease in store._decode(lease_data)
-                  if lease.task == task and not lease.expired(store.now())), None)
+    stamp, lease = _target(document, task)
+    if lease is not None and lease.expired(store.now()):
+        lease = None
     if lease is None:
         raise ReviewError("OAH_INTENT_NOT_CURRENT", f"task {task} has no active lease, so oah fix has no current intent "
                           f"or worktree to work with. {nothing}. Bind the accepted packet with oah start --task {task} "
                           f"--agent <you> --packet .oah/tasks/{task}/PACKET.md (use your packet's path), then run the "
                           "command again")
-    exact = next(item for item in lease_data["leases"] if item["task"] == task)
+    if lease.design_invalid:
+        raise ReviewError("OAH_DESIGN_RECORD_INVALID", _ERROR_DIAGNOSTICS["OAH_DESIGN_RECORD_INVALID"])
+    exact = dict(document.record(task).core)
+    if lease.design is not None:
+        exact["design"] = lease.design
     if any(_has_credential(value, redact) for value in lease.scope):
         raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
     _safe_inputs(exact, redact, "OAH_FIX_SENSITIVE_METADATA")
@@ -464,7 +529,7 @@ def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) ->
         raise ReviewError("OAH_WORKTREE_UNRESOLVED", f"the lease of task {task} names the worktree {root}, which no "
                           f"longer exists. {nothing}. Release it with oah release --task {task} --agent {lease.agent} "
                           '--reason "worktree removed", then start the lease again in the task\'s worktree')
-    return _Task(task, state, lease, root, json.dumps(exact))
+    return _Task(task, state, lease, root, json.dumps(exact), stamp)
 
 
 def _committed_reader(root: pathlib.Path, *, ref: str = "HEAD") -> Callable[[pathlib.Path], str]:
@@ -515,8 +580,22 @@ def _check_intent(t: _Task, nothing: str, *, committed_text: str | None = None) 
     return binding
 
 
+def _check_design(t: _Task, binding: oah_intent.Binding):
+    """A correction writes code, so the task's design must permit work (an unresolved draft refuses)."""
+    from oah.design.model import DesignError
+    from oah.lease_cli import lease_design
+
+    judged = lease_design(t.lease, t.state, source=binding.source, root=t.root)
+    try:
+        judged.require("fix", task=t.name, agent=t.lease.agent)
+    except DesignError as exc:
+        code = exc.code if exc.code in _ERROR_DIAGNOSTICS else "OAH_FIX_FAILED"
+        raise ReviewError(code, _ERROR_DIAGNOSTICS[code]) from None
+    return judged
+
+
 def _check_review_intent(t: _Task, receipt: receipts.Entry, binding: oah_intent.Binding, nothing: str, *,
-                         current_text: str | None = None) -> None:
+                         current_text: str | None = None, design=None) -> None:
     matches = (receipt.record.get("intent") == binding.to_json()
                and receipt.record.get("intent_digest") == binding.digest)
     if matches:
@@ -532,6 +611,11 @@ def _check_review_intent(t: _Task, receipt: receipts.Entry, binding: oah_intent.
         raise ReviewError("OAH_INTENT_SOURCE_MISMATCH", f"the current binding or committed intent section differs "
                           f"from the intent reviewed by {receipt.name}. {nothing}. Run oah review --task {t.name} "
                           "to review the updated intent before correcting its findings")
+    from oah.design.binding import review_evidence
+
+    evidence = review_evidence(design) if design is not None else None
+    if evidence is not None and not evidence.counts(receipt.record):
+        raise ReviewError("OAH_DESIGN_SOURCE_MISMATCH", _ERROR_DIAGNOSTICS["OAH_DESIGN_SOURCE_MISMATCH"])
 
 
 @dataclasses.dataclass
@@ -778,6 +862,25 @@ class _PublicationConflict(ReviewError):
 
 
 @contextlib.contextmanager
+def _design_launch(t: _Task):
+    from oah.lease import utc_now
+
+    store = Store(t.state)
+    with _ExistingLock(store.lock_path):
+        if store.journal.path.exists():
+            from oah.journal import PendingTransaction
+            raise PendingTransaction("OAH_STATE_PENDING: recover the pending transaction before retrying.")
+        stamp, live = _target(store.capture_document(), t.name)
+        if stamp != t.stamp or live is None or live.expired(utc_now()):
+            raise _PublicationConflict("OAH_LEASE_CHANGED", _ERROR_DIAGNOSTICS["OAH_LEASE_CHANGED"])
+        token = call._CORRECTION_STATE_LOCK.set(t.state)
+        try:
+            yield live
+        finally:
+            call._CORRECTION_STATE_LOCK.reset(token)
+
+
+@contextlib.contextmanager
 def _publication(t: _Task, h: _History):
     """Optimistically compare dependencies before any write, holding only a bounded publication lock."""
     from oah.lease import utc_now
@@ -787,10 +890,8 @@ def _publication(t: _Task, h: _History):
         if store.journal.path.exists():
             from oah.journal import PendingTransaction
             raise PendingTransaction("OAH_STATE_PENDING: recover the pending transaction before retrying.")
-        data = read_json(store.leases_path, {"version": 1, "leases": []})
-        store._decode(data)
-        live = next((item for item in data["leases"] if item["task"] == t.name), None)
-        if live != json.loads(t.lease_json) or t.lease.expired(utc_now()):
+        stamp, live = _target(store.capture_document(), t.name)
+        if stamp != t.stamp or live is None or live.expired(utc_now()):
             raise _PublicationConflict("OAH_LEASE_CHANGED", _ERROR_DIAGNOSTICS["OAH_LEASE_CHANGED"])
         for path, expected in runs._CORRECTION_CAPTURE.get().items():
             try:
@@ -803,7 +904,7 @@ def _publication(t: _Task, h: _History):
         try:
             with receipts._correction_publication(t.state, t.name, h.index_bytes, h.index_lines):
                 try:
-                    yield
+                    yield live
                 finally:
                     publication = receipts._CORRECTION_PUBLICATION.get()
                     h.index_bytes, h.index_lines = publication["index"], tuple(publication["lines"])
@@ -1198,6 +1299,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
     except oah_intent.SourceError:
         raise ReviewError("OAH_INTENT_NOT_CURRENT", _ERROR_DIAGNOSTICS["OAH_INTENT_NOT_CURRENT"]) from None
     binding = _check_intent(t, LAUNCHED, committed_text=committed_text)
+    judged = _check_design(t, binding)
     config = load_config(t.root)
     settings = call.Settings.validated(config.section("stages", call.STAGE_DEFAULTS),
                                        config.section("engines", call.ENGINE_DEFAULTS),
@@ -1245,7 +1347,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         receipt = _source(t, h, LAUNCHED, round_log=round_log)
         before = _head(t.root)
         _check_tree(t, receipt, before, LAUNCHED, redact)
-        _check_review_intent(t, receipt, binding, LAUNCHED, current_text=committed_text)
+        _check_review_intent(t, receipt, binding, LAUNCHED, current_text=committed_text, design=judged)
         findings = _select(t, receipt, h, request.findings, LAUNCHED)
         class_ids, classes = _classes(h, findings)
         attempt_id = h.next_id()
@@ -1278,7 +1380,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
                                          lease_json=t.lease_json, bound=bound, packet=packet, config=config,
                                          metadata_json=json.dumps(metadata), max_rounds=limit,
-                                         budget_check=check_budget) as inputs:
+                                         budget_check=check_budget, launch_guard=lambda: _design_launch(t)) as inputs:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                      round_instructions=instructions, timeout_s=request.timeout_s,

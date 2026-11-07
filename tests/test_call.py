@@ -1879,6 +1879,64 @@ def wait_until_gone(pid: int, seconds: float = 10.0) -> bool:
     return False
 
 
+class WindowsOwnedJobTest(unittest.TestCase):
+    def make_child(self, *, active=1, query_ok=True, size=48):
+        import ctypes as ct
+        import struct
+
+        events = []
+        state = {"active": active}
+
+        def query(handle, kind, target, bound, returned):
+            events.append("query")
+            payload = bytearray(48)
+            struct.pack_into("<I", payload, 40, state["active"])
+            ct.memmove(target, bytes(payload), 48)
+            ct.cast(returned, ct.POINTER(ct.c_uint32))[0] = size
+            return int(query_ok)
+
+        def member(process, job, output):
+            ct.cast(output, ct.POINTER(ct.c_int32))[0] = 1
+            return 1
+
+        def times(process, created, exited, kernel, user):
+            ct.cast(created, ct.POINTER(ct.c_uint64))[0] = 1234
+            return 1
+
+        api = types.SimpleNamespace(QueryInformationJobObject=mock.Mock(side_effect=query),
+                    IsProcessInJob=mock.Mock(side_effect=member), GetProcessId=mock.Mock(return_value=37),
+                    GetProcessTimes=mock.Mock(side_effect=times))
+
+        def terminate():
+            events.append("terminate")
+            state["active"] = 0
+
+        def reap(timeout):
+            events.append("reap")
+            return 0
+
+        child = types.SimpleNamespace(pid=37, _handle=51, _oah_job=types.SimpleNamespace(handle=19, api=api,
+                            terminate=terminate), wait=mock.Mock(side_effect=reap))
+        return child, events
+
+    def test_native_shaped_job_waits_for_empty_accounting_before_quiescence(self):
+        child, events = self.make_child()
+        with mock.patch.object(call.os, "name", "nt"):
+            call._kill_owned_tree(child)
+        self.assertEqual(events, ["query", "terminate", "reap", "query"])
+        self.assertTrue(child._oah_windows_identity.startswith("sha256:"))
+
+    def test_failed_short_and_replaced_job_proof_never_becomes_quiescent(self):
+        for values in ({"query_ok": False}, {"size": 44}, {}):
+            with self.subTest(values=values):
+                child, events = self.make_child(**values)
+                if not values:
+                    child._oah_windows_identity = "sha256:" + "0" * 64
+                with mock.patch.object(call.os, "name", "nt"), self.assertRaises(call._CleanupFailed):
+                    call._kill_owned_tree(child)
+                self.assertNotIn("terminate", events)
+
+
 class TimeoutAndBackgroundTest(unittest.TestCase):
     def test_denied_breakaway_fallback_completes_a_real_background_run(self):
         project = Project(self)

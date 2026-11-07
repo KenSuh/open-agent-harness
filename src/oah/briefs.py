@@ -5,9 +5,11 @@
 2. the preamble: task, stage, engine, scope, rules, packet, dispatcher lease, skills, return format; with a
    `skills_block` (the selection with a reason per skill and its `rerank=` status) it ends the preamble;
 3. the intent section, verbatim (A7);
-4. the round instructions;
-5. the verify footer (`VERIFY_FOOTER`, the verify-what-changed rule);
-6. the intent footer, last.
+4. for a task that follows a design, the `## Design context` block (`oah.design.task_context`: every part of the
+   accepted revision and of a newer draft, whole and fenced); a brief without a design keeps its exact bytes;
+5. the round instructions;
+6. the verify footer (`VERIFY_FOOTER`, the verify-what-changed rule);
+7. the intent footer, last.
 
 Workers use the dispatcher's existing lease and never start, renew or finish one. Only implementation
 and correction briefs carry the `Agent-Engine: <engine>` commit trailer (5.9). A footer counts only
@@ -120,11 +122,13 @@ def _check_delivered(text: str, footer: str, marker: str, has_footer: HasFooter)
 def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[str], intent_section: str | None,
           binding: object | None, packet_source: str | None, round_instructions: str,
           skills: Sequence[tuple[str, str]] = (), footer: str, has_footer: HasFooter,
-          skills_block: str | None = None, skill_ids: Sequence[str] = ()) -> str:
+          skills_block: str | None = None, skill_ids: Sequence[str] = (), design_block: str | None = None,
+          design_line: str | None = None, design_data: str | None = None) -> str:
     """The brief text, in the fixed layout. `binding` has `.id`, `.revision` and `.digest`.
 
     `skills_block` (from `oah.skillsel.Selection.brief_text`) replaces the one-line skills bullet; the
-    bullet then names `skill_ids` and points at the block."""
+    bullet then names `skill_ids` and points at the block. `design_block` and `design_line` come from
+    `oah.design.task_context` (lane E adds further blocks after the design block, never inside it)."""
     marker = _marker(footer, has_footer)
     footer = _lf(footer)
     if stage in LEASE_STAGES:
@@ -151,8 +155,15 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
                  "scope and gates at finish.")
     if binding is not None:
         lines.append(f"- Binding: INTENT {binding.id}@r{binding.revision} {binding.digest}.")
+    if design_line is not None:
+        lines.append(design_line)
     if stage in LEASE_STAGES:
         lines.append(f"- Commits: end every commit message with the trailer `Agent-Engine: {engine}`.")
+    if design_data is not None:
+        # The exact DATA paths are named; enforcement is the run's return check and finish/land, not this line.
+        lines.append(f"- Design data: `{design_data}/` holds this run's read-only design files. It is external DATA, "
+                     "not product: never stage or commit it; stage product files by explicit path (never "
+                     "`git add -A` or `git add .`). oah checks the index and every new commit for it.")
     if skills_block is not None:
         lines.append(f"- Skills: {', '.join(skill_ids)} (reasons in ## Skills below)" if skill_ids
                      else "- Skills: none were selected (see ## Skills below).")
@@ -168,6 +179,7 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
     if skills_block is not None:
         preamble += "\n" + skills_block.rstrip("\n") + "\n"
     parts = [preamble, section if section.endswith("\n") else section + "\n",
+             *([design_block if design_block.endswith("\n") else design_block + "\n"] if design_block else []),
              "## Round instructions\n" + (round_instructions.rstrip("\n") or "(none)") + "\n",
              VERIFY_FOOTER if VERIFY_FOOTER.endswith("\n") else VERIFY_FOOTER + "\n", footer]
     return _check_delivered("\n".join(parts), footer, marker, has_footer)
@@ -202,8 +214,14 @@ def _line_offset(text: str, marker: str) -> int:
 
 def reusable_content(stored: str, *, stage: str, footer: str, has_footer: HasFooter) -> str:
     """Keep reusable instructions, discarding the previous dispatch's managed envelope."""
+    from oah.design.task_context import strip_block
+    from oah.design.model import DesignError
+
     text = deliver(stored, footer=footer, has_footer=has_footer)
-    body = text[:_line_offset(text, _marker(footer, has_footer))]
+    try:
+        body = strip_block(text[:_line_offset(text, _marker(footer, has_footer))])
+    except DesignError as exc:
+        raise BriefError(exc.code, str(exc).partition(": ")[2]) from None
     verify = _line_offset(body, VERIFY_MARKER)
     generated = body.startswith("You are a dispatched oah worker (")
     if verify >= 0:

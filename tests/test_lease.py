@@ -55,6 +55,15 @@ class Clock:
 
 
 class StoreTest(unittest.TestCase):
+    def test_oversized_publication_preserves_the_readable_state(self):
+        self.start()
+        before = (self.state / "leases.json").read_bytes()
+        with self.assertRaises(LeaseError) as caught:
+            self.start(task="big", scope=("docs",), note="x" * (8 * 1024 * 1024))
+        self.assertEqual(caught.exception.code, "OAH_STATE_TOO_LARGE")
+        self.assertEqual((self.state / "leases.json").read_bytes(), before)
+        self.assertEqual([lease.task for lease, _ in self.store.snapshot()], ["t1"])
+
     def setUp(self):
         self.root = make_tmp_dir(self)
         self.state = self.root / "state"

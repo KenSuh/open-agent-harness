@@ -348,8 +348,11 @@ def _approval_current(s: Series, latest: Entry) -> bool:
 
 def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, settings: ReviewSettings,
          extra_attempt: bool = False, binding: oah_intent.Binding | None = None,
-         budget: TaskBudget | None = None) -> str | None:
-    """Refuse before any paid call; `"converged"` means this head is already approved."""
+         budget: TaskBudget | None = None, design=None) -> str | None:
+    """Refuse before any paid call; `"converged"` means this head is already approved.
+
+    `design` (an `oah.design.binding.ReviewEvidence`, None for a task without a design) additionally requires the
+    approving receipt to carry an evidence key the task still counts, while its design is current."""
     if s.problems:
         raise ReviewError(NEEDS_DECISION, "the review history of this series is incomplete or was changed, so "
                           "recurrence cannot be judged and nothing was launched:\n- " + "\n- ".join(s.problems) +
@@ -363,6 +366,7 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
     if (reason is None and latest is not None and latest.record.get("outcome") == CONVERGED
             and latest.record.get("base") == s.base and latest.record.get("head") == head and binding is not None
             and latest.record.get("intent") == binding.to_json()
+            and (design is None or design.counts(latest.record))
             # Receipt numbering is task-wide. Publication supersedes that round's attempts;
             # any higher-numbered call is a later, unfinished round, whatever its base.
             and _approval_current(s, latest)):

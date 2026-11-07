@@ -45,6 +45,10 @@ def register(commands: argparse._SubParsersAction) -> None:
     start.add_argument("--ttl-hours", type=float, default=DEFAULT_TTL_HOURS)
     start.add_argument("--gates", action="append", help="a gate ledger this task must meet; repeat for more "
                                                         "(default: .oah/tasks/<task>/GATES.md when it exists)")
+    start.add_argument("--draft-revision", type=int, metavar="N", help="with --packet: the newer draft of the design "
+                       "you read and found not to change this task (with --draft-digest and --draft-reason)")
+    start.add_argument("--draft-digest", metavar="DIGEST", help="that draft's digest, as oah design task prints it")
+    start.add_argument("--draft-reason", metavar="WHY", help="why the draft does not change this task (recorded)")
     start.add_argument("--json", action="store_true", help="print the lease as JSON")
 
     renew = commands.add_parser("renew", help="extend your lease, optionally with a new scope")
@@ -147,7 +151,8 @@ def _packet_source(raw: str, info: RepoInfo) -> tuple[pathlib.Path, str]:
                          "repository, such as .oah/tasks/<task>/PACKET.md (oah packet new <task>)") from None
 
 
-def _bindable(args: argparse.Namespace, info: RepoInfo) -> tuple[intent.Binding, tuple[str, ...], list[str]]:
+def _bindable(args: argparse.Namespace, info: RepoInfo) -> tuple[intent.Binding, tuple[str, ...], list[str],
+                                                                  packet.CheckResult]:
     """The binding, lease scope and packet warnings from an accepted packet, or a refusal naming the first problem."""
     path, source = _packet_source(args.packet, info)
     result = packet.check(path, task=args.task)
@@ -162,7 +167,162 @@ def _bindable(args: argparse.Namespace, info: RepoInfo) -> tuple[intent.Binding,
         raise LeaseError("OAH_SCOPE_EMPTY", f"the packet's ## Scope lists no paths. List the paths this task may "
                          f"write in {source}, or pass --scope repo to lease the whole repository")
     warnings = [f"warning {warning}" for warning in result.warnings]
-    return result.intent.bind(source), normalize_scope([*result.scope, *explicit], info.root), warnings
+    return result.intent.bind(source), normalize_scope([*result.scope, *explicit], info.root), warnings, result
+
+
+def _default_packet_text(root: pathlib.Path, task: str) -> tuple[str, str | None]:
+    """The task's conventional packet source and its text when it can be read."""
+    source = f".oah/tasks/{task}/PACKET.md"
+    try:
+        return source, intent.read_source(root / source)
+    except intent.SourceError:
+        return source, None
+
+
+def _no_section(task: str, agent: str, found, source: str):
+    from oah.design.binding import BINDING_REQUIRED_CODE, ORIGIN_INVALID_CODE, ORIGIN_UNKNOWN_CODE
+    from oah.design.model import DesignError
+
+    if found.kind == "unknown":
+        return DesignError(ORIGIN_UNKNOWN_CODE, f"whether task {task} follows a design is unknown ({found.detail}); "
+                           "nothing was changed. Repair the state folder, then retry", EXIT_ENVIRONMENT)
+    code = ORIGIN_INVALID_CODE if found.kind == "invalid" else BINDING_REQUIRED_CODE
+    return DesignError(code, f"task {task} follows a design ({found.detail}), and nothing names its design here, so "
+                       f"the lease would not be bound to it; nothing was changed. Restore the packet's ## Design section "
+                       f"(oah packet design {task}), commit it and run oah start --task {task} --agent {agent} --packet "
+                       f"{source}")
+
+
+def _draft_given(args: argparse.Namespace):
+    """(revision, digest, reason) from --draft-revision/--draft-digest/--draft-reason, or None; all or none."""
+    from oah.design.model import INPUT_INVALID_CODE, DesignError, check_digest, check_line, check_revision
+
+    given = [args.draft_revision is not None, args.draft_digest is not None, args.draft_reason is not None]
+    if not any(given):
+        return None
+    if not all(given) or not args.packet:
+        raise DesignError(INPUT_INVALID_CODE, "--draft-revision, --draft-digest and --draft-reason go together, with "
+                          "--packet; give all three")
+    return (check_revision(args.draft_revision, "draft revision"), check_digest(args.draft_digest, "draft digest"),
+            check_line(args.draft_reason, "draft reason"))
+
+
+def _instance(view, locked, repo: str, task: str):
+    """(task identity, previous record or None, resume link or None) for a start or rebind (B1).
+
+    An open lease keeps its instance. A new lease resumes the last instance only when its last epoch ended by
+    expiry; after finish or release the reused label is a new undertaking. A task linked by oah packet new
+    --design but never started keeps that instance."""
+    from oah.design import binding as design
+
+    if locked is not None:
+        record = locked.design_record()
+        if record is not None:
+            return record.identity, record, None
+        if view.record is not None and view.epoch is not None and view.epoch.get("lease_id") == locked.id:
+            return view.record.identity, view.record, None
+        return design.TaskIdentity(repo, task, design.mint_instance()), None, None
+    epoch = view.epoch
+    if epoch is not None and epoch.get("ended") == "expired" and view.record is not None:
+        link = {"expired_lease_id": epoch.get("lease_id"), "expired_event_transaction": epoch.get("end_transaction"),
+                "prior_record_digest": view.record.digest}
+        return view.record.identity, view.record, link
+    if epoch is not None and epoch.get("ended") in ("finished", "released"):
+        return design.TaskIdentity(repo, task, design.mint_instance()), None, None
+    if view.identity is not None and view.identity.repo == repo:
+        return view.identity, None, None
+    return design.TaskIdentity(repo, task, design.mint_instance()), None, None
+
+
+def _design_update(args: argparse.Namespace, info: RepoInfo, store: Store, result: packet.CheckResult | None,
+                   source: str, notes: dict, *, intent_binding: intent.Binding | None = None,
+                   scope: tuple[str, ...] = (), gates: list[str] | None = None, explicit_gates: bool = False):
+    """The locked design step of oah start: refuse a design-origin task without a section, or bind onto the
+    accepted revision for the exact proposed task inputs (B1), resuming an expired instance when it may."""
+    from oah.design import binding as design
+    from oah.lease import _iso, utc_now
+
+    section = result.design if result is not None else None
+    drafted = _draft_given(args)
+
+    def update(locked):
+        view = design.task_view(store.dir, args.task, lease=locked)
+        if section is None:
+            text = result.text if result is not None else _default_packet_text(info.root, args.task)[1]
+            found = design.origin(store.dir, args.task, packet_text=text, root=info.root, source=source, view=view)
+            if found is None and locked is not None and (locked.design is not None or locked.design_invalid):
+                found = design.Origin("lease", "its lease records a design")
+            if found is not None:
+                raise _no_section(args.task, args.agent, found, source)
+            return None, None, {}
+        if view.unreadable is not None or view.problem is not None:
+            raise _no_section(args.task, args.agent, design.origin(store.dir, args.task, view=view), source)
+        try:
+            identity, old, resume = _instance(view, locked, design.repo_identity(info.root), args.task)
+        except design.RecordInvalid as exc:
+            raise design.judge(None, root=info.root, invalid=exc.identity).error("start", args.task, args.agent)
+        root = pathlib.Path(locked.worktree) if locked is not None else info.root
+        context = design.read_context(section.binding(), root=root)
+        if isinstance(context, design.TaskDesign):
+            raise context.error("start", args.task, args.agent)
+        declared = list(gates or []) if locked is None or explicit_gates else list(locked.gates)
+        basis = design.TaskBasis.of(identity, project_uid=section.uid, design=section.design,
+                                    intent=intent_binding.to_json() if intent_binding is not None else None,
+                                    scope=scope, gates=declared)
+        draft = None
+        if drafted is not None:
+            authority = design.authority_of(locked) if locked is not None else None
+            draft = design.draft_decision(context, basis=basis.digest, revision=drafted[0], digest=drafted[1],
+                                          reason=drafted[2], actor=args.agent, at=_iso(utc_now()),
+                                          authority=authority, task=args.task)
+            if draft is None:
+                notes.setdefault("warnings", []).append(
+                    "OAH_DESIGN_DRAFT_UNUSED: there is no newer draft than the accepted revision, so the draft "
+                    "acknowledgment was not recorded")
+        record, action, warnings = design.next_record(old, section, context, identity=identity, basis=basis,
+                                                      draft=draft)
+        design.require_fits(record, args.task)
+        judged = design.judge_with_context(record, context)
+        judged.require("start", task=args.task, agent=args.agent)
+        from oah.design import task_context
+
+        block = task_context.readout_block(judged, task=args.task, root=root)
+        notes.setdefault("warnings", []).extend(warnings)
+        notes.update(action=action, record=record, readout=block, judged=judged)
+        extra = {"design_packet": section.to_json(), "task_basis_digest": basis.digest}
+        if locked is None or locked.design is None:  # the epoch's first design binding: capture its outputs
+            extra["design_output_baseline"] = design.output_baseline(
+                root, _wiki_settings(root), record.binding, head=locked.head_at_start if locked is not None
+                else info.head)
+        if resume is not None:
+            extra["resume_from"] = resume
+        if old is not None and old.basis != basis.digest:
+            extra["old_task_basis_digest"] = old.basis
+        return record.to_json(), action, extra
+
+    return update
+
+
+def _design_readout(lease: Lease, notes: dict, as_json: bool) -> tuple[list[str], dict | None]:
+    """After a bound start: the state line and the design text (or an explicit non-delivery), read lock-free."""
+    record = notes.get("record")
+    if record is None:
+        return [], None
+    judged = notes["judged"]
+    block = notes["readout"]
+    word = {"bound": "OAH_DESIGN_BOUND", "rebound": "OAH_DESIGN_REBOUND", "kept": "OAH_DESIGN_BINDING_KEPT",
+            "rebased": "OAH_DESIGN_INPUTS_REBOUND"}
+    lines = [f"{word[notes['action']]} task={lease.task} {record.binding.line()} state={judged.state} "
+             f"instance={record.identity.instance}"]
+    if notes["action"] in ("rebound", "rebased"):
+        lines.append("note: the task's requirements or inputs moved; review receipts and gate evidence made for the "
+                     "earlier binding or inputs no longer count")
+    if not as_json:
+        lines.append(block.readout().rstrip("\n"))
+    # Start offers the text; delivery is a terminal fact of a run that received it.
+    data = {"state": judged.state, "delivered": False, "offered": block.delivered, "block": block.text,
+            "record": block.record, "plan": block.plan}
+    return lines, data
 
 
 def _start(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
@@ -174,31 +334,49 @@ def _start(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     gates = _ledger_paths(args.gates, info)
     if args.packet:
         return _start_packet(args, info, store, gates)
+    if any(value is not None for value in (args.draft_revision, args.draft_digest, args.draft_reason)):
+        print("OAH_USAGE: --draft-revision, --draft-digest and --draft-reason need --packet", file=sys.stderr)
+        return EXIT_USAGE
     scope = normalize_scope(args.scope, info.root)
+    source, _text = _default_packet_text(info.root, args.task)
     lease = store.start(task=args.task, agent=args.agent, scope=scope, note=args.note, ttl_hours=args.ttl_hours,
-                        info=info, gates=gates)
+                        info=info, gates=gates, design_update=_design_update(args, info, store, None, source, {}))
     print(json.dumps(lease.public_json(), indent=2, ensure_ascii=True) if args.json
           else f"OAH_LEASE_STARTED {_summary(lease)}")
     return EXIT_OK
 
 
 def _start_packet(args: argparse.Namespace, info: RepoInfo, store: Store, gates: list[str]) -> int:
-    binding, scope, warnings = _bindable(args, info)
+    binding, scope, warnings, result = _bindable(args, info)
     named = f"intent={binding.id}@r{binding.revision} {binding.digest}"
+    notes: dict = {}
+    update = _design_update(args, info, store, result, binding.source, notes, intent_binding=binding, scope=scope,
+                            gates=gates, explicit_gates=bool(args.gates))
     try:
         lease = store.start(task=args.task, agent=args.agent, scope=scope, note=args.note, ttl_hours=args.ttl_hours,
-                            info=info, gates=gates, intent=binding)
+                            info=info, gates=gates, intent=binding, design_update=update)
         line = f"OAH_LEASE_STARTED {_summary(lease)} {named}"
     except LeaseError as exc:
         if exc.code != "OAH_LEASE_EXISTS":
             raise
         lease, action = store.rebind(task=args.task, agent=args.agent, binding=binding, ttl_hours=args.ttl_hours,
-                                     scope=scope, gates=gates if args.gates else None)
+                                     scope=scope, gates=gates if args.gates else None, design_update=update)
         word = {"bound": "OAH_INTENT_BOUND", "rebound": "OAH_INTENT_REBOUND", "unchanged": "OAH_INTENT_UNCHANGED"}
         line = f"{word[action]} task={lease.task} {named} expires={lease.expires_at}"
     for warning in warnings:
         print(warning, file=sys.stderr)
-    print(json.dumps(lease.public_json(), indent=2, ensure_ascii=True) if args.json else line)
+    for warning in notes.get("warnings", ()):
+        print(f"warning {warning}", file=sys.stderr)
+    design_lines, design_data = _design_readout(lease, notes, args.json)
+    if args.json:
+        data = lease.public_json()
+        if design_data is not None:
+            data["design_context"] = design_data
+        print(json.dumps(data, indent=2, ensure_ascii=True))
+    else:
+        print(line)
+        for item in design_lines:
+            print(item)
     return EXIT_OK
 
 
@@ -220,20 +398,54 @@ def _renew(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     return EXIT_OK
 
 
+def lease_design(lease: Lease, state: pathlib.Path, *, packet_text: str | None = None, source: str | None = None,
+                 root: pathlib.Path | None = None):
+    """The judged design of an open lease: its record against the basis rederived from the lease's own intent,
+    scope and gates; for a lease without a record, the task's origin evidence decides (legacy or required)."""
+    from oah.design import binding as design
+
+    root = root or pathlib.Path(lease.worktree)
+    view = design.task_view(state, lease.task, lease=lease)
+    if view.unreadable is not None or view.problem is not None:
+        return design.judge_task(state, lease.task, root=root, view=view, packet_text=packet_text, source=source)
+    try:
+        record = lease.design_record()
+    except design.RecordInvalid as exc:
+        return design.judge(None, root=root, invalid=exc.identity)
+    if record is None:
+        # The caller's lease is the record: never re-read leases.json here (fix captures it exactly once).
+        found = design.origin(state, lease.task, packet_text=packet_text, root=root if source else None,
+                              source=source, view=design.task_view(state, lease.task, lease=lease))
+        if found is None and lease.design_invalid:
+            found = design.Origin("lease", "its lease records a design")
+        return design.judge(None, root=root, found=found)
+    return design.judge_task(state, lease.task, root=root, view=view, packet_text=packet_text, source=source)
+
+
+def _design_state(lease: Lease, state: pathlib.Path) -> tuple[str, str]:
+    """The lease's design state and reason, read-only."""
+    judged = lease_design(lease, state)
+    return judged.state, judged.reason
+
+
 def _status(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     entries = store.snapshot()
     states = [_intent_state(lease) for lease, _stale in entries]
+    designs = [_design_state(lease, store.dir) for lease, _stale in entries]
     if args.json:
-        print(json.dumps({"leases": [dict(lease.public_json(), stale=stale, intent_state=state, intent_reason=reason)
-                                     for (lease, stale), (state, reason) in zip(entries, states)]},
+        print(json.dumps({"leases": [dict(lease.public_json(), stale=stale, intent_state=state, intent_reason=reason,
+                                          design_state=design_state, design_reason=design_reason)
+                                     for (lease, stale), (state, reason), (design_state, design_reason)
+                                     in zip(entries, states, designs)]},
                          indent=2, ensure_ascii=True))
         return EXIT_OK
     if not entries:
         print("no leases")
         return EXIT_OK
-    for (lease, stale), (intent_state, _reason) in zip(entries, states):
+    for (lease, stale), (intent_state, _reason), (design_state, _why) in zip(entries, states, designs):
         state = "STALE" if stale else "active"
-        print(f"{state:6}  {_summary(lease)}  intent={intent_state}  worktree={lease.worktree}")
+        shown = f"  design={design_state}" if design_state != "unbound" else ""
+        print(f"{state:6}  {_summary(lease)}  intent={intent_state}{shown}  worktree={lease.worktree}")
     return EXIT_OK
 
 
@@ -380,10 +592,111 @@ def _check_intent(args: argparse.Namespace, lease: Lease) -> dict | None:
     return {"line": binding.line(), "acs": {ac: statuses[ac] for ac in binding.acs}}
 
 
+def _packet_section(lease: Lease, record) -> None:
+    """The bound packet must still name the task's design, at a revision the task follows or carried to."""
+    from oah.design.binding import SOURCE_MISMATCH_CODE, SectionInvalid, parse_section
+    from oah.design.model import DesignError
+
+    binding = lease.binding()
+    if binding is None:
+        return
+    try:
+        section = parse_section(intent.read_source(intent.source_path(binding, pathlib.Path(lease.worktree))))
+    except (intent.SourceError, SectionInvalid):
+        section = None
+    if section is None or not record.same_design(section) or not record.holds(section.binding()):
+        named = section.line() if section is not None else "no valid design"
+        raise DesignError(SOURCE_MISMATCH_CODE, f"the bound packet {binding.source} names {named}, but task "
+                          f"{lease.task} follows {record.binding.line()}; restore the packet's Design section, or "
+                          f"rewrite it with oah packet design {lease.task} and rebind with oah start --packet")
+
+
+def _wiki_settings(root: pathlib.Path) -> WikiSettings:
+    return WikiSettings.from_mapping(load_config(root).section("wiki", WIKI_DEFAULTS)).for_root(root)
+
+
+def _design_outputs(lease: Lease, store: Store, record, changed: list[str]) -> dict:
+    """B2's generated-content equivalence report for this lease's changed design outputs."""
+    from oah.design import binding as design
+
+    view = design.task_view(store.dir, lease.task, lease=lease)
+    epoch = view.epoch or {}
+    baseline = epoch.get("output_baseline") if epoch.get("lease_id") == lease.id else None
+    root = pathlib.Path(lease.worktree)
+    return design.generated_outputs(root, _wiki_settings(root), record, changed, baseline)
+
+
+def _finish_design(lease: Lease, store: Store):
+    """Judge the design before the gates (refusing early), and return the check `Store.finish` repeats under its
+    lock, at the control point itself; None for an origin-free (legacy) task."""
+    root = pathlib.Path(lease.worktree)
+    source = lease.binding().source if lease.intent is not None else f".oah/tasks/{lease.task}/PACKET.md"
+    try:
+        text = intent.read_source(root / source)
+    except intent.SourceError:
+        text = None
+    judged = lease_design(lease, store.dir, packet_text=text, source=source)
+    judged.require("finish", task=lease.task, agent=lease.agent)
+    if judged.state == "unbound":
+        return None
+    _packet_section(lease, judged.task)
+
+    def locked(live: Lease, recompute=None, preliminary=None) -> dict:
+        from oah.design.binding import CHANGED_CODE
+        from oah.design.model import DesignError
+
+        again = lease_design(live, store.dir)
+        if again.state == "unbound":  # a design-bound lease cannot turn legacy between the two checks
+            from oah.design import binding as design
+
+            again = design.judge(None, root=pathlib.Path(live.worktree),
+                                 found=design.Origin("lease", "its lease recorded a design"))
+        again.require("finish", task=live.task, agent=live.agent)
+        if again.task != judged.task:
+            raise DesignError(CHANGED_CODE, f"the design record of task {live.task} changed during finish; the lease "
+                              "stays open. Run oah finish again")
+        outputs = recompute(live) if recompute is not None else None
+        if outputs is not None and preliminary is not None and outputs != preliminary:
+            raise DesignError(CHANGED_CODE, f"the design outputs of task {live.task} changed during finish (a file was "
+                              "added, changed or became unreadable); the lease stays open. Run oah finish again")
+        report = {"version": 1, "state": again.state, "fingerprint": again.fingerprint(),
+                  "evidence_key": again.task.key}
+        if outputs is not None:
+            report["outputs"] = outputs
+        return {"design_report": report}
+
+    return locked
+
+
+def _transport_guard(lease: Lease, store: Store):
+    """SC4-P4's scope-independent transport guard: every retained origin that can intersect this worktree is
+    replayed and re-checked before gates, generated outputs and ordinary scope. A task with none passes as before."""
+    from oah.design import task_context
+    from oah.design.binding import repo_identity
+    from oah.design.model import DesignError
+
+    root = pathlib.Path(lease.worktree)
+    record = lease.design if isinstance(lease.design, dict) else None
+    current = None
+    if record is not None and isinstance(record.get("task_identity"), dict):
+        current = {"task_instance_id": record["task_identity"].get("task_instance_id"),
+                   "task_basis_digest": record.get("basis")}
+    try:
+        repo = repo_identity(root)
+    except DesignError:
+        repo = None
+    result = task_context.completion_guard(store.dir, lease.task, root=root, repo=repo, current=current)
+    if not result.ok:
+        raise DesignError(result.code, f"task {lease.task}: {result.reason}; the lease stays open")
+    return result
+
+
 def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     _refuse_worker_lease()
     lease = store.inspect(args.task)
     intent_report = _check_intent(args, lease)
+    design_check = _finish_design(lease, store)
+    transport = _transport_guard(lease, store)
     # The task's ledgers and summary are gate artifacts written by oah and unlazy, not changes to the scope.
     artifacts = {f".oah/tasks/{lease.task}/{LEDGER_NAME}", f".oah/tasks/{lease.task}/{SUMMARY_NAME}", *lease.gates}
     if intent_report is not None:
@@ -391,6 +704,41 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     root = pathlib.Path(lease.worktree)
     wiki_exempt, wiki_report = _wiki_maintenance(root, lease, args.allow_missing_wiki_maintenance)
     changed = [name for name in _changed_files(lease, info) if name not in artifacts and name not in wiki_exempt]
+    if transport.exempt:
+        # Only exact retained owned DATA leaves (ACK_RETAINED present-unchanged) leave ordinary change accounting.
+        retained = set(transport.exempt)
+        changed = [name for name in changed if name not in retained]
+    if design_check is not None:
+        # Only exact generated outputs of the bound design leave ordinary scope; the design state check above is
+        # independent of scope and of --allow-out-of-scope. Store.finish recomputes all of it under its lock.
+        record = lease.design_record()
+        outputs = _design_outputs(lease, store, record, changed)
+        exempt = {item["path"] for item in outputs["verified"]}
+        changed = [name for name in changed if name not in exempt]
+        first_check = design_check
+
+        def recompute(live: Lease) -> dict:
+            names = [name for name in _changed_files(live, info) if name not in artifacts and name not in wiki_exempt]
+            return _design_outputs(live, store, live.design_record(), names)
+
+        def design_check(live: Lease, _first=first_check, _outputs=outputs) -> dict:
+            return _first(live, recompute, _outputs)
+    inner = design_check
+
+    def design_check(live: Lease, _inner=inner, _first=transport) -> dict:
+        from oah.design.binding import CHANGED_CODE
+        from oah.design.model import DesignError
+
+        again = _transport_guard(live, store)
+        if again.exempt != _first.exempt:
+            raise DesignError(CHANGED_CODE, f"the design transport accounting of task {live.task} changed during "
+                              "finish; the lease stays open. Run oah finish again")
+        fields = dict((_inner(live) if _inner is not None else None) or {})
+        if fields and again.origins:
+            fields["transport_report"] = {"version": 1, "origins": [item["origin"] for item in again.origins
+                                                                      if item["task"] == live.task],
+                                          "exempt": list(again.exempt)}
+        return fields
     settings = load_config(root).section("gates", GATE_DEFAULTS)
     # unlazy is looked up (and its pin verified) only when a ledger governs this task.
     ledgers = guard.resolve_ledgers(root, lease.task, lease.gates)
@@ -404,7 +752,7 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
                                  summary=args.summary, changed=changed,
                                  allow_out_of_scope=args.allow_out_of_scope, gate_report=report.event(len(ledgers)),
                                  wiki_report=wiki_report, intent_report=intent_report, checked_binding=lease.binding(),
-                                 checked_generation=lease.generation)
+                                 checked_generation=lease.generation, design_check=design_check)
     extra = f" out_of_scope={','.join(beyond)}" if beyond else ""
     if intent_report is not None:
         extra += f" intent={intent_report['line'].split(' ')[1]}"
