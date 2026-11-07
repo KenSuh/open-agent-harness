@@ -163,6 +163,15 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
     for name, value in (("head", head), ("base", base)):
         if not _SHA.fullmatch(value or ""):
             raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", f"the {name} {value!r} is not a full commit SHA")
+    if dispose is not None:
+        from oah.design import task_context as tc
+
+        try:
+            temp_root = tc._trusted_root(pathlib.Path(temp_root) if temp_root is not None else
+                                         pathlib.Path(tempfile.gettempdir()))
+        except (OSError, ValueError, tc.RootUnavailable) as exc:
+            raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", "the design snapshot temporary base cannot be anchored; "
+                              "check its path, permissions and local filesystem, then retry") from exc
     parent = pathlib.Path(tempfile.mkdtemp(prefix="oah-review-", dir=temp_root))
     created = None
     try:
@@ -170,9 +179,8 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
             from oah.design import task_context as tc
 
             try:
-                parent = tc._trusted_root(parent)
-                created = _container_object(parent)
-            except (OSError, ValueError, tc.InstallRefused, tc.RootUnavailable) as exc:
+                created = _container_object(parent, empty=True)
+            except (OSError, ValueError, tc.InstallRefused, tc.RootUnavailable, Retained) as exc:
                 raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", "the design snapshot root cannot be anchored; "
                                   "check its path, permissions and local filesystem, then retry") from exc
         hooks = parent / "no-hooks"
@@ -196,15 +204,18 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
         _strip(tree, removed)
         yield Snapshot(tree=tree, head=head, stripped=tuple(removed), parent=parent)
     finally:
-        if dispose is None or created is None:
+        if dispose is None:
             if not remove(parent) and warnings is not None:
                 warnings.append(f"OAH_REVIEW_SNAPSHOT_LEFT: the review snapshot {parent} could not be removed; "
                                 "delete it by hand once no reviewer process uses it")
         else:
-            try:
-                outcome = dispose(parent, created)
-            except (OSError, ValueError, RuntimeError, Retained, PlanUnavailable) as exc:
-                outcome = ("retained", f"the disposal check failed ({type(exc).__name__})")
+            if created is None:
+                outcome = ("retained", "the allocation's original directory identity could not be verified")
+            else:
+                try:
+                    outcome = dispose(parent, created)
+                except (OSError, ValueError, RuntimeError, Retained, PlanUnavailable) as exc:
+                    outcome = ("retained", f"the disposal check failed ({type(exc).__name__})")
             if not (isinstance(outcome, tuple) and len(outcome) == 2
                     and outcome[0] in ("disposed", "legacy-disposed", "disposed-noncounting", "retained")):
                 outcome = ("retained", "the disposal check returned no valid result")
@@ -355,15 +366,28 @@ def _object_digest(info: os.stat_result) -> str:
                                                  info.st_uid, info.st_gid])).hexdigest()
 
 
-def _container_object(path: pathlib.Path) -> dict:
-    if os.name != "nt":
-        return _container_stat(os.lstat(path))
+def _container_object(path: pathlib.Path, *, empty: bool = False) -> dict[str, int | str]:
     from oah.design import task_context as tc
 
+    if os.name != "nt":
+        descriptor = tc._continuity_open(path)
+        try:
+            created = _container_stat(os.fstat(descriptor))
+            if empty:
+                with os.scandir(descriptor) as entries:
+                    if next(entries, None) is not None:
+                        raise Retained("the new snapshot container already has unowned entries")
+            if _container_stat(os.lstat(path)) != created:
+                raise Retained("the snapshot container changed while it was anchored")
+            return created
+        finally:
+            os.close(descriptor)
     native = tc._WindowsIO()
     held, anchors = native.open_anchor(path)
     try:
         info = native.info(held)
+        if empty and native.names(held, limit=1):
+            raise Retained("the new snapshot container already has unowned entries")
         return _native_container(info)
     finally:
         for handle in reversed(anchors):

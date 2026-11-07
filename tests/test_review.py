@@ -7,13 +7,14 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
 from oah.config import ConfigError
 from oah.review import (ReviewError, authors, canary, context, prompt, receipts, runner, schema, settings,
                         snapshot)
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
 
 SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
 
@@ -345,16 +346,127 @@ class SnapshotTest(unittest.TestCase):
                     with snapshot.make(repo, head, base=base, temp_root=temporary, dispose=dispose):
                         pass
 
-    def test_failed_windows_container_anchor_removes_the_allocated_temp_folder(self):
+    def test_failed_container_anchor_retains_the_unverified_allocation(self):
         repo, base, head = self.repo_with_history()
         temporary = make_tmp_dir(self)
+        warnings = []
         with mock.patch.object(snapshot, "_container_object", side_effect=FileNotFoundError("RUNNER~1")):
             with self.assertRaises(ReviewError) as caught:
-                with snapshot.make(repo, head, base=base, temp_root=temporary, dispose=lambda *_: None):
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=lambda *_: self.fail("an unverified allocation cannot be disposed")):
                     self.fail("the failed anchor cannot yield a snapshot")
         self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_FAILED")
         self.assertIn("permissions", str(caught.exception))
-        self.assertEqual(list(temporary.iterdir()), [])
+        self.assertEqual(len(list(temporary.iterdir())), 1)
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    def test_design_snapshot_retains_link_before_allocation_identity(self):
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        other = make_tmp_dir(self)
+        marker = other / "keep.txt"
+        marker.write_bytes(b"existing fixture contents\n")
+        original_mkdtemp = tempfile.mkdtemp
+        allocations = []
+
+        def exchange(*args, **kwargs):
+            name = original_mkdtemp(*args, **kwargs)
+            if kwargs.get("prefix") == "oah-review-":
+                allocated = pathlib.Path(name)
+                original = allocated.with_name(allocated.name + "-original")
+                allocated.rename(original)
+                directory_alias(other, allocated)
+                allocations.append((allocated, original))
+            return name
+
+        outcomes, warnings = [], []
+        code = None
+        with mock.patch.object(snapshot.tempfile, "mkdtemp", exchange):
+            try:
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-link", outcomes)):
+                    pass
+            except ReviewError as exc:
+                code = exc.code
+        self.assertEqual(marker.read_bytes(), b"existing fixture contents\n")
+        self.assertEqual(code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertEqual(list(other.iterdir()), [marker])
+        self.assertEqual(len(allocations), 1)
+        allocated, original = allocations[0]
+        self.assertTrue(os.path.lexists(allocated))
+        self.assertTrue(original.is_dir())
+        self.assertEqual(outcomes, [])
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    def test_design_snapshot_retains_replacement_after_allocation_identity(self):
+        repo, base, head = self.repo_with_history()
+        for linked in (False, True):
+            with self.subTest(linked=linked):
+                temporary, other = make_tmp_dir(self), make_tmp_dir(self)
+                outcomes, warnings = [], []
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-replaced", outcomes)) as snap:
+                    parent = snap.parent
+                    assert parent is not None
+                    original = parent.with_name(parent.name + "-original")
+                    parent.rename(original)
+                    if linked:
+                        directory_alias(other, parent)
+                    else:
+                        parent.mkdir()
+                    marker = parent / "keep.txt"
+                    marker.write_bytes(b"replacement contents\n")
+                self.assertEqual(marker.read_bytes(), b"replacement contents\n")
+                self.assertTrue((original / "tree/src/app.py").is_file())
+                self.assertEqual(outcomes[0][0], "retained")
+                self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    def test_design_snapshot_refuses_nonempty_allocation_before_use(self):
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        original_mkdtemp = tempfile.mkdtemp
+        markers = []
+
+        def populate(*args, **kwargs):
+            name = original_mkdtemp(*args, **kwargs)
+            if kwargs.get("prefix") == "oah-review-":
+                marker = pathlib.Path(name) / "keep.txt"
+                marker.write_bytes(b"existing allocation contents\n")
+                markers.append(marker)
+            return name
+
+        code = None
+        outcomes, warnings = [], []
+        with mock.patch.object(snapshot.tempfile, "mkdtemp", populate):
+            try:
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-nonempty", outcomes)):
+                    pass
+            except ReviewError as exc:
+                code = exc.code
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0].read_bytes(), b"existing allocation contents\n")
+        self.assertEqual(code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertEqual(list(markers[0].parent.iterdir()), markers)
+        self.assertEqual(outcomes, [])
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    @unittest.skipUnless(os.name == "posix" and pathlib.Path("/var/tmp").is_dir(), "POSIX /var/tmp base")
+    def test_design_snapshot_disposes_under_unresolved_var_tmp_base(self):
+        repo, base, head = self.repo_with_history()
+        outcomes, warnings = [], []
+        with tempfile.TemporaryDirectory(prefix="oah-allocation-", dir="/var/tmp") as temporary:
+            selected = pathlib.Path(temporary)
+            with snapshot.make(repo, head, base=base, temp_root=selected, warnings=warnings,
+                               dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-normal", outcomes)) as snap:
+                parent = snap.parent
+                assert parent is not None
+                self.assertEqual(parent.parent, selected.resolve())
+                self.assertEqual((snap.tree / "src/app.py").read_bytes(), b"print('hi')\n")
+            self.assertEqual(list(selected.iterdir()), [])
+            self.assertFalse(parent.exists())
+        self.assertEqual(outcomes, [("legacy-disposed", None)])
+        self.assertEqual(warnings, [])
 
     def test_design_free_snapshot_keeps_working_when_design_native_identity_is_unavailable(self):
         from oah.design import task_context as tc
