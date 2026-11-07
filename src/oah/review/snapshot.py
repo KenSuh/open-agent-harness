@@ -175,6 +175,7 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
                               "check its path, permissions and local filesystem, then retry") from exc
     parent = pathlib.Path(tempfile.mkdtemp(prefix="oah-review-", dir=temp_root))
     created = None
+    identity_failure = None
     try:
         if dispose is not None:
             from oah.design import task_context as tc
@@ -205,14 +206,17 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
         _strip(tree, removed)
         yield Snapshot(tree=tree, head=head, stripped=tuple(removed), parent=parent,
                        created=dict(created) if created is not None else None)
+    except CreationRetained as exc:
+        identity_failure = str(exc)
+        raise
     finally:
         if dispose is None:
             if not remove(parent) and warnings is not None:
                 warnings.append(f"OAH_REVIEW_SNAPSHOT_LEFT: the review snapshot {parent} could not be removed; "
                                 "delete it by hand once no reviewer process uses it")
         else:
-            if created is None:
-                outcome = ("retained", "the allocation's original directory identity could not be verified")
+            if created is None or identity_failure is not None:
+                outcome = ("retained", identity_failure or "the allocation's original directory identity could not be verified")
             else:
                 try:
                     outcome = dispose(parent, created)
@@ -355,6 +359,10 @@ class Retained(Exception):
     """Validation or guarded removal stopped; the precise remainder stays."""
 
 
+class CreationRetained(Retained):
+    pass
+
+
 def _canonical(data) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
 
@@ -417,12 +425,12 @@ def require_creation_identity(parent: pathlib.Path, created: dict[str, int | str
                     or (set(created) == {"dev", "ino", "type", "mode", "security"}
                         and isinstance(created["security"], str) and created["security"]))
             or any(identity != created for identity in recorded)):
-        raise Retained("the snapshot has no consistent original creation identity")
+        raise CreationRetained("the snapshot has no consistent original creation identity")
     try:
         if current and _container_object(parent) != created:
-            raise Retained("the snapshot folder is not the one this review created")
+            raise CreationRetained("the snapshot folder is not the one this review created")
     except (OSError, ValueError, tc.InstallRefused, tc.RootUnavailable) as exc:
-        raise Retained("the snapshot creation identity cannot be verified") from exc
+        raise CreationRetained("the snapshot creation identity cannot be verified") from exc
     return dict(created)
 
 

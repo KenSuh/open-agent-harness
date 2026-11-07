@@ -546,6 +546,33 @@ class ReviewDesignTest(unittest.TestCase):
             with self.subTest(phase=phase):
                 self.origin_round(interrupt=False, replacement=phase)
 
+    def test_identity_refusal_retains_snapshot_even_when_the_next_anchor_succeeds(self):
+        from oah.design import task_context as tc
+        from oah.review import ReviewError, receipts, snapshot
+
+        project = design_fix_project(self)
+        identity = snapshot._container_object
+        allocated, refused = [], []
+
+        def unavailable_once(parent, *, empty=False):
+            if empty:
+                allocated.append(parent)
+            elif not refused:
+                refused.append(parent)
+                raise tc.InstallRefused("temporary native identity read refusal")
+            return identity(parent, empty=empty)
+
+        with mock.patch.object(snapshot, "_container_object", unavailable_once):
+            with self.assertRaises(ReviewError) as caught:
+                project.review()
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_RETAINED")
+        self.assertEqual(len(allocated), 1)
+        self.assertEqual(len(refused), 1)
+        self.assertTrue(allocated[0].is_dir(), "an identity refusal must keep its allocation")
+        self.assertEqual((allocated[0] / "tree/src/app.py").read_bytes(), (project.repo / "src/app.py").read_bytes())
+        self.assertEqual(project.calls(), [])
+        self.assertFalse(any(line.get("counted") for line in receipts.read_round_log(project.state, "t1")))
+
     @unittest.skipUnless(pathlib.Path("/var/tmp").is_dir(), "unresolved /var/tmp control")
     def test_design_reviews_dispose_and_count_under_unresolved_var_tmp(self):
         from oah.review import receipts
