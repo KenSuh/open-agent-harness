@@ -13,7 +13,11 @@ Data sent, and nothing else:
   or the user's request before one exists, then the Scope paths), cut to WORK_LIMIT characters in all, with one
   Choice question over the tiers. Never source code, diffs, file contents or stored values;
 - model judgement: the stage, the tier, the four axes and the candidate (model, effort) pairs, with
-  one Choice question over the candidates. No task text, code or paths.
+  one Choice question over the candidates. No task text, code or paths;
+- source and material judgement (`oah.rerank.judge`, off unless `[rerank.judgement] enabled = true`): slices of
+  verified public snapshots, fixed labels and, only with `send_design_text = true`, design excerpts, with oah's
+  closed rubric questions: a Choice plus a Noul on whether any option fits, or one Noul per label. Its reply is
+  parsed strictly: a repeated key or a non-finite number fails the whole answer.
 
 The key goes only into the Authorization header. Errors carry a short code, never response text.
 """
@@ -22,13 +26,14 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import re
 import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, Mapping, Sequence, TypeVar, cast
 
-from oah.rerank.base import (BAD_REQUEST, BAD_RESPONSE, HTTP_ERROR_PREFIX, INSECURE_URL, INVALID_HEADER, NETWORK,
+from oah.rerank.base import (BAD_REQUEST, BAD_RESPONSE, HTTP_ERROR_PREFIX, INSECURE_URL, INVALID_HEADER, NETWORK, JudgeReply,
                              OVERLOADED, RATE_LIMITED, TIMEOUT, TIERS, UNAUTHORIZED, Candidate, ProviderError,
                              _classify_failure, _raise_if_interrupted)
 from oah.secrets import Secret
@@ -40,6 +45,7 @@ DESCRIPTION_LIMIT = 200
 WORK_LIMIT = 16_000  # characters, about 4,000 tokens, over the whole work text
 RESPONSE_LIMIT = 4 * 1024 * 1024
 PROBABILITY_SUM_TOLERANCE = 0.01
+SCORE_TOLERANCE = 0.05
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 STATUS_CODES = {401: UNAUTHORIZED, 429: RATE_LIMITED, 529: OVERLOADED}
 
@@ -267,6 +273,107 @@ def _parse_model_response(body: object, count: int) -> tuple[tuple[int, float | 
         del body, count, answers, answer, probabilities, confidence
 
 
+def build_judgement_request(model: str, state: Mapping[str, object], questions: Mapping[str, Mapping]) -> dict:
+    """A closed-purpose question set: the state holds only tagged field texts; every question is oah's rubric text,
+    a Choice with its companion Noul on whether any option fits, or one Noul per label."""
+    return {"model": model, "state": dict(state),
+            "questions": {name: dict(question) for name, question in questions.items()}}
+
+
+def parse_judgement_response(body: object, questions: Mapping[str, Mapping]) -> JudgeReply:
+    result = code = None
+    try:
+        try:
+            result, code = _outcome(_parse_judgement_response, body, questions)
+        finally:
+            del body, questions
+        return _finish(result, code)
+    finally:
+        del result, code
+
+
+def _parse_judgement_response(body: object, questions: Mapping[str, Mapping]) -> tuple[JudgeReply | None,
+                                                                                       str | None]:
+    """Exactly the asked question ids, each answered in its own type; a missing, extra or malformed answer fails."""
+    answers = answer = probabilities = confidence = None
+    try:
+        answers = _answers(body)
+        if answers is None or set(answers) != set(questions):
+            return None, BAD_RESPONSE
+        parsed = {}
+        for name, question in questions.items():
+            answer = answers[name]
+            if not isinstance(answer, Mapping) or answer.get("type") != question["type"]:
+                return None, BAD_RESPONSE
+            if question["type"] == "noul":
+                noul = _number(answer.get("noul"))
+                if set(answer) != {"type", "noul"} or noul is None or not 0.0 <= noul <= 1.0:
+                    return None, BAD_RESPONSE
+                parsed[name] = {"type": "noul", "noul": noul}
+                continue
+            if question["type"] == "score":
+                levels = question["criteria"]
+                keys = tuple(str(index) for index in range(len(levels)))
+                legend = {str(index): text for index, text in enumerate(levels)}
+                probabilities = answer.get("probabilities")
+                score, confidence = _number(answer.get("score")), _number(answer.get("confidence"))
+                if set(answer) != {"type", "score", "confidence", "legend", "probabilities"} or \
+                        answer.get("legend") != legend or not isinstance(probabilities, Mapping) or \
+                        set(probabilities) != set(keys) or score is None or confidence is None or \
+                        not 0 <= confidence <= 1 or not 0 <= score <= len(levels) - 1:
+                    return None, BAD_RESPONSE
+                scores = {key: _number(probabilities[key]) for key in keys}
+                if any(value is None or not 0 <= value <= 1 for value in scores.values()) or \
+                        abs(math.fsum(scores.values()) - 1) > PROBABILITY_SUM_TOLERANCE or \
+                        abs(math.fsum(int(key) * value for key, value in scores.items()) - score) > SCORE_TOLERANCE:
+                    return None, BAD_RESPONSE
+                parsed[name] = {"type": "score", "score": score, "confidence": confidence,
+                                "legend": legend, "probabilities": scores}
+                continue
+            if question["type"] != "choice":
+                return None, BAD_RESPONSE
+            keys = tuple(question["criteria"])
+            probabilities = answer.get("probabilities")
+            if set(answer) != {"type", "choice", "confidence", "probabilities"} or \
+                    answer.get("choice") not in keys or not isinstance(probabilities, Mapping) \
+                    or set(probabilities) != set(keys):
+                return None, BAD_RESPONSE
+            scores = {}
+            for key in keys:
+                score = _number(probabilities[key])
+                if score is None or not 0.0 <= score <= 1.0:
+                    return None, BAD_RESPONSE
+                scores[key] = score
+            if not 1.0 - PROBABILITY_SUM_TOLERANCE <= math.fsum(scores.values()) <= 1.0 + PROBABILITY_SUM_TOLERANCE \
+                    or scores[answer["choice"]] != max(scores.values()):
+                return None, BAD_RESPONSE
+            confidence = None
+            if "confidence" in answer:
+                confidence = _number(answer["confidence"])
+                if confidence is None or not 0.0 <= confidence <= 1.0:
+                    return None, BAD_RESPONSE
+            parsed[name] = {"type": "choice", "choice": answer["choice"], "probabilities": scores,
+                            "confidence": confidence}
+        model = body.get("model") if isinstance(body, Mapping) else None
+        if model is not None and (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", model)):
+            return None, BAD_RESPONSE
+        return JudgeReply(parsed, model), None
+    finally:
+        del body, questions, answers, answer, probabilities, confidence
+
+
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict:
+    """A JSON object that repeats a key is refused: the last copy would otherwise win silently."""
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("repeated key")
+    return result
+
+
+def _no_constant(name: str) -> object:
+    raise ValueError("non-finite number")
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never follow a redirect: it would carry the Authorization header to another address."""
 
@@ -314,7 +421,8 @@ def post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> obj
         del result, code
 
 
-def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tuple[object, str | None]:
+def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float,
+               strict: bool = False) -> tuple[object, str | None]:
     credential = data = raw = request = opener = response = None
     try:
         code = _check_url(url)
@@ -372,6 +480,9 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
         if len(raw) > RESPONSE_LIMIT:
             return None, BAD_RESPONSE
         try:
+            if strict:
+                return json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys,
+                                  parse_constant=_no_constant), None
             return json.loads(raw.decode("utf-8")), None
         except (BaseExceptionGroup, ProviderError):
             raise
@@ -414,12 +525,14 @@ class TypeSafeProvider:
         finally:
             del result, code
 
-    def _post_result(self, payload: dict, key: Secret, config: Mapping) -> tuple[object, str | None]:
+    def _post_result(self, payload: dict, key: Secret, config: Mapping, *,
+                     strict: bool = False) -> tuple[object, str | None]:
         settings = timeout = None
         try:
             settings = self._settings(config)
             timeout = _number(config.get("timeout_seconds")) or 10.0
-            return _post_json(str(settings.get("url") or DEFAULT_URL), payload, key=key, timeout=timeout)
+            return _post_json(str(settings.get("url") or DEFAULT_URL), payload, key=key, timeout=timeout,
+                              strict=strict)
         finally:
             del self, payload, key, config, settings, timeout
 
@@ -499,6 +612,30 @@ class TypeSafeProvider:
             return (*pairs[index], answer[1]), None
         finally:
             del self, request, candidates, key, config, model, body, index, answer
+
+    def judge(self, state: Mapping[str, object], questions: Mapping[str, Mapping], *, key: Secret,
+              config: Mapping) -> JudgeReply:
+        result = code = None
+        try:
+            try:
+                result, code = _outcome(self._judge, state, questions, key=key, config=config)
+            finally:
+                del self, state, questions, key, config
+            return _finish(result, code)
+        finally:
+            del result, code
+
+    def _judge(self, state: Mapping[str, object], questions: Mapping[str, Mapping], *, key: Secret,
+               config: Mapping) -> tuple[JudgeReply | None, str | None]:
+        model = body = None
+        try:
+            model = str(self._settings(config).get("model") or DEFAULT_MODEL)
+            body, code = self._post_result(build_judgement_request(model, state, questions), key, config, strict=True)
+            if code is not None:
+                return None, code
+            return _parse_judgement_response(body, questions)
+        finally:
+            del self, state, questions, key, config, model, body
 
     def __repr__(self) -> str:
         return "TypeSafeProvider()"
