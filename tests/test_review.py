@@ -468,6 +468,25 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(outcomes, [("legacy-disposed", None)])
         self.assertEqual(warnings, [])
 
+    def test_design_snapshot_retains_native_anchor_refusal_at_disposal(self):
+        from oah.design import task_context as tc
+
+        repo, base, head = self.repo_with_history()
+        temporary, state = make_tmp_dir(self), make_tmp_dir(self)
+        outcomes, warnings = [], []
+        checked = runner._snapshot_disposal(state, "allocation-native-refusal", outcomes)
+
+        def dispose(parent, created):
+            with mock.patch.object(snapshot, "_container_object", side_effect=tc.InstallRefused("native unavailable")):
+                return checked(parent, created)
+
+        with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings, dispose=dispose) as snap:
+            parent = snap.parent
+            assert parent is not None
+        self.assertEqual((parent / "tree/src/app.py").read_bytes(), b"print('hi')\n")
+        self.assertEqual(outcomes[0][0], "retained")
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
     def test_design_free_snapshot_keeps_working_when_design_native_identity_is_unavailable(self):
         from oah.design import task_context as tc
 

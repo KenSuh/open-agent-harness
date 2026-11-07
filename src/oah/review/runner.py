@@ -348,7 +348,7 @@ class _SnapshotDisposal:
                     outcome = ("retained", reason)
                 else:
                     outcome = retire_snapshot(self.state, views[0], parent)
-        except (OSError, ValueError, snapshot.Retained, snapshot.PlanUnavailable) as exc:
+        except (OSError, ValueError, snapshot.Retained, snapshot.PlanUnavailable, task_context.InstallRefused) as exc:
             outcome = ("retained", f"the checked retirement stopped ({type(exc).__name__})")
         self.disposition.append(outcome)
         return outcome
