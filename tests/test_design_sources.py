@@ -534,9 +534,9 @@ class AdvertisementTest(unittest.TestCase):
             self.assertEqual({"refs/tags/v1": "a" * 40, "refs/tags/v1^{}": "b" * 40}, advertisement.refs)
             self.assertEqual(raw, advertisement.raw)
             self.assertEqual(hashlib.sha256(raw).hexdigest(), advertisement.raw_sha256)
-            for limits in ({"byte_limit": len(raw) - 1}, {"row_limit": 1}):
-                with self.subTest(limits=limits), self.assertRaises(gitref.RefError) as caught:
-                    gitref.ls_remote(LOCATOR, tags=True, **limits)
+            for byte_limit, row_limit in ((len(raw) - 1, gitref.ROW_LIMIT), (len(raw), 1)):
+                with self.subTest(byte_limit=byte_limit, row_limit=row_limit), self.assertRaises(gitref.RefError) as caught:
+                    gitref.ls_remote(LOCATOR, tags=True, byte_limit=byte_limit, row_limit=row_limit)
                 self.assertEqual("ls-remote-overflow", caught.exception.code)
 
     def test_collector_caps_bytes(self) -> None:
