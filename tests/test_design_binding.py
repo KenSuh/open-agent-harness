@@ -1080,7 +1080,8 @@ class CompletedCorrectionDesignChangeTest(unittest.TestCase):
         self.assertIn("run completed", str(caught.exception))
         self.assertIn("delivery is not marked", str(caught.exception))
         self.assertEqual(len(project.fix_calls()), 1)
-        run = sorted((project.state / "runs/t1").glob("r*/result.json"))[-1]
+        run_id = project.fix_calls()[0]["env"]["OAH_RUN_ID"]
+        run = project.state / "runs/t1" / run_id / "result.json"
         result = json.loads(run.read_bytes())
         self.assertEqual((result["status"], result["exit_code"]), ("finished", 0))
         delivered = json.loads((run.parent / "design.json").read_bytes())
