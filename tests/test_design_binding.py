@@ -345,7 +345,7 @@ class LeaseDocumentTest(DesignTask, unittest.TestCase):
         self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
         self.path = self.state_dir / "leases.json"
 
-    def corrupt_t1(self, value: str) -> tuple[str, str]:
+    def corrupt_t1(self, value: str) -> tuple[str, bytes]:
         """Replace t1's design value with `value` and respace t2's (noncanonical, still valid); return t2's text."""
         from oah.lease import read_lease_document
 
@@ -356,8 +356,8 @@ class LeaseDocumentTest(DesignTask, unittest.TestCase):
         t2_design = second.design.raw
         spaced = t2_design.replace('": ', '":   ')
         text = text.replace(t1_design, value, 1).replace(t2_design, spaced, 1)
-        self.path.write_text(text, encoding="utf-8")
-        return spaced, text
+        self.path.write_text(text, encoding="utf-8", newline="\r\n")
+        return spaced, self.path.read_bytes()
 
     def test_invalid_values_are_isolated_and_healthy_bytes_survive_a_write(self):
         from oah.lease import Store
@@ -379,8 +379,8 @@ class LeaseDocumentTest(DesignTask, unittest.TestCase):
                 after = self.path.read_text(encoding="utf-8")
                 self.assertIn(spaced, after)  # t2's own design bytes, exactly
                 self.assertNotIn(value if value != "null" else '"design": null', after)
-                kept = self.state_dir / "design-invalid" / (hashlib.sha256(original.encode()).hexdigest() + ".raw")
-                self.assertEqual(kept.read_bytes(), original.encode("utf-8"))
+                kept = self.state_dir / "design-invalid" / (hashlib.sha256(original).hexdigest() + ".raw")
+                self.assertEqual(kept.read_bytes(), original)
                 refused = self.oah("design", "task", "t1", "--check")
                 self.assertEqual(refused.returncode, 1)
                 self.assertEqual(json.loads(self.oah("design", "task", "t1", "--json").stdout)["state"], "invalid")
@@ -427,8 +427,8 @@ class LeaseDocumentTest(DesignTask, unittest.TestCase):
             with self.assertRaises(StorageError):
                 Store(self.state_dir).renew(task="t2", agent="claude", ttl_hours=1)
         Store(self.state_dir).renew(task="t2", agent="claude", ttl_hours=1)
-        kept = self.state_dir / "design-invalid" / (hashlib.sha256(original.encode()).hexdigest() + ".raw")
-        self.assertEqual(kept.read_bytes(), original.encode())
+        kept = self.state_dir / "design-invalid" / (hashlib.sha256(original).hexdigest() + ".raw")
+        self.assertEqual(kept.read_bytes(), original)
 
     def test_a_pending_transaction_recovers_with_the_exact_bytes(self):
         spaced, _text = self.corrupt_t1("null")
@@ -725,6 +725,7 @@ class ReviewDesignTest(unittest.TestCase):
                 profile={"operation": "inspect", "fixture": "simulated-producer-proof"},
                 h0=tc.git_head(root), policy={}, nonce="01" * 32, continuity={}, boot={},
                 root_identity=live.identity("receiving-root"), live_roots=live.facts("01" * 32))
+            live.close()
             record = disposal.adopt(record)
             start = writer.register_transport_origin(task="t1", lease_id=lease.id,
                                                      generation=lease.generation, record=record)
@@ -949,14 +950,16 @@ class LegacyPacketDesignTest(unittest.TestCase):
         binding = intent.parse(text).bind(PACKET)
         Store(state).start(task="t1", agent="claude", scope=("src",), note="main-started legacy lease",
                            ttl_hours=1, info=repo_info(repo), intent=binding)
-        env = clean_env(home, OAH_STATE_DIR=str(state))
+        env = clean_env(home, OAH_STATE_DIR=str(state), PYTHONIOENCODING="utf-8")
 
         def oah(*args):
             return subprocess.run([sys.executable, "-B", "-m", "oah", *args], cwd=repo, env=env,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, encoding="utf-8", timeout=60)
 
         self.assertEqual(packet.check_text(text, task="t1").errors, ())
-        self.assertIsNone(call.read_packet(repo, repo / PACKET, parse_intent=intent.parse).design)
+        loaded = call.read_packet(repo, repo / PACKET, parse_intent=intent.parse)
+        self.assertIsNone(loaded.design)
+        self.assertEqual(loaded.plan["initial"], ("claude", "medium"))
         resumed = oah("start", "--task", "t1", "--agent", "claude", "--packet", PACKET)
         self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
         returned = home / "return.txt"
@@ -966,8 +969,8 @@ class LegacyPacketDesignTest(unittest.TestCase):
         finished = oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", str(returned),
                        "--allow-missing-wiki-maintenance", "--allow-structural")
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-        self.assertEqual((repo / PACKET).read_text(), text)
-        self.assertNotIn("design_origin", (state / "events.jsonl").read_text())
+        self.assertEqual((repo / PACKET).read_bytes().decode("utf-8"), text)
+        self.assertNotIn("design_origin", (state / "events.jsonl").read_text(encoding="utf-8"))
 
     def test_complete_binding_without_generator_comment_is_still_structured(self):
         section = design.PacketDesign("acme", "a" * 32, "booking", 1, "sha256:" + "b" * 64)
@@ -1170,8 +1173,8 @@ class CorrectionAuthorityTest(DesignTask, unittest.TestCase):
         future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)
         Store(case.state_dir, now=lambda: future).start(task="t3", agent="claude", scope=("new",),
                     note="", ttl_hours=1, info=repo_info(case.repo))
-        saved = case.state_dir / "design-invalid" / (hashlib.sha256(original.encode()).hexdigest() + ".raw")
-        self.assertEqual(saved.read_bytes(), original.encode())
+        saved = case.state_dir / "design-invalid" / (hashlib.sha256(original).hexdigest() + ".raw")
+        self.assertEqual(saved.read_bytes(), original)
         self.assertEqual([item.task for item, _ in Store(case.state_dir).snapshot()], ["t3"])
 
     def test_short_preservation_writes_keep_the_complete_original(self):
@@ -1182,7 +1185,7 @@ class CorrectionAuthorityTest(DesignTask, unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         _, original = case.corrupt_t1("[" * 40 + "]" * 40)
-        raw = original.encode()
+        raw = original
         write = os.write
         with mock.patch("oah.lease.os.write", side_effect=lambda fd, data: write(fd, data[:7])):
             Store(case.state_dir).renew(task="t2", agent="claude", ttl_hours=2)
