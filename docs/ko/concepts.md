@@ -517,6 +517,43 @@ docs/wiki/
 - **한계.** 종료를 기록하기 전에 프로세스를 잃은 실행은 검증된 같은 호스트 재부팅 뒤에만 정리할 수 있다. 이번 릴리스는
   그런 프로필을 검증하지 않으므로 그 실행은 막힌 채로 남고 아무것도 지우지 않는다.
 
+네이티브 Windows의 DATA 보존과 스냅샷 은퇴는 같은 `_WindowsIO` 객체 식별을 쓴다. 볼륨·파일 ID,
+소유자 SID와 DACL 보안 설명자의 digest, 속성, 크기와 전체 바이트를 확인하고, 조상 디렉터리도 ID와 보안
+digest를 확인한다. `mode`는 DOS 읽기 전용 속성만 나타낸다. POSIX 소유자·그룹·실행 비트는 Windows 권한을
+나타내지 않는다. 외부 변경을 재현하는 시험은 `GetSecurityInfo` / `SetSecurityInfo`로 소유자에게 쓰기 권한을
+주고 네이티브 속성을 바꾼다. 내용만 바꾸는 시험은 원래 DACL과 속성을 복구하고, 소유자 변경은 네이티브 식별
+조회 결과를 바꿔 재현한다.
+
+루트·조상·보존 객체를 고정하는 모든 핸들은 다른 주체의 삭제·이름 변경을 막는다. 관찰 핸들은 볼륨의
+`CreateFileW`와 상대 디렉터리 `NtCreateFile` 모두 `FILE_SHARE_READ | FILE_SHARE_WRITE` (`3`)를 쓰고,
+생성·쓰기 핸들은 `FILE_SHARE_READ` (`1`)를 쓴다. 고정 핸들은 `DELETE`를 요청하지 않는다. 재시작을 재현할
+때는 기존 설치를 먼저 닫는다. 핸들마다 소유자가 하나이며 반복 close에서도 한 번만 닫는다.
+`FlushFileBuffers`를 쓰는 디렉터리 핸들에는 쓰기 권한이 필요하다.
+
+봉인된 설치를 닫은 뒤의 정확한 정리는 기존 정리 의도와 현재 권한 가드 안에서 같은 소유자에게 쓰기 가능한
+DACL을 준다. 읽기 핸들을 닫고 정확한 디렉터리를 쓰기 권한으로 다시 연 뒤, 설치 때 기록한 파일 ID와 쓰기
+가능한 소유자/DACL digest를 확인한다. 쓰기 가능·ACL 전환 중간 프로필은 POSIX 모드 추정이 아닌 실제 hash다.
+파일 목록이 온전한 중단 정리는 그 프로필로 복구하려면 기록된 정리 의도가 필요하다. 파일이 이미 없는 경우의
+보존 확인 경로는 그 의도 없이도 원래 쓰기 가능 또는 봉인 해제된 manifest 프로필을 허용한다. 이 경로는 없는
+파일을 원인 미상의 부재로 기록하며 oah가 지웠다고 주장하거나 `VERIFIED_CLEANED`를 보고하지 않는다. 불일치는
+삭제 전에 거부한다. 권한 전환을 파일별 진행보다 먼저 기록하며 보존 확인도 정확히 캡처한 메타데이터를 요구한다.
+
+현재 권한 가드 안에서 의도를 기록한 뒤, 대상의 고정 핸들을 모두 닫고 전용 `DELETE` 변경 핸들을 연다.
+객체 식별과 전체 파일 바이트 또는 디렉터리가 비었는지를 다시 확인한다. 파일을 먼저 닫고 manifest 디렉터리를,
+그 뒤 자신이 만든 DATA 부모를 닫는다. 스냅샷도 자식부터 부모 순서로 은퇴한다. 변경 핸들을 보유하는 동안
+관찰 핸들로 같은 대상을 다시 열지 않는다. `SetFileInformationByHandle`의 `FileDispositionInfoEx`와
+`DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` (`0x13`)를 쓰고 삭제 핸들을 닫는다. 이름 부재와
+쓰기 가능한 부모의 성공한 flush를 모두 확인한 뒤에만 부재 진행을 기록한다. 더 약한 삭제 대체 경로는 없으며
+실패하면 Win32 오류 코드를 보존한다. 읽기 전용이 유일한 속성이면 해제할 때 `FILE_ATTRIBUTE_NORMAL` (`0x80`)을
+쓴다. 속성 `0`은 변경하지 않음을 뜻하기 때문이다. Windows 후보 시험은 공유와 close/reopen 계약을 가짜 API로
+확인한다. 네이티브 Windows CI는 여전히 필요하며 참조 전달이나 재부팅 복구를 검증한 것으로 간주하지 않는다.
+
+플랫폼 계약은 [CreateFileW 공유](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
+[NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile),
+[확장 disposition 플래그](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex),
+[SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle),
+[FlushFileBuffers 권한](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)에 따른다.
+
 ## 게이트
 
 "끝났다"는 에이전트가 하는 말이 아니라 증거 원장이다. **게이트**는 확인할 수 있는 결과 하나와 그 결과를 내야 하는

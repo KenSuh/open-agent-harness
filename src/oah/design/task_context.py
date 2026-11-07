@@ -2479,7 +2479,7 @@ class _WindowsIO:
     """One native identity for DATA and retirement: file ID, owner/DACL digest, attributes, size and bytes.
 
     `mode` represents only the DOS read-only attribute; Windows permissions come from `security_digest`.
-    Observer anchors share read/write/delete. Mutation handles stay exclusive until disposition and close.
+    Pins deny delete sharing. A guarded mutation closes the target's pins before opening its DELETE handle.
     """
     def __init__(self):
         import ctypes as ct
@@ -2618,7 +2618,7 @@ class _WindowsIO:
             self._error("windows-basic-information-failed")
         raw = bytearray(basic.raw)
         flags = struct.unpack_from("<I", raw, 32)[0]
-        struct.pack_into("<I", raw, 32, flags | 1 if enabled else flags & ~1)
+        struct.pack_into("<I", raw, 32, (flags | 1 if enabled else flags & ~1) or 0x80)
         updated = ct.create_string_buffer(bytes(raw), 40)
         if not self.kernel.SetFileInformationByHandle(handle, 0, updated, 40):
             self._error("windows-readonly-attribute-failed")
@@ -2674,7 +2674,7 @@ class _WindowsIO:
         if self.kernel.GetDriveTypeW(path.anchor) != 3:
             self._error("windows-fixed-local-volume-required")
         access = 0x120081 | (0x40000116 if writable and len(path.parts) == 1 else 0)
-        handle = self.kernel.CreateFileW(path.anchor, access, 7, None, 3, 0x02200000, None)
+        handle = self.kernel.CreateFileW(path.anchor, access, 3, None, 3, 0x02200000, None)
         if not handle or handle == self.ct.c_void_p(-1).value:
             self._error("windows-anchor-open-failed")
         ancestors = [handle]
@@ -2716,7 +2716,7 @@ class _WindowsIO:
         status, result = self.IoStatus(), ct.c_void_p()
         access = (0x120081 | (0x40000116 if writable else 0) | (0x10000 if delete else 0)
                   | (0x40000 if create or acl else 0))
-        share = 7 if inspect or (directory and not (delete or create or writable)) else 1
+        share = 3 if inspect or (directory and not (delete or create or writable)) else 1
         returned = self.nt.NtCreateFile(ct.byref(result), access, ct.byref(attrs), ct.byref(status), None, 0x80,
                     share, 2 if create else 1, 0x200020 | (0 if directory is None else 1 if directory else 0x40), None, 0)
         code = returned & 0xFFFFFFFF
@@ -2839,7 +2839,7 @@ class _WindowsIO:
     def delete(self, handle) -> None:
         flags = self.ct.c_uint32(0x13)
         if not self.kernel.SetFileInformationByHandle(handle, 21, self.ct.byref(flags), 4):
-            self._error("windows-guarded-disposition-failed")
+            self._error(f"windows-guarded-disposition-failed:winerror={self.ct.get_last_error()}")
 
 
 def _windows_pe(header: bytes) -> str:
@@ -3109,6 +3109,7 @@ class WindowsInstallation(Installation):
         handles = [*self.leaf_handles.values(), self.m_fd, self.data_fd, *reversed(self.ancestors)]
         self.leaf_handles.clear()
         self.m_fd = self.data_fd = self.root_fd = None
+        self.ancestors.clear()
         seen = set()
         for handle in handles:
             if handle is not None and handle not in seen:
@@ -3178,10 +3179,10 @@ class WindowsInstallation(Installation):
                     raise InstallRefused(problem)
                 original = native.info(self.m_fd)
                 native.grant_writes(self.m_fd)
-                native.close(self.m_fd)
-                self.m_fd = None
+                held, self.m_fd = self.m_fd, None
+                native.close(held)
                 self.m_fd, _ = native.open_child(self.data_fd, self.manifest, directory=True,
-                                                  writable=True, delete=True, acl=True)
+                                                  writable=True, acl=True)
                 current = native.info(self.m_fd)
                 if ((current["dev"], current["ino"]) != (original["dev"], original["ino"]) or
                         "sha256:" + _sha(canonical(_anchor_stamp(dict(current, mode=0o755)))) !=
@@ -3198,10 +3199,18 @@ class WindowsInstallation(Installation):
                 problem = self.check()
                 if problem or name not in self.leaf_handles:
                     raise InstallRefused(problem or "native leaf ownership is missing")
-                handle = self.leaf_handles[name]
-                self.native.delete(handle)
-                self.native.close(handle)
-                del self.leaf_handles[name]
+                expected = self.leaves[name]
+                self.native.close(self.leaf_handles.pop(name))
+                handle, _ = self.native.open_child(self.m_fd, name, directory=False, delete=True)
+                try:
+                    current = self.native.info(handle)
+                    raw = self.native.read(handle, expected["size"])
+                    if (current != {key: value for key, value in expected.items() if key != "sha256"} or
+                            self.native.info(handle) != current or "sha256:" + _sha(raw) != expected["sha256"]):
+                        raise InstallRefused("the native leaf changed before its guarded disposition")
+                    self.native.delete(handle)
+                finally:
+                    self.native.close(handle)
                 del self.leaves[name]
                 if name in self.native.names(self.m_fd):
                     raise InstallRefused("native deletion is not observed absent")
@@ -3224,9 +3233,16 @@ class WindowsInstallation(Installation):
                     if name == DATA_DIR:
                         continue
                     raise InstallRefused("the native owned directory is not empty")
-                self.native.delete(handle)
-                self.native.close(handle)
+                expected = _anchor_stamp(self.native.info(handle))
                 setattr(self, field, None)
+                self.native.close(handle)
+                handle, _ = self.native.open_child(getattr(self, parent_field), name, directory=True, delete=True)
+                try:
+                    if _anchor_stamp(self.native.info(handle)) != expected or self.native.names(handle):
+                        raise InstallRefused("the native directory changed before its guarded disposition")
+                    self.native.delete(handle)
+                finally:
+                    self.native.close(handle)
                 if name in self.native.names(getattr(self, parent_field)):
                     raise InstallRefused("the native directory removal is not observed absent")
                 self.native.flush(getattr(self, parent_field))
@@ -3371,16 +3387,14 @@ def _install_windows(root, manifest: str, payloads: Mapping[str, bytes], *, nati
     try:
         with step(DATA_DIR):
             try:
-                done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, create=True, writable=True,
-                                                    delete=True)
+                done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, create=True, writable=True)
                 done.data_created = True
             except FileExistsError:
                 done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, writable=True)
             done.data_identity = native.info(done.data_fd)
             native.flush(root_fd)
         with step(manifest):
-            done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, create=True, writable=True,
-                                             delete=True)
+            done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, create=True, writable=True)
             done.m_write_handle = True
             native.grant_writes(done.m_fd)
             done.m_identity = native.info(done.m_fd)
@@ -3389,7 +3403,7 @@ def _install_windows(root, manifest: str, payloads: Mapping[str, bytes], *, nati
             native.flush(done.data_fd)
         for name, data in sorted(payloads.items()):
             with step(name):
-                leaf, _ = native.open_child(done.m_fd, name, directory=False, create=True, writable=True, delete=True)
+                leaf, _ = native.open_child(done.m_fd, name, directory=False, create=True, writable=True)
                 done.leaf_handles[name] = leaf
                 try:
                     native.write(leaf, data)
@@ -4226,9 +4240,9 @@ def _reopen_windows(root, manifest: str, installed: Mapping, progress=(), *, nat
                     ancestor_identities=[native.info(handle) for handle in ancestors],
                     native_anchors={key: value for key, value in installed.get("anchors", {}).items()
                                     if key in ("m_writable", "m_unsealed") and isinstance(value, str)})
-        done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, writable=True, delete=done.data_created)
+        done.data_fd, _ = native.open_child(root_fd, DATA_DIR, directory=True, writable=True)
         done.data_identity = native.info(done.data_fd)
-        done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, delete=True, acl=True)
+        done.m_fd, _ = native.open_child(done.data_fd, manifest, directory=True, acl=True)
         done.m_identity = native.info(done.m_fd)
         present = set(native.names(done.m_fd))
         states.update({name: "unexpected" for name in present - set(recorded)})
@@ -4236,7 +4250,7 @@ def _reopen_windows(root, manifest: str, installed: Mapping, progress=(), *, nat
             if name not in present:
                 states[name] = "absent"
                 continue
-            leaf, _ = native.open_child(done.m_fd, name, directory=False, delete=True)
+            leaf, _ = native.open_child(done.m_fd, name, directory=False)
             done.leaf_handles[name] = leaf
             before = native.info(leaf)
             raw = native.read(leaf, BUNDLE_LIMIT)

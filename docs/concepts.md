@@ -564,22 +564,30 @@ POSIX owner/group/execute bits do not describe Windows access. Tests that simula
 owner write access through `GetSecurityInfo` / `SetSecurityInfo` and change the native attribute, restoring the
 original DACL and attribute when testing content alone. Simulated owner changes alter the native identity readout.
 
-Read-only observer anchors use `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` (`7`), including both the
-volume's `CreateFileW` and relative directory `NtCreateFile` opens. Creation and mutation handles retain their
-exclusive write/delete sharing restriction. Such handles must close before another lifecycle reopens the object;
-a simulated restart must also close the original installation. Every directory handle used for
+Every handle that pins a root, ancestor or retained object denies delete/rename sharing: observer anchors use
+`FILE_SHARE_READ | FILE_SHARE_WRITE` (`3`), including the volume's `CreateFileW` and relative directory
+`NtCreateFile` opens; creation and writable handles use `FILE_SHARE_READ` (`1`). Pinning handles do not request
+`DELETE`. A simulated restart closes the original installation, and each handle has one owner that closes it
+once, including when close is called again. Every directory handle used for
 `FlushFileBuffers` needs write access. After a sealed installation has closed, exact cleanup grants the same
-owner a writable DACL under its existing cleanup intent and authority guard, closes the read/delete handle,
-reopens the exact directory with write/delete access and verifies its file ID and the writable owner/DACL digest
+owner a writable DACL under its existing cleanup intent and authority guard, closes the read handle,
+reopens the exact directory with write access and verifies its file ID and the writable owner/DACL digest
 captured at installation. The native writable and ACL-only intermediate profiles are factual hashes, rather than
-POSIX mode guesses; only a recorded cleanup intent permits recovery through those profiles. A mismatch refuses
+POSIX mode guesses. Interrupted cleanup of a complete roster requires a recorded cleanup intent to recover
+through those profiles. The missing-leaf acknowledgment route also accepts the original writable or unsealed
+manifest profile without that intent; it records missing leaves as unattributed absence and never claims oah
+deleted them or reports `VERIFIED_CLEANED`. A mismatch refuses
 before deleting data. Cleanup records the permission transition before leaf progress; retained acknowledgments
-still require their exact captured metadata. During exact deletion, oah opens the checked object
-with `DELETE`, rechecks its identity and current authority, records intent, calls `SetFileInformationByHandle` with
+still require their exact captured metadata. Inside the current authority guard and after recording intent, oah
+closes every pin on the target before opening a dedicated mutation handle with `DELETE`, then rechecks its
+identity and complete file bytes (or directory emptiness). Leaves close before their manifest directory, and that
+directory closes before the owned DATA parent; snapshot entries retire from children to parents. No observer
+reopens the target while its mutation handle is held. Oah calls `SetFileInformationByHandle` with
 `FileDispositionInfoEx` and `DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` (`0x13`), closes the deletion handle,
-flushes the parent and verifies name absence before recording progress. There is no weaker deletion fallback.
-This sequence also lets retirement recheck role roots while its deletion handle is held, without an observer
-blocking that handle's `DELETE` access. Windows candidate tests exercise this contract with fake APIs; native
+and establishes both name absence and a successful writable-parent flush before recording progress. There is no
+weaker deletion fallback; a refused disposition preserves the Win32 error code. Clearing the only read-only
+attribute writes `FILE_ATTRIBUTE_NORMAL` (`0x80`), since a zero attribute mask means no change. Windows candidate
+tests exercise sharing and this close/reopen contract with fake APIs; native
 Windows CI remains required and does not qualify reference delivery or reboot recovery.
 
 The platform contracts are [CreateFileW sharing](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),

@@ -1033,7 +1033,7 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
     try:
         root_path = tc._safe_windows_path(str(parent))
         containing, anchors = native.open_anchor(root_path.parent, writable=True)
-        root, _ = native.open_child(containing, root_path.name, directory=True, writable=True, delete=True)
+        root, _ = native.open_child(containing, root_path.name, directory=True, writable=True)
         require_creation_identity(parent, created, descriptor.get("container_object"),
                                   _native_container(native.info(root)), current=False)
 
@@ -1059,7 +1059,7 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
                         if expected is None or _native_entry(native, directory, prefix) != expected:
                             raise Retained("a native owned parent directory changed before deletion")
                     leaf, _ = native.open_child(directory, item["path"][-1], directory=item["type"] == "dir",
-                                                 delete=True)
+                                                 inspect=True)
                     handles.append(leaf)
                     if progress(item, "intent") is False or _native_entry(native, leaf, item["path"]) != item:
                         raise Retained("the exact native delete intent or owned object changed")
@@ -1069,9 +1069,14 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
                         raise Retained("the native final output or its parents were replaced")
                     if item["type"] == "dir" and any(native.iter_names(leaf)):
                         raise Retained("the native directory is not empty")
+                    native.close(handles.pop())
+                    leaf, _ = native.open_child(directory, item["path"][-1], directory=item["type"] == "dir",
+                                                 delete=True)
+                    handles.append(leaf)
+                    if _native_entry(native, leaf, item["path"]) != item:
+                        raise Retained("the native object changed before its guarded disposition")
                     native.delete(leaf)
-                    native.close(leaf)
-                    handles.pop()
+                    native.close(handles.pop())
                     native.flush(directory)
                     if any(name == item["path"][-1] for name in native.iter_names(directory)) or \
                             progress(item, "absent") is False:
@@ -1084,9 +1089,15 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
             check_root()
             if any(native.iter_names(root)) or progress(item, "intent") is False:
                 raise Retained("the native final root is not empty or its intent is unavailable")
+            held, root = root, None
+            native.close(held)
+            root, _ = native.open_child(containing, root_path.name, directory=True, delete=True)
+            require_creation_identity(parent, created, _native_container(native.info(root)), current=False)
+            if any(native.iter_names(root)):
+                raise Retained("the native final root changed before its guarded disposition")
             native.delete(root)
-            native.close(root)
-            root = None
+            held, root = root, None
+            native.close(held)
             native.flush(containing)
             if any(name == root_path.name for name in native.iter_names(containing)):
                 raise Retained("the native final root is not observed absent")

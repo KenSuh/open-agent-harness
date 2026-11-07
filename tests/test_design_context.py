@@ -865,26 +865,32 @@ class RootAnchoringTest(unittest.TestCase):
 
 
 class WindowsNativeRosterTest(unittest.TestCase):
-    def test_native_observer_anchors_share_delete_with_a_retirement_handle(self):
+    def test_native_pins_deny_foreign_delete_until_their_owner_closes_them(self):
         import ctypes as ct
 
         kernel, nt, security = mock.Mock(), mock.Mock(), mock.Mock()
         kernel.GetDriveTypeW.return_value = 3
-        calls = []
+        handles = {}
+
+        def acquire(inode, access, share):
+            rights = 1 | (2 if access & 0x40000116 else 0) | (4 if access & 0x10000 else 0)
+            if any(node == inode and (rights & ~shared or granted & ~share)
+                   for node, granted, shared in handles.values()):
+                return 0
+            handle = len(handles) + 101
+            handles[handle] = (inode, rights, share)
+            return handle
 
         def anchor(path, access, share, *args):
-            calls.append(("CreateFileW", share))
-            return 101 if share & 4 else 0
+            return acquire(1, access, share)
 
         def child(result, access, attrs, status, allocation, attributes, share, *args):
-            calls.append(("NtCreateFile", share))
-            if not share & 4:
-                return -1073741757  # STATUS_SHARING_VIOLATION: an existing retirement handle has DELETE access.
-            result._obj.value = 102
-            return 0
+            result._obj.value = acquire(2, access, share)
+            return 0 if result._obj.value else -1073741757
 
         kernel.CreateFileW.side_effect = anchor
         nt.NtCreateFile.side_effect = child
+        kernel.CloseHandle.side_effect = lambda handle: handles.pop(handle) and 1
         sizeof = ct.sizeof
         with mock.patch.object(ct, "sizeof", side_effect=lambda value: 2 if value is ct.c_wchar else sizeof(value)), \
                 mock.patch.object(ct, "WinDLL", side_effect=[kernel, nt, security], create=True):
@@ -894,9 +900,34 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 mock.patch.object(native, "info", return_value={"dev": 1, "type": "directory"}):
             held, ancestors = native.open_anchor(pathlib.PureWindowsPath(r"C:\work"))
         self.assertEqual((held, ancestors), (102, [101, 102]))
-        self.assertEqual(calls, [("CreateFileW", 7), ("NtCreateFile", 7)])
+        self.assertEqual(acquire(1, 0x10000, 7), 0)
+        self.assertEqual(acquire(2, 0x10000, 7), 0)
         for handle in reversed(ancestors):
             native.close(handle)
+        mutation = acquire(2, 0x10000, 1)
+        self.assertNotEqual(mutation, 0)
+        native.close(mutation)
+
+    def test_clearing_the_only_readonly_attribute_sets_normal_instead_of_leaving_it_unchanged(self):
+        import ctypes as ct
+
+        flags = [1]
+        native = tc._WindowsIO.__new__(tc._WindowsIO)
+
+        def basic(handle, kind, target, size):
+            struct.pack_into("<I", target, 32, flags[0])
+            return 1
+
+        def update(handle, kind, raw, size):
+            requested = struct.unpack_from("<I", raw, 32)[0]
+            if requested:
+                flags[0] = requested
+            return 1
+
+        with mock.patch.multiple(native, ct=ct, kernel=mock.Mock(
+                GetFileInformationByHandleEx=basic, SetFileInformationByHandle=update), create=True):
+            native.writable(7)
+        self.assertEqual(flags[0], 0x80)
 
     def test_native_delete_uses_posix_readonly_disposition_before_closing(self):
         import ctypes as ct
@@ -915,6 +946,17 @@ class WindowsNativeRosterTest(unittest.TestCase):
             native.delete(7)
             native.close(7)
         self.assertEqual(calls, [("SetFileInformationByHandle", 7, 21, 0x13, 4), ("CloseHandle", 7)])
+
+    def test_native_disposition_refusal_keeps_the_windows_error(self):
+        import ctypes as ct
+        import types
+
+        native = tc._WindowsIO.__new__(tc._WindowsIO)
+        api = types.SimpleNamespace(c_uint32=ct.c_uint32, byref=ct.byref, get_last_error=lambda: 5)
+        kernel = mock.Mock(SetFileInformationByHandle=mock.Mock(return_value=0))
+        with mock.patch.multiple(native, ct=api, kernel=kernel, create=True):
+            with self.assertRaisesRegex(tc.InstallRefused, r'windows-guarded-disposition-failed:winerror=5'):
+                native.delete(7)
 
     def test_foreign_actor_uses_owner_dacl_and_native_attributes_then_restores_them(self):
         import ctypes as ct
@@ -952,12 +994,12 @@ class WindowsNativeRosterTest(unittest.TestCase):
         native.kernel.LocalFree.side_effect = lambda p: calls.append("free-descriptor")
         with mock.patch.object(tc, "_WindowsIO", return_value=native), mock.patch.object(os, "name", "nt"), \
                 mock.patch.object(type(path), "chmod", side_effect=AssertionError("sealed object chmod")):
-            with foreign_retained_object(path, restore=True):
+            with foreign_retained_object(path, restore=True, delete=True):
                 calls.append("foreign-change")
         self.assertEqual([call.args[1:3] for call in native.kernel.CreateFileW.call_args_list],
-                         [(0x60000, 7), (0x180, 7)])
+                         [(0x60000, 7), (0x10180, 7)])
         self.assertEqual(calls, ["read-owner-dacl", ("grant", 0x1F01FF), ("set-dacl", 0x80000004),
-            ("attributes", 0), "foreign-change", ("attributes", 1), ("set-dacl", 0x80000004),
+            ("attributes", 0x80), "foreign-change", ("attributes", 1), ("set-dacl", 0x80000004),
             ("close", 8), "free-descriptor", ("close", 7)])
 
     def test_seal_accepts_token_user_or_default_owner_and_refuses_other_owners(self):
@@ -1042,7 +1084,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
             self.next_inode = 2
             self.root = self._handle(1)
 
-        def _handle(self, inode, *, access=1, share=7):
+        def _handle(self, inode, *, access=1, share=3):
             for held, node in self.handles.items():
                 if node == inode and (access & ~self.sharing[held] or self.access[held] & ~share):
                     raise tc.InstallRefused("native fixture sharing violation")
@@ -1095,7 +1137,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 raise tc.InstallRefused('native fixture wrong object type')
             if writable and self.nodes[inode].get('sealed'):
                 raise tc.InstallRefused('native fixture sealed DACL denies write access')
-            share = 7 if inspect or (directory and not (delete or create or writable)) else 1
+            share = 3 if inspect or (directory and not (delete or create or writable)) else 1
             return self._handle(inode, access=1 | (2 if writable else 0) | (4 if delete else 0), share=share), create
 
         def info(self, handle):
@@ -1142,6 +1184,14 @@ class WindowsNativeRosterTest(unittest.TestCase):
         def delete(self, handle):
             if not self.access[handle] & 4:
                 raise tc.InstallRefused("native fixture delete access required")
+            inode = self.handles[handle]
+            for held, target in self.handles.items():
+                if held != handle and target == inode:
+                    raise tc.InstallRefused("native fixture target still has an observer")
+                while target in self.nodes:
+                    target = self.nodes[target]['parent']
+                    if target == inode:
+                        raise tc.InstallRefused("native fixture descendant still has an observer")
             if self.names(handle):
                 raise tc.InstallRefused('native fixture nonempty directory')
             self.nodes[self.handles[handle]]['deleted'] = True
@@ -1194,6 +1244,69 @@ class WindowsNativeRosterTest(unittest.TestCase):
         self.assertEqual(native.names(reopened.root_fd), [])
         reopened.close()
 
+    def test_native_cleanup_handles_exact_and_missing_leaf_rosters_without_open_observers(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                native = self.Native()
+                root, manifest, first, second = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64, 'c' * 64
+                done = tc._install_windows(root, manifest, {first: b'first', second: b'second'}, native=native)
+                installed = done.facts()
+                first_inode = native.handles[done.leaf_handles[first]]
+                if missing:
+                    native.grant_writes(done.m_fd)
+                    native.writable(done.m_fd)
+                done.close()
+                if missing:
+                    del native.nodes[first_inode]
+                reopened, states = tc._reopen_windows(root, manifest, installed, native=native)
+                self.assertEqual(states, {first: 'absent' if missing else 'present-unchanged',
+                                          second: 'present-unchanged'})
+                present = [second] if missing else [first, second]
+                progress = []
+                removed = tc.remove_leaves(reopened, present, before=lambda _: None,
+                                           after=lambda *row: progress.append(row))
+                self.assertEqual(removed, present)
+                self.assertEqual(native.names(reopened.m_fd), [])
+                self.assertEqual(progress, [(manifest, 'writable', 'mode')] +
+                                 [(name, 'absent', 'file') for name in present])
+                if not missing:
+                    tc.remove_directories(reopened, before=lambda _: None, after=lambda *row: progress.append(row))
+                    self.assertEqual(native.names(reopened.root_fd), [])
+                reopened.close()
+
+    def test_native_cleanup_refuses_a_foreign_pin_or_replaced_object_without_disposition(self):
+        for defect in ('foreign-pin', 'replacement'):
+            with self.subTest(defect=defect):
+                native = self.Native()
+                root, manifest, name = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64
+                done = tc._install_windows(root, manifest, {name: b'original'}, native=native)
+                installed = done.facts()
+                done.close()
+                reopened, _ = tc._reopen_windows(root, manifest, installed, native=native)
+                foreign = None
+                opened = native.open_child
+
+                def changed(parent, target, **options):
+                    if defect == 'replacement' and options.get('delete') and target == name:
+                        old = next(row for row in native.nodes.values() if row['name'] == name)
+                        replacement = dict(old)
+                        old['name'] = 'saved'
+                        native.next_inode += 1
+                        native.nodes[native.next_inode] = replacement
+                    return opened(parent, target, **options)
+
+                if defect == 'foreign-pin':
+                    foreign, _ = opened(reopened.m_fd, name, directory=False, inspect=True)
+                with mock.patch.object(native, 'open_child', side_effect=changed), \
+                        mock.patch.object(native, 'delete', wraps=native.delete) as delete:
+                    with self.assertRaises(tc.InstallRefused):
+                        tc.remove_leaves(reopened, [name], before=lambda _: None, after=lambda *row: None)
+                    delete.assert_not_called()
+                self.assertIn(name, native.names(reopened.m_fd))
+                if foreign is not None:
+                    native.close(foreign)
+                reopened.close()
+
     def test_original_mutation_handles_close_before_recovery_reopens_the_roster(self):
         native = self.Native()
         root, manifest, name = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64
@@ -1207,6 +1320,17 @@ class WindowsNativeRosterTest(unittest.TestCase):
         reopened, states = tc._reopen_windows(root, manifest, installed, native=native)
         self.assertEqual(states, {name: 'present-unchanged'})
         reopened.close()
+
+    def test_installation_close_does_not_close_an_ancestor_twice(self):
+        native = self.Native()
+        root = pathlib.PureWindowsPath(r'C:\work')
+        handle, ancestors = native.open_anchor(root)
+        done = tc.WindowsInstallation(root, 'a' * 64, handle, None, None, native.info(handle), False,
+                                      native=native, ancestors=ancestors)
+        done.close()
+        remaining = dict(native.handles)
+        done.close()
+        self.assertEqual(native.handles, remaining)
 
     def test_native_permission_transition_recovers_only_its_recorded_owner_acl_profiles(self):
         native = self.Native()
@@ -1342,10 +1466,11 @@ class WindowsNativeRosterTest(unittest.TestCase):
         def observer(item):
             _, held = native.open_anchor(parent)
             try:
-                yield
+                self.assertEqual(native.info(held[-1])['ino'], 2)
             finally:
                 for handle in reversed(held):
                     native.close(handle)
+            yield
 
         self.assertTrue(snapshot._windows_guarded_remove(parent, validated,
                          lambda item, state: progress.append((item['path'], state)), observer, native=native))
@@ -2875,7 +3000,7 @@ class DescendantPolicyTest(DesignTask, unittest.TestCase):
 
 
 @contextlib.contextmanager
-def foreign_retained_object(path: pathlib.Path, *, mode: int = 0o644, restore: bool = False):
+def foreign_retained_object(path: pathlib.Path, *, mode: int = 0o644, restore: bool = False, delete: bool = False):
     if os.name != "nt":
         previous = stat.S_IMODE(path.stat().st_mode)
         path.chmod(mode)
@@ -2905,7 +3030,7 @@ def foreign_retained_object(path: pathlib.Path, *, mode: int = 0o644, restore: b
                 not native.security.AddAccessAllowedAce(writable_acl, 2, 0x1F01FF, owner) or
                 native.security.SetSecurityInfo(control, 1, 0x80000004, None, None, writable_acl, None) != 0):
             raise tc.InstallRefused("foreign actor cannot grant itself write access")
-        attributes = native.kernel.CreateFileW(str(path), 0x180, 7, None, 3, 0x02200000, None)
+        attributes = native.kernel.CreateFileW(str(path), 0x180 | (0x10000 if delete else 0), 7, None, 3, 0x02200000, None)
         if not attributes or attributes == ct.c_void_p(-1).value:
             attributes = None
             raise tc.InstallRefused("foreign actor cannot open writable attributes")
@@ -2914,7 +3039,7 @@ def foreign_retained_object(path: pathlib.Path, *, mode: int = 0o644, restore: b
             raise tc.InstallRefused("foreign actor cannot read original attributes")
         raw = bytearray(original.raw)
         flags = struct.unpack_from("<I", raw, 32)[0]
-        struct.pack_into("<I", raw, 32, flags & ~1 if mode & stat.S_IWUSR else flags | 1)
+        struct.pack_into("<I", raw, 32, (flags & ~1 if delete or mode & stat.S_IWUSR else flags | 1) or 0x80)
         updated = ct.create_string_buffer(bytes(raw), 40)
         if not native.kernel.SetFileInformationByHandle(attributes, 0, updated, 40):
             raise tc.InstallRefused("foreign actor cannot change the read-only attribute")
@@ -2938,6 +3063,7 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
     """A quiescent origin whose data was not removed: chunk reads, exact cleanup and ACK_RETAINED accounting."""
 
     def setUp(self):
+        self.retained_state = make_tmp_dir(self) / "state"
         self.build({"design": "People book.\n"}, scope="src/")
         from oah.lease import Store
 
@@ -2978,6 +3104,9 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
                                           fact={"quiescent": True, "reason": "test", "spawn_intent": False},
                                           live_proof=mock.Mock(holds=lambda value: True))
 
+    def state(self, repo: pathlib.Path) -> pathlib.Path:
+        return self.retained_state
+
     def expect(self) -> list[str]:
         view = tc.transport_views(self.state_dir)[self.origin]
         return ["--run", "rR", "--evidence-plan", self.manifest, "--expect-origin", self.origin, "--expect-record",
@@ -3015,7 +3144,7 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
     def test_manually_missing_files_are_acknowledged_never_claimed_as_cleaned(self):
         directory = self.repo / tc.DATA_DIR / self.manifest
         with foreign_retained_object(directory, mode=0o755, restore=True), \
-                foreign_retained_object(directory / self.name):
+                foreign_retained_object(directory / self.name, delete=True):
             (directory / self.name).unlink()
         cleaned = self.oah("design", "task", "t1", "--transport-cleanup", *self.expect())
         self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
@@ -3045,7 +3174,7 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
         directory = self.repo / tc.DATA_DIR / self.manifest
         path = directory / self.name
         before = path.stat()
-        with foreign_retained_object(directory, mode=0o755, restore=True), foreign_retained_object(path):
+        with foreign_retained_object(directory, mode=0o755, restore=True), foreign_retained_object(path, delete=True):
             replacement = directory / "replacement"
             replacement.write_bytes(self.data)
             replacement.chmod(stat.S_IMODE(before.st_mode))
@@ -3164,11 +3293,10 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
         self.acknowledge()
         ancestor = self.repo.parent
         previous = stat.S_IMODE(ancestor.stat().st_mode)
-        with foreign_retained_object(ancestor, mode=previous ^ stat.S_IXGRP):
-            pass
-        self.assert_changed_retention()
-        if os.name != "nt":
-            self.assertEqual(stat.S_IMODE(ancestor.stat().st_mode), previous ^ stat.S_IXGRP)
+        with foreign_retained_object(ancestor, mode=previous ^ stat.S_IXGRP, restore=True):
+            self.assert_changed_retention()
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(ancestor.stat().st_mode), previous ^ stat.S_IXGRP)
 
     def test_exact_cleanup_removes_only_the_created_files(self):
         stale = self.oah("design", "task", "t1", "--transport-cleanup", *self.expect()[:-6],
