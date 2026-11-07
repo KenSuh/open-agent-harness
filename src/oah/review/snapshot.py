@@ -415,23 +415,23 @@ def _native_container(info) -> dict:
 
 def require_creation_identity(parent: pathlib.Path, created: dict[str, int | str] | None,
                               *recorded: dict[str, int | str] | None, current: bool = True) -> dict[str, int | str]:
-    from oah.design import task_context as tc
-
-    if (not isinstance(created, dict) or not {"dev", "ino", "type", "mode"}.issubset(created)
-            or any(type(created[key]) is not int for key in ("dev", "ino", "type", "mode"))
-            or created["type"] != stat.S_IFDIR
-            or not ((set(created) == {"dev", "ino", "type", "mode", "uid", "gid"}
-                     and type(created["uid"]) is int and type(created["gid"]) is int)
-                    or (set(created) == {"dev", "ino", "type", "mode", "security"}
-                        and isinstance(created["security"], str) and created["security"]))
-            or any(identity != created for identity in recorded)):
-        raise CreationRetained("the snapshot has no consistent original creation identity")
     try:
+        if (not isinstance(created, dict) or not {"dev", "ino", "type", "mode"}.issubset(created)
+                or any(type(created[key]) is not int for key in ("dev", "ino", "type", "mode"))
+                or created["type"] != stat.S_IFDIR
+                or not ((set(created) == {"dev", "ino", "type", "mode", "uid", "gid"}
+                         and type(created["uid"]) is int and type(created["gid"]) is int)
+                        or (set(created) == {"dev", "ino", "type", "mode", "security"}
+                            and isinstance(created["security"], str) and created["security"]))
+                or any(identity != created for identity in recorded)):
+            raise CreationRetained("the snapshot has no consistent original creation identity")
         if current and _container_object(parent) != created:
             raise CreationRetained("the snapshot folder is not the one this review created")
-    except (OSError, ValueError, tc.InstallRefused, tc.RootUnavailable) as exc:
+        return dict(created)
+    except CreationRetained:
+        raise
+    except BaseException as exc:
         raise CreationRetained("the snapshot creation identity cannot be verified") from exc
-    return dict(created)
 
 
 def _native_entry(native, handle, components) -> dict:

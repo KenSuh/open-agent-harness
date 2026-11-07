@@ -550,28 +550,102 @@ class ReviewDesignTest(unittest.TestCase):
         from oah.design import task_context as tc
         from oah.review import ReviewError, receipts, snapshot
 
-        project = design_fix_project(self)
-        identity = snapshot._container_object
-        allocated, refused = [], []
+        kinds = ("native-unavailable", "held-named") if sys.platform != "win32" else ("native-unavailable",)
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                project = design_fix_project(self)
+                identity = snapshot._container_object
+                allocated, refused, observed = [], [], {}
 
-        def unavailable_once(parent, *, empty=False):
-            if empty:
-                allocated.append(parent)
-            elif not refused:
-                refused.append(parent)
-                raise tc.InstallRefused("temporary native identity read refusal")
-            return identity(parent, empty=empty)
+                def unavailable_once(parent, *, empty=False):
+                    if empty:
+                        allocated.append(parent)
+                    elif not refused:
+                        refused.append(parent)
+                        if kind == "native-unavailable":
+                            raise tc.InstallRefused("temporary native identity read refusal")
+                        with self.named_identity_refusal(parent, observed):
+                            return identity(parent)
+                    return identity(parent, empty=empty)
 
-        with mock.patch.object(snapshot, "_container_object", unavailable_once):
-            with self.assertRaises(ReviewError) as caught:
-                project.review()
-        self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_RETAINED")
-        self.assertEqual(len(allocated), 1)
-        self.assertEqual(len(refused), 1)
-        self.assertTrue(allocated[0].is_dir(), "an identity refusal must keep its allocation")
-        self.assertEqual((allocated[0] / "tree/src/app.py").read_bytes(), (project.repo / "src/app.py").read_bytes())
-        self.assertEqual(project.calls(), [])
-        self.assertFalse(any(line.get("counted") for line in receipts.read_round_log(project.state, "t1")))
+                with mock.patch.object(snapshot, "_container_object", unavailable_once):
+                    with self.assertRaises(ReviewError) as caught:
+                        project.review()
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_RETAINED")
+                self.assertEqual(len(allocated), 1)
+                self.assertEqual(len(refused), 1)
+                self.assertTrue(allocated[0].is_dir(), "an identity refusal must keep its allocation")
+                self.assertEqual((allocated[0] / "tree/src/app.py").read_bytes(),
+                                 (project.repo / "src/app.py").read_bytes())
+                self.assertEqual(project.calls(), [])
+                self.assertFalse(any(line.get("counted") for line in receipts.read_round_log(project.state, "t1")))
+                if kind == "held-named":
+                    self.assertTrue(observed["replacement"].is_dir())
+                    self.assertEqual(observed["marker"].read_bytes(), b"existing fixture contents\n")
+        if sys.platform != "win32":
+            with self.subTest(origin=True):
+                self.origin_round(interrupt=False, identity_refusal=True)
+
+    def test_creation_identity_refusals_preserve_the_original_cause(self):
+        import stat
+
+        from oah.design import task_context as tc
+        from oah.review import snapshot
+
+        parent = make_tmp_dir(self)
+        created: dict[str, int | str] = {"dev": 1, "ino": 2, "type": stat.S_IFDIR, "mode": 0o700, "uid": 3, "gid": 4}
+        errors = (snapshot.Retained("held/named mismatch"), tc.InstallRefused("native refusal"),
+                  OSError("identity read failed"), ValueError("invalid identity"), RuntimeError("identity failed"),
+                  TypeError("identity comparison failed"), MemoryError(), KeyboardInterrupt(), SystemExit())
+        for error in errors:
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(snapshot, "_container_object", side_effect=error):
+                with self.assertRaises(BaseException) as caught:
+                    snapshot.require_creation_identity(parent, created)
+                self.assertIsInstance(caught.exception, snapshot.CreationRetained)
+                self.assertIs(caught.exception.__cause__, error)
+
+        error = RuntimeError("creation identity cannot be compared")
+
+        class Unreadable(dict[str, int | str]):
+            def __getitem__(self, key):
+                raise error
+
+        class Incomparable(dict[str, int | str]):
+            def __ne__(self, other):
+                raise error
+
+        for phase in ("creation", "recorded", "current"):
+            with self.subTest(phase=phase), \
+                    mock.patch.object(snapshot, "_container_object", return_value=Incomparable(created)):
+                with self.assertRaises(BaseException) as caught:
+                    snapshot.require_creation_identity(parent, Unreadable(created) if phase == "creation" else created,
+                        *((Incomparable(created),) if phase == "recorded" else ()), current=phase == "current")
+                self.assertIsInstance(caught.exception, snapshot.CreationRetained)
+                self.assertIs(caught.exception.__cause__, error)
+
+    def named_identity_refusal(self, parent, observed):
+        from oah.review import snapshot
+
+        lstat = snapshot.os.lstat
+
+        def alternate(path, *args, **kwargs):
+            if pathlib.Path(path) == parent and sys._getframe(1).f_code.co_name == "_container_object" \
+                    and not observed.get("replacement"):
+                original = parent.with_name(parent.name + "-original")
+                replacement = parent.with_name(parent.name + "-replacement")
+                parent.rename(original)
+                shutil.copytree(original, parent)
+                info = lstat(parent)
+                marker = parent / "keep.txt"
+                marker.write_bytes(b"existing fixture contents\n")
+                parent.rename(replacement)
+                original.rename(parent)
+                observed.update(replacement=replacement, marker=replacement / "keep.txt")
+                return info
+            return lstat(path, *args, **kwargs)
+
+        return mock.patch.object(snapshot.os, "lstat", alternate)
 
     @unittest.skipUnless(pathlib.Path("/var/tmp").is_dir(), "unresolved /var/tmp control")
     def test_design_reviews_dispose_and_count_under_unresolved_var_tmp(self):
@@ -609,7 +683,7 @@ class ReviewDesignTest(unittest.TestCase):
                 self.assertFalse((project.state / "design-retirement").exists())
                 self.assertEqual(list(project.temp_root.iterdir()), [])
 
-    def origin_round(self, *, interrupt: bool, replacement: str | None = None,
+    def origin_round(self, *, interrupt: bool, replacement: str | None = None, identity_refusal: bool = False,
                      temp_root: pathlib.Path | None = None) -> None:
         from oah.design import task_context as tc
         from oah.design.binding import repo_identity
@@ -677,7 +751,11 @@ class ReviewDesignTest(unittest.TestCase):
             return result
 
         def captured(disposal, parent, source, copied):
-            capture_final(disposal, parent, source, copied)
+            if identity_refusal:
+                with self.named_identity_refusal(parent, observed):
+                    capture_final(disposal, parent, source, copied)
+            else:
+                capture_final(disposal, parent, source, copied)
             if replacement == "retirement":
                 replace_container(parent)
             if interrupt:
@@ -700,15 +778,28 @@ class ReviewDesignTest(unittest.TestCase):
         with mock.patch.object(runner.call, "prepare", prepared), mock.patch.object(runner.call, "execute", completed), \
                 mock.patch.object(runner._SnapshotDisposal, "capture_final", captured):
             result = None
-            if replacement == "capture":
+            if replacement == "capture" or identity_refusal:
                 from oah.review import ReviewError
 
                 with self.assertRaises(ReviewError) as caught:
                     project.review()
                 self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_RETAINED")
-                self.assertFalse((project.state / "design-retirement").exists())
+                if replacement == "capture":
+                    self.assertFalse((project.state / "design-retirement").exists())
             else:
                 result = project.review()
+        if identity_refusal:
+            self.assertTrue(observed["root"].parent.is_dir())
+            self.assertEqual((observed["root"] / "probe.txt").read_bytes(), b"written by the fake reviewer\n")
+            self.assertTrue(observed["replacement"].is_dir())
+            self.assertEqual(observed["marker"].read_bytes(), b"existing fixture contents\n")
+            self.assertEqual(project.names(), [])
+            log = runner.receipts.read_round_log(project.state, "t1")
+            self.assertEqual([line["event"] for line in log], ["start", "finish"])
+            self.assertFalse(log[-1]["counted"])
+            self.assertEqual(log[-1]["snapshot_disposition"], "retained")
+            self.assertIsNone(tc.transport_views(project.state)[observed["origin"]].last("retired"))
+            return
         if replacement is not None:
             self.assertEqual(observed["marker"].read_bytes(), b"existing fixture contents\n")
             self.assertTrue((observed["original"] / "tree/probe.txt").is_file())
