@@ -12,8 +12,10 @@ import datetime as dt
 import hashlib
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -538,6 +540,29 @@ class ReviewDesignTest(unittest.TestCase):
     def test_interrupted_onstack_retirement_never_publishes_a_counted_review(self):
         self.origin_round(interrupt=True)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX snapshot replacement")
+    def test_origin_snapshot_replacement_retains_both_containers_without_counting(self):
+        for phase in ("capture", "retirement"):
+            with self.subTest(phase=phase):
+                self.origin_round(interrupt=False, replacement=phase)
+
+    @unittest.skipUnless(pathlib.Path("/var/tmp").is_dir(), "unresolved /var/tmp control")
+    def test_design_reviews_dispose_and_count_under_unresolved_var_tmp(self):
+        from oah.review import receipts
+
+        for origin in (False, True):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory(prefix="oah-birth-", dir="/var/tmp") as folder:
+                temporary = pathlib.Path(folder)
+                if origin:
+                    self.origin_round(interrupt=False, temp_root=temporary)
+                else:
+                    project = design_fix_project(self)
+                    project.temp_root = temporary
+                    result = project.review()
+                    self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+                    self.assertTrue(receipts.read_round_log(project.state, "t1")[-1]["counted"])
+                self.assertEqual(list(temporary.iterdir()), [])
+
     def test_whole_inline_reviews_accept_clone_names_without_retirement_pages(self):
         import os
 
@@ -557,18 +582,29 @@ class ReviewDesignTest(unittest.TestCase):
                 self.assertFalse((project.state / "design-retirement").exists())
                 self.assertEqual(list(project.temp_root.iterdir()), [])
 
-    def origin_round(self, *, interrupt: bool) -> None:
+    def origin_round(self, *, interrupt: bool, replacement: str | None = None,
+                     temp_root: pathlib.Path | None = None) -> None:
         from oah.design import task_context as tc
         from oah.design.binding import repo_identity
         from oah.lease import Store
         from oah.review import runner
 
         project = design_fix_project(self)
+        if temp_root is not None:
+            project.temp_root = temp_root
         project.commit({"probe.txt": "written by the fake reviewer\n"})
         prepare, execute = runner.call.prepare, runner.call.execute
         capture_final = runner._SnapshotDisposal.capture_final
         writer = Store(project.state)
         observed = {}
+
+        def replace_container(parent):
+            original = parent.with_name(parent.name + "-original")
+            parent.rename(original)
+            shutil.copytree(original, parent)
+            marker = parent / "keep.txt"
+            marker.write_bytes(b"existing fixture contents\n")
+            observed.update(original=original, replacement=parent, marker=marker)
 
         def prepared(*args, **kwargs):
             result = prepare(*args, **kwargs)
@@ -576,6 +612,8 @@ class ReviewDesignTest(unittest.TestCase):
             self.assertIsNotNone(disposal)
             lease = writer.inspect("t1")
             root = pathlib.Path(result.cwd)
+            if replacement == "capture":
+                replace_container(root.parent)
             live = tc.LiveRoots(tc.current_role_roots(lease, project.state, root, retirement=True))
             self.addCleanup(live.close)
             record = tc.origin_record(
@@ -613,6 +651,8 @@ class ReviewDesignTest(unittest.TestCase):
 
         def captured(disposal, parent, source, copied):
             capture_final(disposal, parent, source, copied)
+            if replacement == "retirement":
+                replace_container(parent)
             if interrupt:
                 observe, faulted = Store.observe_transport, []
 
@@ -632,7 +672,28 @@ class ReviewDesignTest(unittest.TestCase):
 
         with mock.patch.object(runner.call, "prepare", prepared), mock.patch.object(runner.call, "execute", completed), \
                 mock.patch.object(runner._SnapshotDisposal, "capture_final", captured):
-            result = project.review()
+            result = None
+            if replacement == "capture":
+                from oah.review import ReviewError
+
+                with self.assertRaises(ReviewError) as caught:
+                    project.review()
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_RETAINED")
+                self.assertFalse((project.state / "design-retirement").exists())
+            else:
+                result = project.review()
+        if replacement is not None:
+            self.assertEqual(observed["marker"].read_bytes(), b"existing fixture contents\n")
+            self.assertTrue((observed["original"] / "tree/probe.txt").is_file())
+            self.assertTrue(observed["replacement"].is_dir())
+            self.assertEqual(project.names(), [])
+            self.assertFalse(any(line.get("counted") for line in runner.receipts.read_round_log(project.state, "t1")))
+            if replacement == "retirement":
+                assert result is not None
+                self.assertEqual(result.code, "OAH_REVIEW_SNAPSHOT_RETAINED", result.message)
+                self.assertEqual(observed["disposition"][-1][0], "retained")
+            return
+        assert result is not None
         self.assertEqual(len(project.calls()), 1)
         view = tc.transport_views(project.state)[observed["origin"]]
         self.assertIsNone(view.problem)

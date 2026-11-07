@@ -271,9 +271,11 @@ class _SnapshotDisposal:
         self.parent: pathlib.Path | None = None
         self.allocation: dict | None = None
 
-    def prepare(self, parent: pathlib.Path, design, *, metadata: dict | None = None) -> None:
+    def prepare(self, parent: pathlib.Path, design, *, created: dict[str, int | str] | None = None,
+                metadata: dict | None = None) -> None:
         allocation = {"version": 1, "run": self.run_id, "task_identity": design.task.identity.to_json(),
-                      "task_basis_digest": design.task.basis, "container_object": snapshot._container_object(parent),
+                      "task_basis_digest": design.task.basis,
+                      "container_object": snapshot.require_creation_identity(parent, created),
                       "review": dict(metadata or {})}
         if os.path.lexists(parent / "last-message.md"):
             raise snapshot.PlanUnavailable("the designated output slot was not absent before launch")
@@ -284,6 +286,8 @@ class _SnapshotDisposal:
                 record.get("task_identity") != self.allocation["task_identity"] or
                 record.get("task_basis_digest") != self.allocation["task_basis_digest"]):
             raise snapshot.PlanUnavailable("the origin does not match the prelaunch allocation")
+        snapshot.require_creation_identity(self.parent, self.allocation.get("container_object"),
+            *((self.plan.descriptor.get("container_object"),) if self.plan is not None else ()))
         if self.plan is None:
             self.plan = snapshot.capture_retirement_plan(self.allocation, self.parent, self.state,
                         output_slot={"path": ["last-message.md"], "producer": {"run": self.run_id, "engine": ENGINE}})
@@ -294,6 +298,7 @@ class _SnapshotDisposal:
         from oah.design import task_context
         from oah.lease import persist_create_only
 
+        snapshot.require_creation_identity(parent, (self.allocation or {}).get("container_object"))
         absent, _reason = task_context.transport_absence(self.state, run=self.run_id)
         if absent:
             return
@@ -330,15 +335,15 @@ class _SnapshotDisposal:
                           "head": checked["head"], "output_preserved": True,
                           "copied_sha256": hashlib.sha256(copied).hexdigest(), "copied_bytes": len(copied)})
 
-    def __call__(self, parent: pathlib.Path, created: dict) -> tuple[str, str | None]:
+    def __call__(self, parent: pathlib.Path, created: dict[str, int | str] | None) -> tuple[str, str | None]:
         from oah.design import task_context
 
         try:
+            snapshot.require_creation_identity(parent, created,
+                *((self.allocation.get("container_object"),) if self.allocation is not None else ()))
             absent, reason = task_context.transport_absence(self.state, run=self.run_id)
             if absent:
-                if snapshot._container_object(parent) != created:
-                    outcome = ("retained", "the snapshot folder is not the one this review created")
-                elif snapshot.remove(parent):
+                if snapshot.remove(parent):
                     outcome = ("legacy-disposed", None)
                 else:
                     outcome = ("retained", "the snapshot folder could not be removed")
@@ -806,7 +811,8 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         schema_path.write_bytes(schema.text().encode("utf-8"))  # the bytes the receipt's digest names
         final_path = snap.tree.parent / "last-message.md"
         if dispose is not None:
-            dispose.prepare(snap.tree.parent, design, metadata={"base": span.base, "head": span.head,
+            dispose.prepare(snap.tree.parent, design, created=snap.created,
+                            metadata={"base": span.base, "head": span.head,
                             "stripped": list(snap.stripped), "canary_sha256": hashlib.sha256(value.encode()).hexdigest(),
                             "schema_sha256": hashlib.sha256(schema.text().encode("utf-8")).hexdigest()})
         context_ = prompt.PromptContext(

@@ -1071,15 +1071,16 @@ class WindowsNativeRosterTest(unittest.TestCase):
         native = self.Native()
         parent = pathlib.PureWindowsPath(r'C:\work')
         root, anchors = native.open_anchor(parent)
+        created = snapshot._native_container(native.info(root))
         leaf, _ = native.open_child(root, 'product.txt', directory=False, create=True, writable=True)
         native.write(leaf, b'product\n')
         native.close(leaf)
         entries = list(snapshot._windows_census(parent, native=native))
         pages = make_tmp_dir(self)
-        allocation = {'run': 'rNative'}
+        allocation = {'run': 'rNative', 'container_object': created}
         fields = snapshot.write_pages(allocation, entries, pages)
         descriptor = {'version': 1, 'allocation': allocation, **fields, 'output_slot': {'path': ['last-message.md']},
-                      'container_object': snapshot._native_container(native.info(root))}
+                      'container_object': created}
         plan = snapshot.RetirementPlan(descriptor, hashlib.sha256(snapshot._canonical(descriptor)).hexdigest(), pages)
         output, _ = native.open_child(root, 'last-message.md', directory=False, create=True, writable=True)
         native.write(output, b'final report\n')
@@ -2868,12 +2869,20 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
 class SnapshotRetirementTest(unittest.TestCase):
     """SC4-P4-R/P4-R-I: exclusive disposal and the complete paged inventory."""
 
+    def __init__(self, methodName: str = "runTest") -> None:
+        super().__init__(methodName)
+        self.creations: dict[pathlib.Path, dict[str, int | str]] = {}
+
     def setUp(self):
         self.state = make_tmp_dir(self)
         self.allocation = {"version": 1, "run": "rS"}
 
     def container(self, files: int, *, name_length: int = 8) -> pathlib.Path:
+        from oah.review import snapshot
+
         parent = make_tmp_dir(self) / "c"
+        parent.mkdir()
+        self.creations[parent] = snapshot._container_object(parent, empty=True)
         (parent / "tree").mkdir(parents=True)
         for n in range(files):
             (parent / "tree" / f"{n:0{name_length}d}").write_bytes(b"x")
@@ -2882,10 +2891,90 @@ class SnapshotRetirementTest(unittest.TestCase):
     def plan(self, parent: pathlib.Path):
         from oah.review import snapshot
 
-        captured = snapshot.capture_retirement_plan(self.allocation, parent, self.state,
+        allocation = dict(self.allocation, container_object=self.creations[parent])
+        captured = snapshot.capture_retirement_plan(allocation, parent, self.state,
                                                     output_slot={"path": ["last-message.md"]})
         final = snapshot.finalize_retirement_plan(captured, {"presence": "absent"})
         return captured, final
+
+    def test_missing_creation_identity_retains_before_prepare_capture_or_disposal(self):
+        from types import SimpleNamespace
+        from oah.design.binding import TaskIdentity
+        from oah.review import runner, snapshot
+
+        parent = self.container(1)
+        design = SimpleNamespace(task=SimpleNamespace(identity=TaskIdentity("sha256:" + "a" * 64, "t1", "b" * 32),
+                                                     basis="sha256:" + "c" * 64))
+        outcomes = []
+        disposal = runner._snapshot_disposal(self.state, "rS", outcomes)
+        with self.assertRaises(snapshot.Retained):
+            disposal.prepare(parent, design)
+        with self.assertRaises(snapshot.Retained):
+            snapshot.capture_retirement_plan(self.allocation, parent, self.state,
+                                             output_slot={"path": ["last-message.md"]})
+        self.assertEqual(disposal(parent, None)[0], "retained")
+        self.assertFalse((self.state / snapshot.RETIREMENT_DIR).exists())
+        self.assertEqual((parent / "tree/00000000").read_bytes(), b"x")
+
+    def test_complete_plan_cannot_replace_its_allocation_identity(self):
+        from oah.review import snapshot
+
+        parent = self.container(1)
+        captured, _ = self.plan(parent)
+        descriptor = json.loads(snapshot._canonical(captured.descriptor))
+        descriptor["allocation"]["container_object"]["ino"] += 1
+        changed = snapshot.RetirementPlan(descriptor, hashlib.sha256(snapshot._canonical(descriptor)).hexdigest(),
+                                           captured.pages_dir)
+        final = snapshot.finalize_retirement_plan(changed, {"presence": "absent"})
+        with self.assertRaises(snapshot.Retained):
+            snapshot.validate_retirement_plan(final, parent, captured.pages_dir)
+        self.assertEqual((parent / "tree/00000000").read_bytes(), b"x")
+
+    def test_complete_capture_retains_replacement_before_writing_any_plan_page(self):
+        import shutil
+        from types import SimpleNamespace
+        from oah.design.binding import TaskIdentity
+        from oah.review import runner, snapshot
+
+        source = make_git_repo(self)
+        head = git_commit(source, {"product.txt": "product\n"})
+        design = SimpleNamespace(task=SimpleNamespace(identity=TaskIdentity("sha256:" + "a" * 64, "t1", "b" * 32),
+                                                     basis="sha256:" + "c" * 64))
+        for phase in ("before-capture", "after-census"):
+            with self.subTest(phase=phase):
+                state, temporary = make_tmp_dir(self), make_tmp_dir(self)
+                outcomes, warnings = [], []
+                disposal = runner._snapshot_disposal(state, "rS", outcomes)
+                with snapshot.make(source, head, base=head, temp_root=temporary,
+                                   dispose=disposal, warnings=warnings) as snap:
+                    parent = snap.tree.parent
+                    disposal.prepare(parent, design, created=snap.created)
+                    allocation = disposal.allocation
+                    assert allocation is not None
+                    original = parent.with_name(parent.name + "-original")
+
+                    def exchange():
+                        parent.rename(original)
+                        shutil.copytree(original, parent)
+                        (parent / "keep.txt").write_bytes(b"existing fixture contents\n")
+
+                    census = snapshot._census
+
+                    def enumerated(*args, **kwargs):
+                        yield from census(*args, **kwargs)
+                        exchange()
+
+                    if phase == "before-capture":
+                        exchange()
+                    with mock.patch.object(snapshot, "_census", enumerated if phase == "after-census" else census):
+                        with self.assertRaises(snapshot.Retained):
+                            snapshot.capture_retirement_plan(allocation, parent, state,
+                                                             output_slot={"path": ["last-message.md"]})
+                    self.assertEqual(list((state / snapshot.RETIREMENT_DIR).rglob("*.json")), [])
+                self.assertEqual((original / "tree/product.txt").read_bytes(), b"product\n")
+                self.assertEqual((parent / "keep.txt").read_bytes(), b"existing fixture contents\n")
+                self.assertEqual(outcomes[0][0], "retained")
+                self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
 
     @staticmethod
     def pages(captured) -> list[bytes]:
@@ -3070,7 +3159,7 @@ class SnapshotRetirementTest(unittest.TestCase):
         with snapshot.make(case.repo, head, base=head, dispose=dispose) as snap:
             parent = snap.parent
             allocation = {"version": 1, "run": "rS", "task_identity": case.lease.design["task_identity"],
-                          "task_basis_digest": case.lease.design["basis"]}
+                          "task_basis_digest": case.lease.design["basis"], "container_object": snap.created}
             captured = snapshot.capture_retirement_plan(allocation, parent, case.state_dir,
                                                         output_slot={"path": ["last-message.md"]})
             record = tc.origin_record(transport={"read_plan": {"files": [], "manifest_sha256": "sha256:" + "c" * 64},
@@ -3137,7 +3226,8 @@ class SnapshotRetirementTest(unittest.TestCase):
                     self.fail("the retirement fixture has no owned container")
                 plan = snapshot.capture_retirement_plan(
                     {"version": 1, "run": "rS", "task_identity": case.lease.design["task_identity"],
-                     "task_basis_digest": case.lease.design["basis"]}, parent, case.state_dir,
+                     "task_basis_digest": case.lease.design["basis"], "container_object": snap.created},
+                    parent, case.state_dir,
                     output_slot={"path": ["last-message.md"]})
                 roots = tc.LiveRoots(tc.current_role_roots(case.lease, case.state_dir, snap.tree, retirement=True))
                 try:

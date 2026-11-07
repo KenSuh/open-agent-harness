@@ -57,6 +57,7 @@ class Snapshot:
     head: str
     stripped: tuple[str, ...]
     parent: pathlib.Path | None = None  # the B-created container (clone, controls and output slot)
+    created: dict[str, int | str] | None = None
 
 
 def stripped(paths: Iterable[str]) -> list[str]:
@@ -202,7 +203,8 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
         paths = _tracked_paths(tree, _git(hooks, "ls-files", "--stage", "-z", cwd=tree).split("\0"))
         removed = stripped(paths)
         _strip(tree, removed)
-        yield Snapshot(tree=tree, head=head, stripped=tuple(removed), parent=parent)
+        yield Snapshot(tree=tree, head=head, stripped=tuple(removed), parent=parent,
+                       created=dict(created) if created is not None else None)
     finally:
         if dispose is None:
             if not remove(parent) and warnings is not None:
@@ -403,6 +405,27 @@ def _native_container(info) -> dict:
             "mode": info["mode"], "security": info["uid"]}
 
 
+def require_creation_identity(parent: pathlib.Path, created: dict[str, int | str] | None,
+                              *recorded: dict[str, int | str] | None, current: bool = True) -> dict[str, int | str]:
+    from oah.design import task_context as tc
+
+    if (not isinstance(created, dict) or not {"dev", "ino", "type", "mode"}.issubset(created)
+            or any(type(created[key]) is not int for key in ("dev", "ino", "type", "mode"))
+            or created["type"] != stat.S_IFDIR
+            or not ((set(created) == {"dev", "ino", "type", "mode", "uid", "gid"}
+                     and type(created["uid"]) is int and type(created["gid"]) is int)
+                    or (set(created) == {"dev", "ino", "type", "mode", "security"}
+                        and isinstance(created["security"], str) and created["security"]))
+            or any(identity != created for identity in recorded)):
+        raise Retained("the snapshot has no consistent original creation identity")
+    try:
+        if current and _container_object(parent) != created:
+            raise Retained("the snapshot folder is not the one this review created")
+    except (OSError, ValueError, tc.InstallRefused, tc.RootUnavailable) as exc:
+        raise Retained("the snapshot creation identity cannot be verified") from exc
+    return dict(created)
+
+
 def _native_entry(native, handle, components) -> dict:
     before = native.info(handle)
     directory = before["type"] == "directory"
@@ -593,16 +616,19 @@ def capture_retirement_plan(allocation: dict, parent: pathlib.Path, state_dir: p
     """The complete prelaunch inventory of the B-created container as linked create-only pages; every page is
     durable before the descriptor that names it exists. Raises PlanUnavailable before any origin or payment."""
     try:
+        created = require_creation_identity(parent, allocation.get("container_object"))
         allocation_id = hashlib.sha256(_canonical(allocation)).hexdigest()
         pages_dir = pathlib.Path(state_dir) / RETIREMENT_DIR / allocation_id / "pages"
         pages_dir.mkdir(parents=True, exist_ok=True)
         with Inventory(pages_dir.parent) as inventory:
             for entry in _census(parent, exclude=exclude):
                 inventory.add(entry)
+            require_creation_identity(parent, created, allocation.get("container_object"))
             fields = write_pages(allocation, inventory.entries(), pages_dir)
         _fsync(pages_dir)
+        require_creation_identity(parent, created, allocation.get("container_object"))
         descriptor = {"version": 1, "allocation": allocation, **fields, "output_slot": output_slot,
-                      "container_object": _container_object(parent)}
+                      "container_object": created}
         return RetirementPlan(descriptor, hashlib.sha256(_canonical(descriptor)).hexdigest(), pages_dir)
     except PlanUnavailable:
         raise
@@ -785,8 +811,11 @@ def validate_retirement_plan(final: dict, parent: pathlib.Path, pages_dir: pathl
         raise Retained("the retirement descriptor is malformed or does not match its sha256")
     pending_root = (pending is not None and pending.get("fact", {}).get("path") == []
                     and not os.path.lexists(parent))
-    if not container_removed and not pending_root and _container_object(parent) != descriptor.get("container_object"):
-        raise Retained("the owned snapshot container was replaced")
+    allocation = descriptor.get("allocation")
+    if not isinstance(allocation, dict):
+        raise Retained("the retirement plan has no creation allocation")
+    require_creation_identity(parent, allocation.get("container_object"), descriptor.get("container_object"),
+                              current=not container_removed and not pending_root)
     working = Inventory(pathlib.Path(pages_dir).parent)
     link, total_bytes = descriptor["head"], 0
     for expected_ordinal in range(descriptor["page_count"] - 1, -1, -1):
@@ -884,16 +913,16 @@ def _guarded_remove(parent: pathlib.Path, plan: ValidatedPlan, progress, guard=N
     except OSError:
         return False
     try:
-        if _container_stat(os.fstat(root)) != plan.final["base_plan"].get("container_object"):
-            raise Retained("the owned container was replaced")
+        descriptor = plan.final["base_plan"]
+        created = require_creation_identity(parent, descriptor["allocation"].get("container_object"),
+                                           descriptor.get("container_object"), _container_stat(os.fstat(root)))
         for item in plan.entries:
             *folders, name = item["path"]
             directory = root
             opened = []
             try:
                 with guard(item) if guard is not None else contextlib.nullcontext():
-                    if _container_object(parent) != plan.final["base_plan"]["container_object"]:
-                        raise Retained("the owned container path was replaced")
+                    require_creation_identity(parent, created)
                     prefix = []
                     for folder in folders:
                         prefix.append(folder)
@@ -941,16 +970,14 @@ def _guarded_remove(parent: pathlib.Path, plan: ValidatedPlan, progress, guard=N
         with guard(entry) if guard is not None else contextlib.nullcontext():
             if progress(entry, "intent") is False:
                 return False
-            if _container_object(parent) != plan.final["base_plan"]["container_object"]:
-                return False
+            require_creation_identity(parent, created)
             containing = os.open(parent.parent, flags)
-            if _container_stat(os.stat(parent.name, dir_fd=containing, follow_symlinks=False)) != \
-                    plan.final["base_plan"]["container_object"]:
-                return False
+            require_creation_identity(parent, created,
+                _container_stat(os.stat(parent.name, dir_fd=containing, follow_symlinks=False)))
             os.rmdir(parent.name, dir_fd=containing)
             os.fsync(containing)
             return progress(entry, "absent") is not False and not os.path.lexists(parent)
-    except OSError:
+    except (OSError, Retained):
         return False
     finally:
         if containing is not None:
@@ -992,21 +1019,21 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
     from oah.design import task_context as tc
 
     native, root, anchors = native if native is not None else tc._WindowsIO(), None, []
-    expected_root = plan.final["base_plan"]["container_object"]
+    descriptor = plan.final["base_plan"]
+    created = descriptor["allocation"].get("container_object")
     slot = tuple(plan.final["base_plan"]["output_slot"]["path"])
     try:
         root_path = tc._safe_windows_path(str(parent))
         containing, anchors = native.open_anchor(root_path.parent)
         root, _ = native.open_child(containing, root_path.name, directory=True, delete=True)
-        if _native_container(native.info(root)) != expected_root:
-            raise Retained("the native snapshot root was replaced")
+        require_creation_identity(parent, created, descriptor.get("container_object"),
+                                  _native_container(native.info(root)), current=False)
 
         def check_root():
             named, _ = native.open_child(containing, root_path.name, directory=True, inspect=True)
             try:
-                if _native_container(native.info(named)) != expected_root or \
-                        _native_container(native.info(root)) != expected_root:
-                    raise Retained("the native snapshot root path, ownership or mode changed")
+                require_creation_identity(parent, created, _native_container(native.info(named)),
+                                          _native_container(native.info(root)), current=False)
             finally:
                 native.close(named)
 
