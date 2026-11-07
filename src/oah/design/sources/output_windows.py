@@ -74,6 +74,12 @@ class Native:
     def create_file(self, path: str) -> int:
         return self._open(path, directory=False)
 
+    def open_file(self, path: str) -> int:
+        handle = self.api.CreateFileW(path, 0x80, 7, None, 3, 0x00200080, None)
+        if handle is None or handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return handle
+
     def info(self, handle: int) -> Info:
         class AttributeTag(ctypes.Structure):
             _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
@@ -213,9 +219,13 @@ def write_new(root: Path, parts: list[str], data: bytes, fault: Callable[[str], 
         destination = path / parts[-1]
         api.rename(temporary, str(destination))
         published = True
-        actual = _inspect(api, temporary, destination, directory=False, volume=owned.volume)
-        if actual.file_id != owned.file_id:
-            raise OutputError(UNVERIFIABLE_CODE, "identity-changed", "the published handle no longer names our file")
+        verification = api.open_file(str(destination))
+        try:
+            actual = _inspect(api, verification, destination, directory=False, volume=owned.volume)
+            if actual.file_id != owned.file_id:
+                raise OutputError(UNVERIFIABLE_CODE, "identity-changed", "the published path no longer names our file")
+        finally:
+            api.close(verification)
         return destination
     except OSError as exc:
         code = getattr(exc, "winerror", None)

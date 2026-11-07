@@ -1209,6 +1209,39 @@ class WindowsOutputTest(unittest.TestCase):
         self.assertTrue(ctypes.string_at(buffer, size).endswith("C:/repo/out/materials.md".encode("utf-16-le")))
         native.discard(7)
         self.assertEqual((7, 4), api.SetFileInformationByHandle.call_args.args[:2])
+        self.assertEqual(7, native.open_file("C:/repo/out/materials.md"))
+        self.assertEqual((0x80, 7, None, 3, 0x00200080, None), api.CreateFileW.call_args.args[1:])
+
+    def test_native_identity_reads_the_full_volume_serial_and_128_bit_file_id(self) -> None:
+        from types import SimpleNamespace
+        from oah.design.sources.output_windows import Info, Native
+
+        serial, identifier = 0xFEDCBA9876543210, bytes(range(16))
+
+        def information(_handle, kind, pointer, size):
+            match kind:
+                case 9:
+                    pointer._obj.attributes = 0x80
+                case 18:
+                    self.assertEqual(24, size)
+                    pointer._obj.volume = serial
+                    pointer._obj.identifier[:] = identifier
+                case _:
+                    self.fail(f"unexpected file information class {kind}")
+            return 1
+
+        def final_path(_handle, buffer, _size, flags):
+            self.assertEqual(0, flags)
+            buffer.value = "\\\\?\\C:\\repo\\out\\materials.md"
+            return len(buffer.value)
+
+        api = SimpleNamespace(GetFileType=mock.Mock(return_value=1),
+            GetFileInformationByHandleEx=mock.Mock(side_effect=information),
+            GetFinalPathNameByHandleW=mock.Mock(side_effect=final_path))
+        native = object.__new__(Native)
+        with mock.patch.object(native, "api", api, create=True):
+            self.assertEqual(Info("C:\\repo\\out\\materials.md", serial, identifier, 0x80), native.info(7))
+        self.assertEqual([9, 18], [call.args[1] for call in api.GetFileInformationByHandleEx.call_args_list])
 
     def api(self):
         from oah.design.sources.output_windows import Info
@@ -1216,26 +1249,34 @@ class WindowsOutputTest(unittest.TestCase):
         class FakeNative:
             def __init__(self):
                 self.handles = {}
+                self.identities = {}
                 self.closed = []
                 self.reparse = False
                 self.unsupported = False
                 self.fail_write = False
 
             def open_directory(self, name):
-                handle = os.open(name, os.O_RDONLY | os.O_DIRECTORY)
+                return self.pin(name)
+
+            def pin(self, name):
+                handle = len(self.handles) + 1
                 self.handles[handle] = name
+                info = pathlib.Path(name).stat()
+                self.identities[handle] = Info(name, info.st_dev, info.st_ino.to_bytes(16, "little"),
+                                               0x10 if pathlib.Path(name).is_dir() else 0x80)
                 return handle
 
             def create_file(self, name):
-                handle = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-                self.handles[handle] = name
-                return handle
+                with pathlib.Path(name).open("xb"):
+                    pass
+                return self.pin(name)
+
+            def open_file(self, name):
+                return self.pin(name)
 
             def info(self, handle):
-                info = os.fstat(handle)
-                attributes = 0x10 if pathlib.Path(self.handles[handle]).is_dir() else 0x80
-                return Info(self.handles[handle], info.st_dev, info.st_ino.to_bytes(16, "little"),
-                            attributes | (0x400 if self.reparse else 0))
+                info = self.identities[handle]
+                return dataclasses.replace(info, attributes=info.attributes | (0x400 if self.reparse else 0))
 
             def volume(self, handle):
                 if self.unsupported:
@@ -1247,18 +1288,17 @@ class WindowsOutputTest(unittest.TestCase):
             def write(self, handle, data):
                 if self.fail_write:
                     raise OSError("injected write failure")
-                os.write(handle, data)
+                pathlib.Path(self.handles[handle]).write_bytes(data)
 
             def flush(self, handle):
-                os.fsync(handle)
+                pass
 
             def rename(self, handle, destination):
                 if os.path.lexists(destination):
                     error = OSError("already exists")
                     error.winerror = 183
                     raise error
-                os.link(self.handles[handle], destination)
-                os.unlink(self.handles[handle])
+                os.rename(self.handles[handle], destination)
                 self.handles[handle] = destination
 
             def discard(self, handle):
@@ -1266,7 +1306,6 @@ class WindowsOutputTest(unittest.TestCase):
 
             def close(self, handle):
                 self.closed.append(handle)
-                os.close(handle)
 
         return FakeNative()
 
@@ -1292,6 +1331,47 @@ class WindowsOutputTest(unittest.TestCase):
         self.assertEqual((output.UNVERIFIABLE_CODE, "windows-api-unavailable"),
                          (caught.exception.code, caught.exception.reason))
         self.assertEqual([], list(root.iterdir()))
+
+    def test_a_published_file_with_a_different_id_or_volume_is_refused(self) -> None:
+        from oah.design.sources import output_windows
+
+        for field, replacement in (("file_id", b"x" * 16), ("volume", 2**63 + 1),
+                                   ("path", "C:/elsewhere/materials.md")):
+            with self.subTest(field=field):
+                root = make_tmp_dir(self)
+                api = self.api()
+                original = api.open_file
+
+                def swapped(name):
+                    handle = original(name)
+                    api.identities[handle] = dataclasses.replace(api.identities[handle], **{field: replacement})
+                    return handle
+
+                api.open_file = swapped
+                with mock.patch.object(output_windows, "Native", return_value=api), \
+                        self.assertRaises(output.OutputError) as caught:
+                    output.write_new(root, "materials.md", b"ours", windows=True)
+                self.assertEqual("identity-changed", caught.exception.reason)
+                self.assertEqual(set(api.handles), set(api.closed))
+
+    def test_a_changed_pinned_directory_is_refused_before_publication(self) -> None:
+        from oah.design.sources import output_windows
+
+        for stage in ("parent-pinned", "temporary-written"):
+            with self.subTest(stage=stage):
+                root = make_tmp_dir(self)
+                api = self.api()
+
+                def swap(step):
+                    if step == stage:
+                        api.identities[1] = dataclasses.replace(api.identities[1], file_id=b"x" * 16)
+
+                with mock.patch.object(output_windows, "Native", return_value=api), \
+                        self.assertRaises(output.OutputError) as caught:
+                    output.write_new(root, "materials.md", b"ours", windows=True, fault=swap)
+                self.assertEqual("identity-changed", caught.exception.reason)
+                self.assertEqual([], list(root.iterdir()))
+                self.assertEqual(set(api.handles), set(api.closed))
 
     def test_windows_reparse_filesystem_and_write_failures_preserve_other_files(self) -> None:
         from oah.design.sources import output_windows
