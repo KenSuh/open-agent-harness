@@ -36,6 +36,7 @@ from oah.design.sources.state import (ASSESSMENT_LIMIT, DESIGNS_LIMIT, DISMISSAL
                                       SCHEDULE_LIMIT, State, StateProblem, canonical, digest_of, hex_of)
 from oah.design.sources.view import DesignView, ViewUnavailable, read_view
 from oah.lockfile import LockTimeout
+from oah.scratch import ScratchError
 
 DEFAULTS = {"auto_check": True, "check_interval_hours": 24.0, "fresh_hours": 24.0, "license_allow": ["MIT"],
             "max_document_bytes": 1 << 20, "timeout_seconds": 30.0}
@@ -415,7 +416,7 @@ class Sources:
             limit = self.clock() + SOURCE_DEADLINE if deadline is None else deadline
             return self._check_prepared(spec, head, started, deadline=limit, fault=fault, skip_fresh=skip_fresh,
                                         publish=publish)
-        except _AuthorityFailure:
+        except (_AuthorityFailure, ScratchError):
             raise
         except Exception:
             if not prepared:

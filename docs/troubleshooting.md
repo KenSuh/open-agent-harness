@@ -35,6 +35,15 @@ cannot point at a code that is gone.
 | `OAH_STATE_LOCK_TIMEOUT` | Another `oah` command holds the state lock. | Wait for it to finish, then run your command again. |
 | `OAH_SCRATCH_UNSAFE` | `oah` could not prove that its scratch folder, where it keeps short-lived working folders, is yours alone: a folder above it can be changed by another account, or the scratch folder has the wrong owner or permissions. `oah` stops rather than use the system temp folder. | Fix the folder the message names. It and the folders above it must belong to you or the system, with no write access for other accounts, and the scratch folder itself must be yours alone (`chmod 700` on macOS and Linux). A scratch folder that was not made that way can be removed while no `oah` command runs; `oah` creates it again correctly. On Windows, also check that `LOCALAPPDATA` points at your own `AppData\Local` folder. [Scratch folders](concepts.md#scratch-folders) explains the check. |
 
+`oah sources check`, `oah land` and `oah fix` preserve `OAH_SCRATCH_UNSAFE`, the refused base, the reason
+and the scratch module's recovery instructions in text and JSON. For a supplied correction root, use the
+root named in that refusal. Correction diagnostics still redact exported credential values.
+
+`oah doctor` reports the configured scratch base without changing it. If the base or any entry cannot be
+read, text says it **cannot be fully read** and shows only the known entries and size; the totals remain
+unknown. JSON always includes the scratch report, including `base` and `unreadable`, even when the base
+is absent or empty. Doctor deletes nothing and changes no permissions.
+
 ## Models
 
 These appear in v0.3.0. [How a model is chosen](concepts.md#how-a-model-is-chosen) has the

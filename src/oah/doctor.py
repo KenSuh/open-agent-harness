@@ -441,7 +441,7 @@ def scratch_leftovers(env: Mapping[str, str]) -> dict:
     try:
         return scratch.leftovers(env)
     except scratch.ScratchError as exc:
-        return {"base": exc.base, "error": exc.code, "reason": exc.reason}
+        return {"base": exc.base, "error": exc.code, "reason": exc.reason, "unreadable": 1}
 
 
 def _size(count: int) -> str:
@@ -461,12 +461,15 @@ def _scratch_lines(report: Mapping | None) -> list[str]:
     base = _printable(str(report.get("base")))
     if report.get("error"):
         return ["", f"Scratch folder: {base} cannot be used ({report['error']}: {_printable(str(report['reason']))})"]
+    if report["unreadable"]:
+        return ["", f"Scratch folder: {base} cannot be fully read",
+                f"  known: {report['count']} direct entries, {_size(report['bytes'])} of regular files; "
+                f"{report['unreadable']} unreadable paths; totals are unknown; oah deletes nothing here"]
     if not report["count"]:
         return ["", f"Scratch folder: {base} (no leftovers)"]
-    count, unreadable = report["count"], report["unreadable"]
-    unread = f", {unreadable} entr{'y' if unreadable == 1 else 'ies'} unreadable" if unreadable else ""
+    count = report["count"]
     return ["", f"Scratch folder: {base}",
-            f"  {count} leftover{'' if count == 1 else 's'}, {_size(report['bytes'])}{unread}, from runs that stopped "
+            f"  {count} leftover{'' if count == 1 else 's'}, {_size(report['bytes'])}, from runs that stopped "
             "before cleaning up; oah deletes nothing here, so remove them once no oah command is running"]
 
 
@@ -530,7 +533,7 @@ def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
         payload["update_notices"] = [dict(notice) for notice in update_notices]
     if update_notices_error is not None:
         payload["update_notices_error"] = update_notices_error
-    if scratch is not None and (scratch.get("error") or scratch.get("count")):  # leftovers or a problem only
+    if scratch is not None:
         payload["scratch"] = dict(scratch)
     return json.dumps(payload, indent=2, ensure_ascii=True)
 

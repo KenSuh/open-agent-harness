@@ -101,9 +101,15 @@ def run(args: argparse.Namespace) -> int:
     from oah.design.sources.output import OutputError
     from oah.design.sources.view import ViewUnavailable
     from oah.toolkit.schedule import ScheduleError
+    from oah.scratch import ScratchError
 
     try:
         return HANDLERS[args.sources_command](args)
+    except ScratchError as exc:
+        print(exc, file=sys.stderr)
+        if getattr(args, "json", False):
+            _print({"code": exc.code, "message": str(exc)})
+        return EXIT_REFUSED
     except (ViewUnavailable, DesignError, RefUnavailable) as exc:
         code = getattr(exc, "code", "ref-unavailable")
         print(f"OAH_SOURCES_DESIGN_UNAVAILABLE: {code}; design authority is unknown. Retry the read before "

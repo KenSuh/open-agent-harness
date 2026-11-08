@@ -1010,7 +1010,8 @@ class ScratchDoctorTest(unittest.TestCase):
         self.assertIn(f"\nScratch folder: {self.base} (no leftovers)\n", out)
         self.assertTrue(out.rstrip().endswith("DOCTOR_OK"), out)
         _code, raw = self.doctor(json_output=True)
-        self.assertNotIn("scratch", json.loads(raw), "the JSON names the scratch folder only when there is news")
+        self.assertEqual(json.loads(raw)["scratch"],
+                         {"base": str(self.base), "exists": False, "count": 0, "bytes": 0, "unreadable": 0})
         self.assertEqual(self.tree(), [], "oah doctor creates nothing")
 
     def test_leftovers_are_counted_sized_and_kept(self):
@@ -1042,3 +1043,43 @@ class ScratchDoctorTest(unittest.TestCase):
         _code, raw = self.doctor(json_output=True)
         self.assertEqual(json.loads(raw)["scratch"]["error"], "OAH_SCRATCH_UNSAFE")
         self.assertEqual(self.tree(), [])
+
+    def test_unreadable_base_is_unknown_in_text(self):
+        self.unreadable_report(json_output=False)
+
+    def test_unreadable_base_is_unknown_in_json(self):
+        self.unreadable_report(json_output=True)
+
+    def unreadable_report(self, *, json_output):
+        retained = self.base / "oah-review-retained" / "keep.txt"
+        retained.parent.mkdir(parents=True)
+        retained.write_bytes(b"retained test contents\n")
+        before = retained.read_bytes()
+        recorded_mode = self.base.stat().st_mode
+        original = os.scandir
+
+        def listing(path):
+            if pathlib.Path(path) == self.base:
+                raise PermissionError("test-owned base listing is unreadable")
+            return original(path)
+
+        if os.name != "nt":
+            self.base.chmod(0)
+        try:
+            with mock.patch("os.scandir", listing) if os.name == "nt" else contextlib.nullcontext():
+                code, out = self.doctor(json_output=json_output)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(self.base.stat().st_mode, recorded_mode if os.name == "nt" else recorded_mode & ~0o7777)
+        finally:
+            if os.name != "nt":
+                self.base.chmod(recorded_mode)
+        self.assertEqual(retained.read_bytes(), before)
+        if json_output:
+            self.assertEqual(json.loads(out)["scratch"],
+                             {"base": str(self.base), "exists": True, "count": 0, "bytes": 0, "unreadable": 1})
+        else:
+            self.assertIn(f"Scratch folder: {self.base} cannot be fully read", out)
+            self.assertIn("0 direct entries", out)
+            self.assertIn("0 bytes", out)
+            self.assertIn("1 unreadable", out)
+            self.assertNotIn("(no leftovers)", out)

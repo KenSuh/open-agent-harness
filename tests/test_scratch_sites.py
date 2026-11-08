@@ -360,16 +360,15 @@ class DesignSourceRefusals(SourceCase, RefusalCase):
             gitref.ls_remote(str(self.upstream), tags=True)
         self.assert_refused(caught.exception, OSError)
 
-    def test_s10_a_source_check_fails_and_falls_back_to_nothing(self):
-        # The source check turns every observer error into a failed attempt (design/sources/check.py, outside this
-        # lane), so the code itself is not shown here; the check still fails and makes no folder anywhere.
+    def test_s10_a_source_check_preserves_the_scratch_refusal(self):
         self.commit({"src/lib.rs": "pub fn a() {}\n", "LICENSE": LICENSE})
         branch = git(self.upstream, "branch", "--show-current").strip()
         sources = self.sources()
         spec = self.register(sources, track="commit", ref=branch)
         with unsafe_scratch(self):
-            result = sources.check_one(spec)
-        self.assertEqual(result.result, "failed")
+            with self.assertRaises(OSError) as caught:
+                sources.check_one(spec)
+        self.assert_refused(caught.exception, OSError)
 
 
 if __name__ == "__main__":

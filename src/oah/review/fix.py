@@ -298,8 +298,14 @@ _WARNING_DIAGNOSTICS = {
 }
 
 
+class _ScratchRefusal(ReviewError):
+    def __init__(self, error: oah_scratch.ScratchError, redact: Callable[[str], str]) -> None:
+        super().__init__(error.code, redact(error.detail))
+
+
 def _error_diagnostic(exc: BaseException) -> tuple[str, str]:
-    """Never format exception text, paths, class names or unapproved codes, even without exported keys."""
+    if isinstance(exc, _ScratchRefusal):
+        return exc.code, str(exc)
     code = INTERRUPTED if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", None)
     if not isinstance(code, str) or code not in _ERROR_DIAGNOSTICS:
         code = "OAH_STATE_IO" if isinstance(exc, OSError) else "OAH_FIX_FAILED"
@@ -964,6 +970,10 @@ def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]],
             return operation(redact)
         finally:
             runs._CORRECTION_CAPTURE.reset(token)
+    except oah_scratch.ScratchError as exc:
+        raise _ScratchRefusal(exc, redact) from None
+    except _ScratchRefusal:
+        raise
     except BaseException as exc:
         code, diagnostic = _error_diagnostic(exc)
         message = diagnostic[len(code) + 2:]
@@ -1521,11 +1531,15 @@ class _Attempt:
                             exc, interrupted = changed, False
                     except Exception:
                         pass
+                if isinstance(exc, oah_scratch.ScratchError):
+                    exc = _ScratchRefusal(exc, self.redact)
                 code, diagnostic = _error_diagnostic(exc)
                 with _publication(self.t, self.history):
                     self._end("aborted" if interrupted else "failed", diagnostic)
             if interrupted:
                 raise FixInterrupted(diagnostic[len(code) + 2:]) from None
+            if isinstance(exc, _ScratchRefusal):
+                raise exc from None
             raise ReviewError(code, diagnostic[len(code) + 2:]) from None
 
     def _show(self, judged):

@@ -7,7 +7,7 @@ import os
 import pathlib
 import sys
 
-from oah import land
+from oah import land, scratch
 from oah.atomic import StateCorrupt, StorageError
 from oah.journal import PendingTransaction
 from oah.lockfile import LockTimeout
@@ -216,7 +216,10 @@ def run(args: argparse.Namespace) -> int:
         _record(state, assessment, mode, pushed)
         return _done(pushed.code, pushed.message, EXIT_OK if pushed.landed else EXIT_REFUSED, args.json, assessment,
                      pushed)
-    except (land.LandError, ReviewError) as exc:
+    except (land.LandError, ReviewError, scratch.ScratchError) as exc:
+        refusal = exc if isinstance(exc, scratch.ScratchError) else exc.__cause__
+        if isinstance(refusal, scratch.ScratchError):
+            return _done(refusal.code, refusal.detail, EXIT_REFUSED, args.json)
         code = getattr(exc, "code", "OAH_LAND_FAILED")
         code = code if code in EXCEPTION_MESSAGES else "OAH_LAND_FAILED"
         return _done(code, EXCEPTION_MESSAGES[code], EXIT_ENVIRONMENT if code in ENVIRONMENT_CODES
