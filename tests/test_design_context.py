@@ -37,9 +37,9 @@ NATIVE = sys.platform == "darwin" and platform.machine() == "arm64"
 NATIVE_ONLY = "the reference profile is qualified only for native macOS arm64"
 _GrantSecurityChange = Literal['unchanged', 'preparation', 'owner', 'access', 'ace-flags',
                                'extra-ace', 'unprotected', 'control']
-_SemanticFixture = Literal['different-control', 'padded-acl', 'owner', 'ace-owner', 'extra-ace',
+_SemanticFixture = Literal['different-control', 'padded-acl', 'padded-ace', 'owner', 'ace-owner', 'extra-ace',
                            'ace-type', 'ace-flags', 'access', 'unprotected', 'absent', 'null']
-_SEMANTIC_FIXTURES: tuple[_SemanticFixture, ...] = ('different-control', 'padded-acl', 'owner', 'ace-owner',
+_SEMANTIC_FIXTURES: tuple[_SemanticFixture, ...] = ('different-control', 'padded-acl', 'padded-ace', 'owner', 'ace-owner',
     'extra-ace', 'ace-type', 'ace-flags', 'access', 'unprotected', 'absent', 'null')
 
 FAKE_STREAM = '''# 스트림 가짜 Claude — 브리프의 Design data 파일을 Read 도구 이벤트로 읽은 것처럼 stream-json 을 낸다.
@@ -1337,8 +1337,9 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 b''.join(aces) + bytes(padding)
 
         @staticmethod
-        def _ace(mask: int, sid: bytes) -> bytes:
-            return b'\0\0' + (8 + len(sid)).to_bytes(2, 'little') + mask.to_bytes(4, 'little') + sid
+        def _ace(mask: int, sid: bytes, padding: bytes = b'') -> bytes:
+            return b'\0\0' + (8 + len(sid) + len(padding)).to_bytes(2, 'little') + \
+                mask.to_bytes(4, 'little') + sid + padding
 
         def _state(self, handle) -> tuple[bytes, bytes | None, int]:
             inode = self.handles[handle]
@@ -1398,6 +1399,8 @@ class WindowsNativeRosterTest(unittest.TestCase):
                         pass
                     case 'padded-acl':
                         stored_acl = self._acl([ace], padding=16)
+                    case 'padded-ace':
+                        stored_acl = self._acl([self._ace(mask, sid, padding=b'pad!')])
                     case 'owner':
                         stored_owner = self.OTHER_SID
                     case 'ace-owner':
@@ -1462,7 +1465,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
                     held = {'leaf': reopened.leaf_handles.get(name), 'manifest': reopened.m_fd,
                             'data': reopened.data_fd}[target]
                     inode, progress = native.handles[held], []
-                    accepted = fixture in ('different-control', 'padded-acl')
+                    accepted = fixture in ('different-control', 'padded-acl', 'padded-ace')
                     installation: tc.WindowsInstallation = reopened
 
                     def remove():
@@ -1511,7 +1514,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
                     progress = []
                     disposed = snapshot._windows_guarded_remove(parent, plan,
                         lambda item, phase: progress.append((item['path'], phase)) or True, native=native)
-                    accepted = fixture in ('different-control', 'padded-acl')
+                    accepted = fixture in ('different-control', 'padded-acl', 'padded-ace')
                     self.assertEqual(disposed, accepted)
                     self.assertEqual(inode in native.nodes, not accepted)
                     self.assertEqual((target_path, 'absent') in progress, accepted)
@@ -1519,6 +1522,28 @@ class WindowsNativeRosterTest(unittest.TestCase):
                                      [('disposition', inode, 0x130181, 0x13)] if accepted else [])
                     self.assertTrue(any(row[:2] == (inode, 0x130189) for row in native.submitted))
                     self.assertEqual(native.allocations, {})
+
+    def test_native_security_digest_bounds_sid_inside_ace(self):
+        sid = self.SemanticNative.SID
+        cases = (('minimal', sid, b'', True), ('padded-ace', sid, b'pad!', True),
+                 ('large-padding', sid, b'pad!' * 16, True),
+                 ('zero-subauthorities', sid[:1] + b'\0' + sid[2:8], b'', True),
+                 ('max-subauthorities', sid[:1] + b'\x0f' + sid[2:8] + bytes(60), b'', True),
+                 ('short-prefix', sid[:4], b'', False), ('truncated-sid', sid[:12], b'', False),
+                 ('wrong-revision', b'\x02' + sid[1:], b'', False),
+                 ('over-bound-count', sid[:1] + b'\x10' + sid[2:8] + bytes(64), b'', False),
+                 ('unaligned-ace', sid, b'!', False))
+        for name, owner, padding, accepted in cases:
+            with self.subTest(case=name):
+                acl = self.SemanticNative._acl([self.SemanticNative._ace(0x130189, owner, padding)])
+                security = tc._WindowsSecurity(owner, acl, 0x9004)
+                if accepted:
+                    expected = 'sha256:' + hashlib.sha256(canonical([
+                        owner.hex(), True, True, 1, 0, 0, 0x130189, owner.hex()])).hexdigest()
+                    self.assertEqual(security.digest(), expected)
+                else:
+                    with self.assertRaisesRegex(tc.InstallRefused, 'windows-delete-ace-.*bound'):
+                        security.digest()
 
     def test_native_create_only_evidence_recovers_an_exact_prefix(self):
         import errno

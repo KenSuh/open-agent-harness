@@ -2495,15 +2495,16 @@ class _WindowsSecurity:
             if size < 12:
                 raise InstallRefused("windows-delete-ace-bound")
             kind, flags, ace_size = struct.unpack_from("<BBH", self.dacl, 8)
-            if not 4 <= ace_size <= size - 8:
+            if not 4 <= ace_size <= size - 8 or ace_size % 4:
                 raise InstallRefused("windows-delete-ace-bound")
             fields.extend([kind, flags])
             if kind == 0:
                 if ace_size < 16:
                     raise InstallRefused("windows-delete-ace-sid-bound")
-                sid = self.dacl[16:8 + ace_size]
-                if sid[0] != 1 or not 8 <= len(sid) <= 68 or len(sid) != 8 + 4 * sid[1]:
+                sid_size = 8 + 4 * self.dacl[17]
+                if self.dacl[16] != 1 or sid_size > 68 or sid_size > ace_size - 8:
                     raise InstallRefused("windows-delete-ace-sid-bound")
+                sid = self.dacl[16:16 + sid_size]
                 fields.extend([struct.unpack_from("<I", self.dacl, 12)[0], sid.hex()])
         return "sha256:" + _sha(canonical(fields))
 
