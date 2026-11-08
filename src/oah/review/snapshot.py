@@ -434,17 +434,22 @@ def require_creation_identity(parent: pathlib.Path, created: dict[str, int | str
         raise CreationRetained("the snapshot creation identity cannot be verified") from exc
 
 
+def _native_entry_identity(info) -> dict[str, int | str | None]:
+    directory = info["type"] == "directory"
+    kind = stat.S_IFDIR if directory else stat.S_IFREG
+    return {"type": "dir" if directory else "file", "mode": info["mode"],
+            "object": "sha256:" + hashlib.sha256(_canonical([info["dev"], info["ino"], kind])).hexdigest(),
+            "size": None if directory else info["size"], "nlink": None if directory else info["nlink"],
+            "security": info["uid"]}
+
+
 def _native_entry(native, handle, components) -> dict:
     before = native.info(handle)
     directory = before["type"] == "directory"
-    kind = stat.S_IFDIR if directory else stat.S_IFREG
     digest = None if directory else "sha256:" + native.digest(handle, before["size"])
     if before != native.info(handle):
         raise PlanUnavailable("a native snapshot object changed during its complete read")
-    return {"path": list(components), "type": "dir" if directory else "file", "mode": before["mode"],
-            "object": "sha256:" + hashlib.sha256(_canonical([before["dev"], before["ino"], kind])).hexdigest(),
-            "size": None if directory else before["size"], "sha256": digest,
-            "nlink": None if directory else before["nlink"], "security": before["uid"]}
+    return dict(_native_entry_identity(before), path=list(components), sha256=digest)
 
 
 def _windows_census(parent, *, exclude=(), native=None):
@@ -1069,13 +1074,15 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
                         raise Retained("the native final output or its parents were replaced")
                     if item["type"] == "dir" and any(native.iter_names(leaf)):
                         raise Retained("the native directory is not empty")
-                    prepared = native.grant_delete(leaf)
+                    prepared = native.grant_delete(leaf,
+                        {key: value for key, value in item.items() if key not in ("path", "sha256")},
+                        identity=_native_entry_identity)
                     expected = dict(item, security=prepared["uid"])
                     native.close(handles.pop())
                     leaf, _ = native.open_child(directory, item["path"][-1], directory=item["type"] == "dir",
                                                  delete=True)
                     handles.append(leaf)
-                    if _native_entry(native, leaf, item["path"]) != expected:
+                    if _native_entry(native, leaf, item["path"]) != expected or native.info(leaf) != prepared:
                         raise Retained("the native object changed before its guarded disposition")
                     native.delete(leaf)
                     native.close(handles.pop())
@@ -1091,12 +1098,13 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
             check_root()
             if any(native.iter_names(root)) or progress(item, "intent") is False:
                 raise Retained("the native final root is not empty or its intent is unavailable")
-            prepared_root = _native_container(native.grant_delete(root))
+            prepared = native.grant_delete(root, created, identity=_native_container)
             held, root = root, None
             native.close(held)
             root, _ = native.open_child(containing, root_path.name, directory=True, delete=True)
-            require_creation_identity(parent, prepared_root, _native_container(native.info(root)), current=False)
-            if any(native.iter_names(root)):
+            require_creation_identity(parent, dict(created, security=prepared["uid"]),
+                                      _native_container(native.info(root)), current=False)
+            if any(native.iter_names(root)) or native.info(root) != prepared:
                 raise Retained("the native final root changed before its guarded disposition")
             native.delete(root)
             held, root = root, None

@@ -18,7 +18,7 @@ import dataclasses
 import hashlib
 import pathlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from oah.design.binding import TaskDesign
 from oah.design.model import DesignError
@@ -2631,13 +2631,19 @@ class _WindowsIO:
     def grant_writes(self, handle) -> None:
         self._owner_acl(handle, 0x1F01FF)
 
-    def grant_delete(self, handle) -> dict[str, int | str]:
+    def grant_delete(self, handle, expected: Mapping[str, int | str | None], *,
+                     identity: Callable[[Mapping[str, int | str]], Mapping[str, int | str | None]] | None = None
+                     ) -> dict[str, int | str]:
+        """Bind the owner-only grant to the original record; a refused postcheck keeps that restricted ACL."""
         before = self.info(handle)
+        if (before if identity is None else identity(before)) != expected:
+            self._error("windows-object-changed-before-delete-grant")
         self._owner_acl(handle, 0x130189)
         after = self.info(handle)
-        if any(after.get(key) != value for key, value in before.items() if key not in ("uid", "change_time")):
+        if set(after) != set(before) or any(after[key] != value for key, value in before.items()
+                                           if key not in ("uid", "change_time")):
             self._error("windows-object-changed-during-delete-grant")
-        return after
+        return {key: after[key] if key in ("uid", "change_time") else value for key, value in before.items()}
 
     def writable(self, handle) -> None:
         self._readonly(handle, False)
@@ -3208,7 +3214,8 @@ class WindowsInstallation(Installation):
                 if problem or name not in self.leaf_handles:
                     raise InstallRefused(problem or "native leaf ownership is missing")
                 expected = self.leaves[name]
-                prepared = self.native.grant_delete(self.leaf_handles[name])
+                prepared = self.native.grant_delete(self.leaf_handles[name],
+                    {key: value for key, value in expected.items() if key != "sha256"})
                 self.native.close(self.leaf_handles.pop(name))
                 handle, _ = self.native.open_child(self.m_fd, name, directory=False, delete=True)
                 try:
@@ -3242,12 +3249,15 @@ class WindowsInstallation(Installation):
                     if name == DATA_DIR:
                         continue
                     raise InstallRefused("the native owned directory is not empty")
-                expected = _anchor_stamp(self.native.grant_delete(handle))
+                original = self.m_identity if field == "m_fd" else self.data_identity
+                if original is None:
+                    raise InstallRefused("the native owned directory has no original identity")
+                expected = self.native.grant_delete(handle, _anchor_stamp(original), identity=_anchor_stamp)
                 setattr(self, field, None)
                 self.native.close(handle)
                 handle, _ = self.native.open_child(getattr(self, parent_field), name, directory=True, delete=True)
                 try:
-                    if _anchor_stamp(self.native.info(handle)) != expected or self.native.names(handle):
+                    if self.native.names(handle) or self.native.info(handle) != expected:
                         raise InstallRefused("the native directory changed before its guarded disposition")
                     self.native.delete(handle)
                 finally:

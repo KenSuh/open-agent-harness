@@ -25,6 +25,7 @@ from unittest import mock
 from oah.design import task_context as tc
 from oah.design.binding import PacketDesign, replace_section
 from oah.design.model import DesignError, canonical
+from oah.review import snapshot
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 from tests.test_design_store import TODAY, DesignRepo
 from tests.test_intent_wiring import clean_env, packet_text
@@ -1200,8 +1201,13 @@ class WindowsNativeRosterTest(unittest.TestCase):
             item = self.nodes[inode]
             if item.get('reparse') or item.get('nlink', 1) != 1:
                 raise tc.InstallRefused('native fixture reparse or hardlink')
+            mode = item['mode']
+            assert isinstance(mode, int)
             return {'dev': 10, 'ino': inode, 'uid': item.get('security', 'sha256:' + '1' * 64), 'mode': item['mode'],
-                    'size': len(item['data']), 'nlink': 1, 'type': item['type']}
+                    'size': len(item['data']), 'nlink': 1, 'type': item['type'],
+                    'attributes': ((0x10 if item['type'] == 'directory' else 0) |
+                                   (0 if mode & 0o200 else 1)) or 0x80,
+                    'write_time': item.get('write_time', 0), 'change_time': item.get('change_time', 0)}
 
         def read(self, handle, bound):
             raw = self.nodes[self.handles[handle]]['data']
@@ -1234,6 +1240,9 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 raise tc.InstallRefused('native fixture WRITE_DAC required')
             item = self.nodes[self.handles[handle]]
             item['acl_access'], item['security'] = access, 'sha256:' + '3' * 64
+            change_time = item.get('change_time', 0)
+            assert isinstance(change_time, int)
+            item['change_time'] = change_time + 1
             self.native_calls.append(('owner-acl', self.handles[handle], access))
 
         def writable(self, handle):
@@ -1411,6 +1420,178 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 self.assertIn(name, native.names(reopened.m_fd))
                 self.assertEqual([row for row in progress if row[2] == 'file'], [])
                 reopened.close()
+
+    def _change_native_metadata(self, native: Native, inode: int, *, mode: int | None = None) -> None:
+        control = native._handle(inode, access=0, share=3, granted=0x60000)
+        try:
+            native._owner_acl(control, 0x1F01FF)
+        finally:
+            native.close(control)
+        if mode is not None:
+            attributes = native._handle(inode, access=0, share=3, granted=0x100)
+            try:
+                native.nodes[inode]['mode'] = mode
+            finally:
+                native.close(attributes)
+
+    def test_native_cleanup_refuses_original_metadata_changes_before_delete_grant(self):
+        for target in ('leaf', 'manifest', 'data'):
+            with self.subTest(target=target):
+                native = self.Native()
+                root, manifest, name = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64
+                done = tc._install_windows(root, manifest, {name: b'original'}, native=native)
+                installed = done.facts()
+                done.close()
+                reopened, states = tc._reopen_windows(root, manifest, installed, native=native)
+                if reopened is None:
+                    self.fail('the original native installation could not be reopened')
+                self.addCleanup(reopened.close)
+                self.assertEqual(states, {name: 'present-unchanged'})
+                if target != 'leaf':
+                    tc.remove_leaves(reopened, [name], before=lambda _: None, after=lambda *row: None)
+                held = {'leaf': reopened.leaf_handles.get(name), 'manifest': reopened.m_fd,
+                        'data': reopened.data_fd}[target]
+                inode = native.handles[held]
+                method = 'check' if target == 'leaf' else 'check_anchors'
+                checked_installation: tc.WindowsInstallation = reopened
+                check = getattr(checked_installation, method)
+                injected, progress = [], []
+
+                def checked():
+                    problem = check()
+                    ready = checked_installation.m_write_handle if target == 'leaf' else \
+                        (target == 'manifest' or checked_installation.m_fd is None)
+                    if problem is None and ready and not injected:
+                        self._change_native_metadata(native, inode, mode=0o644 if target == 'leaf' else 0o555)
+                        injected.append(inode)
+                    return problem
+
+                with mock.patch.object(reopened, method, side_effect=checked):
+                    with self.assertRaises(tc.InstallRefused):
+                        if target == 'leaf':
+                            tc.remove_leaves(reopened, [name], before=lambda _: None,
+                                             after=lambda *row: progress.append(row))
+                        else:
+                            tc.remove_directories(reopened, before=lambda _: None,
+                                                  after=lambda *row: progress.append(row))
+                self.assertEqual(injected, [inode])
+                self.assertIn(inode, native.nodes)
+                target_name = {'leaf': name, 'manifest': manifest, 'data': tc.DATA_DIR}[target]
+                self.assertFalse(any(row[:2] == (target_name, 'absent') for row in progress))
+                self.assertNotIn(('owner-acl', inode, 0x130189), native.native_calls)
+
+    def test_native_postgrant_metadata_refusals_keep_owner_only_acl_without_absence(self):
+        for point in ('grant', 'dedicated-open'):
+            with self.subTest(point=point):
+                native = self.Native()
+                root, manifest, name = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64
+                done = tc._install_windows(root, manifest, {name: b'original'}, native=native)
+                installed = done.facts()
+                done.close()
+                reopened, _ = tc._reopen_windows(root, manifest, installed, native=native)
+                if reopened is None:
+                    self.fail('the original native installation could not be reopened')
+                self.addCleanup(reopened.close)
+                inode = native.handles[reopened.leaf_handles[name]]
+                progress = []
+                grant, opened = native._owner_acl, native.open_child
+
+                def granted(handle, access):
+                    grant(handle, access)
+                    if point == 'grant' and native.handles[handle] == inode:
+                        native.nodes[inode]['mode'] = 0o644
+
+                def dedicated(parent, target, **options):
+                    handle, created = opened(parent, target, **options)
+                    if point == 'dedicated-open' and target == name and options.get('delete'):
+                        native.nodes[inode]['change_time'] = -1
+                    return handle, created
+
+                with mock.patch.object(native, '_owner_acl', side_effect=granted), \
+                        mock.patch.object(native, 'open_child', side_effect=dedicated):
+                    with self.assertRaises(tc.InstallRefused):
+                        tc.remove_leaves(reopened, [name], before=lambda _: None,
+                                         after=lambda *row: progress.append(row))
+                self.assertIn(name, native.names(reopened.m_fd))
+                self.assertEqual(native.nodes[inode]['acl_access'], 0x130189)
+                self.assertFalse(any(row[1] == 'absent' for row in progress))
+
+    def _native_retirement_plan(self, native: Native, parent: pathlib.Path) -> snapshot.ValidatedPlan:
+        root, anchors = native.open_anchor(parent)
+        try:
+            created = snapshot._native_container(native.info(root))
+            entries = sorted(snapshot._windows_census(parent, native=native), key=snapshot._order)
+            pages = make_tmp_dir(self)
+            allocation = {'run': 'rPreimage', 'container_object': created}
+            fields = snapshot.write_pages(allocation, entries, pages)
+            descriptor = {'version': 1, 'allocation': allocation, **fields,
+                          'output_slot': {'path': ['last-message.md']}, 'container_object': created}
+            plan = snapshot.RetirementPlan(descriptor, hashlib.sha256(snapshot._canonical(descriptor)).hexdigest(), pages)
+            producer = {'run': 'rPreimage', 'checkpoint': 'sha256:' + '3' * 64}
+            final = snapshot.finalize_retirement_plan(plan, snapshot._windows_output_slot(
+                parent, ['last-message.md'], producer=producer, native=native))
+        finally:
+            for handle in reversed(anchors):
+                native.close(handle)
+        with mock.patch.object(snapshot, '_container_object', return_value=created), \
+                mock.patch.object(snapshot, '_census', side_effect=lambda path: snapshot._windows_census(parent, native=native)), \
+                mock.patch.object(snapshot, 'capture_output_slot', side_effect=lambda path, parts, producer:
+                                  snapshot._windows_output_slot(parent, parts, producer=producer, native=native)):
+            return snapshot.validate_retirement_plan(final, parent, pages)
+
+    def test_native_snapshot_leaf_refuses_security_change_after_original_entry_check(self):
+        native = self.Native()
+        parent = pathlib.Path(r'C:\work')
+        root, anchors = native.open_anchor(parent)
+        leaf, _ = native.open_child(root, 'product.txt', directory=False, create=True, writable=True)
+        native.write(leaf, b'original')
+        inode = native.handles[leaf]
+        native.close(leaf)
+        for handle in reversed(anchors):
+            native.close(handle)
+        validated = self._native_retirement_plan(native, parent)
+        entry, injected, progress = snapshot._native_entry, [], []
+
+        def checked(native_api, handle, components):
+            item = entry(native_api, handle, components)
+            if list(components) == ['product.txt'] and not injected:
+                control = native._handle(inode, access=0, share=3, granted=0x60000)
+                try:
+                    native.grant_writes(control)
+                    injected.append(inode)
+                finally:
+                    native.close(control)
+            return item
+
+        with mock.patch.object(snapshot, '_native_entry', side_effect=checked):
+            disposed = snapshot._windows_guarded_remove(parent, validated,
+                lambda item, phase: progress.append((item['path'], phase)) or True, native=native)
+        self.assertFalse(disposed)
+        self.assertEqual(injected, [inode])
+        self.assertIn(inode, native.nodes)
+        self.assertFalse(any(phase == 'absent' for _, phase in progress))
+        self.assertNotIn(('owner-acl', inode, 0x130189), native.native_calls)
+
+    def test_native_snapshot_root_retains_creation_metadata_through_intent_and_grant(self):
+        for interfere in (False, True):
+            with self.subTest(interfere=interfere):
+                native = self.Native()
+                parent = pathlib.Path(r'C:\work')
+                validated = self._native_retirement_plan(native, parent)
+                progress = []
+
+                def observed(item, phase):
+                    progress.append((item['path'], phase))
+                    if interfere and item['path'] == [] and phase == 'intent':
+                        self._change_native_metadata(native, 2, mode=0o555)
+                    return True
+
+                disposed = snapshot._windows_guarded_remove(parent, validated, observed, native=native)
+                self.assertEqual(disposed, not interfere)
+                self.assertEqual(2 in native.nodes, interfere)
+                self.assertEqual(progress, [([], 'intent')] if interfere else [([], 'intent'), ([], 'absent')])
+                if interfere:
+                    self.assertNotIn(('owner-acl', 2, 0x130189), native.native_calls)
 
     def test_native_cleanup_refuses_a_foreign_pin_or_replaced_object_without_disposition(self):
         for defect in ('foreign-pin', 'replacement'):

@@ -579,10 +579,15 @@ manifest profile without that intent; it records missing leaves as unattributed 
 deleted them or reports `VERIFIED_CLEANED`. A mismatch refuses
 before deleting data. Cleanup records the permission transition before leaf progress; retained acknowledgments
 still require their exact captured metadata. Inside the current authority guard and after recording intent, oah
-grants only the verified existing owner `FILE_WRITE_ATTRIBUTES` on the held, identity-checked object, then
-closes every pin on the target before opening a dedicated mutation handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
-The grant preserves the object apart from its owner-only DACL and change time; oah then rechecks its
-identity and complete file bytes (or directory emptiness). Leaves close before their manifest directory, and that
+compares the held object's pre-grant metadata with its original leaf record, plan entry or creation identity.
+A mismatch refuses before changing its ACL. Oah then grants only the verified existing owner
+`FILE_WRITE_ATTRIBUTES` on that held object, closes every pin on the target, and opens a dedicated mutation
+handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
+The dedicated handle must retain the original fields, allowing only that grant's owner-only DACL and change
+time transition; oah also rechecks complete file bytes (or directory emptiness). If a post-grant identity check
+refuses before disposition,
+the target remains present and uncounted with the owner-only ACL already granted; oah does not restore a
+possibly stale ACL. Leaves close before their manifest directory, and that
 directory closes before the owned DATA parent; snapshot entries retire from children to parents. No observer
 reopens the target while its mutation handle is held. Oah calls `SetFileInformationByHandle` with
 `FileDispositionInfoEx` and `DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` (`0x13`), closes the deletion handle,
