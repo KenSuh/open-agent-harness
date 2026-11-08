@@ -1077,12 +1077,14 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
                     prepared = native.grant_delete(leaf,
                         {key: value for key, value in item.items() if key not in ("path", "sha256")},
                         identity=_native_entry_identity)
-                    expected = dict(item, security=prepared["uid"])
                     native.close(handles.pop())
                     leaf, _ = native.open_child(directory, item["path"][-1], directory=item["type"] == "dir",
                                                  delete=True)
                     handles.append(leaf)
-                    if _native_entry(native, leaf, item["path"]) != expected or native.info(leaf) != prepared:
+                    current = native.delete_info(leaf)
+                    unchanged_contents = (not any(native.iter_names(leaf)) if item["type"] == "dir" else
+                                          "sha256:" + native.digest(leaf, item["size"]) == item["sha256"])
+                    if current != prepared or not unchanged_contents or native.delete_info(leaf) != prepared:
                         raise Retained("the native object changed before its guarded disposition")
                     native.delete(leaf)
                     native.close(handles.pop())
@@ -1102,9 +1104,7 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
             held, root = root, None
             native.close(held)
             root, _ = native.open_child(containing, root_path.name, directory=True, delete=True)
-            require_creation_identity(parent, dict(created, security=prepared["uid"]),
-                                      _native_container(native.info(root)), current=False)
-            if any(native.iter_names(root)) or native.info(root) != prepared:
+            if any(native.iter_names(root)) or native.delete_info(root) != prepared:
                 raise Retained("the native final root changed before its guarded disposition")
             native.delete(root)
             held, root = root, None

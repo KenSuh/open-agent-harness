@@ -2475,6 +2475,23 @@ def _trusted_root(root: pathlib.Path) -> pathlib.Path:
         raise RootUnavailable("the selected root cannot be resolved") from exc
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _WindowsSecurity:
+    owner: bytes
+    dacl: bytes
+    control: int
+
+    def digest(self) -> str:
+        return "sha256:" + _sha(canonical([self.owner.hex(), self.dacl.hex(), self.control]))
+
+    def deletion_grant(self) -> "_WindowsSecurity":
+        import struct
+
+        acl = struct.pack("<BBHHHBBHI", 2, 0, 16 + len(self.owner), 1, 0,
+                          0, 0, 8 + len(self.owner), 0x130189) + self.owner
+        return _WindowsSecurity(self.owner, acl, (self.control | 0x1004) & ~0x0008)
+
+
 class _WindowsIO:
     """One native identity for DATA and retirement: file ID, owner/DACL digest, attributes, size and bytes.
 
@@ -2610,6 +2627,46 @@ class _WindowsIO:
             if descriptor.value:
                 self.kernel.LocalFree(descriptor)
 
+    def _security_state(self, handle) -> tuple[str, _WindowsSecurity]:
+        import struct
+
+        ct = self.ct
+        owner, dacl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
+        try:
+            if self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(dacl), None,
+                                             ct.byref(descriptor)) != 0 or not descriptor.value:
+                self._error("windows-owner-or-acl-unreadable")
+            size = self.security.GetSecurityDescriptorLength(descriptor)
+            if not 20 <= size <= 65536:
+                self._error("windows-security-descriptor-bound")
+            raw = ct.string_at(descriptor, size)
+            revision, reserved, control, owner_offset, group, sacl, acl_offset = struct.unpack_from("<BBHIIII", raw)
+            if (revision != 1 or reserved or control & 0x8004 != 0x8004 or group or sacl or
+                    not 20 <= owner_offset <= size - 8 or not 20 <= acl_offset <= size - 8 or
+                    owner.value != descriptor.value + owner_offset or dacl.value != descriptor.value + acl_offset):
+                self._error("windows-security-descriptor-layout")
+            sid_size = 8 + 4 * raw[owner_offset + 1]
+            acl_size = struct.unpack_from("<H", raw, acl_offset + 2)[0]
+            if (not 8 <= sid_size <= 68 or owner_offset + sid_size > size or
+                    not 8 <= acl_size <= 65535 or acl_offset + acl_size > size or
+                    not (owner_offset + sid_size <= acl_offset or acl_offset + acl_size <= owner_offset) or
+                    self.security.IsValidSid(owner) != 1 or self.security.GetLengthSid(owner) != sid_size):
+                self._error("windows-owner-or-acl-bound")
+            self._require_principal(owner)
+            return "sha256:" + _sha(raw), _WindowsSecurity(raw[owner_offset:owner_offset + sid_size],
+                raw[acl_offset:acl_offset + acl_size], control)
+        finally:
+            if descriptor.value:
+                self.kernel.LocalFree(descriptor)
+
+    def delete_info(self, handle) -> dict[str, int | str]:
+        # Deletion compares exact security fields, independent of self-relative buffer offsets; persisted hashes stay raw.
+        info = self.info(handle)
+        raw_digest, security = self._security_state(handle)
+        if raw_digest != info["uid"]:
+            self._error("windows-security-changed-during-delete-observation")
+        return dict(info, uid=security.digest())
+
     def _readonly(self, handle, enabled: bool) -> None:
         import struct
 
@@ -2634,16 +2691,20 @@ class _WindowsIO:
     def grant_delete(self, handle, expected: Mapping[str, int | str | None], *,
                      identity: Callable[[Mapping[str, int | str]], Mapping[str, int | str | None]] | None = None
                      ) -> dict[str, int | str]:
-        """Bind the owner-only grant to the original record; a refused postcheck keeps that restricted ACL."""
+        """Only the precomputed owner/DACL result and change time may differ from the verified original."""
         before = self.info(handle)
         if (before if identity is None else identity(before)) != expected:
             self._error("windows-object-changed-before-delete-grant")
+        raw_digest, security = self._security_state(handle)
+        if raw_digest != before["uid"]:
+            self._error("windows-security-changed-before-delete-grant")
+        prepared = dict(before, uid=security.deletion_grant().digest())
         self._owner_acl(handle, 0x130189)
-        after = self.info(handle)
-        if set(after) != set(before) or any(after[key] != value for key, value in before.items()
-                                           if key not in ("uid", "change_time")):
+        after = self.delete_info(handle)
+        if set(after) != set(prepared) or any(after[key] != value for key, value in prepared.items()
+                                             if key != "change_time"):
             self._error("windows-object-changed-during-delete-grant")
-        return {key: after[key] if key in ("uid", "change_time") else value for key, value in before.items()}
+        return dict(prepared, change_time=after["change_time"])
 
     def writable(self, handle) -> None:
         self._readonly(handle, False)
@@ -3219,10 +3280,10 @@ class WindowsInstallation(Installation):
                 self.native.close(self.leaf_handles.pop(name))
                 handle, _ = self.native.open_child(self.m_fd, name, directory=False, delete=True)
                 try:
-                    current = self.native.info(handle)
+                    current = self.native.delete_info(handle)
                     raw = self.native.read(handle, expected["size"])
                     if (current != prepared or
-                            self.native.info(handle) != current or "sha256:" + _sha(raw) != expected["sha256"]):
+                            self.native.delete_info(handle) != prepared or "sha256:" + _sha(raw) != expected["sha256"]):
                         raise InstallRefused("the native leaf changed before its guarded disposition")
                     self.native.delete(handle)
                 finally:
@@ -3257,7 +3318,7 @@ class WindowsInstallation(Installation):
                 self.native.close(handle)
                 handle, _ = self.native.open_child(getattr(self, parent_field), name, directory=True, delete=True)
                 try:
-                    if self.native.names(handle) or self.native.info(handle) != expected:
+                    if self.native.names(handle) or self.native.delete_info(handle) != expected:
                         raise InstallRefused("the native directory changed before its guarded disposition")
                     self.native.delete(handle)
                 finally:

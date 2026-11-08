@@ -580,11 +580,19 @@ deleted them or reports `VERIFIED_CLEANED`. A mismatch refuses
 before deleting data. Cleanup records the permission transition before leaf progress; retained acknowledgments
 still require their exact captured metadata. Inside the current authority guard and after recording intent, oah
 compares the held object's pre-grant metadata with its original leaf record, plan entry or creation identity.
-A mismatch refuses before changing its ACL. Oah then grants only the verified existing owner
-`FILE_WRITE_ATTRIBUTES` on that held object, closes every pin on the target, and opens a dedicated mutation
-handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
-The dedicated handle must retain the original fields, allowing only that grant's owner-only DACL and change
-time transition; oah also rechecks complete file bytes (or directory emptiness). If a post-grant identity check
+A mismatch refuses before changing its ACL. Before the grant, the shared native helper computes its exact
+expected security state: the verified existing owner, a protected DACL with one non-inheriting owner ACE
+(`0x130189`), and the original descriptor control flags with DACL-present/protected set and DACL-defaulted
+cleared. It compares exact owner/DACL/control fields independently of self-relative buffer offsets; persisted
+identity hashes keep their original raw-descriptor format. Every later observation must match the original
+identity with security replaced by this precomputed value; only change time may also change during the grant.
+Directory size, link count and write/change timestamps are sampled after this cleanup's earlier child removals;
+the original anchor, plan or creation record still governs every field in its stable identity schema. The helper
+keeps every other field of that pre-grant native sample unchanged. Oah grants only the verified existing owner
+`FILE_WRITE_ATTRIBUTES` on the held object, verifies that exact result, closes every pin on the target, and opens
+a dedicated mutation handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
+The dedicated handle must match the helper's full expected identity unchanged, and oah rechecks complete file
+bytes (or directory emptiness). If a post-grant identity check
 refuses before disposition,
 the target remains present and uncounted with the owner-only ACL already granted; oah does not restore a
 possibly stale ACL. Leaves close before their manifest directory, and that

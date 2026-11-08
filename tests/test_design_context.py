@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 import unittest
+from typing import Literal, assert_never
 from unittest import mock
 
 from oah.design import task_context as tc
@@ -34,6 +35,8 @@ FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
 FAKE_CODEX = [sys.executable, str(FAKES / "fake_codex.py")]
 NATIVE = sys.platform == "darwin" and platform.machine() == "arm64"
 NATIVE_ONLY = "the reference profile is qualified only for native macOS arm64"
+_GrantSecurityChange = Literal['unchanged', 'preparation', 'owner', 'access', 'ace-flags',
+                               'extra-ace', 'unprotected', 'control']
 
 FAKE_STREAM = '''# 스트림 가짜 Claude — 브리프의 Design data 파일을 Read 도구 이벤트로 읽은 것처럼 stream-json 을 낸다.
 import json, os, re, sys
@@ -1157,7 +1160,12 @@ class WindowsNativeRosterTest(unittest.TestCase):
             self.sharing.pop(handle)
             self.granted.pop(handle)
             if inode in self.nodes and self.nodes[inode].get('deleted') and inode not in self.handles.values():
+                parent = self.nodes[inode]['parent']
                 del self.nodes[inode]
+                if parent in self.nodes:
+                    generation = self.nodes[parent].get('directory_generation', 0)
+                    assert isinstance(generation, int)
+                    self.nodes[parent]['directory_generation'] = generation + 1
 
         def names(self, handle, *, limit=tc.ENTRY_LIMIT + 1):
             return sorted(item['name'] for item in self.nodes.values()
@@ -1203,11 +1211,15 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 raise tc.InstallRefused('native fixture reparse or hardlink')
             mode = item['mode']
             assert isinstance(mode, int)
+            data = item['data']
+            assert isinstance(data, bytes)
             return {'dev': 10, 'ino': inode, 'uid': item.get('security', 'sha256:' + '1' * 64), 'mode': item['mode'],
-                    'size': len(item['data']), 'nlink': 1, 'type': item['type'],
+                    'size': 128 * len(self.names(handle)) if item['type'] == 'directory' else len(data),
+                    'nlink': 1, 'type': item['type'],
                     'attributes': ((0x10 if item['type'] == 'directory' else 0) |
                                    (0 if mode & 0o200 else 1)) or 0x80,
-                    'write_time': item.get('write_time', 0), 'change_time': item.get('change_time', 0)}
+                    'write_time': item.get('directory_generation', 0) if item['type'] == 'directory' else
+                                  item.get('write_time', 0), 'change_time': item.get('change_time', 0)}
 
         def read(self, handle, bound):
             raw = self.nodes[self.handles[handle]]['data']
@@ -1244,6 +1256,15 @@ class WindowsNativeRosterTest(unittest.TestCase):
             assert isinstance(change_time, int)
             item['change_time'] = change_time + 1
             self.native_calls.append(('owner-acl', self.handles[handle], access))
+
+        def _security_state(self, handle):
+            item = self.nodes[self.handles[handle]]
+            owner = struct.pack('<BB6sII', 1, 2, b'\0\0\0\0\0\5', 21, 1001)
+            access = item.get('acl_access', 0x1F01FF)
+            acl = struct.pack('<BBHHHBBHI', 2, 0, 16 + len(owner), 1, 0, 0, 0, 8 + len(owner), access) + owner
+            raw_digest = self.info(handle)['uid']
+            assert isinstance(raw_digest, str)
+            return raw_digest, tc._WindowsSecurity(owner, acl, 0x9004)
 
         def writable(self, handle):
             item = self.nodes[self.handles[handle]]
@@ -1515,6 +1536,123 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 self.assertIn(name, native.names(reopened.m_fd))
                 self.assertEqual(native.nodes[inode]['acl_access'], 0x130189)
                 self.assertFalse(any(row[1] == 'absent' for row in progress))
+
+    @contextlib.contextmanager
+    def _change_security_at_delete_step(self, native, inode, point):
+        grant, acl, close = native.grant_delete, native._owner_acl, native.close
+        changes, armed = [], []
+
+        def change():
+            if not changes:
+                control = native._handle(inode, access=0, share=3, granted=0x60000)
+                try:
+                    before = native.info(control)
+                    native.grant_writes(control)
+                    changes.append([key for key, value in before.items() if native.info(control)[key] != value])
+                finally:
+                    close(control)
+
+        def granted(handle, *args, **kwargs):
+            target = native.handles[handle] == inode
+            if target:
+                armed.append(handle)
+            result = grant(handle, *args, **kwargs)
+            if target and point == 'after-grant':
+                change()
+            return result
+
+        def owner_acl(handle, access):
+            acl(handle, access)
+            if native.handles[handle] == inode and access == 0x130189 and point == 'after-acl':
+                change()
+
+        def closed(handle):
+            target = native.handles[handle] == inode
+            close(handle)
+            if target and armed and point == 'after-close' and inode in native.nodes:
+                change()
+
+        with mock.patch.object(native, 'grant_delete', side_effect=granted), \
+                mock.patch.object(native, '_owner_acl', side_effect=owner_acl), \
+                mock.patch.object(native, 'close', side_effect=closed):
+            yield changes
+
+    def test_native_cleanup_keeps_security_changed_after_acl_or_pin_close(self):
+        for target in ('leaf', 'manifest', 'data'):
+            for point in ('unchanged', 'after-acl', 'after-grant', 'after-close'):
+                with self.subTest(target=target, point=point):
+                    native = self.Native()
+                    root, manifest, name = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64
+                    done = tc._install_windows(root, manifest, {name: b'original'}, native=native)
+                    installed = done.facts()
+                    done.close()
+                    reopened, states = tc._reopen_windows(root, manifest, installed, native=native)
+                    if reopened is None:
+                        self.fail('the original native installation could not be reopened')
+                    self.addCleanup(reopened.close)
+                    self.assertEqual(states, {name: 'present-unchanged'})
+                    if target != 'leaf':
+                        tc.remove_leaves(reopened, [name], before=lambda _: None, after=lambda *row: None)
+                    held = {'leaf': reopened.leaf_handles.get(name), 'manifest': reopened.m_fd,
+                            'data': reopened.data_fd}[target]
+                    inode, progress = native.handles[held], []
+                    target_name = {'leaf': name, 'manifest': manifest, 'data': tc.DATA_DIR}[target]
+                    installation: tc.WindowsInstallation = reopened
+
+                    def remove():
+                        if target == 'leaf':
+                            return tc.remove_leaves(installation, [name], before=lambda _: None,
+                                                    after=lambda *row: progress.append(row))
+                        return tc.remove_directories(installation, before=lambda _: None,
+                                                     after=lambda *row: progress.append(row))
+
+                    with self._change_security_at_delete_step(native, inode, point) as changes:
+                        if point == 'unchanged':
+                            remove()
+                        else:
+                            with self.assertRaises(tc.InstallRefused):
+                                remove()
+                    self.assertEqual(changes, [] if point == 'unchanged' else [['uid']])
+                    self.assertEqual(inode in native.nodes, point != 'unchanged')
+                    self.assertEqual(any(row[:2] == (target_name, 'absent') for row in progress), point == 'unchanged')
+                    dispositions = [row for row in native.native_calls if row[:2] == ('disposition', inode)]
+                    self.assertEqual(dispositions, [('disposition', inode, 0x130181, 0x13)]
+                                     if point == 'unchanged' else [])
+
+    def test_native_retirement_keeps_security_changed_after_acl_or_pin_close(self):
+        for target in ('leaf', 'directory', 'root'):
+            for point in ('unchanged', 'after-acl', 'after-grant', 'after-close'):
+                with self.subTest(target=target, point=point):
+                    native = self.Native()
+                    parent = pathlib.Path(r'C:\work')
+                    root, anchors = native.open_anchor(parent)
+                    inode, target_path = native.handles[root], []
+                    if target != 'root':
+                        directory = root
+                        if target == 'directory':
+                            directory, _ = native.open_child(root, 'nested', directory=True, create=True, writable=True)
+                            inode, target_path = native.handles[directory], ['nested']
+                        leaf, _ = native.open_child(directory, 'product.txt', directory=False, create=True, writable=True)
+                        native.write(leaf, b'original')
+                        if target == 'leaf':
+                            inode, target_path = native.handles[leaf], ['product.txt']
+                        native.close(leaf)
+                        if directory != root:
+                            native.close(directory)
+                    for held in reversed(anchors):
+                        native.close(held)
+                    plan = self._native_retirement_plan(native, parent)
+                    progress = []
+                    with self._change_security_at_delete_step(native, inode, point) as changes:
+                        disposed = snapshot._windows_guarded_remove(parent, plan,
+                            lambda item, phase: progress.append((item['path'], phase)) or True, native=native)
+                    self.assertEqual(changes, [] if point == 'unchanged' else [['uid']])
+                    self.assertEqual(disposed, point == 'unchanged')
+                    self.assertEqual(inode in native.nodes, point != 'unchanged')
+                    self.assertEqual((target_path, 'absent') in progress, point == 'unchanged')
+                    dispositions = [row for row in native.native_calls if row[:2] == ('disposition', inode)]
+                    self.assertEqual(dispositions, [('disposition', inode, 0x130181, 0x13)]
+                                     if point == 'unchanged' else [])
 
     def _native_retirement_plan(self, native: Native, parent: pathlib.Path) -> snapshot.ValidatedPlan:
         root, anchors = native.open_anchor(parent)
@@ -1897,6 +2035,101 @@ class WindowsNativeRosterTest(unittest.TestCase):
                         native.security_digest(7)
                 self.assertEqual(calls, [*expected, ('LocalFree', address)])
                 native.security.MakeSelfRelativeSD.assert_not_called()
+
+    def test_native_grant_verifies_exact_owner_dacl_and_control_across_descriptor_layouts(self):
+        import ctypes as ct
+        import types
+
+        owner = struct.pack('<BB6sII', 1, 2, b'\0\0\0\0\0\5', 21, 1001)
+        original_acl = struct.pack('<BBHHHBBHI', 2, 0, 32, 1, 0, 0, 0, 24, 0x130089) + owner
+        expected_acl = struct.pack('<BBHHHBBHI', 2, 0, 32, 1, 0, 0, 0, 24, 0x130189) + owner
+        changes: tuple[_GrantSecurityChange, ...] = (
+            'unchanged', 'preparation', 'owner', 'access', 'ace-flags', 'extra-ace', 'unprotected', 'control')
+        change: _GrantSecurityChange
+        for control in (0x8004, 0x800C, 0x8404, 0x9004):
+            for change in changes:
+                with self.subTest(control=control, change=change):
+                    current_owner, current_acl, current_control, granted = owner, original_acl, control, False
+                    allocations, calls, queries = {}, [], []
+                    native = tc._WindowsIO.__new__(tc._WindowsIO)
+
+                    def get_security(handle, kind, fields, sid, group, dacl, sacl, descriptor):
+                        nonlocal current_control
+                        queries.append(handle)
+                        if change == 'preparation' and len(queries) == 3:
+                            current_control ^= 0x0400
+                        owner_offset = 20 + len(current_acl) if granted else 20
+                        acl_offset = 20 if granted else 20 + len(current_owner)
+                        raw = struct.pack('<BBHIIII', 1, 0, current_control, owner_offset, 0, 0, acl_offset)
+                        raw += current_acl + current_owner if granted else current_owner + current_acl
+                        buffer = ct.create_string_buffer(raw, len(raw))
+                        address = ct.addressof(buffer)
+                        allocations[address] = buffer
+                        sid._obj.value, dacl._obj.value = address + owner_offset, address + acl_offset
+                        descriptor._obj.value = address
+                        return 0
+
+                    def add_ace(acl, revision, access, sid):
+                        sid_bytes = ct.string_at(sid, 16)
+                        raw = struct.pack('<BBHHHBBHI', 2, 0, 32, 1, 0, 0, 0, 24, access) + sid_bytes
+                        ct.memmove(acl, raw, len(raw))
+                        return 1
+
+                    def set_security(handle, kind, fields, sid, group, dacl, sacl):
+                        nonlocal current_owner, current_acl, current_control, granted
+                        self.assertEqual(fields, 0x80000004)
+                        current_acl = ct.string_at(dacl, 32)
+                        current_control = (current_control | 0x1004) & ~0x0008
+                        granted = True
+                        calls.append('set-dacl')
+                        match change:
+                            case 'owner':
+                                current_owner = owner[:-4] + struct.pack('<I', 1002)
+                            case 'access':
+                                current_acl = expected_acl[:12] + struct.pack('<I', 0x1F01FF) + owner
+                            case 'ace-flags':
+                                current_acl = expected_acl[:9] + b'\x02' + expected_acl[10:]
+                            case 'extra-ace':
+                                current_acl = expected_acl[:4] + struct.pack('<H', 2) + expected_acl[6:]
+                            case 'unprotected':
+                                current_control &= ~0x1000
+                            case 'control':
+                                current_control ^= 0x0400
+                            case 'unchanged' | 'preparation':
+                                return 0
+                            case other:
+                                assert_never(other)
+                        return 0
+
+                    security = types.SimpleNamespace(GetSecurityInfo=get_security,
+                        GetSecurityDescriptorLength=lambda descriptor: len(allocations[descriptor.value]),
+                        IsValidSid=lambda sid: 1, GetLengthSid=lambda sid: 16,
+                        InitializeAcl=lambda acl, length, revision: 1, AddAccessAllowedAce=add_ace,
+                        SetSecurityInfo=set_security)
+                    kernel = types.SimpleNamespace(LocalFree=lambda descriptor: allocations.pop(descriptor.value))
+                    metadata = {'dev': 10, 'ino': 7, 'size': 8, 'nlink': 1, 'mode': 0o444, 'type': 'file',
+                                'attributes': 1, 'write_time': 3, 'change_time': 4}
+                    def info(handle):
+                        return dict(metadata, uid=native.security_digest(handle), change_time=5 if granted else 4)
+
+                    with mock.patch.object(native, 'ct', ct, create=True), \
+                            mock.patch.object(native, 'security', security, create=True), \
+                            mock.patch.object(native, 'kernel', kernel, create=True), \
+                            mock.patch.object(native, 'info', side_effect=info), \
+                            mock.patch.object(native, '_require_principal'):
+                        expected = native.info(7)
+                        if change == 'unchanged':
+                            prepared = native.grant_delete(7, expected)
+                            digest = 'sha256:' + hashlib.sha256(canonical([
+                                owner.hex(), expected_acl.hex(), (control | 0x1004) & ~0x0008])).hexdigest()
+                            self.assertEqual(prepared, dict(expected, uid=digest, change_time=5))
+                            self.assertEqual(native.delete_info(7), prepared)
+                        else:
+                            reason = 'changed-before-delete-grant' if change == 'preparation' else 'changed-during-delete-grant'
+                            with self.assertRaisesRegex(tc.InstallRefused, reason):
+                                native.grant_delete(7, expected)
+                    self.assertEqual(calls, [] if change == 'preparation' else ['set-dacl'])
+                    self.assertEqual(allocations, {})
 
 
 class WindowsPolicyTest(unittest.TestCase):
