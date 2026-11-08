@@ -596,7 +596,8 @@ This same digest is recorded for DATA leaves, manifest and DATA directories, sna
 snapshot root. Original-record, pre-grant, post-grant and delete-observation comparisons all use that meaning;
 descriptor component order, group/SACL presence and raw descriptor hashes never gate equality. These unreleased
 records use only this semantic form, with no fallback to the earlier raw digest. No later read becomes the
-expectation. Every later observation must match the original
+expectation. General identity reads can observe ancestors with a different owner; cleanup security reads and
+ACL grants still require the current principal. Every later observation must match the original
 identity with security replaced by this precomputed value; only change time may also change during the grant.
 Directory size, link count and write/change timestamps are sampled after this cleanup's earlier child removals;
 the original anchor, plan or creation record still governs every field in its stable identity schema. The helper

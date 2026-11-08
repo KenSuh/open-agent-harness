@@ -2649,7 +2649,7 @@ class _WindowsIO:
                 "change_time": struct.unpack_from("<q", basic, 24)[0]}
 
     def security_digest(self, handle) -> str:
-        return self._security_state(handle)[1].digest()
+        return self._security_state(handle, require_principal=False)[1].digest()
 
     def raw_security_digest(self, handle) -> str:
         ct = self.ct
@@ -2690,7 +2690,7 @@ class _WindowsIO:
             if descriptor.value:
                 self.kernel.LocalFree(descriptor)
 
-    def _security_state(self, handle) -> tuple[str, _WindowsSecurity]:
+    def _security_state(self, handle, *, require_principal: bool = True) -> tuple[str, _WindowsSecurity]:
         import struct
 
         ct = self.ct
@@ -2722,7 +2722,8 @@ class _WindowsIO:
             if not 8 <= acl_size <= 65535:
                 self._error(f"windows-owner-or-acl-bound:acl-size={acl_size}")
             raw = ct.string_at(descriptor, size)
-            self._require_principal(owner)
+            if require_principal:
+                self._require_principal(owner)
             return "sha256:" + _sha(raw), _WindowsSecurity(ct.string_at(owner, sid_size),
                 ct.string_at(dacl, acl_size), control.value)
         finally:

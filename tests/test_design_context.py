@@ -1232,7 +1232,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
             assert isinstance(mode, int)
             data = item['data']
             assert isinstance(data, bytes)
-            return {'dev': 10, 'ino': inode, 'uid': item.get('security', self._security_state(handle)[1].digest()), 'mode': item['mode'],
+            return {'dev': 10, 'ino': inode, 'uid': item.get('security', self._security_state(handle, require_principal=False)[1].digest()), 'mode': item['mode'],
                     'size': 128 * len(self.names(handle)) if item['type'] == 'directory' else len(data),
                     'nlink': 1, 'type': item['type'],
                     'attributes': ((0x10 if item['type'] == 'directory' else 0) |
@@ -1279,7 +1279,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
             item['change_time'] = change_time + 1
             self.native_calls.append(('owner-acl', self.handles[handle], access))
 
-        def _security_state(self, handle):
+        def _security_state(self, handle, *, require_principal: bool = True):
             item = self.nodes[self.handles[handle]]
             owner = struct.pack('<BB6sII', 1, 2, b'\0\0\0\0\0\5', 21, 1001)
             access = item.get('acl_access', 0x1F01FF)
@@ -1454,8 +1454,8 @@ class WindowsNativeRosterTest(unittest.TestCase):
         def info(self, handle):
             return dict(super().info(handle), uid=self.security_digest(handle))
 
-        def _security_state(self, handle):
-            return tc._WindowsIO._security_state(self, handle)
+        def _security_state(self, handle, *, require_principal: bool = True):
+            return tc._WindowsIO._security_state(self, handle, require_principal=require_principal)
 
         def _owner_acl(self, handle, access):
             tc._WindowsIO._owner_acl(self, handle, access)
@@ -1700,6 +1700,29 @@ class WindowsNativeRosterTest(unittest.TestCase):
 
     def test_native_cleanup_compares_semantic_grant(self):
         self._cleanup_semantic_grant(self.SemanticNative)
+
+    def test_native_identity_reads_do_not_require_cleanup_ownership(self):
+        native = self.SemanticNative('work', 'different-control')
+        root, anchors = native.open_anchor(pathlib.PureWindowsPath(r'C:\work'))
+        _, acl, control = native._state(root)
+        assert acl is not None
+        native.states[native.handles[root]] = native.OTHER_SID, acl, control
+        refusal = 'windows-created-object-owner-is-not-the-current-principal:equal-sid=0'
+        try:
+            with mock.patch.object(native, '_require_principal', side_effect=tc.InstallRefused(refusal)) as ownership:
+                recorded = native.info(root)
+                self.assertEqual(recorded['uid'], tc._WindowsSecurity(native.OTHER_SID, acl, control).digest())
+                self.assertEqual(ownership.call_count, 0)
+                with self.assertRaisesRegex(tc.InstallRefused, refusal):
+                    native.grant_delete(root, tc._anchor_stamp(recorded), identity=tc._anchor_stamp)
+                self.assertEqual(ownership.call_count, 1)
+            self.assertIn(native.handles[root], native.nodes)
+            self.assertEqual(native.submitted, [])
+            self.assertFalse(any(row[0] == 'disposition' for row in native.native_calls))
+            self.assertEqual(native.allocations, {})
+        finally:
+            for handle in reversed(anchors):
+                native.close(handle)
 
     def test_native_cleanup_accepts_security_api_layouts(self):
         layout: _SecurityLayout
