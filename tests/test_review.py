@@ -477,7 +477,8 @@ class SnapshotTest(unittest.TestCase):
         checked = runner._snapshot_disposal(state, "allocation-native-refusal", outcomes)
 
         def dispose(parent, created):
-            with mock.patch.object(snapshot, "_container_object", side_effect=tc.InstallRefused("native unavailable")):
+            with mock.patch.object(snapshot, "_container_object",
+                                   side_effect=tc.InstallRefused("windows-owner-sid-length=0")):
                 return checked(parent, created)
 
         with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings, dispose=dispose) as snap:
@@ -485,7 +486,9 @@ class SnapshotTest(unittest.TestCase):
             assert parent is not None
         self.assertEqual((parent / "tree/src/app.py").read_bytes(), b"print('hi')\n")
         self.assertEqual(outcomes[0][0], "retained")
+        self.assertIn("windows-owner-sid-length=0", outcomes[0][1])
         self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+        self.assertIn("windows-owner-sid-length=0", warnings[0])
 
     def test_design_free_snapshot_keeps_working_when_design_native_identity_is_unavailable(self):
         from oah.design import task_context as tc

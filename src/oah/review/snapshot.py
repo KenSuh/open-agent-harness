@@ -128,14 +128,15 @@ def _strip(tree: pathlib.Path, paths: Iterable[str]) -> None:
                               "nothing was reviewed. Check the folder's permissions and run oah review again")
 
 
-def remove(path: pathlib.Path, *, expected_plan: "ValidatedPlan | None" = None, progress=None, guard=None) -> bool:
+def remove(path: pathlib.Path, *, expected_plan: "ValidatedPlan | None" = None, progress=None, guard=None,
+           refusals: list[str] | None = None) -> bool:
     """Remove a folder tree, clearing read-only flags (Windows git objects); True when it is gone.
 
     With `expected_plan` (a ValidatedPlan) it unlinks only that plan's exact unchanged entries, deepest first,
     calling `progress(entry, "intent")` before and `progress(entry, observed)` after each, and stops (False) at the
     first unexpected, replaced or unowned entry or failed progress write. It never falls back to rmtree."""
     if expected_plan is not None:
-        return _guarded_remove(path, expected_plan, progress, guard)
+        return _guarded_remove(path, expected_plan, progress, guard, refusals=refusals)
     def retry(function, target, _error) -> None:
         try:
             os.chmod(target, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
@@ -914,11 +915,12 @@ def validate_retirement_plan(final: dict, parent: pathlib.Path, pages_dir: pathl
                          working.entries(), pending_absent)
 
 
-def _guarded_remove(parent: pathlib.Path, plan: ValidatedPlan, progress, guard=None) -> bool:
+def _guarded_remove(parent: pathlib.Path, plan: ValidatedPlan, progress, guard=None, *,
+                    refusals: list[str] | None = None) -> bool:
     if pathlib.Path(parent) != plan.parent or progress is None:
         return False
     if os.name == "nt":
-        return _windows_guarded_remove(parent, plan, progress, guard)
+        return _windows_guarded_remove(parent, plan, progress, guard, refusals=refusals)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     slot = tuple((plan.final["base_plan"].get("output_slot") or {}).get("path") or ())
     try:
@@ -1028,7 +1030,8 @@ def _windows_output_slot(parent, components, *, producer, native=None, root_hand
             native.close(handle)
 
 
-def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) -> bool:
+def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None,
+                            refusals: list[str] | None = None) -> bool:
     from oah.design import task_context as tc
 
     native, root, anchors = native if native is not None else tc._WindowsIO(), None, []
@@ -1113,7 +1116,11 @@ def _windows_guarded_remove(parent, plan, progress, guard=None, *, native=None) 
             if any(name == root_path.name for name in native.iter_names(containing)):
                 raise Retained("the native final root is not observed absent")
             return progress(item, "absent") is not False
-    except (OSError, ValueError, PlanUnavailable, Retained, tc.InstallRefused):
+    except tc.InstallRefused as exc:
+        if refusals is not None:
+            refusals.append(str(exc))
+        return False
+    except (OSError, ValueError, PlanUnavailable, Retained):
         return False
     finally:
         if root is not None:

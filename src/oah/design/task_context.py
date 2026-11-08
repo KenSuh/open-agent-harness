@@ -2572,6 +2572,8 @@ class _WindowsIO:
             (self.security, "AddAccessAllowedAce", [ct.c_void_p, ct.c_uint32, ct.c_uint32, ct.c_void_p], ct.c_int32),
             (self.security, "GetLengthSid", [ct.c_void_p], ct.c_uint32),
             (self.security, "GetSecurityDescriptorLength", [ct.c_void_p], ct.c_uint32),
+            (self.security, "GetSecurityDescriptorControl", [ct.c_void_p, ct.POINTER(ct.c_uint16),
+                ct.POINTER(ct.c_uint32)], ct.c_int32),
             (self.security, "OpenProcessToken", [ct.c_void_p, ct.c_uint32, ct.POINTER(ct.c_void_p)], ct.c_int32),
             (self.security, "GetTokenInformation", [ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_uint32,
                                                     ct.POINTER(ct.c_uint32)], ct.c_int32),
@@ -2616,12 +2618,16 @@ class _WindowsIO:
         ct = self.ct
         owner, dacl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
         try:
-            if self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(dacl), None,
-                                             ct.byref(descriptor)) != 0 or not descriptor.value or not owner.value or not dacl.value:
-                self._error("windows-owner-or-acl-unreadable")
+            result = self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(dacl), None,
+                                                   ct.byref(descriptor))
+            if result != 0:
+                self._error(f"windows-owner-or-acl-unreadable:get-security-info={result}")
+            for field, pointer in (("descriptor", descriptor), ("owner", owner), ("dacl", dacl)):
+                if not pointer.value:
+                    self._error(f"windows-owner-or-acl-unreadable:{field}=0")
             size = self.security.GetSecurityDescriptorLength(descriptor)
             if not 20 <= size <= 65536:
-                self._error("windows-security-descriptor-bound")
+                self._error(f"windows-security-descriptor-bound:length={size}")
             return "sha256:" + _sha(ct.string_at(descriptor, size))
         finally:
             if descriptor.value:
@@ -2653,28 +2659,35 @@ class _WindowsIO:
         ct = self.ct
         owner, dacl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
         try:
-            if self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(dacl), None,
-                                             ct.byref(descriptor)) != 0 or not descriptor.value:
-                self._error("windows-owner-or-acl-unreadable")
+            result = self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(dacl), None,
+                                                   ct.byref(descriptor))
+            if result != 0:
+                self._error(f"windows-owner-or-acl-unreadable:get-security-info={result}")
+            for field, pointer in (("descriptor", descriptor), ("owner", owner), ("dacl", dacl)):
+                if not pointer.value:
+                    self._error(f"windows-owner-or-acl-unreadable:{field}=0")
             size = self.security.GetSecurityDescriptorLength(descriptor)
             if not 20 <= size <= 65536:
-                self._error("windows-security-descriptor-bound")
+                self._error(f"windows-security-descriptor-bound:length={size}")
+            control, revision = ct.c_uint16(), ct.c_uint32()
+            result = self.security.GetSecurityDescriptorControl(descriptor, ct.byref(control), ct.byref(revision))
+            if not result:
+                self._error(f"windows-security-descriptor-control:result={result}")
+            if revision.value != 1:
+                self._error(f"windows-security-descriptor-control:revision={revision.value}")
+            valid = self.security.IsValidSid(owner)
+            if not valid:
+                self._error(f"windows-owner-or-acl-bound:owner-sid-valid={valid}")
+            sid_size = self.security.GetLengthSid(owner)
+            if not 8 <= sid_size <= 68:
+                self._error(f"windows-owner-or-acl-bound:owner-sid-length={sid_size}")
+            acl_size = struct.unpack_from("<H", ct.string_at(dacl, 8), 2)[0]
+            if not 8 <= acl_size <= 65535:
+                self._error(f"windows-owner-or-acl-bound:acl-size={acl_size}")
             raw = ct.string_at(descriptor, size)
-            revision, reserved, control, owner_offset, group, sacl, acl_offset = struct.unpack_from("<BBHIIII", raw)
-            if (revision != 1 or reserved or control & 0x8004 != 0x8004 or group or sacl or
-                    not 20 <= owner_offset <= size - 8 or not 20 <= acl_offset <= size - 8 or
-                    owner.value != descriptor.value + owner_offset or dacl.value != descriptor.value + acl_offset):
-                self._error("windows-security-descriptor-layout")
-            sid_size = 8 + 4 * raw[owner_offset + 1]
-            acl_size = struct.unpack_from("<H", raw, acl_offset + 2)[0]
-            if (not 8 <= sid_size <= 68 or owner_offset + sid_size > size or
-                    not 8 <= acl_size <= 65535 or acl_offset + acl_size > size or
-                    not (owner_offset + sid_size <= acl_offset or acl_offset + acl_size <= owner_offset) or
-                    self.security.IsValidSid(owner) != 1 or self.security.GetLengthSid(owner) != sid_size):
-                self._error("windows-owner-or-acl-bound")
             self._require_principal(owner)
-            return "sha256:" + _sha(raw), _WindowsSecurity(raw[owner_offset:owner_offset + sid_size],
-                raw[acl_offset:acl_offset + acl_size], control)
+            return "sha256:" + _sha(raw), _WindowsSecurity(ct.string_at(owner, sid_size),
+                ct.string_at(dacl, acl_size), control.value)
         finally:
             if descriptor.value:
                 self.kernel.LocalFree(descriptor)
@@ -2732,26 +2745,31 @@ class _WindowsIO:
     def _require_principal(self, owner) -> None:
         ct, token, size = self.ct, self.ct.c_void_p(), self.ct.c_uint32()
         try:
-            if not self.security.OpenProcessToken(self.kernel.GetCurrentProcess(), 8, ct.byref(token)):
-                self._error("windows-principal-token-unreadable")
+            result = self.security.OpenProcessToken(self.kernel.GetCurrentProcess(), 8, ct.byref(token))
+            if not result:
+                self._error(f"windows-principal-token-unreadable:open-process-token={result}")
             for kind in (1, 4):  # TokenUser, then TokenOwner (the default owner for newly created objects).
                 size.value = 0
                 self.security.GetTokenInformation(token, kind, None, 0, ct.byref(size))
                 if not 16 <= size.value <= 65536:
-                    self._error("windows-principal-buffer-bound")
+                    self._error(f"windows-principal-buffer-bound:token-kind={kind},length={size.value}")
                 buffer = ct.create_string_buffer(size.value)
-                if not self.security.GetTokenInformation(token, kind, buffer, len(buffer), ct.byref(size)):
-                    self._error("windows-principal-token-read-failed")
+                result = self.security.GetTokenInformation(token, kind, buffer, len(buffer), ct.byref(size))
+                if not result:
+                    self._error(f"windows-principal-token-read-failed:token-kind={kind},result={result}")
                 sid = ct.c_void_p.from_buffer(buffer).value
-                if (not sid or not ct.addressof(buffer) + ct.sizeof(ct.c_void_p) <= sid <=
-                        ct.addressof(buffer) + len(buffer) - 8 or self.security.IsValidSid(sid) != 1):
-                    self._error("windows-principal-sid-invalid")
+                in_buffer = bool(sid and ct.addressof(buffer) + ct.sizeof(ct.c_void_p) <= sid <=
+                                 ct.addressof(buffer) + len(buffer) - 8)
+                valid = self.security.IsValidSid(sid) if in_buffer else 0
+                if not in_buffer or valid != 1:
+                    self._error(f"windows-principal-sid-invalid:token-kind={kind},in-buffer={int(in_buffer)},valid={valid}")
                 sid_size = self.security.GetLengthSid(sid)
                 if not 8 <= sid_size <= 68 or sid + sid_size > ct.addressof(buffer) + len(buffer):
-                    self._error("windows-principal-sid-bound")
-                if self.security.EqualSid(owner, sid) == 1:
+                    self._error(f"windows-principal-sid-bound:token-kind={kind},length={sid_size}")
+                equal = self.security.EqualSid(owner, sid)
+                if equal == 1:
                     return
-            self._error("windows-created-object-owner-is-not-the-current-principal")
+            self._error(f"windows-created-object-owner-is-not-the-current-principal:equal-sid={equal}")
         finally:
             if token.value:
                 self.close(token)

@@ -585,8 +585,10 @@ semantic security state from the verified existing owner SID: that same owner; a
 exactly one `ACCESS_ALLOWED_ACE` (type `0`), ACE flags `0`, mask `0x130189`, and that same SID in the ACE.
 It relies on `GetSecurityInfo` with `OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION` and
 `SetSecurityInfo` with `DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION`, which leaves the
-owner unchanged. A bounded parse of the documented self-relative descriptor, ACL and ACE layouts reads those
-fields. Other descriptor control bits, including automatic-inheritance and auto-inherit-request bits, and unused
+owner unchanged. The owner SID and DACL are read through the returned API pointers: `IsValidSid` and
+`GetLengthSid` bound the SID, the ACL header's `AclSize` bounds the DACL, and `GetSecurityDescriptorControl`
+supplies the control bits. The comparator parses the documented ACL and ACE fields without assuming raw
+descriptor offsets or component order. Other descriptor control bits, including automatic-inheritance and auto-inherit-request bits, and unused
 ACL allocation bytes do not determine semantic equality. No observed security value becomes the expectation;
 persisted
 identity hashes keep their original raw-descriptor format. Every later observation must match the original
@@ -626,6 +628,9 @@ and [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32
 Directory durability also follows the [FlushFileBuffers access contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
 Semantic security fields follow [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
 [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+[GetSecurityDescriptorControl](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorcontrol),
+[IsValidSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-isvalidsid),
+[GetLengthSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getlengthsid),
 [ACL](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-acl) and
 [ACCESS_ALLOWED_ACE](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-access_allowed_ace).
 

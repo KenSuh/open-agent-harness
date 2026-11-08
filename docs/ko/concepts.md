@@ -544,8 +544,10 @@ DACL을 준다. 읽기 핸들을 닫고 정확한 디렉터리를 쓰기 권한�
 정확히 하나의 `ACCESS_ALLOWED_ACE`(type `0`), ACE flags `0`, mask `0x130189`, ACE 안의 같은 SID다.
 `GetSecurityInfo`의 `OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION` 조회와
 `SetSecurityInfo`의 `DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION` 설정 계약에
-따르며 소유자는 바꾸지 않는다. 문서화된 self-relative descriptor·ACL·ACE 구조를 범위 검사하며 파싱해
-해당 필드를 읽는다. 자동 상속·자동 상속 요청 비트를 비롯한 나머지 descriptor 제어 비트와 ACL 할당의
+따르며 소유자는 바꾸지 않는다. 반환된 API 포인터로 소유자 SID와 DACL을 읽는다. `IsValidSid`와
+`GetLengthSid`로 SID 범위를, ACL 헤더의 `AclSize`로 DACL 범위를 확인하고,
+`GetSecurityDescriptorControl`로 제어 비트를 얻는다. 비교기는 raw descriptor의 오프셋이나 구성 요소
+순서를 가정하지 않고 문서화된 ACL·ACE 필드를 파싱한다. 자동 상속·자동 상속 요청 비트를 비롯한 나머지 descriptor 제어 비트와 ACL 할당의
 미사용 바이트는 의미 동등성 판정에 쓰지 않는다. 관측한 보안 값을 예상 값으로 채택하지 않는다. 저장된 식별
 hash는 원래 raw descriptor 형식을 유지한다. 이후의 모든 관측은 보안 값만 미리 계산한 값으로 바꾼 원래
 식별과 일치해야 하고, 권한 부여 중에는 변경 시각만 추가로 달라질 수 있다. 디렉터리 크기·링크 수·쓰기/변경
@@ -580,6 +582,9 @@ disposition 실패의 Win32 오류 코드를 보존한다. 읽기 전용 파일�
 [FlushFileBuffers 권한](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)에 따른다.
 보안 의미 필드는 [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
 [SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+[GetSecurityDescriptorControl](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorcontrol),
+[IsValidSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-isvalidsid),
+[GetLengthSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getlengthsid),
 [ACL](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-acl),
 [ACCESS_ALLOWED_ACE](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-access_allowed_ace)의 계약을 따른다.
 

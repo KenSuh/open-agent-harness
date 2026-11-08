@@ -20,7 +20,7 @@ import struct
 import subprocess
 import sys
 import unittest
-from typing import Literal, assert_never
+from typing import Callable, Literal, assert_never
 from unittest import mock
 
 from oah.design import task_context as tc
@@ -41,6 +41,9 @@ _SemanticFixture = Literal['different-control', 'padded-acl', 'padded-ace', 'own
                            'ace-type', 'ace-flags', 'access', 'unprotected', 'absent', 'null']
 _SEMANTIC_FIXTURES: tuple[_SemanticFixture, ...] = ('different-control', 'padded-acl', 'padded-ace', 'owner', 'ace-owner',
     'extra-ace', 'ace-type', 'ace-flags', 'access', 'unprotected', 'absent', 'null')
+_SecurityLayout = Literal['acl-first', 'group', 'owner-first', 'sacl', 'reserved', 'separate-pointers', 'acl-capacity']
+_SECURITY_LAYOUTS: tuple[_SecurityLayout, ...] = ('acl-first', 'group', 'owner-first', 'sacl', 'reserved',
+                                               'separate-pointers', 'acl-capacity')
 
 FAKE_STREAM = '''# 스트림 가짜 Claude — 브리프의 Design data 파일을 Read 도구 이벤트로 읽은 것처럼 stream-json 을 낸다.
 import json, os, re, sys
@@ -1323,6 +1326,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
             self.submitted: list[tuple[int, int, bytes]] = []
             self.security = types.SimpleNamespace(GetSecurityInfo=self._get_security,
                 GetSecurityDescriptorLength=lambda sd: len(self.allocations[sd.value]),
+                GetSecurityDescriptorControl=self._get_control,
                 GetLengthSid=lambda sid: 8 + 4 * self.ct.string_at(sid, 2)[1],
                 IsValidSid=lambda sid: int(self.ct.string_at(sid, 2) == b'\x01\x02'),
                 InitializeAcl=self._initialize_acl, AddAccessAllowedAce=self._add_ace,
@@ -1362,6 +1366,11 @@ class WindowsNativeRosterTest(unittest.TestCase):
             descriptor._obj.value, owner._obj.value = address, address + owner_offset
             dacl._obj.value = address + acl_offset if acl is not None else None
             return 0
+
+        def _get_control(self, descriptor, control, revision):
+            control._obj.value = struct.unpack_from('<H', self.ct.string_at(descriptor, 4), 2)[0]
+            revision._obj.value = 1
+            return 1
 
         def _initialize_acl(self, acl, length, revision):
             assert revision == 2 and length >= 8
@@ -1445,13 +1454,79 @@ class WindowsNativeRosterTest(unittest.TestCase):
             super().grant_writes(handle)
             self._owner_acl(handle, 0x1F01FF)
 
+    class LayoutNative(SemanticNative):
+        def __init__(self, target: str, fixture: _SemanticFixture, layout: _SecurityLayout):
+            self.layout: _SecurityLayout = layout
+            self.pointer_buffers = {}
+            super().__init__(target, fixture)
+            free = self.kernel.LocalFree
+
+            def release(descriptor):
+                self.pointer_buffers.pop(descriptor.value, None)
+                return free(descriptor)
+
+            self.release = mock.patch.object(self.kernel, 'LocalFree', new=release)
+            self.release.start()
+
+        def _get_security(self, handle, kind, fields, owner, group, dacl, sacl, descriptor):
+            if self.nodes[self.handles[handle]]['name'] != self.target:
+                return super()._get_security(handle, kind, fields, owner, group, dacl, sacl, descriptor)
+            assert (kind, fields, group, sacl) == (1, 5, None, None)
+            sid, acl, control = self._state(handle)
+            owner_offset, acl_offset = 20, 20 + len(sid) if acl is not None else 0
+            group_offset, sacl_offset, reserved = 0, 0, 0
+            extra = b''
+            match self.layout:
+                case 'acl-first' | 'separate-pointers':
+                    acl_offset, owner_offset = (20, 20 + len(acl)) if acl is not None else (0, 20)
+                case 'owner-first':
+                    pass
+                case 'group':
+                    group_offset, extra = 20 + len(sid) + len(acl or b''), self.OTHER_SID
+                case 'sacl':
+                    sacl_offset, extra = 20 + len(sid) + len(acl or b''), self._acl([])
+                    control |= 0x10
+                case 'reserved':
+                    reserved, control = 7, control | 0x4000
+                case 'acl-capacity':
+                    if acl is not None:
+                        stored = bytearray(acl + bytes(16))
+                        struct.pack_into('<H', stored, 2, len(stored))
+                        acl = bytes(stored)
+                case other:
+                    assert_never(other)
+            body = ((acl or b'') + sid if owner_offset > 20 else sid + (acl or b'')) + extra
+            raw = struct.pack('<BBHIIII', 1, reserved, control, owner_offset, group_offset, sacl_offset, acl_offset) + body
+            buffer = self.ct.create_string_buffer(raw, len(raw))
+            address = self.ct.addressof(buffer)
+            self.allocations[address] = buffer
+            descriptor._obj.value, owner._obj.value = address, address + owner_offset
+            dacl._obj.value = address + acl_offset if acl is not None else None
+            if self.layout == 'separate-pointers':
+                pointers = [self.ct.create_string_buffer(sid, len(sid))]
+                owner._obj.value = self.ct.addressof(pointers[0])
+                if acl is not None:
+                    pointers.append(self.ct.create_string_buffer(acl, len(acl)))
+                    dacl._obj.value = self.ct.addressof(pointers[1])
+                self.pointer_buffers[address] = pointers
+            return 0
+
     def test_native_cleanup_compares_semantic_grant(self):
+        self._cleanup_semantic_grant(self.SemanticNative)
+
+    def test_native_cleanup_accepts_security_api_layouts(self):
+        layout: _SecurityLayout
+        for layout in _SECURITY_LAYOUTS:
+            with self.subTest(layout=layout):
+                self._cleanup_semantic_grant(lambda target, fixture: self.LayoutNative(target, fixture, layout))
+
+    def _cleanup_semantic_grant(self, native_factory: Callable[[str, _SemanticFixture], WindowsNativeRosterTest.SemanticNative]) -> None:
         for target in ('leaf', 'manifest', 'data'):
             for fixture in _SEMANTIC_FIXTURES:
                 with self.subTest(target=target, fixture=fixture):
                     root, manifest, name = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64
                     target_name = {'leaf': name, 'manifest': manifest, 'data': tc.DATA_DIR}[target]
-                    native = self.SemanticNative(target_name, fixture)
+                    native = native_factory(target_name, fixture)
                     done = tc._install_windows(root, manifest, {name: b'original'}, native=native)
                     installed = done.facts()
                     done.close()
@@ -1488,11 +1563,20 @@ class WindowsNativeRosterTest(unittest.TestCase):
                     self.assertEqual(native.allocations, {})
 
     def test_native_retirement_compares_semantic_grant(self):
+        self._retirement_semantic_grant(self.SemanticNative)
+
+    def test_native_retirement_accepts_security_api_layouts(self):
+        layout: _SecurityLayout
+        for layout in _SECURITY_LAYOUTS:
+            with self.subTest(layout=layout):
+                self._retirement_semantic_grant(lambda target, fixture: self.LayoutNative(target, fixture, layout))
+
+    def _retirement_semantic_grant(self, native_factory: Callable[[str, _SemanticFixture], WindowsNativeRosterTest.SemanticNative]) -> None:
         for target in ('leaf', 'directory', 'root'):
             for fixture in _SEMANTIC_FIXTURES:
                 with self.subTest(target=target, fixture=fixture):
                     target_name = {'leaf': 'product.txt', 'directory': 'nested', 'root': 'work'}[target]
-                    native = self.SemanticNative(target_name, fixture)
+                    native = native_factory(target_name, fixture)
                     parent = pathlib.Path(r'C:\work')
                     root, anchors = native.open_anchor(parent)
                     inode, target_path = native.handles[root], []
@@ -1544,6 +1628,86 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(tc.InstallRefused, 'windows-delete-ace-.*bound'):
                         security.digest()
+
+    def test_native_security_read_names_the_refused_field(self):
+        cases = (('status', 'windows-owner-or-acl-unreadable:get-security-info=5'),
+                 ('descriptor', 'windows-owner-or-acl-unreadable:descriptor=0'),
+                 ('owner', 'windows-owner-or-acl-unreadable:owner=0'),
+                 ('dacl', 'windows-owner-or-acl-unreadable:dacl=0'),
+                 ('short-descriptor', 'windows-security-descriptor-bound:length=19'),
+                 ('large-descriptor', 'windows-security-descriptor-bound:length=65537'),
+                 ('control', 'windows-security-descriptor-control:result=0'),
+                 ('revision', 'windows-security-descriptor-control:revision=2'),
+                 ('invalid-sid', 'windows-owner-or-acl-bound:owner-sid-valid=0'),
+                 ('short-sid', 'windows-owner-or-acl-bound:owner-sid-length=7'),
+                 ('large-sid', 'windows-owner-or-acl-bound:owner-sid-length=69'),
+                 ('short-acl', 'windows-owner-or-acl-bound:acl-size=7'))
+        for field, expected in cases:
+            with self.subTest(field=field):
+                native = self.SemanticNative('work', 'different-control')
+                root, anchors = native.open_anchor(pathlib.PureWindowsPath(r'C:\work'))
+                read = native.security.GetSecurityInfo
+
+                def changed(handle, kind, fields, owner, group, dacl, sacl, descriptor):
+                    if field == 'descriptor':
+                        return 0
+                    result = read(handle, kind, fields, owner, group, dacl, sacl, descriptor)
+                    match field:
+                        case 'status':
+                            return 5
+                        case 'owner':
+                            owner._obj.value = None
+                        case 'dacl':
+                            dacl._obj.value = None
+                        case 'short-acl':
+                            native.ct.memmove(dacl._obj.value + 2, b'\x07\0', 2)
+                    return result
+
+                native.security.GetSecurityInfo = changed
+                match field:
+                    case 'short-descriptor' | 'large-descriptor':
+                        native.security.GetSecurityDescriptorLength = lambda _: 19 if field == 'short-descriptor' else 65537
+                    case 'control':
+                        native.security.GetSecurityDescriptorControl = lambda *_: 0
+                    case 'revision':
+                        def control(descriptor, result, revision):
+                            result._obj.value, revision._obj.value = 0x9004, 2
+                            return 1
+                        native.security.GetSecurityDescriptorControl = control
+                    case 'invalid-sid':
+                        native.security.IsValidSid = lambda _: 0
+                    case 'short-sid' | 'large-sid':
+                        native.security.GetLengthSid = lambda _: 7 if field == 'short-sid' else 69
+                with self.assertRaises(tc.InstallRefused) as refused:
+                    native._security_state(root)
+                self.assertEqual(str(refused.exception), expected)
+                self.assertNotIn(native.SID.hex(), str(refused.exception))
+                self.assertEqual(native.allocations, {})
+                for held in reversed(anchors):
+                    native.close(held)
+
+    def test_native_retirement_records_security_read_refusal_without_completion(self):
+        native = self.SemanticNative('product.txt', 'different-control')
+        parent = pathlib.Path(r'C:\work')
+        root, anchors = native.open_anchor(parent)
+        leaf, _ = native.open_child(root, 'product.txt', directory=False, create=True, writable=True)
+        native.write(leaf, b'original')
+        inode = native.handles[leaf]
+        native.close(leaf)
+        for held in reversed(anchors):
+            native.close(held)
+        plan = self._native_retirement_plan(native, parent)
+        progress, refusals = [], []
+        with mock.patch.object(native.security, 'GetLengthSid', return_value=7):
+            disposed = snapshot._windows_guarded_remove(parent, plan,
+                lambda item, phase: progress.append((item['path'], phase)) or True,
+                native=native, refusals=refusals)
+        self.assertFalse(disposed)
+        self.assertEqual(refusals, ['windows-owner-or-acl-bound:owner-sid-length=7'])
+        self.assertEqual(native.nodes[inode]['data'], b'original')
+        self.assertEqual(progress, [(['product.txt'], 'intent')])
+        self.assertFalse(any(row[:2] == ('disposition', inode) for row in native.native_calls))
+        self.assertEqual(native.allocations, {})
 
     def test_native_create_only_evidence_recovers_an_exact_prefix(self):
         import errno
@@ -2353,8 +2517,14 @@ class WindowsNativeRosterTest(unittest.TestCase):
                                 assert_never(other)
                         return 0
 
+                    def get_control(descriptor, flags, revision):
+                        flags._obj.value = struct.unpack_from('<H', allocations[descriptor.value].raw, 2)[0]
+                        revision._obj.value = 1
+                        return 1
+
                     security = types.SimpleNamespace(GetSecurityInfo=get_security,
                         GetSecurityDescriptorLength=lambda descriptor: len(allocations[descriptor.value]),
+                        GetSecurityDescriptorControl=get_control,
                         IsValidSid=lambda sid: 1, GetLengthSid=lambda sid: 16,
                         InitializeAcl=initialize_acl, AddAccessAllowedAce=add_ace,
                         SetSecurityInfo=set_security)

@@ -354,7 +354,11 @@ class _SnapshotDisposal:
                 else:
                     outcome = retire_snapshot(self.state, views[0], parent)
         except (OSError, ValueError, snapshot.Retained, snapshot.PlanUnavailable, task_context.InstallRefused) as exc:
-            outcome = ("retained", f"the checked retirement stopped ({type(exc).__name__})")
+            cause: BaseException = exc
+            while cause.__cause__ is not None:
+                cause = cause.__cause__
+            detail = str(cause) if isinstance(cause, task_context.InstallRefused) else type(exc).__name__
+            outcome = ("retained", f"the checked retirement stopped ({detail})")
         self.disposition.append(outcome)
         return outcome
 
@@ -562,12 +566,15 @@ def retire_snapshot(state: pathlib.Path, view, parent: pathlib.Path) -> tuple[st
             removed_paths.add(tuple(item["path"]))
         return True
 
+    refusals: list[str] = []
     try:
-        disposed = root_removed or snapshot.remove(parent, expected_plan=planned, progress=progress, guard=guard)
+        disposed = root_removed or snapshot.remove(parent, expected_plan=planned, progress=progress, guard=guard,
+                                                   refusals=refusals)
     except (LeaseError, OSError) as exc:
         return "retained", f"retirement stopped ({getattr(exc, 'code', type(exc).__name__)})"
     if not disposed:
-        return "retained", "guarded deletion stopped; the exact progress and remainder were kept"
+        detail = f" ({'; '.join(refusals)})" if refusals else ""
+        return "retained", f"guarded deletion stopped{detail}; the exact progress and remainder were kept"
     writer.observe_transport(task=view.task, origin=view.origin, expected=expected, kind="retired", authority=authority,
                               fact={"plan_sha256": registration["sha256"], "final_sha256": fact["final_sha256"],
                                     "removed_entries": cursor, **({"counted": False} if interrupted else {})})

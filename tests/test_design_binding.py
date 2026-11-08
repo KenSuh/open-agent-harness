@@ -540,6 +540,25 @@ class ReviewDesignTest(unittest.TestCase):
     def test_interrupted_onstack_retirement_never_publishes_a_counted_review(self):
         self.origin_round(interrupt=True)
 
+    def test_native_retirement_refusal_reaches_the_noncounting_review_result(self):
+        from oah.design import task_context as tc
+        from oah.review import snapshot
+        from tests.test_design_context import WindowsNativeRosterTest
+
+        native = WindowsNativeRosterTest.SemanticNative('work', 'different-control')
+        native.security.GetSecurityInfo = lambda *_: 5
+
+        def native_remove(parent, plan, progress, guard=None, *, refusals=None):
+            with mock.patch.object(tc, '_safe_windows_path', return_value=pathlib.PureWindowsPath(r'C:\work')):
+                return snapshot._windows_guarded_remove(parent, plan, progress, guard, native=native,
+                                                         refusals=refusals)
+
+        with mock.patch.object(snapshot, '_guarded_remove', side_effect=native_remove):
+            self.origin_round(interrupt=False,
+                              retirement_refusal='windows-owner-or-acl-unreadable:get-security-info=5')
+        self.assertFalse(any(row[0] == 'disposition' for row in native.native_calls))
+        self.assertEqual(native.allocations, {})
+
     @unittest.skipIf(sys.platform == "win32", "POSIX snapshot replacement")
     def test_origin_snapshot_replacement_retains_both_containers_without_counting(self):
         for phase in ("capture", "retirement"):
@@ -684,7 +703,7 @@ class ReviewDesignTest(unittest.TestCase):
                 self.assertEqual(list(project.temp_root.iterdir()), [])
 
     def origin_round(self, *, interrupt: bool, replacement: str | None = None, identity_refusal: bool = False,
-                     temp_root: pathlib.Path | None = None) -> None:
+                     temp_root: pathlib.Path | None = None, retirement_refusal: str | None = None) -> None:
         from oah.design import task_context as tc
         from oah.design.binding import repo_identity
         from oah.lease import Store
@@ -813,6 +832,15 @@ class ReviewDesignTest(unittest.TestCase):
                 self.assertEqual(observed["disposition"][-1][0], "retained")
             return
         assert result is not None
+        if retirement_refusal is not None:
+            self.assertEqual(result.code, 'OAH_REVIEW_SNAPSHOT_RETAINED', result.message)
+            self.assertIn(retirement_refusal, result.message)
+            self.assertIn(retirement_refusal, observed['disposition'][-1][1])
+            self.assertEqual((observed['root'] / 'probe.txt').read_bytes(), b'written by the fake reviewer\n')
+            self.assertIsNone(tc.transport_views(project.state)[observed['origin']].last('retired'))
+            self.assertFalse(any(line.get('counted') for line in runner.receipts.read_round_log(project.state, 't1')))
+            self.assertEqual(project.names(), [])
+            return
         self.assertEqual(len(project.calls()), 1)
         view = tc.transport_views(project.state)[observed["origin"]]
         self.assertIsNone(view.problem)
