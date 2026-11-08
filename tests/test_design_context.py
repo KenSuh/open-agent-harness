@@ -309,7 +309,7 @@ class DesignTask(DesignRepo):
         self.state_dir = self.state(self.repo)
         self.record = self.work / "record.json"
         self.env = clean_env(self.work / "home", OAH_STATE_DIR=str(self.state_dir), CODEX_HOME=str(codex_home),
-                             FAKE_RECORD=str(self.record), FAKE_CLAUDE_VERSION=claude_version)
+                             FAKE_RECORD=str(self.record), FAKE_CLAUDE_VERSION=claude_version, PYTHONIOENCODING="utf-8")
         started = self.oah("start", "--task", "t1", "--agent", "claude", "--packet", ".oah/tasks/t1/PACKET.md",
                            "--scope", scope)
         if not allow_refusal:

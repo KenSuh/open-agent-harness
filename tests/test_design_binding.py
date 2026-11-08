@@ -523,7 +523,7 @@ def design_fix_project(test: unittest.TestCase):
     section = design.PacketDesign.of(store.context("acme", "booking").binding("accepted"))
     packet = (project.repo / PACKET).read_text(encoding="utf-8")
     project.commit({PACKET: design.replace_section(packet, section)}, "design bound")
-    env = dict(project.env, PYTHONPATH=SRC_DIR)
+    env = dict(project.env, PYTHONPATH=SRC_DIR, PYTHONIOENCODING="utf-8")
     bound = subprocess.run([sys.executable, "-m", "oah", "start", "--task", "t1", "--agent", "claude", "--packet",
                             PACKET], cwd=project.repo, env=env, capture_output=True, text=True, timeout=120, encoding="utf-8")
     test.assertEqual(bound.returncode, 0, bound.stdout + bound.stderr)
