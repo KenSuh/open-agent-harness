@@ -18,13 +18,13 @@ import pathlib
 import re
 import secrets
 import stat
-import tempfile
 import time
 from dataclasses import dataclass, field
 from contextvars import ContextVar
 from typing import Callable, Mapping, Sequence, TypeVar
 
 from oah import launchers
+from oah import scratch as oah_scratch
 from oah.atomic import RETRY_SECONDS, StateCorrupt, StorageError, read_json, read_jsonl, write_json_atomic, write_text_atomic
 from oah.lease import TASK_RE
 from oah.lockfile import LockTimeout, StateLock
@@ -170,7 +170,7 @@ def _captured_state(path: pathlib.Path, *, jsonl: bool = False, default=None) ->
         return b"", [] if jsonl else default
     except OSError as exc:
         raise StorageError(path, exc) from exc
-    with tempfile.TemporaryDirectory(prefix="oah-state-") as folder:
+    with oah_scratch.directory("oah-state-") as folder:
         copy = pathlib.Path(folder) / "input"
         copy.write_bytes(raw)
         parsed = read_jsonl(copy) if jsonl else read_json(copy, default)

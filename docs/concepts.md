@@ -21,6 +21,7 @@ command refuses, see [Troubleshooting](troubleshooting.md).
 - [Landing](#landing)
 - [Model and skill updates](#model-and-skill-updates)
 - [The toolkit](#the-toolkit)
+- [Scratch folders](#scratch-folders)
 - [CI for your project](#ci-for-your-project)
 - [Companion apps: Orca and Aside](#companion-apps-orca-and-aside)
 
@@ -884,6 +885,34 @@ source and license:
 
 `oah skills list` shows what is bundled, cached, linked and installed. The full list, with every item's source
 and license, is on the [Toolkit](toolkit.md) page.
+
+## Scratch folders
+
+Some commands need a short-lived folder of their own: a review snapshot, the copy a correction works in, an
+evaluation workspace, or an empty home for a `git` or `gitleaks` run. These **scratch folders** live only under a
+folder that belongs to you, never in the system temp folder (`/tmp`, `%TEMP%`), where another account on the same
+computer could swap or read what `oah` puts there.
+
+| OS | Scratch base |
+|---|---|
+| Windows | `%LOCALAPPDATA%\oah\scratch` |
+| macOS | `~/Library/Caches/oah/scratch` |
+| Linux and others | `${XDG_CACHE_HOME:-~/.cache}/oah/scratch` |
+
+- **Checked once per `oah` process.** Before the first scratch folder, `oah` checks that every folder above the base
+  belongs to you or the system and that no other account can replace what is inside it, then that the base itself
+  is yours alone: mode `0700` on macOS and Linux, and on Windows a protected access list that grants your account
+  only. A missing base is created that way. Each scratch folder inside it is owner-only too.
+- **`OAH_SCRATCH_UNSAFE` stops the command.** When the check fails, the message names the folder, the reason and the
+  fix. `oah` never falls back to the system temp folder and never changes an existing folder's owner or
+  permissions; [Troubleshooting](troubleshooting.md#setup-and-configuration) has the fix.
+- **Leftovers stay until you remove them.** A command removes its scratch folders when it ends, but a run that is
+  killed or crashes cannot. `oah doctor` shows the base, how many folders are left and their total size, and
+  deletes nothing; remove them once no `oah` command is running.
+
+**What this costs you.** Leftovers from interrupted runs stay until you remove them, and `oah doctor` lists them. On
+macOS and Linux scratch moves out of `/tmp` into your home folder's cache, so the system's `/tmp` cleanup no longer
+removes it. On Windows the paths are a little longer than under `%TEMP%`.
 
 ## CI for your project
 

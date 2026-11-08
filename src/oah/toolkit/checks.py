@@ -7,10 +7,10 @@ import hashlib
 import os
 import pathlib
 import re
-import tempfile
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
+from oah import scratch as oah_scratch
 from oah.engines.proc import Resolved, RunResult, run_command
 
 GITLEAKS_TIMEOUT = 300.0
@@ -166,7 +166,7 @@ Runner = Callable[..., RunResult]
 
 def gitleaks_problems(folder: pathlib.Path, gitleaks: Resolved, *, runner: Runner = run_command) -> list[str]:
     """Findings from `gitleaks detect --no-git` on folder; a gitleaks failure is itself a problem."""
-    with tempfile.TemporaryDirectory(prefix="oah-gitleaks-") as scratch:
+    with oah_scratch.directory("oah-gitleaks-") as scratch:
         report = pathlib.Path(scratch) / "report.json"
         result = runner((*gitleaks.argv, "detect", "--no-git", "--source", str(folder), "--redact",
                          "--no-banner", "--exit-code", "1", "--report-format", "json",

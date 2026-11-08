@@ -1,6 +1,7 @@
-# 테스트 공용 도우미 — 임시 폴더, POSIX 가짜 도구, npm 설치 배치(layout), 점수 받기용 가짜 연결과 네트워크 차단을 만든다.
+# 테스트 공용 도우미 — 임시 폴더, POSIX 가짜 도구, npm 설치 배치(layout), 점수 받기용 가짜 연결과 네트워크 차단, 작업 폴더(scratch) 격리를 만든다.
 from __future__ import annotations
 
+import atexit
 import contextlib
 import io
 import json
@@ -9,11 +10,13 @@ import pathlib
 import shutil
 import socket
 import stat
+import sys
 import tempfile
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Mapping
 from unittest import mock
 
 
@@ -22,6 +25,102 @@ def make_tmp_dir(test: unittest.TestCase) -> pathlib.Path:
     path = pathlib.Path(tempfile.mkdtemp(prefix="oah-test-")).resolve()
     test.addCleanup(shutil.rmtree, path, True)
     return path
+
+
+def private_folder(path: pathlib.Path) -> pathlib.Path:
+    """Create `path` owner-only (mode 0700, or a protected owner-only Windows DACL) and return it."""
+    from oah import unlazy
+
+    unlazy._private_directory(path)
+    return path
+
+
+def make_private_dir(test: unittest.TestCase) -> pathlib.Path:
+    """A fresh owner-only folder, such as a `temp_root=` that must pass the scratch proof, removed when the test ends."""
+    return private_folder(make_tmp_dir(test) / "private")
+
+
+# The per-user scratch base (oah.scratch) is computed from one variable per OS. The test package points it at a
+# private folder of its own (isolate_scratch), so no test writes into the developer's real cache.
+SCRATCH_RUN: pathlib.Path | None = None
+
+
+def scratch_env(root: pathlib.Path, platform: str | None = None) -> dict[str, str]:
+    """The one variable that moves the scratch base under `root` on this platform."""
+    platform = sys.platform if platform is None else platform
+    name = "LOCALAPPDATA" if platform == "win32" else "HOME" if platform == "darwin" else "XDG_CACHE_HOME"
+    return {name: str(root)}
+
+
+def scratch_base(env: Mapping[str, str] | None = None, platform: str | None = None) -> pathlib.Path:
+    """The documented scratch base for `env`, worked out here independently of oah.scratch and resolved."""
+    env = os.environ if env is None else env
+    platform = sys.platform if platform is None else platform
+    if platform == "win32":
+        root = pathlib.Path(env["LOCALAPPDATA"])
+    elif platform == "darwin":
+        root = pathlib.Path(env["HOME"]) / "Library" / "Caches"
+    else:
+        cache = env.get("XDG_CACHE_HOME", "")
+        root = pathlib.Path(cache) if cache and os.path.isabs(cache) else pathlib.Path(env["HOME"]) / ".cache"
+    return pathlib.Path(os.path.realpath(root / "oah" / "scratch"))
+
+
+def isolate_scratch() -> pathlib.Path:
+    """Point this test process's scratch base at a private folder that is removed when the process exits.
+
+    Child processes inherit the variable, so their scratch lands there too."""
+    global SCRATCH_RUN
+    if SCRATCH_RUN is None:
+        SCRATCH_RUN = pathlib.Path(tempfile.mkdtemp(prefix="oah-scratch-run-")).resolve()
+        atexit.register(shutil.rmtree, SCRATCH_RUN, True)
+        os.environ.update(scratch_env(SCRATCH_RUN))
+    return SCRATCH_RUN
+
+
+@contextlib.contextmanager
+def hostile_temp(test: unittest.TestCase):
+    """Point every system-temp lookup (TMPDIR, TEMP, TMP and tempfile.tempdir) at a shared folder any account may
+    write, and record every folder tempfile creates meanwhile. Yields (shared folder, resolved created folders)."""
+    shared = make_tmp_dir(test) / "shared-temp"
+    shared.mkdir()
+    if os.name != "nt":
+        shared.chmod(0o777)  # world-writable and not sticky: another account could swap any child
+    created: list[pathlib.Path] = []
+    real = tempfile.mkdtemp
+
+    def recording(*args, **kwargs):
+        name = real(*args, **kwargs)
+        created.append(pathlib.Path(os.path.realpath(name)))
+        return name
+
+    with mock.patch.dict(os.environ, {"TMPDIR": str(shared), "TEMP": str(shared), "TMP": str(shared)}), \
+            mock.patch.object(tempfile, "tempdir", str(shared)), mock.patch.object(tempfile, "mkdtemp", recording):
+        yield shared, created
+
+
+def unprovable_folder(test: unittest.TestCase) -> pathlib.Path:
+    """A folder the scratch proof must refuse before creating anything. On POSIX it would sit in a folder any account
+    may write that is not sticky; on Windows it is relative, as a LOCALAPPDATA of "relative-folder" would be."""
+    if os.name == "nt":
+        return pathlib.Path("relative-folder")
+    shared = make_tmp_dir(test) / "open"
+    shared.mkdir()
+    shared.chmod(0o777)
+    return shared / "folder"
+
+
+@contextlib.contextmanager
+def unsafe_scratch(test: unittest.TestCase):
+    """The scratch base moves into an unprovable_folder while every system-temp lookup names a shared folder.
+
+    Afterwards nothing may exist in either place: no folder was created at all, so nothing fell back."""
+    folder = unprovable_folder(test)
+    with hostile_temp(test) as (shared, created), mock.patch.dict(os.environ, scratch_env(folder)):
+        yield
+    test.assertEqual(created, [], "no folder was created anywhere")
+    test.assertEqual(sorted(shared.iterdir()), [], "the shared system temp stays unused")
+    test.assertFalse(os.path.lexists(folder), "nothing was created where the unsafe base would be")
 
 
 def directory_alias(target: pathlib.Path, link: pathlib.Path) -> None:

@@ -19,6 +19,7 @@ from oah.cli import build_parser, main
 from oah.lease import Store
 from oah.paths import repo_info
 from oah.review import receipts
+from tests.helpers import scratch_base, scratch_env
 from tests.test_fix import FIXED, FixProject, publish_start, wait_for
 from tests.test_review_rounds import PACKET, git
 
@@ -711,10 +712,11 @@ class CliTest(unittest.TestCase):
         project = FixProject(self)
         project.changes_requested()
         project.queue_fix({"hang": True}, {"write": FIXED})
-        temp = project.work / "killed-temp"  # a killed process cannot remove its scratch folder; keep it here
+        temp = project.work / "killed-temp"  # the system temp the child is given, which oah must not use
         temp.mkdir()
+        private = scratch_env(project.work / "user")  # a killed process cannot remove its scratch folder; keep it here
         process = start_oah(project, "fix", "--task", "t1", "--tier", "high",
-                            env_extra={"TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)})
+                            env_extra={"TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp), **private})
         pid_file = project.fix_dir / "pid-000.txt"
         try:
             self.assertTrue(wait_for(pid_file), "the corrector must start")
@@ -730,7 +732,9 @@ class CliTest(unittest.TestCase):
         while call._alive(pid) and time.monotonic() < deadline:
             time.sleep(0.05)  # Windows closes the corrector's job with its killed parent
         self.assertFalse(call._alive(pid))
-        self.assertEqual(len(list(temp.glob("oah-fix-*"))), 1, "the scratch folder stayed in the given temp folder")
+        self.assertEqual(len(list(scratch_base(private).glob("oah-fix-*"))), 1,
+                         "the killed run's scratch folder stayed in the private scratch base")
+        self.assertEqual(list(temp.iterdir()), [], "the system temp the child was given stays unused")
         self.assertEqual(names(project), ["R1.json", "A1-start.json"])
         done = oah(project, "review", "--task", "t1", "--tier", "high")
         self.assertEqual(done.returncode, 1)

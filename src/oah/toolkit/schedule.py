@@ -22,11 +22,11 @@ import plistlib
 import re
 import subprocess
 import sys
-import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Callable
 
+from oah import scratch as oah_scratch
 from oah.engines.proc import RunResult, UnsupportedBatchShim, resolve_command, run_command
 
 LABEL_PREFIX = "io.github.open-agent-harness.skills-update"
@@ -203,7 +203,11 @@ def install_entry(entry: Entry, *, runner: Runner = run_command, search_path: st
             entry.path.unlink(missing_ok=True)
             raise
         return
-    with tempfile.TemporaryDirectory(prefix="oah-task-") as scratch:
+    try:
+        temporary = oah_scratch.directory("oah-task-")
+    except oah_scratch.ScratchError as exc:
+        raise ScheduleError(exc.code, exc.detail) from exc
+    with temporary as scratch:
         xml_path = pathlib.Path(scratch) / "task.xml"
         xml_path.write_text(task_xml(entry), encoding="utf-16")
         _ok(runner((*_tool("schtasks", search_path), "/Create", "/TN", entry.name, "/XML", str(xml_path), "/F"),

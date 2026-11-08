@@ -33,6 +33,7 @@ cannot point at a code that is gone.
 | `OAH_EFFORT_METADATA_MISSING` | A tier asks for `highest` effort, but the engine has not reported the model's reasoning levels, so `oah` does not guess. | Run the engine once so it caches its model list, then `oah models --refresh`; or set a literal effort for the tier. |
 | `OAH_EFFORT_UNSUPPORTED` | The tier's effort is not one the model lists. | Set the tier's effort to one of the levels in the message, or to `highest`. |
 | `OAH_STATE_LOCK_TIMEOUT` | Another `oah` command holds the state lock. | Wait for it to finish, then run your command again. |
+| `OAH_SCRATCH_UNSAFE` | `oah` could not prove that its scratch folder, where it keeps short-lived working folders, is yours alone: a folder above it can be changed by another account, or the scratch folder has the wrong owner or permissions. `oah` stops rather than use the system temp folder. | Fix the folder the message names. It and the folders above it must belong to you or the system, with no write access for other accounts, and the scratch folder itself must be yours alone (`chmod 700` on macOS and Linux). A scratch folder that was not made that way can be removed while no `oah` command runs; `oah` creates it again correctly. On Windows, also check that `LOCALAPPDATA` points at your own `AppData\Local` folder. [Scratch folders](concepts.md#scratch-folders) explains the check. |
 
 ## Models
 

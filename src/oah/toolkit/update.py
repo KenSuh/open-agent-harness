@@ -27,10 +27,10 @@ import contextlib
 import datetime as dt
 import json
 import pathlib
-import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, ContextManager, Iterator, Mapping, Sequence
 
+from oah import scratch as oah_scratch
 from oah.atomic import (StateCorrupt, StorageError, append_jsonl, read_json, read_jsonl, write_json_atomic,
                         write_text_atomic)
 from oah.engines.proc import Resolved, UnsupportedBatchShim, resolve_command
@@ -315,7 +315,11 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
             return [UpdateResult(d.item, "deferred", str(d.path), d.commit,
                                  reasons=["baseline changed before preparation; run the update again"])
                     for d in destinations]
-    with tempfile.TemporaryDirectory(prefix="oah-update-") as scratch_text:
+    try:
+        temporary = oah_scratch.directory("oah-update-")
+    except oah_scratch.ScratchError as exc:
+        raise InstallError(exc.code, exc.detail) from exc
+    with temporary as scratch_text:
         scratch = pathlib.Path(scratch_text)
         for number, (item, group) in enumerate(by_item.items()):
             entry = catalog.find(item)

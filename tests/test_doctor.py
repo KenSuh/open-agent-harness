@@ -18,7 +18,8 @@ from oah.engines.effort import EngineError
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
 from oah.models import Catalog, Entry, ModelInfo
 from oah.setup import catalog, display
-from tests.helpers import ToolUpdateTestCase, make_git_repo, make_tmp_dir, make_unlazy, shipped_defaults
+from tests.helpers import (ToolUpdateTestCase, make_git_repo, make_tmp_dir, make_unlazy, scratch_env,
+                           shipped_defaults)
 
 
 def setUpModule():
@@ -966,3 +967,78 @@ class AgentFileDoctorTest(unittest.TestCase):
             else:
                 self.assertIn("OAH_AGENT_FILE_EDITED: .claude/agents/oah-high.md", out.getvalue())
         self.assertEqual(path.read_bytes(), before)
+
+
+class ScratchDoctorTest(unittest.TestCase):
+    """oah doctor lists what stopped runs left in the private scratch base (count, size and base), offline; it starts
+    no program and never creates, proves or deletes anything there."""
+
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        self.user = make_tmp_dir(self) / "user"
+        self.user.mkdir()
+        self.env = scratch_env(self.user)
+        # the documented base for that variable: %LOCALAPPDATA%, ~/Library/Caches or $XDG_CACHE_HOME, then oah/scratch
+        self.base = (self.user / "Library" / "Caches" if sys.platform == "darwin" else self.user) / "oah" / "scratch"
+
+    def doctor(self, *, json_output=False):
+        import oah.doctor as doctor
+
+        out = io.StringIO()
+        spawned = mock.Mock(side_effect=AssertionError("oah doctor starts no program to count scratch leftovers"))
+        with mock.patch.object(doctor, "check_tools", return_value=[python_status((3, 12, 0))]), \
+                mock.patch.object(doctor, "project_root", return_value=self.repo), \
+                mock.patch.object(doctor, "model_notices", return_value=[]), \
+                mock.patch.object(doctor, "model_choices", return_value=[]), \
+                mock.patch.object(doctor, "agent_notices", return_value=[]), \
+                mock.patch.object(doctor, "mcp_notices", return_value=[]), \
+                mock.patch.object(doctor, "update_notices", return_value=[]), \
+                mock.patch.object(doctor, "reviewer_pin", return_value=None), \
+                mock.patch.object(doctor, "rerank_breaker", return_value=None), \
+                mock.patch.dict(os.environ, self.env), \
+                mock.patch("subprocess.Popen", spawned), contextlib.redirect_stdout(out):
+            code = doctor.doctor_main(json_output=json_output)
+        self.assertEqual(spawned.call_count, 0)
+        return code, out.getvalue()
+
+    def tree(self):
+        return sorted(str(path.relative_to(self.user)) for path in self.user.rglob("*"))
+
+    def test_an_absent_base_is_named_and_not_created(self):
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"\nScratch folder: {self.base} (no leftovers)\n", out)
+        self.assertTrue(out.rstrip().endswith("DOCTOR_OK"), out)
+        _code, raw = self.doctor(json_output=True)
+        self.assertNotIn("scratch", json.loads(raw), "the JSON names the scratch folder only when there is news")
+        self.assertEqual(self.tree(), [], "oah doctor creates nothing")
+
+    def test_leftovers_are_counted_sized_and_kept(self):
+        (self.base / "oah-fix-abc" / "deep").mkdir(parents=True)
+        (self.base / "oah-fix-abc" / "deep" / "a.bin").write_bytes(b"a" * 1536)
+        (self.base / "oah-review-def").mkdir()
+        (self.base / "oah-review-def" / "b.bin").write_bytes(b"b" * 512)
+        if os.name != "nt":  # a link inside a leftover is neither followed nor counted
+            outside = self.user / "outside.bin"
+            outside.write_bytes(b"c" * 4096)
+            (self.base / "oah-review-def" / "link").symlink_to(outside)
+        before = self.tree()
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"\nScratch folder: {self.base}\n  2 leftovers, 2.0 KiB, from runs that stopped before cleaning "
+                      "up; oah deletes nothing here, so remove them once no oah command is running\n", out)
+        self.assertTrue(out.rstrip().endswith("DOCTOR_OK"), out)
+        _code, raw = self.doctor(json_output=True)
+        self.assertEqual(json.loads(raw)["scratch"],
+                         {"base": str(self.base), "exists": True, "count": 2, "bytes": 2048, "unreadable": 0})
+        self.assertEqual(self.tree(), before, "oah doctor deletes nothing")
+
+    def test_a_base_that_cannot_be_worked_out_is_named_and_the_report_goes_on(self):
+        self.env = {"LOCALAPPDATA" if sys.platform == "win32" else "HOME": "relative-folder", "XDG_CACHE_HOME": ""}
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn(" cannot be used (OAH_SCRATCH_UNSAFE: ", out)
+        self.assertTrue(out.rstrip().endswith("DOCTOR_OK"), out)
+        _code, raw = self.doctor(json_output=True)
+        self.assertEqual(json.loads(raw)["scratch"]["error"], "OAH_SCRATCH_UNSAFE")
+        self.assertEqual(self.tree(), [])

@@ -19,10 +19,10 @@ import codecs
 import dataclasses
 import datetime as dt
 import pathlib
-import tempfile
 import time
 from typing import Callable, Mapping
 
+from oah import scratch as oah_scratch
 from oah.design.sources import gitref, release, web
 from oah.design.sources import license as license_module
 from oah.design.sources.model import Head, Observation, SourceSpec
@@ -191,7 +191,7 @@ class Observer:
                 files, license_evidence, tree_id = verified.get("files") or [], verified.get("license"), old.get("tree")
                 fetched = commit
             else:
-                with tempfile.TemporaryDirectory(prefix="oah-source-") as scratch:
+                with oah_scratch.directory("oah-source-") as scratch:
                     tree = fetch(git_url, f"refs/tags/{chosen.tag}", pathlib.Path(scratch) / "repo",
                                  timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False,
                                  remaining=lambda: self._left(deadline))
@@ -250,7 +250,7 @@ class Observer:
         if verified is not None and (verified.get("observed") or {}).get("commit") == commit:
             return Observation("unchanged", seen=commit)
         problems: list[str] = []
-        with tempfile.TemporaryDirectory(prefix="oah-source-") as scratch:
+        with oah_scratch.directory("oah-source-") as scratch:
             tree = fetch(git_url, spec.ref, pathlib.Path(scratch) / "repo",
                          timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False,
                          remaining=lambda: self._left(deadline))

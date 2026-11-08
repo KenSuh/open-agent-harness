@@ -30,6 +30,7 @@
 | `OAH_EFFORT_METADATA_MISSING` | tier가 `highest` 강도를 요청했는데 엔진이 모델의 추론 단계를 알려 주지 않았다. `oah`는 짐작하지 않는다. | 엔진을 한 번 실행해 모델 목록을 저장하게 한 뒤 `oah models --refresh`를 실행한다. 아니면 그 tier에 강도를 직접 적는다. |
 | `OAH_EFFORT_UNSUPPORTED` | tier의 강도가 모델이 밝힌 단계에 없다. | 메시지에 나온 단계 가운데 하나나 `highest`로 바꾼다. |
 | `OAH_STATE_LOCK_TIMEOUT` | 다른 `oah` 명령이 상태 잠금을 쥐고 있다. | 그 명령이 끝나기를 기다렸다가 다시 실행한다. |
+| `OAH_SCRATCH_UNSAFE` | `oah`가 잠깐 쓰는 작업 폴더(scratch)가 내 계정 전용인지 증명하지 못했다. 그 위의 폴더를 다른 계정이 바꿀 수 있거나, 작업 폴더의 소유자나 권한이 틀렸다. `oah`는 시스템 임시 폴더를 대신 쓰지 않고 멈춘다. | 메시지가 짚은 폴더를 고친다. 그 폴더와 위의 폴더는 내 계정이나 시스템 소유이고 다른 계정의 쓰기 권한이 없어야 하며, 작업 폴더 자체는 내 계정 전용이어야 한다(macOS와 Linux는 `chmod 700`). 그렇게 만들어지지 않은 작업 폴더는 실행 중인 `oah` 명령이 없을 때 지우면 `oah`가 올바르게 다시 만든다. Windows에서는 `LOCALAPPDATA`가 내 `AppData\Local` 폴더를 가리키는지도 확인한다. 확인 방법은 [임시 작업 폴더](concepts.md#임시-작업-폴더)에 있다. |
 
 ## 모델
 

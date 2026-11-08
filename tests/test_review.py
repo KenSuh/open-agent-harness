@@ -14,7 +14,7 @@ from unittest import mock
 from oah.config import ConfigError
 from oah.review import (ReviewError, authors, canary, context, prompt, receipts, runner, schema, settings,
                         snapshot)
-from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_private_dir, make_tmp_dir
 
 SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
 
@@ -423,7 +423,7 @@ class SnapshotTest(unittest.TestCase):
         for error in (KeyboardInterrupt(), LeaseError("OAH_LEASE_CHANGED", "controlled lease change")):
             with self.subTest(error=type(error).__name__):
                 repo, base, head = self.repo_with_history()
-                temporary = make_tmp_dir(self)
+                temporary = make_private_dir(self)
 
                 def dispose(_parent, _created):
                     raise error
@@ -434,7 +434,7 @@ class SnapshotTest(unittest.TestCase):
 
     def test_failed_container_anchor_retains_the_unverified_allocation(self):
         repo, base, head = self.repo_with_history()
-        temporary = make_tmp_dir(self)
+        temporary = make_private_dir(self)
         warnings = []
         with mock.patch.object(snapshot, "_container_object", side_effect=FileNotFoundError("RUNNER~1")):
             with self.assertRaises(ReviewError) as caught:
@@ -448,7 +448,7 @@ class SnapshotTest(unittest.TestCase):
 
     def test_design_snapshot_retains_link_before_allocation_identity(self):
         repo, base, head = self.repo_with_history()
-        temporary = make_tmp_dir(self)
+        temporary = make_private_dir(self)
         other = make_tmp_dir(self)
         marker = other / "keep.txt"
         marker.write_bytes(b"existing fixture contents\n")
@@ -488,7 +488,7 @@ class SnapshotTest(unittest.TestCase):
         repo, base, head = self.repo_with_history()
         for linked in (False, True):
             with self.subTest(linked=linked):
-                temporary, other = make_tmp_dir(self), make_tmp_dir(self)
+                temporary, other = make_private_dir(self), make_tmp_dir(self)
                 outcomes, warnings = [], []
                 with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
                                    dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-replaced", outcomes)) as snap:
@@ -509,7 +509,7 @@ class SnapshotTest(unittest.TestCase):
 
     def test_design_snapshot_refuses_nonempty_allocation_before_use(self):
         repo, base, head = self.repo_with_history()
-        temporary = make_tmp_dir(self)
+        temporary = make_private_dir(self)
         original_mkdtemp = tempfile.mkdtemp
         markers = []
 
@@ -558,7 +558,7 @@ class SnapshotTest(unittest.TestCase):
         from oah.design import task_context as tc
 
         repo, base, head = self.repo_with_history()
-        temporary, state = make_tmp_dir(self), make_tmp_dir(self)
+        temporary, state = make_private_dir(self), make_tmp_dir(self)
         outcomes, warnings = [], []
         checked = runner._snapshot_disposal(state, "allocation-native-refusal", outcomes)
 
@@ -580,7 +580,7 @@ class SnapshotTest(unittest.TestCase):
         from oah.design import task_context as tc
 
         repo, base, head = self.repo_with_history()
-        temporary = make_tmp_dir(self)
+        temporary = make_private_dir(self)
         with mock.patch.object(snapshot, "_container_object", side_effect=tc.InstallRefused("native unavailable")):
             with snapshot.make(repo, head, base=base, temp_root=temporary) as snap:
                 self.assertEqual((snap.tree / "src/app.py").read_bytes(), b"print('hi')\n")
@@ -598,7 +598,7 @@ class SnapshotTest(unittest.TestCase):
         worktree = make_tmp_dir(self) / "wt"
         git(repo, "worktree", "add", "-q", "-b", "feat", str(worktree))
         head = git_commit(worktree, {"src/app.py": "print('hi')\n"})
-        temp_root = make_tmp_dir(self)
+        temp_root = make_private_dir(self)
         with snapshot.make(worktree, head, base=base, temp_root=temp_root) as snap:
             tree = snap.tree
             self.assertEqual(git(tree, "rev-parse", "HEAD"), head)
@@ -634,7 +634,7 @@ class SnapshotTest(unittest.TestCase):
                 git(repo, "config", "core.symlinks", "true")
                 git(repo, "add", "source-link")
                 head = git_commit(repo, {}, "add source link")
-                temp_root = make_tmp_dir(self)
+                temp_root = make_private_dir(self)
                 with self.assertRaises(ReviewError) as caught:
                     with snapshot.make(repo, head, base=base, temp_root=temp_root):
                         pass
@@ -751,7 +751,7 @@ class SnapshotTest(unittest.TestCase):
 
     def test_snapshot_removed_on_exception(self):
         repo, base, head = self.repo_with_history()
-        temp_root = make_tmp_dir(self)
+        temp_root = make_private_dir(self)
         for error in (RuntimeError, KeyboardInterrupt):
             with self.subTest(error=error.__name__):
                 with self.assertRaises(error):

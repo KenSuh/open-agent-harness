@@ -25,7 +25,7 @@ from oah.review import ReviewError, context, receipts, rounds, runner, schema
 from oah.review.settings import ReviewSettings
 from oah.runs import RunError
 from oah.secrets import NoKeychain
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir, private_folder
 from tests.test_call import SCORES, write_models
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -71,8 +71,9 @@ class Project:
         work = make_tmp_dir(test)
         self.state, self.home, self.calls_dir = work / "state", work / "codex-home", work / "calls"
         self.script, self.temp_root = work / "script.json", work / "snapshots"
-        for folder in (self.home, self.calls_dir, self.temp_root):
+        for folder in (self.home, self.calls_dir):
             folder.mkdir()
+        private_folder(self.temp_root)  # a temp_root goes through the same proof as the scratch base
         (self.home / "models_cache.json").write_text(json.dumps({"models": [
             {"slug": "gpt-test-a", "is_default": True,
              "supported_reasoning_levels": [{"effort": level} for level in LEVELS]}]}), encoding="utf-8")

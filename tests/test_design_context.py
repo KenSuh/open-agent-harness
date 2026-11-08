@@ -27,7 +27,7 @@ from oah.design import task_context as tc
 from oah.design.binding import PacketDesign, replace_section
 from oah.design.model import DesignError, canonical
 from oah.review import snapshot
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import git_commit, git_env, make_git_repo, make_private_dir, make_tmp_dir
 from tests.test_design_store import TODAY, DesignRepo
 from tests.test_intent_wiring import clean_env, packet_text
 
@@ -4671,7 +4671,7 @@ class SnapshotRetirementTest(unittest.TestCase):
                                                      basis="sha256:" + "c" * 64))
         for phase in ("before-capture", "after-census"):
             with self.subTest(phase=phase):
-                state, temporary = make_tmp_dir(self), make_tmp_dir(self)
+                state, temporary = make_tmp_dir(self), make_private_dir(self)
                 outcomes, warnings = [], []
                 disposal = runner._snapshot_disposal(state, "rS", outcomes)
                 with snapshot.make(source, head, base=head, temp_root=temporary,

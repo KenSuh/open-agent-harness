@@ -21,7 +21,7 @@ from oah.runs import RunError
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 1, 2, 69
 COMMANDS = ("review",)
 ENVIRONMENT_CODES = frozenset({"OAH_REVIEW_SNAPSHOT_FAILED", "OAH_REVIEW_GIT_FAILED", "OAH_REVIEW_RECORD_EXISTS",
-                               "OAH_RUN_PATH_UNSAFE", *call_cli.ENVIRONMENT_CODES})
+                               "OAH_RUN_PATH_UNSAFE", "OAH_SCRATCH_UNSAFE", *call_cli.ENVIRONMENT_CODES})
 
 
 def _seconds(text: str) -> float:

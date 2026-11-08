@@ -14,12 +14,12 @@ import os
 import pathlib
 import shutil
 import stat
-import tempfile
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
+from oah import scratch as oah_scratch
 from oah.atomic import write_json_atomic
 from oah.engines.proc import RunResult, run_command
 from oah.paths import git_argv
@@ -80,7 +80,7 @@ def git_env() -> dict[str, str]:
 @contextlib.contextmanager
 def _git_env() -> Iterator[dict[str, str]]:
     env = git_env()
-    with tempfile.TemporaryDirectory(prefix="oah-git-home-") as home:
+    with oah_scratch.directory("oah-git-home-") as home:
         env.update(HOME=home, USERPROFILE=home, XDG_CONFIG_HOME=home, CURL_HOME=home)
         yield env
 

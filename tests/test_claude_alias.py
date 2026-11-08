@@ -11,7 +11,7 @@ from unittest import mock
 from oah import call
 from oah.engines import claude_alias
 from oah.models import Catalog
-from tests.helpers import make_tmp_dir
+from tests.helpers import make_tmp_dir, unsafe_scratch
 from tests.test_call import Project
 
 CANARY = "sk-ant-canary-" + "0123456789abcdef"
@@ -78,7 +78,8 @@ class AliasCheckTest(unittest.TestCase):
     def test_temporary_directory_setup_failure_leaves_the_alias_out(self):
         for stage in ("construction", "entry"):
             with self.subTest(stage=stage):
-                with mock.patch.object(claude_alias.tempfile, "TemporaryDirectory") as folder:
+                # Each folder is still a TemporaryDirectory, now made in the proven scratch base.
+                with mock.patch.object(claude_alias.oah_scratch.tempfile, "TemporaryDirectory") as folder:
                     if stage == "construction":
                         folder.side_effect = OSError("unavailable")
                     else:
@@ -86,6 +87,17 @@ class AliasCheckTest(unittest.TestCase):
                     _project, entry, runs = self.check("real")
                 self.assertEqual([model.name for model in entry.models], ["fable", "opus", "sonnet"])
                 self.assertEqual(runs, [])
+
+    def test_an_unsafe_scratch_base_stops_the_rebuild(self):
+        project = Project(self)
+        record = make_tmp_dir(self) / "bare.jsonl"
+        env = dict(project.env, FAKE_CLAUDE_BARE="real", FAKE_BARE_RECORD=str(record))
+        settings, before = project.settings(), Catalog(project.state).load("claude")
+        with unsafe_scratch(self), self.assertRaises(OSError) as caught:
+            call.check_catalog("claude", settings, state_dir=project.state, env=env, refresh=True)
+        self.assertEqual(getattr(caught.exception, "code", None), "OAH_SCRATCH_UNSAFE", str(caught.exception))
+        self.assertFalse(record.exists(), "no alias run started")
+        self.assertEqual(Catalog(project.state).load("claude"), before, "the stored catalog is unchanged")
 
     def test_an_alias_the_help_lists_is_not_checked(self):
         _project, entry, runs = self.check("real", aliases="haiku,sonnet,opus,fable")

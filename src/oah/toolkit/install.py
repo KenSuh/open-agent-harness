@@ -19,10 +19,10 @@ import pathlib
 import secrets
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from typing import Callable, ContextManager, Iterable, Iterator, Mapping, Sequence
 
+from oah import scratch as oah_scratch
 from oah.engines.proc import UnsupportedBatchShim, resolve_command
 from oah.lockfile import LockTimeout, StateLock
 from oah.toolkit.catalog import (Bundled, Catalog, CatalogError, Linked, Upstream, item_skill_dirs, read_upstream,
@@ -282,7 +282,11 @@ def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime,
     def user_lock() -> ContextManager[None]:
         return publication_lock(plan.publication_home if plan.publication_home is not None else pathlib.Path.home())
 
-    with tempfile.TemporaryDirectory(prefix="oah-skills-") as scratch_text:
+    try:
+        temporary = oah_scratch.directory("oah-skills-")
+    except oah_scratch.ScratchError as exc:
+        raise InstallError(exc.code, exc.detail) from exc
+    with temporary as scratch_text:
         scratch = pathlib.Path(scratch_text)
         items: dict[str, tuple[pathlib.Path, Upstream, tuple | None]] = {}
         for copy in plan.copies:
