@@ -651,7 +651,8 @@ class ModelNoticeDoctorTest(unittest.TestCase):
         data = json.loads(raw)
         # This config has no [updates] after_finish, so the off-by-absence notice joins the report.
         self.assertEqual(list(data), ["ok", "platform", "tools", "mcp_notices", "model_notices", "model_choices",
-                                      "update_notices"])
+                                      "update_notices", "scratch"])
+        self.assertEqual(set(data["scratch"]), {"base", "exists", "count", "bytes", "unreadable"})
         notice = data["model_notices"][0]
         self.assertEqual((notice["code"], notice["engine"], notice["model"], notice["date"]),
                          ("OAH_MODEL_NEW_UNPOOLED", "codex", "m-new", "2026-10-27"))
