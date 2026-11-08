@@ -2491,21 +2491,55 @@ class _WindowsSecurity:
             raise InstallRefused("windows-delete-acl-layout")
         fields: list[str | int | bool] = [self.owner.hex(), bool(self.control & 4),
                                          bool(self.control & 0x1000), count]
-        if count == 1:
-            if size < 12:
+        offset = 8
+        for _ in range(count):
+            if offset + 4 > size:
                 raise InstallRefused("windows-delete-ace-bound")
-            kind, flags, ace_size = struct.unpack_from("<BBH", self.dacl, 8)
-            if not 4 <= ace_size <= size - 8 or ace_size % 4:
+            kind, flags, ace_size = struct.unpack_from("<BBH", self.dacl, offset)
+            if not 4 <= ace_size <= size - offset or ace_size % 4:
                 raise InstallRefused("windows-delete-ace-bound")
+            ace = self.dacl[offset:offset + ace_size]
+            sid_offset = 8
+            extra: list[str | int] = []
+            match kind:
+                case 0 | 1 | 2 | 3 | 9 | 10 | 13 | 14 | 17 | 18 | 19 | 20 | 21:
+                    pass
+                case 4:
+                    if ace_size < 12:
+                        raise InstallRefused("windows-delete-ace-compound-bound")
+                    sid_offset = 12
+                    extra.append(struct.unpack_from("<H", ace, 8)[0])
+                case 5 | 6 | 7 | 8 | 11 | 12 | 15 | 16:
+                    if ace_size < 12:
+                        raise InstallRefused("windows-delete-ace-object-bound")
+                    object_flags = struct.unpack_from("<I", ace, 8)[0]
+                    if object_flags & ~3:
+                        raise InstallRefused("windows-delete-ace-object-flags")
+                    sid_offset = 12 + 16 * ((object_flags & 1) + bool(object_flags & 2))
+                    if sid_offset > ace_size:
+                        raise InstallRefused("windows-delete-ace-object-bound")
+                    extra.extend([object_flags, ace[12:sid_offset].hex()])
+                case _:
+                    raise InstallRefused("windows-delete-ace-type-unsupported")
+            if ace_size < sid_offset + 8:
+                raise InstallRefused("windows-delete-ace-sid-bound")
+            sid_size = 8 + 4 * ace[sid_offset + 1]
+            if ace[sid_offset] != 1 or sid_size > 68 or sid_size > ace_size - sid_offset:
+                raise InstallRefused("windows-delete-ace-sid-bound")
+            sid = ace[sid_offset:sid_offset + sid_size]
+            if kind == 4:
+                client = sid_offset + sid_size
+                if client + 8 > ace_size:
+                    raise InstallRefused("windows-delete-ace-sid-bound")
+                client_size = 8 + 4 * ace[client + 1]
+                if ace[client] != 1 or client_size > 68 or client_size > ace_size - client:
+                    raise InstallRefused("windows-delete-ace-sid-bound")
+                extra.append(ace[client:client + client_size].hex())
             fields.extend([kind, flags])
-            if kind == 0:
-                if ace_size < 16:
-                    raise InstallRefused("windows-delete-ace-sid-bound")
-                sid_size = 8 + 4 * self.dacl[17]
-                if self.dacl[16] != 1 or sid_size > 68 or sid_size > ace_size - 8:
-                    raise InstallRefused("windows-delete-ace-sid-bound")
-                sid = self.dacl[16:16 + sid_size]
-                fields.extend([struct.unpack_from("<I", self.dacl, 12)[0], sid.hex()])
+            fields.extend([struct.unpack_from("<I", ace, 4)[0], sid.hex(), *extra])
+            if kind in (9, 10, 11, 12, 13, 14, 15, 16, 18, 21):
+                fields.append(ace[sid_offset + sid_size:].hex())
+            offset += ace_size
         return "sha256:" + _sha(canonical(fields))
 
     def deletion_grant_digest(self) -> str:
@@ -2615,6 +2649,9 @@ class _WindowsIO:
                 "change_time": struct.unpack_from("<q", basic, 24)[0]}
 
     def security_digest(self, handle) -> str:
+        return self._security_state(handle)[1].digest()
+
+    def raw_security_digest(self, handle) -> str:
         ct = self.ct
         owner, dacl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
         try:
@@ -2693,12 +2730,11 @@ class _WindowsIO:
                 self.kernel.LocalFree(descriptor)
 
     def delete_info(self, handle) -> dict[str, int | str]:
-        # Compare owner/ACE semantics and DACL present/protected; persisted original hashes stay raw.
         info = self.info(handle)
-        raw_digest, security = self._security_state(handle)
-        if raw_digest != info["uid"]:
+        _, security = self._security_state(handle)
+        if security.digest() != info["uid"]:
             self._error("windows-security-changed-during-delete-observation")
-        return dict(info, uid=security.digest())
+        return info
 
     def _readonly(self, handle, enabled: bool) -> None:
         import struct
@@ -2728,8 +2764,8 @@ class _WindowsIO:
         before = self.info(handle)
         if (before if identity is None else identity(before)) != expected:
             self._error("windows-object-changed-before-delete-grant")
-        raw_digest, security = self._security_state(handle)
-        if raw_digest != before["uid"]:
+        _, security = self._security_state(handle)
+        if security.digest() != before["uid"]:
             self._error("windows-security-changed-before-delete-grant")
         prepared = dict(before, uid=security.deletion_grant_digest())
         self._owner_acl(handle, 0x130189)

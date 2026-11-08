@@ -558,7 +558,7 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
   same-host reboot, and this release qualifies no such profile, so that run stays blocked; nothing is deleted.
 
 On native Windows, DATA retention and snapshot retirement use the same `_WindowsIO` object identity: volume and
-file ID, the owner SID and DACL security-descriptor digest, attributes, size and complete content. Ancestor checks
+file ID, the semantic owner SID and DACL digest, attributes, size and complete content. Ancestor checks
 include each directory's file ID and security digest. The `mode` value describes the DOS read-only attribute;
 POSIX owner/group/execute bits do not describe Windows access. Tests of test-owned files grant the
 owner write access through `GetSecurityInfo` / `SetSecurityInfo` and change the native attribute, restoring the
@@ -589,9 +589,14 @@ owner unchanged. The owner SID and DACL are read through the returned API pointe
 `GetLengthSid` bound the SID, the ACL header's `AclSize` bounds the DACL, and `GetSecurityDescriptorControl`
 supplies the control bits. The comparator parses the documented ACL and ACE fields without assuming raw
 descriptor offsets or component order. Other descriptor control bits, including automatic-inheritance and auto-inherit-request bits, and unused
-ACL allocation bytes do not determine semantic equality. No observed security value becomes the expectation;
-persisted
-identity hashes keep their original raw-descriptor format. Every later observation must match the original
+ACL allocation bytes do not determine semantic equality. The shared identity read captures the full owner SID,
+DACL present/protected state and every ACE in order (type, flags, mask and the SID's SubAuthorityCount length).
+Object ACE GUIDs, compound principals and conditional/application data also remain part of their ACE's meaning.
+This same digest is recorded for DATA leaves, manifest and DATA directories, snapshot leaves/directories and the
+snapshot root. Original-record, pre-grant, post-grant and delete-observation comparisons all use that meaning;
+descriptor component order, group/SACL presence and raw descriptor hashes never gate equality. These unreleased
+records use only this semantic form, with no fallback to the earlier raw digest. No later read becomes the
+expectation. Every later observation must match the original
 identity with security replaced by this precomputed value; only change time may also change during the grant.
 Directory size, link count and write/change timestamps are sampled after this cleanup's earlier child removals;
 the original anchor, plan or creation record still governs every field in its stable identity schema. The helper
