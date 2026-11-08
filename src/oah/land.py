@@ -15,8 +15,13 @@ applies to failed or pending CI.
 1. lease: no lease, active or stale, is recorded for this worktree (`OAH_LAND_LEASE_OPEN`).
 2. intent: the task's latest lease binding is `current`, and its packet is committed at HEAD as bound
    (`OAH_LAND_INTENT_NOT_CURRENT`).
+   design: a task that never followed a design passes ("no design is bound"). Otherwise the finished epoch's design
+   record must be current for the epoch's own intent, scope and gates, and the packet committed at HEAD must name a
+   revision the task follows (`OAH_LAND_DESIGN_NOT_CURRENT`); a newer unresolved draft, a stale or invalid binding
+   and an unreadable authority all refuse.
 3. review: `rounds.gate` finds the task's latest event approving exactly HEAD for that binding
-   (`OAH_LAND_REVIEW_REQUIRED`).
+   (`OAH_LAND_REVIEW_REQUIRED`); for a design task the approving receipt must carry an evidence key the task still
+   counts.
 4. gates: a ledger governs the task, `oah.gates.guard.evaluate` passes with unlazy, and its summary equals
    `GATES.summary.md` committed at HEAD. With `[gates] commit_ledgers`, every ledger is committed at HEAD as it is
    on disk. Codes: `OAH_LAND_GATES_REQUIRED`, `OAH_LAND_GATES_UNMET`, `OAH_LAND_GATES_SUMMARY_MISSING`,
@@ -96,7 +101,7 @@ from oah.engines.proc import resolve_command, run_command
 from oah.paths import git_argv, repo_info, run_git, state_dir
 from oah.review import summary as evidence
 
-CHECKS = ("lease", "intent", "review", "gates", "impact", "required-checks", "fast-forward", "scan", "ci")
+CHECKS = ("lease", "intent", "design", "review", "gates", "impact", "required-checks", "fast-forward", "scan", "ci")
 PASSED, FAILED, UNVERIFIED, SKIPPED = "passed", "failed", "unverified", "skipped"
 READY = "OAH_LAND_READY"
 READY_WITH_CI_EXCEPTION = "OAH_LAND_READY_WITH_CI_EXCEPTION"
@@ -506,12 +511,62 @@ def _intent_check(root: pathlib.Path, task: str, head: str,
     return binding, _passed("intent", f"intent digest {binding.digest} is current and committed at HEAD")
 
 
+def _design_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
+                  binding: oah_intent.Binding | None):
+    """(review evidence or None, check). Judged read-only from the typed task view of the finished epoch."""
+    from oah.design import binding as design
+
+    source = binding.source if binding is not None else f".oah/tasks/{task}/PACKET.md"
+    judged = design.judge_task(state, task, root=pathlib.Path(root), source=source,
+                               packet_text=design.committed_text(root, source, head))
+    transport = _transport_check(root, state, task, head, judged)
+    if transport is not None:
+        return None, transport
+    if judged.state == "unbound":
+        return None, _passed("design", "no design is bound to this task")
+    refuse = ("the task's design is " + judged.state + f" ({judged.code}); " + judged.next_step(task, "<agent>") +
+              ", then run oah land again")
+    if judged.state != "current":
+        return None, _failed("design", "OAH_LAND_DESIGN_NOT_CURRENT", refuse)
+    try:
+        section = design.parse_section(design.committed_text(root, source, head) or "")
+    except design.SectionInvalid:
+        section = None
+    if section is None or not judged.task.same_design(section) or not judged.task.holds(section.binding()):
+        return None, _failed("design", "OAH_LAND_DESIGN_NOT_CURRENT", "the packet committed at HEAD does not name a "
+                             "revision the task follows; commit its Design section as bound, then run oah land again")
+    return design.review_evidence(judged), _passed("design", f"{judged.task.binding.line()} is current for the "
+                                                             "task's inputs and committed at HEAD",
+                                                   {"evidence_key": judged.task.key})
+
+
+def _transport_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, judged):
+    """SC4-P4 at land: every retained transport origin is replayed and the candidate's reachable history and index
+    are checked for its exact DATA directory; a failed check, or None to continue."""
+    from oah.design import task_context
+    from oah.design.binding import repo_identity
+    from oah.design.model import DesignError
+
+    record = judged.task
+    current = (None if record is None else
+               {"task_instance_id": record.identity.instance, "task_basis_digest": record.basis})
+    try:
+        repo = repo_identity(pathlib.Path(root))
+    except DesignError:
+        repo = None
+    found = task_context.completion_guard(state, task, root=pathlib.Path(root), repo=repo, current=current,
+                                          head=head, worktree=False)
+    if found.ok:
+        return None
+    return _failed("design", found.code, f"{found.reason}, then run oah land again")
+
+
 def _review_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
-                  binding: oah_intent.Binding) -> Check:
+                  binding: oah_intent.Binding, design=None) -> Check:
     from oah.review import ReviewError
 
     try:
-        found = evidence.convergence(root, state, task, head, binding)
+        found = evidence.convergence(root, state, task, head, binding, design=design)
     except ReviewError:
         found = None  # Unverifiable review state refuses landing without exposing saved values.
     if found is None or not found.converged:
@@ -1299,8 +1354,11 @@ def _assess(root, task, *, env, offline, home, git_context, accept_unverified_ci
     result.checks.append(_lease_check(state, root))
     binding, intent_check = _intent_check(root, task, head, lease)
     result.checks.append(intent_check)
-    result.checks.append(_review_check(root, state, task, head, binding) if binding is not None
-                         else _skipped("review", "it needs a current intent binding"))
+    design_evidence, design_check = _design_check(root, state, task, head, binding)
+    result.checks.append(design_check)
+    result.checks.append(_review_check(root, state, task, head, binding, design=design_evidence)
+                         if binding is not None and design_check.state == PASSED
+                         else _skipped("review", "it needs a current intent binding and design"))
     config = load_config(root)
     gate_settings = config.section("gates", GATE_DEFAULTS)
     proposed_settings = land_settings(config)
@@ -1430,7 +1488,10 @@ def _revalidate_local(root: pathlib.Path, assessment: Assessment, env: Mapping[s
     binding, checked = _intent_check(root, task, head, lease)
     if checked.state != PASSED:
         return checked
-    checked = _review_check(root, state, task, head, binding)
+    design_evidence, checked = _design_check(root, state, task, head, binding)  # the landing control point
+    if checked.state != PASSED:
+        return checked
+    checked = _review_check(root, state, task, head, binding, design=design_evidence)
     if checked.state != PASSED:
         return checked
     settings = load_config(root).section("gates", GATE_DEFAULTS)

@@ -78,6 +78,24 @@ def lease_binding(info: RepoInfo, task: str | None) -> tuple[Binding | None, str
     return None, f"no lease for task {task}", info.root
 
 
+def _design_line(info: RepoInfo | None, task: str | None) -> str | None:
+    """`design=<state> DESIGN ...` for a task that follows a design (read-only); None for any other task."""
+    if info is None or task is None:
+        return None
+    from oah.design import binding as design
+
+    try:
+        judged = design.judge_task(state_dir(info, os.environ), task, root=info.root)
+    except Exception as exc:  # a readout never fails on the design part
+        return f"design=unknown ({type(exc).__name__})"
+    if judged.state == "unbound":
+        return None
+    named = judged.task.binding.line() if judged.task is not None else "no design binding"
+    if judged.state == "unknown":
+        return f"design=unknown {named} code={judged.code}: {judged.reason}; next: {judged.next_step(task)}"
+    return f"design={judged.state} {named}"
+
+
 def _head_version(root: pathlib.Path, path: pathlib.Path) -> intent.Intent | None:
     try:
         rel = path.resolve().relative_to(root.resolve()).as_posix()
@@ -150,6 +168,9 @@ def _run(args: argparse.Namespace) -> int:
         print(current.line())
     if binding is not None:
         print(f"bound={binding.line()} source={binding.source}")
+    design_line = _design_line(info, task)
+    if design_line is not None:
+        print(design_line)
 
     if args.intent_command == "check" and current is not None:
         if current.status != "accepted":

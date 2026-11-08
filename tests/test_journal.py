@@ -10,7 +10,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from oah.atomic import StateCorrupt, StorageError, append_jsonl, write_json_atomic
+from oah.atomic import StateCorrupt, StorageError, append_jsonl, write_json_atomic, write_text_atomic
 from oah.lease import Store
 from oah.paths import RepoInfo
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
@@ -35,10 +35,10 @@ class JournalTest(unittest.TestCase):
                     def interrupted_journal(path, data):
                         if path == store.journal.path:
                             with patch("oah.atomic._fsync_folder", side_effect=OSError("journal directory sync")):
-                                return write_json_atomic(path, data)
-                        return write_json_atomic(path, data)
+                                return write_text_atomic(path, data)
+                        return write_text_atomic(path, data)
 
-                    with patch("oah.journal.write_json_atomic", side_effect=interrupted_journal):
+                    with patch("oah.atomic.write_text_atomic", side_effect=interrupted_journal):
                         with self.assertRaises(StorageError) as caught:
                             store.renew(task="t1", agent="claude", ttl_hours=3)
                     self.assertEqual(caught.exception.path, store.journal.path)
@@ -50,10 +50,10 @@ class JournalTest(unittest.TestCase):
                         if path == store.journal.path:
                             step = "os.fsync" if boundary == "file_sync" else "_fsync_folder"
                             with patch("oah.atomic." + step, side_effect=interruption("recovery sync")):
-                                return write_json_atomic(path, data)
-                        return write_json_atomic(path, data)
+                                return write_text_atomic(path, data)
+                        return write_text_atomic(path, data)
 
-                    with patch("oah.journal.write_json_atomic", side_effect=interrupted_recovery):
+                    with patch("oah.atomic.write_text_atomic", side_effect=interrupted_recovery):
                         with self.assertRaises(StorageError if interruption is OSError else KeyboardInterrupt) as caught:
                             with store._lock():
                                 pass
@@ -80,7 +80,7 @@ class JournalTest(unittest.TestCase):
         script = (
             "import os, pathlib, sys\n"
             "from unittest.mock import patch\n"
-            "from oah.atomic import write_json_atomic\n"
+            "from oah.atomic import write_text_atomic as write_json_atomic\n"
             "from oah.lease import Store\n"
             "store = Store(pathlib.Path(sys.argv[1]))\n"
             "phase = sys.argv[2]\n"
@@ -106,7 +106,7 @@ class JournalTest(unittest.TestCase):
             "        with patch('oah.atomic.os.replace', side_effect=replace):\n"
             "            return write_json_atomic(path, data)\n"
             "    return write_json_atomic(path, data)\n"
-            "with patch('oah.journal.write_json_atomic', side_effect=write):\n"
+            "with patch('oah.atomic.write_text_atomic', side_effect=write):\n"
             "    if phase == 'journal':\n"
             "        store.renew(task='t1', agent='claude', ttl_hours=3)\n"
             "    else:\n"
@@ -210,7 +210,7 @@ class JournalTest(unittest.TestCase):
                             return real_unlink(path, *args, **kwargs)
 
                         with patch("oah.atomic.os.replace", side_effect=replace), \
-                                patch("oah.journal.append_jsonl", side_effect=append), \
+                                patch("oah.atomic.append_jsonl", side_effect=append), \
                                 patch("pathlib.Path.unlink", autospec=True, side_effect=unlink):
                             with self.assertRaises(OSError):
                                 calls[operation]()
@@ -254,7 +254,7 @@ class JournalTest(unittest.TestCase):
             "from oah.paths import RepoInfo\n"
             "state = pathlib.Path(sys.argv[1])\n"
             "info = RepoInfo(state.parent, state.parent / '.git', 'main', None)\n"
-            "with patch('oah.journal.append_jsonl', side_effect=lambda *a: os._exit(23)):\n"
+            "with patch('oah.atomic.append_jsonl', side_effect=lambda *a: os._exit(23)):\n"
             "    Store(state).start(task='t1', agent='claude', scope=('src',), note='', ttl_hours=1, info=info)\n"
         )
         result = subprocess.run([sys.executable, "-c", script, str(state)], env=dict(os.environ, PYTHONPATH=SRC),
@@ -310,7 +310,7 @@ class JournalTest(unittest.TestCase):
         state = repo / ".git" / "oah"
         started = oah(repo, "start", "--task", "t1", "--agent", "claude", "--scope", "src")
         self.assertEqual(started.returncode, 0, started.stderr)
-        with patch("oah.journal.append_jsonl", side_effect=OSError("no space")):
+        with patch("oah.atomic.append_jsonl", side_effect=OSError("no space")):
             with self.assertRaises(OSError):
                 Store(state).renew(task="t1", agent="claude", ttl_hours=1)
         before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in state.iterdir()}

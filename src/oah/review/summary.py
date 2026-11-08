@@ -132,8 +132,10 @@ def _is_ancestor(root: pathlib.Path, commit: str, head: str) -> bool:
     return run_git(root, "merge-base", "--is-ancestor", commit, head).returncode == 0
 
 
-def _why(latest: receipts.Entry, head: str, binding: oah_intent.Binding, log: Sequence[dict]) -> str:
+def _why(latest: receipts.Entry, head: str, binding: oah_intent.Binding, log: Sequence[dict], design=None) -> str:
     record = latest.record
+    if design is not None and not design.counts(record) and record.get("outcome") == "converged":
+        return f"{latest.name} {design.why(record)}; run oah review --task {record['task']} for the current design"
     if record.get("outcome") == "changes-requested":
         return f"{latest.name} requested changes; correct them, commit, then run oah review --task {record['task']}"
     if record.get("outcome") == "needs-decision":
@@ -152,8 +154,9 @@ def _why(latest: receipts.Entry, head: str, binding: oah_intent.Binding, log: Se
 
 
 def convergence(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
-                binding: oah_intent.Binding | None) -> Convergence:
-    """Whether the task's latest review event approves exactly `head` for `binding` (`rounds.gate`)."""
+                binding: oah_intent.Binding | None, design=None) -> Convergence:
+    """Whether the task's latest review event approves exactly `head` for `binding` (`rounds.gate`); for a task
+    that follows a design, `design` (ReviewEvidence) must also count the receipt."""
     try:
         records = receipts.load(state, task)
         log = receipts.read_round_log(state, task)
@@ -180,12 +183,12 @@ def convergence(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
         return Convergence(False, latest, waiting)
     try:
         verdict = rounds.gate(series, head=head, decision=None, extra_round=False, settings=_SETTINGS,
-                              binding=binding)
+                              binding=binding, design=design)
     except ReviewError:
         verdict = None  # a refusal only explains why no round would be skipped
     if verdict == rounds.CONVERGED:
         return Convergence(True, latest, "")
-    return Convergence(False, latest, _why(latest, head, binding, log))
+    return Convergence(False, latest, _why(latest, head, binding, log, design))
 
 
 def committed_bytes(root: pathlib.Path, rev: str, path: str) -> bytes | None:
@@ -594,7 +597,10 @@ def build(root: pathlib.Path, state: pathlib.Path, task: str, *, env: Mapping[st
     problems = list(records.problems)
     lease = task_lease(state, task)
     binding = lease.binding if lease else None
-    status = convergence(root, state, task, head, binding)
+    from oah.design.binding import judge_task, review_evidence
+
+    status = convergence(root, state, task, head, binding,
+                         design=review_evidence(judge_task(state, task, root=pathlib.Path(root))))
     latest = entries[-1] if entries else None
     critical: tuple[str, ...] = ()
     if latest is not None:

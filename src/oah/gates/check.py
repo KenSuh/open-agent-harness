@@ -12,6 +12,16 @@ inputs changed under unchanged evidence is stale until someone re-attests it.
 
 `freshness` is what `oah finish` and the Stop hook use: a gate is fresh only when its binding
 matches the final inputs, including working-tree changes. unlazy's green status alone is not enough.
+
+A task that follows a design (`oah.design.binding.gate_provenance`) adds one requirement to every gate,
+whatever its OAH-INPUTS prefixes: the entry carries the task evidence key it was checked under, and that key
+must be one the task still counts (its binding, or one an explicit carry moved from) while the design is
+current. `run_check` refuses before any CHECK when the design does not permit work, brackets the run with
+two design observations (P0 before, P1 after) and publishes nothing new when they differ or the lease
+generation moved. Design-origin publication (`publish_design_bindings`) keeps an unchanged gate's stored
+entry as it was, appends a complete old entry to a bounded semantic history only on a meaningful change,
+and rotates that history into create-only archive pages. A task without a design keeps `BindingStore.replace`
+and its exact fields.
 """
 from __future__ import annotations
 
@@ -22,11 +32,23 @@ import pathlib
 import re
 from typing import Mapping, Sequence
 
+import hashlib
+import json
+import os
+
 from oah import __version__
 from oah import unlazy as unlazy_mod
 from oah.gates.bindings import BindingStore
 from oah.gates.inputs import InputsUncovered, Manifest, collect
 from oah.gates.ledger import Gate, Ledger, gate_state, parse_ledger, sha256_text
+
+LIVE_LIMIT = 1024 * 1024
+RECENT_LIMIT = 128
+HISTORY_DIR_NAME = "design-history"
+_DESIGN_STATE_CODES = {"required": "OAH_DESIGN_BINDING_REQUIRED", "needs-review": "OAH_DESIGN_NEEDS_REVIEW",
+                       "stale": "OAH_DESIGN_CONTEXT_STALE", "invalid": "OAH_DESIGN_BINDING_INVALID",
+                       "edited": "OAH_DESIGN_UNREGISTERED_EDIT", "missing": "OAH_DESIGN_NOT_FOUND",
+                       "unknown": "OAH_DESIGN_FRESHNESS_UNKNOWN"}
 
 RESULT_RE = re.compile(r"^  (PASS|FAIL|STALE) (.+?): ")
 
@@ -88,21 +110,172 @@ def _gate_digests(gate: Gate) -> dict:
             "prefixes": list(gate.inputs) if gate.inputs is not None else None}
 
 
-def _matches(binding: dict | None, gate: Gate, inputs: str) -> bool:
+def _matches(binding: dict | None, gate: Gate, inputs: str, provenance=None) -> bool:
     if not isinstance(binding, dict):
         return False
     digests = _gate_digests(gate)
-    return all(binding.get(key) == value for key, value in digests.items()) and binding.get("inputs") == inputs
+    same = all(binding.get(key) == value for key, value in digests.items()) and binding.get("inputs") == inputs
+    if provenance is None:
+        return same  # a task without a design: unchanged rule
+    return same and binding.get("design") in provenance.accepts
+
+
+def _provenance(store: BindingStore, root: pathlib.Path):
+    """The task's design provenance (None for a task that never followed a design)."""
+    from oah.design.binding import gate_provenance
+
+    return gate_provenance(store.state_dir, store.task, root=pathlib.Path(root))
+
+
+def _observation(provenance, generation: int | None) -> str:
+    payload = {"current": provenance.current, "accepts": sorted(provenance.accepts), "state": provenance.state,
+               "generation": generation}
+    return "sha256:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _lease_generation(store: BindingStore) -> int | None:
+    from oah.lease import Store
+
+    lease = next((item for item, _stale in Store(store.state_dir).snapshot() if item.task == store.task), None)
+    return None if lease is None else lease.generation
+
+
+def require_design_work(store: BindingStore, root: pathlib.Path):
+    """P0 for a design-origin task: refuse before any CHECK unless its design permits work."""
+    provenance = _provenance(store, root)
+    from oah.design.binding import task_view
+
+    if provenance is not None and task_view(store.state_dir, store.task).lease is None:
+        raise GateRefused("OAH_DESIGN_BINDING_REQUIRED", "new gate evidence requires the task's current unexpired "
+                          "lease; resume the task before checking gates")
+    if provenance is not None and provenance.state != "current":
+        code = _DESIGN_STATE_CODES.get(provenance.state or "invalid", "OAH_DESIGN_BINDING_INVALID")
+        raise GateRefused(code, f"task {store.task}'s design is {provenance.state} ({provenance.problem}); no gate can "
+                          "certify it. Resolve the design (oah design task shows the next step), then run oah gates "
+                          "check again")
+    return provenance
+
+
+def semantic_identity(entry: dict) -> str:
+    """GateSemanticIdentityV1: what the evidence means, not when it was recorded or how often it was carried."""
+    carry = entry.get("carry") if isinstance(entry.get("carry"), dict) else {}
+    payload = {"kind": carry.get("source_kind") or entry.get("kind"), "evidence": entry.get("evidence"),
+               "definition": entry.get("definition"), "title": entry.get("title"), "inputs": entry.get("inputs"),
+               "prefixes": entry.get("prefixes"), "design": entry.get("design"),
+               "edge": [carry.get("old_design"), carry.get("new_design"), carry.get("decision")]
+               if carry.get("old_design") != carry.get("new_design") else None}
+    return "sha256:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _size(data: dict) -> int:
+    return len((json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _history(data: dict) -> tuple[list[dict], dict | None]:
+    history = data.get("design_history", [])
+    head = data.get("design_archive_head")
+    if (not isinstance(history, list) or len(history) > RECENT_LIMIT or not all(isinstance(item, dict) and
+                                                                                 "design_history" not in item
+                                                                                 for item in history)
+            or (head is not None and not (isinstance(head, dict) and set(head) == {"sha256", "bytes", "previous_head"}))):
+        raise GateRefused("OAH_GATES_HISTORY_INVALID", "the gate history of this task is malformed; restore "
+                          "bindings.json from the archive head it names, or remove it and run oah gates check again")
+    return list(history), head
+
+
+def publish_design_bindings(store: BindingStore, key: str, entries: dict[str, dict], old: list[dict],
+                            check=None) -> dict:
+    """Publish one ledger's design-origin entries under the state lock, with bounded semantic history.
+
+    `old` are complete previous entries that a meaningful change replaced. `check()` runs under the lock first and
+    raises to publish nothing (a moved design or lease generation). Rotation writes the exact previous live bytes
+    to a create-only archive page and then replaces the live file: that replace is the single commit point."""
+    from oah.atomic import write_json_atomic
+    from oah.lease import persist_create_only
+    from oah.lockfile import StateLock
+
+    with StateLock(store.state_dir / ".lock", timeout=store.lock_timeout):
+        if check is not None:
+            check()
+        try:
+            raw = store.path.read_bytes()
+        except FileNotFoundError:
+            raw = None
+        except OSError as exc:
+            raise GateRefused("OAH_GATES_HISTORY_STORAGE", f"{store.path} cannot be read ({exc})") from None
+        if raw is not None and len(raw) > LIVE_LIMIT:
+            raise GateRefused("OAH_GATES_CURRENT_TOO_LARGE", f"{store.path} is {len(raw)} bytes, over {LIVE_LIMIT}")
+        ledgers = store.load()
+        data = json.loads(raw.decode("utf-8")) if raw is not None else {"version": 1, "ledgers": {}}
+        history, head = _history(data)
+        known = {semantic_identity(item) for item in history}
+        added = []
+        for item in old:
+            identity = semantic_identity(item)
+            if identity not in known:
+                known.add(identity)
+                added.append({k: v for k, v in item.items() if k != "design_history"})
+        current = dict(ledgers, **{key: entries})
+        candidate = {"version": 1, "ledgers": current, "design_history": history + added, "design_archive_head": head}
+        if len(candidate["design_history"]) > RECENT_LIMIT or _size(candidate) > LIVE_LIMIT:
+            if raw is None:
+                raise GateRefused("OAH_GATES_CURRENT_TOO_LARGE", "the current gate entries alone are over the live "
+                                  f"limit ({_size(candidate)} bytes); split the task's ledgers")
+            page = store.path.parent / HISTORY_DIR_NAME / (hashlib.sha256(raw).hexdigest() + ".json")
+            try:
+                page.parent.mkdir(parents=True, exist_ok=True)
+                persist_create_only(page, raw)
+            except OSError as exc:
+                raise GateRefused("OAH_GATES_HISTORY_STORAGE", f"the gate history page {page} ({len(raw)} bytes) cannot "
+                                  f"be written ({exc}); free storage or fix permissions, then run the same check "
+                                  "again (successful unchanged gates are not rerun)") from None
+            candidate = {"version": 1, "ledgers": current,
+                         "design_history": added[-RECENT_LIMIT:] if RECENT_LIMIT else [],
+                         "design_archive_head": {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw),
+                                                 "previous_head": None if head is None else
+                                                 {"sha256": head["sha256"], "bytes": head["bytes"]}}}
+            if _size(candidate) > LIVE_LIMIT:
+                sizes = {name: _size({"ledgers": {name: value}}) for name, value in current.items()}
+                raise GateRefused("OAH_GATES_CURRENT_TOO_LARGE", f"the current gate entries alone are over the live "
+                                  f"limit (per ledger bytes: {sizes}); split the task's ledgers")
+        try:
+            write_json_atomic(store.path, candidate)
+        except OSError as exc:
+            raise GateRefused("OAH_GATES_HISTORY_STORAGE", f"{store.path} cannot be written ({exc})") from None
+        return candidate
+
+
+def history_page(store: BindingStore, digest: str | None = None) -> dict:
+    """One verified page of a task's gate history: the live recent history, or an archive page by exact digest."""
+    if digest is None:
+        data = json.loads(store.path.read_bytes().decode("utf-8")) if store.path.exists() else {"ledgers": {}}
+        history, head = _history(data)
+        return {"page": "live", "history": history, "archive_head": head}
+    if not (isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)):
+        raise GateRefused("OAH_GATES_HISTORY_INVALID", "an archive page is named by its 64-hex sha256")
+    page = store.path.parent / HISTORY_DIR_NAME / f"{digest}.json"
+    try:
+        raw = page.read_bytes()
+    except FileNotFoundError:
+        raise GateRefused("OAH_GATES_HISTORY_INVALID", f"archive page {digest} is missing") from None
+    if hashlib.sha256(raw).hexdigest() != digest or len(raw) > LIVE_LIMIT:
+        raise GateRefused("OAH_GATES_HISTORY_INVALID", f"archive page {digest} does not match its digest; it was "
+                          "changed and is not used")
+    data = json.loads(raw.decode("utf-8"))
+    history, head = _history(data)
+    return {"page": digest, "history": history, "archive_head": head, "ledgers": data.get("ledgers")}
 
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _binding(kind: str, gate: Gate, inputs: str, carry: dict | None = None) -> dict:
+def _binding(kind: str, gate: Gate, inputs: str, carry: dict | None = None, design: dict | None = None) -> dict:
     entry = {"kind": kind, **_gate_digests(gate), "inputs": inputs, "recorded_at": _now()}
     if carry is not None:
         entry["carry"] = carry
+    if design is not None:
+        entry.update(design)
     return entry
 
 
@@ -122,6 +295,7 @@ def freshness(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
     manifest = manifest or collect_inputs(root, [ledger_path], store, env_names=env_names, env=env,
                                           tools=tool_versions(unlazy_dir))
     bound = store.load().get(ledger_key(root, ledger_path), {})
+    provenance = _provenance(store, root)  # authority first: a design that is not current certifies nothing
     result = {}
     for gate in ledger.gates:
         state = gate_state(gate, ledger.abandoned)
@@ -129,7 +303,7 @@ def freshness(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
             result[gate.id] = "abandoned"
         elif gate.id not in bound:
             result[gate.id] = "missing"
-        elif state == "met" and _matches(bound[gate.id], gate, manifest.digest_for(gate.inputs)):
+        elif state == "met" and _matches(bound[gate.id], gate, manifest.digest_for(gate.inputs), provenance):
             result[gate.id] = "fresh"
         else:
             result[gate.id] = "stale"
@@ -155,10 +329,13 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
     original = {gate.id: (gate.definition, gate.title, gate.inputs) for gate in ledger.gates}
     key = ledger_key(root, ledger_path)
     tools = tool_versions(unlazy_dir)
+    provenance = require_design_work(store, root)  # P0: refused before any CHECK runs
+    generation = _lease_generation(store) if provenance is not None else None
+    p0 = _observation(provenance, generation) if provenance is not None else None
     before = collect_inputs(root, [ledger_path], store, env_names=env_names, env=env, tools=tools, node=node)
     bound = store.load().get(key, {})
     affected = {gate.id for gate in ledger.gates if gate.id not in ledger.abandoned
-                and not _matches(bound.get(gate.id), gate, before.digest_for(gate.inputs))}
+                and not _matches(bound.get(gate.id), gate, before.digest_for(gate.inputs), provenance)}
     report = CheckReport(actions={}, lines=[])
     after, passed, failed, discarded = before, set(), set(), set()
     if any(gate.runnable for gate in ledger.gates if gate.id in affected):
@@ -175,6 +352,10 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
                                node=node)
         ledger = _parse(ledger_path)
     entries: dict[str, dict] = {}
+    replaced: list[dict] = []
+    stamp = None
+    if provenance is not None:
+        stamp = {"design": provenance.current, "observation": {"p0": p0}}
     for gate in ledger.gates:
         state = gate_state(gate, ledger.abandoned)
         old = bound.get(gate.id)
@@ -189,7 +370,7 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
             action = "failed"
         elif gate.runnable and gate.id in passed and state == "met":
             action = "run"
-        elif gate.id not in affected and state == "met" and _matches(old, gate, inputs_after):
+        elif gate.id not in affected and state == "met" and _matches(old, gate, inputs_after, provenance):
             action = "carry"
         elif gate.runnable and gate.id in affected:
             action = "not-run"
@@ -201,13 +382,47 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
         else:
             action = "unmet"
         report.actions[gate.id] = action
-        if action == "run":
-            entries[gate.id] = _binding("run", gate, inputs_after)
-        elif action == "attest":
-            entries[gate.id] = _binding("attest", gate, inputs_after)
+        if provenance is None:
+            if action == "run":
+                entries[gate.id] = _binding("run", gate, inputs_after)
+            elif action == "attest":
+                entries[gate.id] = _binding("attest", gate, inputs_after)
+            elif action == "carry":
+                entries[gate.id] = _binding("carry", gate, inputs_after, carry={
+                    "old_inputs": old["inputs"], "new_inputs": inputs_after, "evidence": old["evidence"]})
+        elif action in ("run", "attest"):
+            entries[gate.id] = _binding(action, gate, inputs_after, design=stamp)
+            if isinstance(old, dict) and semantic_identity(old) != semantic_identity(entries[gate.id]):
+                replaced.append(old)
+        elif action == "carry" and old.get("design") == provenance.current:
+            entries[gate.id] = old  # a no-op check keeps the stored entry and its original recorded_at
         elif action == "carry":
             entries[gate.id] = _binding("carry", gate, inputs_after, carry={
-                "old_inputs": old["inputs"], "new_inputs": inputs_after, "evidence": old["evidence"]})
+                "old_inputs": old["inputs"], "new_inputs": inputs_after, "evidence": old["evidence"],
+                "source_kind": (old.get("carry") or {}).get("source_kind") or old.get("kind"),
+                "old_design": old.get("design"), "new_design": provenance.current,
+                "decision": "explicit-design-carry"}, design=stamp)
+            replaced.append(old)
         report.lines.append(f"OAH_GATE {gate.id} {action}")
-    store.replace(key, entries)
+    if provenance is None:
+        store.replace(key, entries)
+        return report
+
+    def unchanged():  # P1 under the publication lock: the design and the lease must not have moved
+        try:
+            later = require_design_work(store, root)
+        except GateRefused:
+            raise GateRefused("OAH_DESIGN_CHANGED", "the current task authority no longer permits the gate "
+                              "publication; nothing new was recorded") from None
+        if later is None or _observation(later, _lease_generation(store)) != p0:
+            raise GateRefused("OAH_DESIGN_CHANGED", f"task {store.task}'s design or lease changed while its gates were "
+                              "checked; nothing new was recorded and earlier evidence is unchanged. Run oah gates "
+                              "check again")
+    for entry in entries.values():
+        if entry.get("observation") == {"p0": p0}:
+            entry["observation"] = {"p0": p0, "p1": p0}
+    for gate in ledger.gates:  # old evidence is kept as it was (stale for the new key), never re-tagged
+        if gate.id not in entries and isinstance(bound.get(gate.id), dict):
+            entries[gate.id] = bound[gate.id]
+    publish_design_bindings(store, key, entries, replaced, check=unchanged)
     return report

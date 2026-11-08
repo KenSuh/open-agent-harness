@@ -44,6 +44,14 @@ The first dispatch of a task that has a packet records its intent source in
 an in-place edit or an older revision refuses with `OAH_INTENT_SOURCE_MISMATCH`, and only a raised Revision
 of the same Intent-ID in the same source moves the binding forward. `resolve_worktree` turns a path,
 branch or worktree name into exactly one worktree before any intent is read.
+
+A task that follows a design (`oah.design.binding`) is judged from the lease's worktree before the budget gate:
+initial and correction stages need the design `current`, a review stage (read-only) also runs while a newer draft
+is unresolved. The brief carries `## Design context` with every part of the accepted revision and of a newer
+draft, or nothing launches (`OAH_DESIGN_CONTEXT_TOO_LARGE`); the run folder keeps `design.json`.
+`dispatch_guard` judges again at the launch point and refuses `OAH_DESIGN_CHANGED` when the judgement moved, and
+`execute` records a change made while the engine ran as the warning `OAH_DESIGN_CHANGED_DURING_RUN` and in
+`design-after.json`; the next checkpoint (finish, review, call, land) refuses until it is carried or rebound.
 """
 from __future__ import annotations
 
@@ -83,6 +91,8 @@ _PREPARATION_RUN = ContextVar("oah_preparation_run", default=None)
 _PREPARATION_START = ContextVar("oah_preparation_start", default=None)  # `oah review` starts its round after admission
 _CORRECTION_STATE_LOCK = ContextVar("oah_correction_state_lock", default=None)
 _CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
+_REFERENCE_RUN = ContextVar("oah_reference_run", default=None)  # the ORIGINAL runner's ReferenceRun, if any
+_DESIGN_RUN = ContextVar("oah_design_run", default=False)  # design-bound: stop owned descendants on every return
 DEFAULT_TASK = "adhoc"
 MODEL_MISMATCH = "OAH_MODEL_MISMATCH"
 BELOW_FLOOR = "OAH_MODEL_BELOW_FLOOR"
@@ -691,6 +701,7 @@ class Packet:
     rerank_disabled: bool = False  # the packet's Constraints turn the re-ranker off
     axes: dict[str, routing.Axes] = dataclasses.field(default_factory=dict)
     planned: dict[str, str] = dataclasses.field(default_factory=dict)  # stage -> rule tier `oah packet new` recorded
+    design: object | None = None  # oah.design.binding.PacketDesign: the packet's ## Design section
 
 
 def _section_lines(text: str, heading: str) -> list[str]:
@@ -750,8 +761,14 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
     except ValueError:
         source = str(path)
     section = briefs.raw_section(text) if intent is not None else None
+    from oah.design.binding import SectionInvalid, parse_section
+
+    try:
+        design = parse_section(text)
+    except SectionInvalid as exc:
+        raise EngineError(exc.code, f"{path}: {str(exc).split(': ', 1)[1]}") from None
     return Packet(source=source, intent=intent, section=section, scope=tuple(scope), plan=plan,
-                  rerank_disabled=oah_packet.rerank_disabled(text), axes=axes, planned=planned)
+                  rerank_disabled=oah_packet.rerank_disabled(text), axes=axes, planned=planned, design=design)
 
 
 BINDING_NAME = "intent-binding.json"
@@ -864,7 +881,7 @@ def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
                               "--worktree set to that exact path")
     inputs = _CORRECTION_INPUTS.get()
     if inputs is not None:
-        # Both the working and committed intent were checked while capturing this snapshot.
+        check_lease_binding(lease)
         _check_lease_source(lease.binding(), inputs.packet, lease.task)
         return
     check_lease_binding(lease)
@@ -920,9 +937,21 @@ def dispatch_guard(prepared: Prepared):
     run = prepared.run
     publication = _CORRECTION_PUBLICATION.get()
     if publication is not None and publication.plan.prepared == prepared:
-        # Fix authorized this immutable lease at start publication and owns the task review lock.
         publication.budget_check()
-        yield
+        if publication.plan.design_record is None:
+            yield publication.holder()
+            return
+        if publication.launch_guard is None:
+            raise EngineError("OAH_RUN_LAUNCH_INVALID", "the correction has no current target comparison")
+        with publication.launch_guard() as live:
+            _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
+            sealed = publication.plan.design_record
+            try:
+                _check_design_unchanged(prepared, live, json.loads(sealed) if sealed else None)
+            except EngineError as exc:
+                _record_refusal(prepared, exc)
+                raise
+            yield live
         return
     try:
         saved = run._read_json("lease.json")
@@ -935,13 +964,39 @@ def dispatch_guard(prepared: Prepared):
         except ValueError:
             raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run has no valid checked intent binding; "
                               "run oah call again to prepare it from the current lease") from None
-        with Store(run.path.parents[2]).checked(task=prepared.task, lease_id=saved["id"],
-                                               generation=saved["generation"]) as live:
+        store = Store(run.path.parents[2])
+        with store.checked(task=prepared.task, lease_id=saved["id"], generation=saved["generation"]) as live:
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
             from oah.review import rounds
             _task_dispatch_gate(run.path.parents[2], prepared.task, pathlib.Path(live.worktree), stage=prepared.stage,
                                 record=rounds._PAID_SPAWN.get(), run_id=prepared.run_id)
-            yield
+            # The judgement closest to the spawn: local Git and file reads only, under the short launch lock.
+            from oah.atomic import StateCorrupt
+
+            expected = live.design is not None or live.design_invalid
+            if expected or os.path.lexists(run.file_path(DESIGN_NAME)):  # legacy runs have no design record
+                try:
+                    design_saved = (run._read_json(DESIGN_NAME) if os.path.lexists(run.file_path(DESIGN_NAME))
+                                    else None)
+                except (StateCorrupt, ValueError, RecursionError):
+                    raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record cannot be read; run oah "
+                                      "call again to prepare it from the current design") from None
+                _check_design_unchanged(prepared, live, design_saved)
+            reference = _REFERENCE_RUN.get()
+            if reference is not None and reference.run_id == prepared.run_id:
+                from oah.design.model import DesignError
+
+                try:
+                    reference.spawn_intent(store)
+                except DesignError as exc:
+                    raise _design_error(exc) from None
+                reference.held_store = store
+                try:
+                    yield live
+                finally:
+                    reference.held_store = None
+            else:
+                yield live
     except (LeaseError, EngineError) as exc:
         error = EngineError(exc.code, str(exc).split(": ", 1)[1] if prepared.retain_worker_text else "")
         _record_refusal(prepared, error)
@@ -988,6 +1043,153 @@ def _stored_brief_matches(stored: str, packet: Packet | None) -> None:
                           f"{packet.intent.revision} {packet.intent.digest} from {packet.source}; rebuild the brief "
                           "from the bound packet instead of reusing it. A changed goal needs a new revision of the "
                           "same Intent-ID, not a different source")
+
+
+DESIGN_NAME = "design.json"
+DESIGN_AFTER_NAME = "design-after.json"
+DESIGN_CHANGED_DURING_RUN = "OAH_DESIGN_CHANGED_DURING_RUN"
+
+
+def _design_error(exc: Exception) -> EngineError:
+    code = getattr(exc, "code", "OAH_DESIGN_BINDING_INVALID")
+    text = str(exc)
+    return EngineError(code, text.split(": ", 1)[1] if text.startswith(f"{code}: ") else text)
+
+
+def _task_design(holder, packet: Packet | None, *, state_dir: pathlib.Path, stage: str, task: str,
+                 engine: str = "claude"):
+    """The task's design judgement and the brief block, judged from the lease's worktree (a review's root is a
+    snapshot without authority refs) against the basis rederived from the lease. Raises EngineError before anything
+    is spent or reserved."""
+    from oah.design import binding as design
+    from oah.design import task_context
+    from oah.lease_cli import lease_design
+
+    judged = lease_design(holder, state_dir, source=packet.source if packet is not None else None)
+    if judged.state == "unbound" and packet is not None and packet.design is not None:
+        judged = design.judge(None, root=pathlib.Path(holder.worktree),
+                              found=design.Origin("packet", "its packet has a ## Design section"))
+    record = judged.task
+    try:
+        if record is not None and (packet is None or packet.design is None or not record.same_design(packet.design)
+                                   or not record.holds(packet.design.binding())):
+            named = packet.design.line() if packet is not None and packet.design is not None else "no design"
+            raise design.DesignError(design.SOURCE_MISMATCH_CODE, f"the packet this dispatch reads names {named}, but "
+                                     f"task {task} follows {record.binding.line()}; nothing was launched. Rebind with "
+                                     f"oah start --task {task} --agent {holder.agent} --packet <packet>, or restore "
+                                     "the packet's Design section")
+        judged.require("inspect" if stage == "review" else "dispatch", task=task, agent=holder.agent)
+        if record is None:
+            return judged, None
+        # Whole-inline, or (Claude only) a reference plan built once the run is allocated; Codex and native
+        # Windows refuse here when the design needs references.
+        block = task_context.select(judged, task=task, engine=engine)
+    except design.DesignError as exc:
+        raise _design_error(exc) from None
+    return judged, block
+
+
+def _reference_design(task_design, block, request, *, root: pathlib.Path, run_id: str | None):
+    """The reference-transport block for a design whose whole parts do not fit (Claude only, see select)."""
+    from oah.design import task_context
+
+    if run_id is None:
+        raise _design_error(task_context.DesignError(task_context.TOO_LARGE_CODE, f"task {request.task}: "
+                            f"{block.plan}; nothing was launched"))
+    try:
+        transport = task_context.prepare_transport(
+            task_design, task=request.task, run=run_id, root=root, engine=request.engine,
+            operation="inspect" if request.stage == "review" else "work",
+            root_role="review-snapshot" if request.stage == "review" and request.isolated else "holder-worktree")
+    except task_context.DesignError as exc:
+        raise _design_error(exc) from None
+    return transport.block
+
+
+def _reference_profile_problem(request, settings: Settings, resolution: "Resolution") -> str | None:
+    from oah.design import task_context
+    from oah.engines.claude import READ_ONLY_TOOLS
+
+    tools = READ_ONLY_TOOLS if request.stage == "review" else tuple(settings.engines["claude"]["tools"])
+    return task_context.qualify_profile(request.engine, "inspect" if request.stage == "review" else "work",
+                                        executable=resolution.base[0], cli_version=resolution.cli_version,
+                                        tools=tools)
+
+
+def _argv_tools(argv: Sequence[str]) -> tuple[str, ...]:
+    return tuple(argv[argv.index("--tools") + 1].split(",")) if "--tools" in argv else ()
+
+
+def _design_bound(prepared: "Prepared") -> bool:
+    try:
+        saved = prepared.run._read_json(DESIGN_NAME) if os.path.lexists(prepared.run.file_path(DESIGN_NAME)) else None
+    except Exception:
+        return True  # an unreadable design record is still a design-bound run
+    return isinstance(saved, dict) and saved.get("task") is not None
+
+
+def _design_check_record(saved: object, digest_only: bool) -> dict:
+    keys = ("version", "state", "fingerprint", "task") if not digest_only else ("version", "state", "fingerprint")
+    if not (isinstance(saved, dict) and all(name in saved for name in keys) and saved.get("version") in (1, 2)
+            and isinstance(saved.get("fingerprint"), str)):
+        raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record is missing or malformed; run oah call "
+                          "again to prepare it from the current design")
+    return saved
+
+
+def _check_design_unchanged(prepared: "Prepared", live, saved: object) -> None:
+    """At the launch point: the design judged now must equal the one the brief was built from."""
+    from oah.design import binding as design
+    from oah.lease_cli import lease_design
+
+    if saved is None:
+        if live.design is not None or live.design_invalid:
+            raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run was prepared without the design its lease now follows; "
+                              "nothing was launched. Run oah call again")
+        return
+    saved = _design_check_record(saved, digest_only=not prepared.retain_worker_text)
+    judged = lease_design(live, prepared.run.path.parents[2])
+    if judged.state == "unbound":
+        judged = design.judge(None, root=pathlib.Path(live.worktree),
+                              found=design.Origin("lease", "the run was prepared with a design"))
+    allowed = design.OPERATIONS["inspect" if prepared.stage == "review" else "dispatch"]
+    if judged.state not in allowed or judged.fingerprint() != saved["fingerprint"]:
+        raise EngineError(design.CHANGED_CODE, f"the design of task {prepared.task} changed between preparation and "
+                          f"launch (now {judged.line()}); nothing was launched. Read it with oah design task "
+                          f"{prepared.task}, then run oah call again")
+
+
+def _design_after(prepared: "Prepared") -> str | None:
+    """After the engine ran: record whether the design moved meanwhile; never raises, never writes the design."""
+    from oah.design import binding as design
+
+    try:
+        saved = prepared.run._read_json(DESIGN_NAME)
+    except (Exception, RecursionError):
+        saved = None
+    if not isinstance(saved, dict) or not isinstance(saved.get("task"), dict):
+        return None
+    try:
+        record = design.TaskBinding.from_json(saved["task"])
+        judged = design.judge(record, root=pathlib.Path(saved.get("worktree") or prepared.cwd))
+        state, fingerprint = judged.state, judged.fingerprint()
+        accepted, working = judged.record()["accepted"], judged.record()["working"]
+    except Exception as exc:  # recording what happened must never fail a finished run
+        state, fingerprint, accepted, working = f"unknown({type(exc).__name__})", None, None, None
+    changed = fingerprint != saved.get("fingerprint")
+    try:
+        from oah.atomic import write_json_atomic
+
+        write_json_atomic(prepared.run.file_path(DESIGN_AFTER_NAME),
+                          {"version": 1, "state": state, "fingerprint": fingerprint, "accepted": accepted,
+                           "working": working, "changed": changed})
+    except Exception:
+        pass
+    if not changed:
+        return None
+    return (f"{DESIGN_CHANGED_DURING_RUN}: the design of task {prepared.task} changed while this run worked (now "
+            f"{state}); its result is evidence for the design it was given only. Read it with oah design task "
+            f"{prepared.task} before finishing")
 
 
 def resolve_worktree(selector: str, root: pathlib.Path, *, retry: Callable[[str], str]) -> pathlib.Path:
@@ -1097,6 +1299,7 @@ class _CallPlan:
     binding_record: str | None = None
     lease_record: str | None = None
     dispatch_record: str | None = None
+    design_record: str | None = None  # a correction's digest-only design.json, compared again at its launch
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1144,6 +1347,7 @@ class _CorrectionInputs:
     metadata_json: str
     max_rounds: int | None = None
     budget_check: Callable[[], None] | None = None
+    launch_guard: Callable | None = None
     snapshot: _CorrectionSnapshot | None = None
     plan: _CallPlan | None = None
     run: _CorrectionRun | None = None
@@ -1201,6 +1405,8 @@ class _CorrectionInputs:
         if plan.binding_record is not None:
             write_text_atomic(_binding_path(self.state, self.run.task), plan.binding_record)
             runs._CORRECTION_CAPTURE.get()[_binding_path(self.state, self.run.task)] = plan.binding_record.encode("utf-8")
+        if plan.design_record is not None:
+            write_text_atomic(self.run.file_path(DESIGN_NAME), plan.design_record)
         write_text_atomic(self.run.file_path("lease.json"), plan.lease_record)
 
 
@@ -1320,12 +1526,13 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 
 @contextmanager
 def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json, max_rounds=None,
-                       budget_check=None):
+                       budget_check=None, launch_guard=None):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
     token = _CORRECTION_INPUT_CHECK.set(check)
     try:
         inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
-                                   metadata_json, max_rounds=max_rounds, budget_check=budget_check)
+                                   metadata_json, max_rounds=max_rounds, budget_check=budget_check,
+                                   launch_guard=launch_guard)
         snapshot = _CORRECTION_INPUTS.set(inputs)
         try:
             yield inputs
@@ -1335,7 +1542,8 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
         _CORRECTION_INPUT_CHECK.reset(token)
 
 
-def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease):
+def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
+                design=None):
     intent = packet.intent if packet else None
     section = (packet.section or getattr(intent, "section", None)) if packet else None
     instructions = request.round_instructions
@@ -1351,7 +1559,11 @@ def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warn
                         packet_source=packet.source if packet else None,
                         round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer,
                         skills_block=chosen.brief_text(rerank=skills_rerank) if chosen is not None else None,
-                        skill_ids=[skill.id for skill in chosen.skills] if chosen is not None else ())
+                        skill_ids=[skill.id for skill in chosen.skills] if chosen is not None else (),
+                        design_block=design.text if design is not None else None,
+                        design_line=design.preamble if design is not None else None,
+                        design_data=(design.transport.relative("").rstrip("/") if design is not None
+                                     and design.transport is not None else None))
 
 
 def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, brief_disabled, now):
@@ -1437,6 +1649,10 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         read_source=read_source or oah_intent.read_source)
     _check_lease_source(leased, packet, request.task)
     check_dispatch_binding(bound, packet, request.task)
+    # Before the budget gate, so a design refusal spends and reserves nothing. Lane E reads `task_design` (the
+    # binding, its state and the accepted texts) for its stage and decision based selection.
+    task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=request.stage, task=request.task,
+                                       engine=request.engine)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -1454,6 +1670,9 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
 
         planned_run = _PREPARATION_RUN.get() or runs._plan_run(
             state_dir, request.task, request.engine, request.stage, now=now)
+    if design is not None and not design.delivered:
+        design = _reference_design(task_design, design, request, root=root, run_id=planned_run[0].id
+                                   if planned_run is not None else None)
     axes = scored.axes if recorded is not None else None
     # `oah review` passed its own gate under the task lock, with its decision and extra round, which only a
     # logged start carries. Until that start, the gate below would not know them.
@@ -1526,6 +1745,14 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     warnings.extend(resolution.warnings)
     pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
     admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
+    if design is not None and design.transport is not None:
+        # The reference profile is known once the executable and its version are resolved, before any paid judge.
+        problem = _reference_profile_problem(request, settings, resolution)
+        if problem is not None:
+            from oah.design import task_context
+
+            raise EngineError(task_context.REFERENCE_UNAVAILABLE_CODE, f"task {request.task}: the design needs "
+                              f"reference delivery and {problem}; nothing was launched")
     check_budget()
     if inputs is None:
         if start_round is not None:
@@ -1549,10 +1776,14 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                               state_dir=state_dir, env=env, keychain=keychain,
                               brief_disabled=disabled, now=now)
     check_budget()
+    if task_design.state == "needs-review":
+        warnings.append(f"{task_design.code}: {task_design.task.binding.line()} has a newer draft "
+                        f"r{task_design.context.current.revision} that nobody has checked; this read-only run sees "
+                        "both, and its result cannot complete the task until the draft is carried or rebound")
     fields = dict(root=root, state_dir=state_dir, packet=packet, scope=scope, stored=stored, footer=footer,
                   has_footer=has_footer, resolution=resolution, tier=tier, tier_source=tier_source, axes=axes,
                   reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder,
-                  judge=judge)
+                  judge=judge, design=design)
     plan = None
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
@@ -1575,7 +1806,12 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                 {"id": holder.id, "generation": holder.generation, "intent": holder.intent},
                 ("id", "generation", "intent"))) + "\n",
             dispatch_record=json.dumps({"event": "dispatch", "stage": request.stage, "run_id": run.id,
-                                        "max_rounds": inputs.max_rounds}))
+                                        "max_rounds": inputs.max_rounds}),
+            design_record=None if design is None else json.dumps(
+                {"version": 1, "state": design.record["state"], "fingerprint": design.record["fingerprint"],
+                 "block_sha256": design.record["block_sha256"], "block_bytes": design.record["block_bytes"],
+                 "inline_complete": design.record["inline_complete"],
+                 "evidence_key": design.record["evidence_key"]}) + "\n")
         captured = {"metadata": json.loads(inputs.metadata_json), "lease": json.loads(inputs.lease_json),
                     "binding": bound, "settings": dataclasses.asdict(settings), "packet": dataclasses.asdict(packet),
                     "config": json.loads(json.dumps(inputs.config.raw, default=
@@ -1607,9 +1843,10 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str], selection: tuple | None = None, checked_lease=None,
-                    judge: dict | None = None) -> _CallPlan:
+                    judge: dict | None = None, design=None) -> _CallPlan:
     chosen, skills_rerank = selection if selection is not None else (None, None)
-    text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease)
+    text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
+                       design)
     read_only = request.stage == "review"
     if request.engine == "codex":
         argv = codex.build_command(resolution.base, workdir=str(root), read_only=read_only, model=resolution.model,
@@ -1627,6 +1864,11 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
                                     permission_mode=section["permission_mode"], tools=section["tools"],
                                     read_only=read_only)
+        if design is not None and design.transport is not None:
+            # SC4-P1: the actual child's tool events are observed from stream-json; the result line is unchanged.
+            at = argv.index("--output-format")
+            argv[at + 1] = "stream-json"
+            argv.insert(at + 2, "--verbose")
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": request.task}
     timeout_s = float(request.timeout_s) if request.timeout_s else resolution.timeout_s
     result_fields = dict(status="prepared", command=list(argv) if request.retain_worker_text else None,
@@ -1658,7 +1900,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str], selection: tuple | None = None, checked_lease=None,
-                    plan: _CallPlan | None = None, judge: dict | None = None) -> Prepared:
+                    plan: _CallPlan | None = None, judge: dict | None = None, design=None) -> Prepared:
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -1669,12 +1911,21 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         plan = _plan_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
                              stored=stored, footer=footer, has_footer=has_footer, resolution=resolution, tier=tier,
                              tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
-                             warnings=warnings, selection=selection, checked_lease=checked_lease, judge=judge)
+                             warnings=warnings, selection=selection, checked_lease=checked_lease, judge=judge,
+                             design=design)
     run.write_prompt(plan.prompt)
     if plan.skills_record is not None:
         from oah.atomic import write_json_atomic
 
         write_json_atomic(run.file_path("skills.json"), plan.skills_record)
+    if design is not None:
+        from oah.atomic import write_json_atomic
+
+        write_json_atomic(run.file_path(DESIGN_NAME), dict(design.record, worktree=checked_lease.worktree))
+        if design.transport is not None:
+            from oah.design import task_context
+
+            task_context.freeze(run.path, design.transport)
     run.result(**plan.result_fields)
     if packet is not None:
         record_dispatch_binding(state_dir, packet, request.task, run.id, checked_lease=checked_lease, root=root)
@@ -1724,9 +1975,45 @@ def _recorded_error(exc: BaseException, retain_worker_text: bool) -> str:
     return _error_diagnostic(exc)[1]
 
 
+def _finish_inline_delivery(prepared: Prepared) -> None:
+    from oah.atomic import write_json_atomic
+    from oah.design import binding as design, task_context
+
+    publication = _CORRECTION_PUBLICATION.get()
+    if publication is not None:
+        saved = json.loads(publication.plan.design_record) if publication.plan.design_record else None
+    else:
+        path = prepared.run.file_path(DESIGN_NAME)
+        saved = prepared.run._read_json(DESIGN_NAME) if os.path.lexists(path) else None
+    if not isinstance(saved, dict) or not saved.get("inline_complete") or saved.get("transport"):
+        return
+    if publication is None:
+        after = prepared.run._read_json(DESIGN_AFTER_NAME)
+        if after.get("changed") is not False:
+            return
+    else:
+        try:
+            _check_design_unchanged(prepared, publication.holder(), saved)
+        except EngineError as exc:
+            if exc.code != design.CHANGED_CODE:
+                raise
+            raise EngineError("OAH_DESIGN_CHANGED_AFTER_RUN", "the run completed, but delivery is not marked because "
+                              "the design changed during the run; read it with oah design task "
+                              f"{prepared.task} before retrying") from None
+    saved["receiving"] = dict(task_context._whole_receiving(), delivered=True,
+                              provided=[{"inline_bytes": saved["block_bytes"], "references": 0}])
+    saved["delivered"] = True
+    if publication is not None:
+        publication.artifacts[DESIGN_NAME] = json.dumps(saved, sort_keys=True) + "\n"
+    else:
+        write_json_atomic(prepared.run.file_path(DESIGN_NAME), saved)
+
+
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
+    from oah.design.task_context import RootUnavailable
+
     run = prepared.run
     env = dict(os.environ if base_env is None else base_env)
     env.update(prepared.env_additions)
@@ -1738,22 +2025,58 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
               run.prompt_path.read_bytes().decode("utf-8"))  # the brief goes to stdin byte for byte
     if prepared.retain_worker_text:
         run.file_path("last-message.md")
+    reference = _start_reference(prepared, env)
+    tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(_design_bound(prepared)))
     try:
         result = _run_prepared(prepared, env, prompt)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError, RootUnavailable) as exc:
         if prepared.retain_worker_text:
             run.write_logs("", "")
+        extra = _end_reference_failed(reference)
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                           error=(clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}") if prepared.retain_worker_text else
-                                 _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False)))
+                                 _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False)),
+                          **({"warnings": [*run.read().get("warnings", []), *extra]} if extra else {}))
     except (KeyboardInterrupt, SystemExit):
         # _run_prepared already stopped the process tree; never leave the run looking alive.
         if prepared.retain_worker_text:
             run.write_logs("", "")
+        _end_reference_failed(reference)
         run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                    error="OAH_RUN_INTERRUPTED: the run was interrupted (Ctrl-C or a stop signal) and its process "
                          "tree was stopped; call the engine again when you are ready")
         raise
+    except EngineError:
+        _end_reference_failed(reference)
+        raise
+    finally:
+        for var, token in zip((_REFERENCE_RUN, _DESIGN_RUN), tokens):
+            var.reset(token)
+    transport_warnings, transport_failure = [], None
+    if reference is not None:
+        concluded = False
+        accounting_problem = "transport accounting did not complete"
+        try:
+            stdout, transport_warnings, transport_failure = reference.conclude(
+                result.stdout, returncode=result.returncode, timed_out=result.timed_out)
+            result = dataclasses.replace(result, stdout=stdout)
+            concluded = True
+        except (OSError, ValueError) as exc:
+            accounting_problem = f"transport accounting failed ({type(exc).__name__})"
+        finally:
+            try:
+                if not concluded:
+                    try:
+                        if prepared.retain_worker_text:
+                            run.write_logs("", "")
+                    finally:
+                        run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
+                                   error=f"OAH_DESIGN_ACCOUNTING_FAILED: {accounting_problem}; inspect oah design task "
+                                         f"{prepared.task} --run {prepared.run_id} before retrying")
+            finally:
+                reference.release()
+        if not concluded:
+            return run.read()
     finished = dt.datetime.now(dt.timezone.utc)
     if prepared.retain_worker_text:
         run.write_logs(clean(result.stdout), clean(result.stderr))
@@ -1788,8 +2111,54 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                                    f"{prepared.launch_effort}; this run does not count")
     else:
         status, error = "finished", None
-    return run.result(status=status, finished_at=_iso(finished), duration_s=round((finished - started).total_seconds(), 3),
-                      exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
+    if transport_failure is not None and status == "finished":
+        status, error = "failed", transport_warnings[0]  # exposed design data: this run does not count
+    if prepared.retain_worker_text:
+        moved = _design_after(prepared)  # corrections keep their closed vocabulary; their next checkpoint re-judges
+        if moved is not None or transport_warnings:
+            fields["warnings"] = [*run.read().get("warnings", []), *transport_warnings,
+                                  *([moved] if moved is not None else [])]
+    completed = run.result(status=status, finished_at=_iso(finished), duration_s=round((finished - started).total_seconds(), 3),
+                           exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
+    if status == "finished" and reference is None:
+        _finish_inline_delivery(prepared)
+    return completed
+
+
+def _start_reference(prepared: "Prepared", env: Mapping[str, str]):
+    """Register the run's transport origin and install its DATA (SC4-P3) in the process that will own Popen; a
+    refusal is recorded on the run and raised with nothing launched."""
+    if prepared.engine != "claude" or not prepared.retain_worker_text:
+        return None
+    from oah.design import task_context
+    from oah.design.model import DesignError
+    from oah.lease import LeaseError
+
+    reference = None
+    try:
+        reference = task_context.ReferenceRun.load(prepared, env, _argv_tools(prepared.argv))
+        if reference is not None:
+            reference.prepare()
+    except (DesignError, LeaseError, OSError) as exc:
+        if reference is not None:
+            reference.release()
+        code = getattr(exc, "code", task_context.REFERENCE_UNAVAILABLE_CODE)
+        text = str(exc)
+        error = EngineError(code, text.split(": ", 1)[1] if text.startswith(code + ": ") else text)
+        _record_refusal(prepared, error)
+        raise error from None
+    return reference
+
+
+def _end_reference_failed(reference) -> list[str]:
+    if reference is None:
+        return []
+    try:
+        return reference.conclude_failed()
+    except Exception as exc:  # accounting must never hide the original failure
+        return [f"{type(exc).__name__}: the design data could not be accounted after the failure"]
+    finally:
+        reference.release()
 
 
 @contextmanager
@@ -2001,14 +2370,56 @@ class _PosixTree:
                                  "running workers and the worktree before retrying") from None
 
 
+def _windows_job_state(child) -> dict:
+    import ctypes as ct
+
+    job = getattr(child, "_oah_job", None)
+    if job is None or job.handle is None or not getattr(child, "_handle", None):
+        raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: the original Windows process and Job are not held")
+    api = job.api
+    for name, args, result in (
+        ("QueryInformationJobObject", [ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_uint32,
+                                       ct.POINTER(ct.c_uint32)], ct.c_int32),
+        ("IsProcessInJob", [ct.c_void_p, ct.c_void_p, ct.POINTER(ct.c_int32)], ct.c_int32),
+        ("GetProcessId", [ct.c_void_p], ct.c_uint32),
+        ("GetProcessTimes", [ct.c_void_p, ct.c_void_p, ct.c_void_p, ct.c_void_p, ct.c_void_p], ct.c_int32),
+    ):
+        function = getattr(api, name)
+        function.argtypes, function.restype = args, result
+    process, member = int(child._handle), ct.c_int32()
+    accounting, size = ct.create_string_buffer(48), ct.c_uint32()
+    times = [ct.c_uint64() for _ in range(4)]
+    if (api.GetProcessId(process) != child.pid or not api.IsProcessInJob(process, job.handle, ct.byref(member))
+            or member.value != 1 or not api.GetProcessTimes(process, *(ct.byref(value) for value in times)) or
+            not times[0].value or not api.QueryInformationJobObject(job.handle, 1, accounting, 48, ct.byref(size))
+            or size.value != 48):
+        raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: Windows process identity or Job accounting is unknown")
+    import struct
+    identity = {"pid": child.pid, "creation": times[0].value, "job_handle": int(job.handle)}
+    digest = "sha256:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    old = getattr(child, "_oah_windows_identity", digest)
+    if old != digest:
+        raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: the original Windows process or Job was replaced")
+    child._oah_windows_identity = digest
+    return {"identity_digest": digest, "active": struct.unpack_from("<I", accounting.raw, 40)[0]}
+
+
 def _kill_owned_tree(child):
-    from oah.engines.proc import kill_tree
 
     tree = getattr(child, "_oah_posix_tree", None)
     if tree is not None:
         tree.kill()
     elif os.name == "nt" and getattr(child, "_oah_job", None) is not None:
-        kill_tree(child)
+        from oah.engines.proc import REAP_SECONDS
+
+        _windows_job_state(child)
+        child._oah_job.terminate()
+        child.wait(timeout=REAP_SECONDS)
+        deadline = time.monotonic() + REAP_SECONDS
+        while _windows_job_state(child)["active"] != 0:
+            if time.monotonic() >= deadline:
+                raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: the original Windows Job still has active processes")
+            time.sleep(0.01)
     else:
         raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: process-tree cleanup could not be verified; inspect "
                              "running workers and the worktree before retrying")
@@ -2100,8 +2511,21 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                {"start_new_session": True})
     child = None
     communicator = None
+    reference = _REFERENCE_RUN.get()
+    reference = reference if reference is not None and reference.run_id == prepared.run_id else None
+    design_run = _DESIGN_RUN.get()
+    inline_roots = None
+    # P5-F: what the owning runner actually established, appended before the tree/Job below are released.
+    outcome = {"kind": "aborted", "returncode": None, "timed_out": False, "quiescent": False}
     try:
-        with _paid_dispatch(prepared), dispatch_guard(prepared):
+        with _paid_dispatch(prepared), dispatch_guard(prepared) as live:
+            if design_run and reference is None:
+                from oah.design import task_context
+
+                inline_roots = task_context.LiveRoots(task_context.current_role_roots(
+                    live, prepared.run.path.parents[2], pathlib.Path(prepared.cwd)))
+                if not inline_roots.current():
+                    raise EngineError("OAH_RUN_LAUNCH_INVALID", "the actual design run role roots changed before launch")
             with _deferred_creation_signals():
                 try:
                     child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -2110,17 +2534,25 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                     # Windows omits the executable; keep spawn errors out of the lease's state-I/O wrapper.
                     raise subprocess.SubprocessError(f"cannot launch {prepared.argv[0]}: {exc}. "
                                                      "Check the executable path and permissions, then retry") from None
+                if reference is not None:
+                    reference.child = child
                 if job is not None:
                     try:
                         job.start(child)
+                        _windows_job_state(child)
                     except BaseException:
                         child.kill()
                         child.communicate(timeout=REAP_SECONDS)
                         raise
                 else:
                     child._oah_posix_tree = _PosixTree(child)
+                if reference is not None:
+                    reference.running(reference.held_store, child)
         if not prepared.retain_worker_text:
-            return _stream_correction(child, prepared, prompt)
+            streamed = _stream_correction(child, prepared, prompt)
+            outcome.update(kind="failed" if streamed.timed_out else "exit-observed",
+                           returncode=streamed.returncode, timed_out=streamed.timed_out, quiescent=True)
+            return streamed
         output, errors = [], []
         exchanged = threading.Event()
 
@@ -2142,6 +2574,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
             if remaining <= 0:
                 _kill_owned_tree(child)
                 communicator.join(timeout=REAP_SECONDS)
+                outcome.update(kind="failed", timed_out=True, quiescent=not communicator.is_alive())
                 out, err = output[0] if output else (b"", b"")
                 return RunResult(None, decode_output(out), decode_output(err), True)
             exchanged.wait(timeout=min(POLL_SECONDS, remaining))
@@ -2149,15 +2582,19 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
         if errors:
             raise errors[0]
         out, err = output[0]
-        if _CORRECTION_CLEANUP.get():
-            # A completed correction must leave no owned descendants changing the tree during accounting.
+        if _CORRECTION_CLEANUP.get() or design_run:
+            # A completed correction or design-bound run must leave no owned descendants changing the tree
+            # during accounting (redirected background servers are stopped too).
             _kill_owned_tree(child)
+            outcome["quiescent"] = True
+        outcome.update(kind="exit-observed", returncode=child.returncode)
         return RunResult(child.returncode, decode_output(out), decode_output(err), False)
     except BaseException:
         # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.
         # An exited launcher can leave descendants holding the pipes and modifying the worktree.
         if child is not None:
             _kill_owned_tree(child)
+            outcome.update(kind="aborted", quiescent=True)
             try:
                 if communicator is not None and communicator.ident is not None:
                     communicator.join(timeout=REAP_SECONDS)
@@ -2167,10 +2604,14 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                 pass
         raise
     finally:
+        if reference is not None:
+            reference.finish_process(outcome)  # before the original tree/Job proof is released
         if child is not None and hasattr(child, "_oah_posix_tree"):
             child._oah_posix_tree.close()
         if job is not None:
             job.close()
+        if inline_roots is not None:
+            inline_roots.close()
 
 
 _BOOT = ("import sys; sys.path.insert(0, sys.argv[1]); import oah.call as c; "
@@ -2204,7 +2645,7 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     if launched.returncode != 0 or not text.isdigit():
         if detail.startswith(("OAH_LEASE_CHANGED: ", "OAH_INTENT_NOT_CURRENT: ", "OAH_RUN_LAUNCH_INVALID: ",
                               "OAH_REVIEW_NEEDS_DECISION: ", "OAH_REVIEW_ROUNDS_EXHAUSTED: ",
-                              "OAH_REVIEW_STATE_INVALID: ", "OAH_REVIEW_SERIES_BUSY: ")):
+                              "OAH_REVIEW_STATE_INVALID: ", "OAH_REVIEW_SERIES_BUSY: ", "OAH_DESIGN_CHANGED: ")):
             code, message = detail.split(": ", 1)
             raise EngineError(code, message)
         if detail.startswith("OAH_RUN_DETACH_FAILED:"):

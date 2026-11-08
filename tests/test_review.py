@@ -7,13 +7,14 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
 from oah.config import ConfigError
 from oah.review import (ReviewError, authors, canary, context, prompt, receipts, runner, schema, settings,
                         snapshot)
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
 
 SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
 
@@ -330,6 +331,261 @@ class RecordsTest(unittest.TestCase):
 
 
 class SnapshotTest(unittest.TestCase):
+    def test_inventory_closes_live_readers_before_its_database(self):
+        directory, parent = make_tmp_dir(self), make_tmp_dir(self)
+        (parent / 'a.txt').write_bytes(b'a')
+        (parent / 'b.txt').write_bytes(b'b')
+        streams, observations = [], []
+        connect = snapshot.sqlite3.connect
+
+        class CheckedConnection(snapshot.sqlite3.Connection):
+            def close(self) -> None:
+                for stream in streams:
+                    try:
+                        next(stream)
+                    except snapshot.sqlite3.ProgrammingError:
+                        observations.append('closed')
+                    else:
+                        observations.append('open')
+                super().close()
+
+        def opened(database: str) -> snapshot.sqlite3.Connection:
+            return connect(database, factory=CheckedConnection)
+
+        with mock.patch.object(snapshot.sqlite3, 'connect', side_effect=opened):
+            inventory = snapshot.Inventory(directory)
+        self.addCleanup(inventory.close)
+        for entry in snapshot._census(parent):
+            inventory.add(entry)
+        streams.extend((iter(inventory.entries()), inventory.original_order()))
+        for stream in streams:
+            next(stream)
+        inventory.close()
+        self.assertEqual(observations, ['closed', 'closed'])
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_inventory_initialization_failure_closes_its_database(self):
+        directory = make_tmp_dir(self)
+        connections: list[snapshot.sqlite3.Connection] = []
+        connect = snapshot.sqlite3.connect
+
+        class InitializationFailure(snapshot.sqlite3.Connection):
+            def execute(self, sql: str, parameters=()) -> snapshot.sqlite3.Cursor:
+                if sql == 'PRAGMA cache_size=-2048':
+                    raise snapshot.sqlite3.OperationalError('controlled census initialization failure')
+                return super().execute(sql, parameters)
+
+        def opened(database: str) -> snapshot.sqlite3.Connection:
+            connection = connect(database, factory=InitializationFailure)
+            connections.append(connection)
+            self.addCleanup(connection.close)
+            return connection
+
+        with mock.patch.object(snapshot.sqlite3, 'connect', side_effect=opened):
+            with self.assertRaises(snapshot.sqlite3.OperationalError):
+                snapshot.Inventory(directory)
+        self.assertEqual(len(connections), 1)
+        with self.assertRaises(snapshot.sqlite3.ProgrammingError):
+            connections[0].execute('SELECT 1')
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_retirement_validation_closes_its_inventory_on_refusal_or_interrupt(self):
+        parent, state = make_tmp_dir(self), make_tmp_dir(self)
+        created = snapshot._container_object(parent, empty=True)
+        (parent / 'probe.txt').write_bytes(b'retained snapshot contents\n')
+        captured = snapshot.capture_retirement_plan({'version': 1, 'run': 'rS', 'container_object': created},
+                    parent, state, output_slot={'path': ['last-message.md']})
+        final = snapshot.finalize_retirement_plan(captured, {'presence': 'absent'})
+        initialize = snapshot.Inventory.__init__
+
+        for boundary in ('read_evidence', '_census'):
+            for error in (snapshot.Retained('controlled census refusal'), KeyboardInterrupt()):
+                with self.subTest(boundary=boundary, error=type(error).__name__):
+                    inventories: list[snapshot.Inventory] = []
+
+                    def keep_inventory(inventory: snapshot.Inventory, directory: pathlib.Path) -> None:
+                        initialize(inventory, directory)
+                        inventories.append(inventory)
+                        self.addCleanup(inventory.close)
+
+                    with mock.patch.object(snapshot.Inventory, '__init__', keep_inventory), \
+                            mock.patch.object(snapshot, boundary, side_effect=error):
+                        with self.assertRaises(type(error)):
+                            snapshot.validate_retirement_plan(final, parent, captured.pages_dir)
+                    self.assertEqual(len(inventories), 1)
+                    with self.assertRaises(snapshot.sqlite3.ProgrammingError):
+                        inventories[0].db.execute('SELECT 1')
+                    self.assertEqual((parent / 'probe.txt').read_bytes(), b'retained snapshot contents\n')
+
+    def test_finalizer_interrupts_and_authority_errors_propagate(self):
+        from oah.lease import LeaseError
+
+        for error in (KeyboardInterrupt(), LeaseError("OAH_LEASE_CHANGED", "controlled lease change")):
+            with self.subTest(error=type(error).__name__):
+                repo, base, head = self.repo_with_history()
+                temporary = make_tmp_dir(self)
+
+                def dispose(_parent, _created):
+                    raise error
+
+                with self.assertRaises(type(error)):
+                    with snapshot.make(repo, head, base=base, temp_root=temporary, dispose=dispose):
+                        pass
+
+    def test_failed_container_anchor_retains_the_unverified_allocation(self):
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        warnings = []
+        with mock.patch.object(snapshot, "_container_object", side_effect=FileNotFoundError("RUNNER~1")):
+            with self.assertRaises(ReviewError) as caught:
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=lambda *_: self.fail("an unverified allocation cannot be disposed")):
+                    self.fail("the failed anchor cannot yield a snapshot")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertIn("permissions", str(caught.exception))
+        self.assertEqual(len(list(temporary.iterdir())), 1)
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    def test_design_snapshot_retains_link_before_allocation_identity(self):
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        other = make_tmp_dir(self)
+        marker = other / "keep.txt"
+        marker.write_bytes(b"existing fixture contents\n")
+        original_mkdtemp = tempfile.mkdtemp
+        allocations = []
+
+        def exchange(*args, **kwargs):
+            name = original_mkdtemp(*args, **kwargs)
+            if kwargs.get("prefix") == "oah-review-":
+                allocated = pathlib.Path(name)
+                original = allocated.with_name(allocated.name + "-original")
+                allocated.rename(original)
+                directory_alias(other, allocated)
+                allocations.append((allocated, original))
+            return name
+
+        outcomes, warnings = [], []
+        code = None
+        with mock.patch.object(snapshot.tempfile, "mkdtemp", exchange):
+            try:
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-link", outcomes)):
+                    pass
+            except ReviewError as exc:
+                code = exc.code
+        self.assertEqual(marker.read_bytes(), b"existing fixture contents\n")
+        self.assertEqual(code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertEqual(list(other.iterdir()), [marker])
+        self.assertEqual(len(allocations), 1)
+        allocated, original = allocations[0]
+        self.assertTrue(os.path.lexists(allocated))
+        self.assertTrue(original.is_dir())
+        self.assertEqual(outcomes, [])
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    def test_design_snapshot_retains_replacement_after_allocation_identity(self):
+        repo, base, head = self.repo_with_history()
+        for linked in (False, True):
+            with self.subTest(linked=linked):
+                temporary, other = make_tmp_dir(self), make_tmp_dir(self)
+                outcomes, warnings = [], []
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-replaced", outcomes)) as snap:
+                    parent = snap.parent
+                    assert parent is not None
+                    original = parent.with_name(parent.name + "-original")
+                    parent.rename(original)
+                    if linked:
+                        directory_alias(other, parent)
+                    else:
+                        parent.mkdir()
+                    marker = parent / "keep.txt"
+                    marker.write_bytes(b"replacement contents\n")
+                self.assertEqual(marker.read_bytes(), b"replacement contents\n")
+                self.assertTrue((original / "tree/src/app.py").is_file())
+                self.assertEqual(outcomes[0][0], "retained")
+                self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    def test_design_snapshot_refuses_nonempty_allocation_before_use(self):
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        original_mkdtemp = tempfile.mkdtemp
+        markers = []
+
+        def populate(*args, **kwargs):
+            name = original_mkdtemp(*args, **kwargs)
+            if kwargs.get("prefix") == "oah-review-":
+                marker = pathlib.Path(name) / "keep.txt"
+                marker.write_bytes(b"existing allocation contents\n")
+                markers.append(marker)
+            return name
+
+        code = None
+        outcomes, warnings = [], []
+        with mock.patch.object(snapshot.tempfile, "mkdtemp", populate):
+            try:
+                with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings,
+                                   dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-nonempty", outcomes)):
+                    pass
+            except ReviewError as exc:
+                code = exc.code
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0].read_bytes(), b"existing allocation contents\n")
+        self.assertEqual(code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertEqual(list(markers[0].parent.iterdir()), markers)
+        self.assertEqual(outcomes, [])
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+
+    @unittest.skipUnless(os.name == "posix" and pathlib.Path("/var/tmp").is_dir(), "POSIX /var/tmp base")
+    def test_design_snapshot_disposes_under_unresolved_var_tmp_base(self):
+        repo, base, head = self.repo_with_history()
+        outcomes, warnings = [], []
+        with tempfile.TemporaryDirectory(prefix="oah-allocation-", dir="/var/tmp") as temporary:
+            selected = pathlib.Path(temporary)
+            with snapshot.make(repo, head, base=base, temp_root=selected, warnings=warnings,
+                               dispose=runner._snapshot_disposal(make_tmp_dir(self), "allocation-normal", outcomes)) as snap:
+                parent = snap.parent
+                assert parent is not None
+                self.assertEqual(parent.parent, selected.resolve())
+                self.assertEqual((snap.tree / "src/app.py").read_bytes(), b"print('hi')\n")
+            self.assertEqual(list(selected.iterdir()), [])
+            self.assertFalse(parent.exists())
+        self.assertEqual(outcomes, [("legacy-disposed", None)])
+        self.assertEqual(warnings, [])
+
+    def test_design_snapshot_retains_native_anchor_refusal_at_disposal(self):
+        from oah.design import task_context as tc
+
+        repo, base, head = self.repo_with_history()
+        temporary, state = make_tmp_dir(self), make_tmp_dir(self)
+        outcomes, warnings = [], []
+        checked = runner._snapshot_disposal(state, "allocation-native-refusal", outcomes)
+
+        def dispose(parent, created):
+            with mock.patch.object(snapshot, "_container_object",
+                                   side_effect=tc.InstallRefused("windows-owner-sid-length=0")):
+                return checked(parent, created)
+
+        with snapshot.make(repo, head, base=base, temp_root=temporary, warnings=warnings, dispose=dispose) as snap:
+            parent = snap.parent
+            assert parent is not None
+        self.assertEqual((parent / "tree/src/app.py").read_bytes(), b"print('hi')\n")
+        self.assertEqual(outcomes[0][0], "retained")
+        self.assertIn("windows-owner-sid-length=0", outcomes[0][1])
+        self.assertTrue(warnings[0].startswith("OAH_REVIEW_SNAPSHOT_RETAINED:"))
+        self.assertIn("windows-owner-sid-length=0", warnings[0])
+
+    def test_design_free_snapshot_keeps_working_when_design_native_identity_is_unavailable(self):
+        from oah.design import task_context as tc
+
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        with mock.patch.object(snapshot, "_container_object", side_effect=tc.InstallRefused("native unavailable")):
+            with snapshot.make(repo, head, base=base, temp_root=temporary) as snap:
+                self.assertEqual((snap.tree / "src/app.py").read_bytes(), b"print('hi')\n")
+        self.assertEqual(list(temporary.iterdir()), [])
+
     def repo_with_history(self) -> tuple[pathlib.Path, str, str]:
         repo = make_git_repo(self)
         base = git_commit(repo, {"README.md": "base\n"})

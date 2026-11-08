@@ -466,6 +466,134 @@ docs/wiki/
   중단된 쓰기가 남긴 파일은 무시하고 그 번호는 다시 쓰지 않는다. `[wiki] dir`로 페이지를 `.oah/designs` 위에 둘 수는
   없다.
 
+### 설계를 따르는 작업
+
+패킷에 구조화된 OAH `## Design` 섹션이 있으면 작업은 그 설계를 따른다(`oah packet new <task> --design <project>/<design>`로 만들고
+`oah packet design <task>`로 다시 쓴다). `oah start --packet`은 작업의 정확한 입력, 곧 작업과 그 인스턴스, 프로젝트와
+설계, 수락된 의도, 정규화한 범위, 선언한 게이트에 수락된 revision을 결속한다. TTL 갱신이나 만료 뒤의 정확한 재시작은
+그 정체성을 유지하고, 그에 맞춰 만든 게이트 증거와 리뷰 영수증도 유지한다. 의도·범위·게이트 목록이 바뀌면 유지되지
+않는다.
+
+- **상태.** `oah design task <task>`는 설계와 상태와 전체 텍스트를 보여 준다. `current`일 때만 작업할 수 있다. 더 새
+  revision이 수락되면 `stale`이 된다. 아무도 수락하지 않은 새 초안이 있으면 `needs-review`가 되어 작업은 거부되고
+  (`OAH_DESIGN_NEEDS_REVIEW`) 읽기 전용 리뷰는 두 텍스트를 모두 본다. `oah design carry <task>`는 이 정확한 작업 입력에
+  대해 그 변경이 작업을 바꾸지 않는다고 기록해 증거가 계속 쓰이게 한다. 바꾼다면 revision을 수락하고 Design 섹션을
+  다시 쓴 뒤 다시 시작한다. 다른 입력에 대해 내린 판단은 적용되지 않는다(`OAH_DESIGN_TASK_INPUTS_CHANGED`).
+- **패킷 업그레이드.** 자유롭게 쓴 `## Design` 제목은 사용자 글로 남는다. 구조화된 결속 필드가 있을 때만 작업 설계로
+  인식하며, 기존 lease를 업그레이드하면서 그 글을 덮어쓰지 않는다. 열린 작업의 carry에는 현재 보유자와 유효한
+  lease가 필요하고, 재결속은 `oah start --packet`으로 한다. 기록이 남은 완료 작업은 활성 lease 없이 carry나 초안
+  확인을 기록할 수 있지만, 그 판단이 새 실행 권한을 주지는 않는다. 로컬 작업 조회는 작업 경로가 사적 경로여도
+  상태·이유·복구 명령을 보여 준다.
+- **전달.** 관리되는 모든 브리프는 수락된 부분과 그보다 새 초안의 다른 부분을 262,144바이트 안에 통째로 싣는다. 큰
+  내용이 materials 기록의 검증된 공개 원본(라이선스·고지 텍스트, 문서)뿐인 설계는 의미 필드를 모두 본문에 싣고 그
+  원본은 그 실행 동안 `.oah-design-data/<plan>/` 아래 읽기 전용 파일로 보낸다. 이 경로에는 macOS arm64의 Claude Code
+  2.1.318과, oah가 읽고 검증할 수 있는 로컬 Claude 정책이 필요하다. 원격 서버 정책은 CLI 자신의 몫으로 남는다. Codex는
+  자신이 읽은 내용을 보고하지 않으므로 그런 설계는 유료 호출 전에 거부한다
+  (`OAH_DESIGN_CODEX_REFERENCE_PROFILE_PENDING`). 네이티브 Windows도 같다(`OAH_DESIGN_REFERENCE_UNAVAILABLE`). 그 밖에
+  예산을 넘는 설계는 분할 계획과 함께 거부한다(`OAH_DESIGN_CONTEXT_TOO_LARGE`).
+  본문을 통째로 보낸 리뷰는 일반 clone 정리를 쓰고 설계 은퇴 페이지를 만들지 않는다. 참조 전달에는 계속 보호된
+  은퇴가 필요하다. 설정한 실행 명령과 wrapper는 운영자가 확인해야 한다. 현재 프로필은 네이티브 실행 파일 헤더와 보고된
+  버전을 검사하지만 모든 argv와 wrapper를 증명하지 않는다.
+- **설계 데이터.** 그 파일은 제품이 아니라 외부 데이터다. oah는 파일이 생기기 전에 실행을 기록하고, 각 Read를 정확한
+  바이트와 맞춰 보고, 실행 뒤 색인과 새 커밋 전부에서 그 파일을 찾고, 자신이 만든 바뀌지 않은 파일만 정확히 지운다.
+  스테이징되거나 커밋된 데이터는 기록으로 남는다(`OAH_DESIGN_TRANSPORT_STAGED`, `OAH_DESIGN_TRANSPORT_COMMITTED`).
+  스테이징을 풀어도 지워지지 않으므로 그 작업은 완료하거나 반영할 수 없다. 필요한 원본을 다 읽지 않은 실행은 수정을
+  남기지만 작업을 완료할 수 없다(`OAH_DESIGN_TRANSPORT_NOT_DELIVERED`). `oah design task <task> --run <run>`은 실행의
+  기록을 보여 주고, `--transport-cleanup`은 실행이 남긴 데이터를 지우거나 `--retain`과 함께 남긴다고 확인한다. 그 뒤
+  완료는 확인된 파일을 범위 밖이 아니라 남긴 파일로 센다(그 전까지는 `OAH_DESIGN_TRANSPORT_RETAINED`). 종료가 기록되지
+  않은 실행은 완료를 막는다(`OAH_DESIGN_TRANSPORT_NONTERMINAL`).
+  실행 조회는 origin/latest 식별자를 포함한 정확한 정리 명령을 출력한다. 종료가 기록됐으면 `--settle`이 필요 없고,
+  설치가 중단됐으면 install-progress 기록으로 정리하거나 보존을 확인할 수 있다. 정리 뒤 불완전한 실행의 기록된 종료
+  시점보다 나중에 시작한 실행이 같은 현재 작업과 정확한 설계를 완전히 전달받으면, 본문 전체 전달을 포함해 앞선
+  불완전한 읽기를 충족할 수 있다. 시간이 겹치는 실행은 해당하지 않는다. 실행되지 않았음이 증명된 no-spawn 실행은
+  데이터 정리·보존 확인은 필요하지만 미전달 작업 의무를 만들지 않는다. 노출되거나 종료되지 않은 실행은 계속 완료를 막는다.
+- **완료·게이트·리뷰·반영.** 각자 자신의 제어 지점에서 설계를 다시 판정한다. 게이트 증거는 작업의 증거 키를 싣고,
+  설계가 움직이면 재결속 없이도 낡은 것이 된다. 바뀌지 않은 검사는 항목을 그대로 두고, 의미 있는 기록은 생성 전용
+  페이지로 넘긴다(`oah design task <task> --gate-history`). 완료는 결속된 설계가 생성한 정확한 페이지와 기록만 범위에서
+  빼고 `project.json`에는 늘 명시적인 범위가 필요하다. 반영은 완료된 설계가 current가 아닌 작업을 거부한다
+  (`OAH_LAND_DESIGN_NOT_CURRENT`). 한 작업의 설계 값이 망가지면 그 작업만 거부되고 바이트는 보존된다
+  (`OAH_DESIGN_RECORD_INVALID`). 디스패치된 워커는 설계를 바꾸거나 수락하거나 carry할 수 없다
+  (`OAH_DESIGN_WORKER_REFUSED`). 이 가드는 협력 규칙이지 보안 경계가 아니다.
+- **한계.** 종료를 기록하기 전에 프로세스를 잃은 실행은 검증된 같은 호스트 재부팅 뒤에만 정리할 수 있다. 이번 릴리스는
+  그런 프로필을 검증하지 않으므로 그 실행은 막힌 채로 남고 아무것도 지우지 않는다.
+
+네이티브 Windows의 DATA 보존과 스냅샷 은퇴는 같은 `_WindowsIO` 객체 식별을 쓴다. 볼륨·파일 ID,
+소유자 SID와 DACL의 의미 digest, 속성, 크기와 전체 바이트를 확인하고, 조상 디렉터리도 ID와 보안
+digest를 확인한다. `mode`는 DOS 읽기 전용 속성만 나타낸다. POSIX 소유자·그룹·실행 비트는 Windows 권한을
+나타내지 않는다. 시험 소유 파일을 쓰는 시험은 `GetSecurityInfo` / `SetSecurityInfo`로 소유자에게 쓰기 권한을
+주고 네이티브 속성을 바꾼다. 내용만 바꾸는 시험은 원래 DACL과 속성을 복구하고, 소유자 변경은 네이티브 식별
+조회 결과를 바꿔 재현한다.
+
+루트·조상·보존 객체를 고정하는 모든 핸들은 다른 주체의 삭제·이름 변경을 막는다. 관찰 핸들은 볼륨의
+`CreateFileW`와 상대 디렉터리 `NtCreateFile` 모두 `FILE_SHARE_READ | FILE_SHARE_WRITE` (`3`)를 쓰고,
+생성·쓰기 핸들은 `FILE_SHARE_READ` (`1`)를 쓴다. 고정 핸들은 `DELETE`를 요청하지 않는다. 재시작을 재현할
+때는 기존 설치를 먼저 닫는다. 핸들마다 소유자가 하나이며 반복 close에서도 한 번만 닫는다.
+`FlushFileBuffers`를 쓰는 디렉터리 핸들에는 쓰기 권한이 필요하다.
+
+봉인된 설치를 닫은 뒤의 정확한 정리는 기존 정리 의도와 현재 권한 가드 안에서 같은 소유자에게 쓰기 가능한
+DACL을 준다. 읽기 핸들을 닫고 정확한 디렉터리를 쓰기 권한으로 다시 연 뒤, 설치 때 기록한 파일 ID와 쓰기
+가능한 소유자/DACL digest를 확인한다. 쓰기 가능·ACL 전환 중간 프로필은 POSIX 모드 추정이 아닌 실제 hash다.
+파일 목록이 온전한 중단 정리는 그 프로필로 복구하려면 기록된 정리 의도가 필요하다. 파일이 이미 없는 경우의
+보존 확인 경로는 그 의도 없이도 원래 쓰기 가능 또는 봉인 해제된 manifest 프로필을 허용한다. 이 경로는 없는
+파일을 원인 미상의 부재로 기록하며 oah가 지웠다고 주장하거나 `VERIFIED_CLEANED`를 보고하지 않는다. 불일치는
+삭제 전에 거부한다. 권한 전환을 파일별 진행보다 먼저 기록하며 보존 확인도 정확히 캡처한 메타데이터를 요구한다.
+
+현재 권한 가드 안에서 의도를 기록한 뒤, 보유 중인 객체의 권한 부여 전 메타데이터를 원래 파일 기록,
+계획 항목 또는 생성 식별과 비교한다. 불일치하면 ACL을 바꾸기 전에 거부한다. 공통 네이티브 헬퍼는 권한을
+주기 전에 검증된 기존 소유자 SID로 예상 보안 의미를 계산한다. 같은 소유자, 존재하며 보호된 DACL,
+정확히 하나의 `ACCESS_ALLOWED_ACE`(type `0`), ACE flags `0`, mask `0x130189`, ACE 안의 같은 SID다.
+`GetSecurityInfo`의 `OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION` 조회와
+`SetSecurityInfo`의 `DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION` 설정 계약에
+따르며 소유자는 바꾸지 않는다. 반환된 API 포인터로 소유자 SID와 DACL을 읽는다. `IsValidSid`와
+`GetLengthSid`로 SID 범위를, ACL 헤더의 `AclSize`로 DACL 범위를 확인하고,
+`GetSecurityDescriptorControl`로 제어 비트를 얻는다. 비교기는 raw descriptor의 오프셋이나 구성 요소
+순서를 가정하지 않고 문서화된 ACL·ACE 필드를 파싱한다. 자동 상속·자동 상속 요청 비트를 비롯한 나머지 descriptor 제어 비트와 ACL 할당의
+미사용 바이트는 의미 동등성 판정에 쓰지 않는다. 공통 식별 조회는 전체 소유자 SID, DACL 존재·보호 상태와
+순서대로 모든 ACE의 type·flags·mask 및 SubAuthorityCount 길이의 SID를 캡처한다. 객체 ACE의 GUID,
+복합 ACE의 주체와 조건·애플리케이션 데이터도 해당 ACE의 의미에 포함한다. DATA 파일, manifest·DATA
+디렉터리, 스냅샷 파일·디렉터리와 스냅샷 루트 모두 같은 digest를 기록한다. 원래 기록과 권한 부여 전후 및
+삭제 관측의 비교는 전부 이 의미를 사용하며 descriptor 구성 요소 순서, group·SACL 존재와 raw descriptor
+hash는 동등성 조건이 아니다. 이 미출시 기록은 이 의미 형식만 사용하며 이전 raw digest로 대체하지 않는다.
+나중 관측을 예상 값으로 채택하지 않는다. 일반 식별 조회는 소유자가 다른 조상도 읽을 수 있지만 정리 보안
+조회와 ACL 부여는 계속 현재 주체를 요구한다. 이후의 모든 관측은 보안 값만 미리 계산한 값으로 바꾼 원래
+식별과 일치해야 하고, 권한 부여 중에는 변경 시각만 추가로 달라질 수 있다. 디렉터리 크기·링크 수·쓰기/변경
+시각은 이 정리가 앞서 자식을 지운 뒤에 관측한다. 원래 앵커·계획·생성 기록은 안정된 식별 스키마의 모든
+필드에 계속 기준이 되며, 헬퍼는 권한 부여 전 네이티브 관측의 나머지 필드를 모두 보존한다. 보유한 핸들로
+검증된 기존 소유자에게만 `FILE_WRITE_ATTRIBUTES`를 주고 정확한 결과를 검증한 뒤, 대상의 고정 핸들을 모두
+닫고 전용 `DELETE | FILE_WRITE_ATTRIBUTES` 변경 핸들을 연다. 전용 핸들은 헬퍼의 전체 예상 식별과 그대로
+일치해야 한다. 전체 파일 바이트 또는 디렉터리가 비었는지도 다시 확인한다. 마지막 식별 및 소유자/DACL
+의미 비교는 전용 핸들의 최종 검증에서 `SetFileInformationByHandle` disposition 호출 전에 수행한다.
+DATA 파일은 이 마지막 보안 검사 뒤에 바이트 digest를 비교하며, 나머지 경로는 내용·비어 있음 검사를 먼저
+마친다. 비교와 disposition은 별도 연산이므로 마지막 비교 뒤부터 disposition 전까지의 보안 변경은
+관측하지 못할 수 있다. 이 구간의 변경을 배제하는 문서화된 Windows API는 없다. 이는 가드의 수용된 Windows
+한계이며 소유권의 연속성이나 원자성을 보장하지 않는다. 회귀 시험은 이름 붙인 앞선 검사 지점에서 시험 소유
+객체의 기록 필드 하나를 바꾸고, 정리가 거부되어 객체가 남으며 완료를 기록하지 않는지 확인한다.
+권한 부여 뒤, disposition 전의 식별 검사에서 거부하면 대상은 남고 삭제 건수에 넣지 않으며, 이미 부여한 소유자 전용 ACL을
+유지한다. 오래되었을 수 있는 ACL로 복원하지 않는다.
+파일을 먼저 닫고 manifest 디렉터리를,
+그 뒤 자신이 만든 DATA 부모를 닫는다. 스냅샷도 자식부터 부모 순서로 은퇴한다. 변경 핸들을 보유하는 동안
+관찰 핸들로 같은 대상을 다시 열지 않는다. `SetFileInformationByHandle`의 `FileDispositionInfoEx`와
+`DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` (`0x13`)를 쓰고 삭제 핸들을 닫는다. 이름 부재와
+쓰기 가능한 부모의 성공한 flush를 모두 확인한 뒤에만 부재 진행을 기록한다. 더 약한 삭제 대체 경로는 없으며
+권한 부여·열기·객체 식별·disposition 중 어느 단계에서 거부하든 해당 객체는 삭제 건수에 넣지 않고,
+disposition 실패의 Win32 오류 코드를 보존한다. 읽기 전용 파일과 디렉터리에는 속성 권한과 무시 플래그가
+모두 필요하며 스냅샷 은퇴도 같다. 읽기 전용이 유일한 속성이면 해제할 때 `FILE_ATTRIBUTE_NORMAL` (`0x80`)을
+쓴다. 속성 `0`은 변경하지 않음을 뜻하기 때문이다. Windows 후보 시험은 공유와 close/reopen 계약을 가짜 API로
+확인한다. 네이티브 Windows CI는 여전히 필요하며 참조 전달이나 재부팅 복구를 검증한 것으로 간주하지 않는다.
+
+플랫폼 계약은 [CreateFileW 공유](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
+[NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile),
+[확장 disposition 플래그](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex),
+[SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle),
+[FlushFileBuffers 권한](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)에 따른다.
+보안 의미 필드는 [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+[GetSecurityDescriptorControl](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorcontrol),
+[IsValidSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-isvalidsid),
+[GetLengthSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getlengthsid),
+[ACL](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-acl),
+[ACCESS_ALLOWED_ACE](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-access_allowed_ace)의 계약을 따른다.
+
 ## 게이트
 
 "끝났다"는 에이전트가 하는 말이 아니라 증거 원장이다. **게이트**는 확인할 수 있는 결과 하나와 그 결과를 내야 하는

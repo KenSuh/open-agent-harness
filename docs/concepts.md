@@ -501,6 +501,145 @@ revision was approved. The AI runs these commands; you read the design pages in 
   check does not wait for a pending design journal; files an interrupted write left behind are ignored, and their
   numbers are never reused. `[wiki] dir` cannot put the pages on top of `.oah/designs`.
 
+### Tasks that follow a design
+
+A task follows a design when its packet has a structured OAH `## Design` section (`oah packet new <task> --design
+<project>/<design>`, or `oah packet design <task>` to rewrite it). `oah start --packet` binds the task to the accepted
+revision for its exact inputs: the task and its instance, the project and design, the accepted intent, the normalized
+scope and the declared gates. A TTL renewal, or an exact restart after the lease expired, keeps that identity and the
+gate evidence and review receipts made for it. A changed intent, scope or gate list does not.
+
+- **States.** `oah design task <task>` shows the design, its state and its whole text. `current` permits work. A newer
+  accepted revision makes the task `stale`. A newer draft that nobody accepted makes it `needs-review`: work refuses
+  (`OAH_DESIGN_NEEDS_REVIEW`) and a read-only review sees both texts. `oah design carry <task>` records, for these exact
+  task inputs, that the change does not affect the task, so its evidence keeps counting; otherwise accept the
+  revision, rewrite the Design section and start again. A decision made for other inputs does not apply
+  (`OAH_DESIGN_TASK_INPUTS_CHANGED`).
+- **Packet upgrades.** A free-form `## Design` heading remains user prose. Only the structured binding fields make
+  it a task design; upgrading an existing lease does not replace that prose. Carrying an open task requires its
+  current holder and a live lease; rebinding uses `oah start --packet`. A retained finished task can record a carry
+  or draft acknowledgment without an active lease; that decision grants no new execution authority. Local task
+  readouts keep the state, reason and recovery command even when a worktree path is private.
+- **Delivery.** Every managed brief carries the accepted parts and the newest distinct draft parts whole, within
+  262,144 bytes. A design whose only large content is the verified public originals of a materials record (license
+  and notice texts, documents) is sent with every semantic field inline and those originals as read-only files under
+  `.oah-design-data/<plan>/` for that run. That route needs Claude Code 2.1.318 on macOS arm64 and a local Claude
+  policy oah can read and verify; the remote server policy stays the CLI's own. Codex reports no read it made, so it
+  refuses such a design before any paid call (`OAH_DESIGN_CODEX_REFERENCE_PROFILE_PENDING`), and so does native Windows
+  (`OAH_DESIGN_REFERENCE_UNAVAILABLE`). Anything else over the budget refuses with a split plan
+  (`OAH_DESIGN_CONTEXT_TOO_LARGE`).
+  Whole-inline reviews use ordinary clone cleanup and write no design-retirement pages. Reference delivery still
+  needs guarded retirement. The configured process command and wrappers require operator verification: the
+  current profile checks the native executable header and reported version, but does not attest every argv or wrapper.
+- **Design data.** Those files are external data, not product. oah records the run before the files exist, matches
+  each Read against their exact bytes, checks the index and every new commit for them after the run, and removes
+  exactly the unchanged files it created. Staged or committed data stays recorded (`OAH_DESIGN_TRANSPORT_STAGED`,
+  `OAH_DESIGN_TRANSPORT_COMMITTED`): unstaging does not clear it, so that task cannot finish or land. A run that did
+  not read every required original keeps its edits but cannot complete the task (`OAH_DESIGN_TRANSPORT_NOT_DELIVERED`).
+  `oah design task <task> --run <run>` shows a run's record; with `--transport-cleanup` it removes, or with `--retain`
+  acknowledges, data a run left, and finish then counts acknowledged files as retained rather than out of scope
+  (`OAH_DESIGN_TRANSPORT_RETAINED` until then). A run whose exit was never recorded blocks finish
+  (`OAH_DESIGN_TRANSPORT_NONTERMINAL`).
+  The run readout prints the exact cleanup command and expected origin/latest identities. A recorded exit needs no
+  `--settle`; a partial install can be cleaned or acknowledged from its install-progress record. After cleanup, a
+  complete delivery by a run that starts after the incomplete run's recorded exit, for the current task and exact
+  design, can satisfy that incomplete read, including a whole-inline delivery. An overlapping run does not qualify.
+  A proven no-spawn run needs its data accounted for but creates no undelivered work obligation. Exposure and
+  nonterminal runs still block completion.
+- **Finish, gates, reviews and land.** Each judges the design again at its own control point. Gate evidence carries
+  the task's evidence key and goes stale when the design moves, without a rebind; unchanged checks keep their
+  entries, and meaningful history rotates into create-only pages (`oah design task <task> --gate-history`). Finish
+  exempts only the exact generated pages and records of the bound design, and `project.json` always needs explicit
+  scope. Land refuses a task whose finished design is not current (`OAH_LAND_DESIGN_NOT_CURRENT`). A malformed design
+  value of one task refuses that task only and its bytes are kept (`OAH_DESIGN_RECORD_INVALID`). Dispatched workers
+  cannot change, accept or carry designs (`OAH_DESIGN_WORKER_REFUSED`); that guard is cooperative, not a security
+  boundary.
+- **Limits.** A run whose process was lost before its exit was recorded can only be settled after a qualified
+  same-host reboot, and this release qualifies no such profile, so that run stays blocked; nothing is deleted.
+
+On native Windows, DATA retention and snapshot retirement use the same `_WindowsIO` object identity: volume and
+file ID, the semantic owner SID and DACL digest, attributes, size and complete content. Ancestor checks
+include each directory's file ID and security digest. The `mode` value describes the DOS read-only attribute;
+POSIX owner/group/execute bits do not describe Windows access. Tests of test-owned files grant the
+owner write access through `GetSecurityInfo` / `SetSecurityInfo` and change the native attribute, restoring the
+original DACL and attribute when testing content alone. Simulated owner changes alter the native identity readout.
+
+Every handle that pins a root, ancestor or retained object denies delete/rename sharing: observer anchors use
+`FILE_SHARE_READ | FILE_SHARE_WRITE` (`3`), including the volume's `CreateFileW` and relative directory
+`NtCreateFile` opens; creation and writable handles use `FILE_SHARE_READ` (`1`). Pinning handles do not request
+`DELETE`. A simulated restart closes the original installation, and each handle has one owner that closes it
+once, including when close is called again. Every directory handle used for
+`FlushFileBuffers` needs write access. After a sealed installation has closed, exact cleanup grants the same
+owner a writable DACL under its existing cleanup intent and authority guard, closes the read handle,
+reopens the exact directory with write access and verifies its file ID and the writable owner/DACL digest
+captured at installation. The native writable and ACL-only intermediate profiles are factual hashes, rather than
+POSIX mode guesses. Interrupted cleanup of a complete roster requires a recorded cleanup intent to recover
+through those profiles. The missing-leaf acknowledgment route also accepts the original writable or unsealed
+manifest profile without that intent; it records missing leaves as unattributed absence and never claims oah
+deleted them or reports `VERIFIED_CLEANED`. A mismatch refuses
+before deleting data. Cleanup records the permission transition before leaf progress; retained acknowledgments
+still require their exact captured metadata. Inside the current authority guard and after recording intent, oah
+compares the held object's pre-grant metadata with its original leaf record, plan entry or creation identity.
+A mismatch refuses before changing its ACL. Before the grant, the shared native helper computes its expected
+semantic security state from the verified existing owner SID: that same owner; a present, protected DACL;
+exactly one `ACCESS_ALLOWED_ACE` (type `0`), ACE flags `0`, mask `0x130189`, and that same SID in the ACE.
+It relies on `GetSecurityInfo` with `OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION` and
+`SetSecurityInfo` with `DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION`, which leaves the
+owner unchanged. The owner SID and DACL are read through the returned API pointers: `IsValidSid` and
+`GetLengthSid` bound the SID, the ACL header's `AclSize` bounds the DACL, and `GetSecurityDescriptorControl`
+supplies the control bits. The comparator parses the documented ACL and ACE fields without assuming raw
+descriptor offsets or component order. Other descriptor control bits, including automatic-inheritance and auto-inherit-request bits, and unused
+ACL allocation bytes do not determine semantic equality. The shared identity read captures the full owner SID,
+DACL present/protected state and every ACE in order (type, flags, mask and the SID's SubAuthorityCount length).
+Object ACE GUIDs, compound principals and conditional/application data also remain part of their ACE's meaning.
+This same digest is recorded for DATA leaves, manifest and DATA directories, snapshot leaves/directories and the
+snapshot root. Original-record, pre-grant, post-grant and delete-observation comparisons all use that meaning;
+descriptor component order, group/SACL presence and raw descriptor hashes never gate equality. These unreleased
+records use only this semantic form, with no fallback to the earlier raw digest. No later read becomes the
+expectation. General identity reads can observe ancestors with a different owner; cleanup security reads and
+ACL grants still require the current principal. Every later observation must match the original
+identity with security replaced by this precomputed value; only change time may also change during the grant.
+Directory size, link count and write/change timestamps are sampled after this cleanup's earlier child removals;
+the original anchor, plan or creation record still governs every field in its stable identity schema. The helper
+keeps every other field of that pre-grant native sample unchanged. Oah grants only the verified existing owner
+`FILE_WRITE_ATTRIBUTES` on the held object, verifies that exact result, closes every pin on the target, and opens
+a dedicated mutation handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
+The dedicated handle must match the helper's full expected identity unchanged, and oah rechecks complete file
+bytes (or directory emptiness). The last identity and semantic owner/DACL comparison uses that dedicated handle
+in the final validation before the `SetFileInformationByHandle` disposition call. For a DATA file, the byte-digest
+comparison follows that last security check; the other paths have already checked content or emptiness.
+The comparison and disposition are separate operations: a security change after that last comparison and before
+disposition can remain unobserved. No documented Windows API excludes changes during this interval. This is an
+accepted Windows limit of the guard, not a continuous or atomic ownership guarantee. Regression tests change
+one recorded field of a test-owned object at named earlier check points and assert that cleanup refuses, keeps
+the object and records no completion. If a post-grant identity check
+refuses before disposition,
+the target remains present and uncounted with the owner-only ACL already granted; oah does not restore a
+possibly stale ACL. Leaves close before their manifest directory, and that
+directory closes before the owned DATA parent; snapshot entries retire from children to parents. No observer
+reopens the target while its mutation handle is held. Oah calls `SetFileInformationByHandle` with
+`FileDispositionInfoEx` and `DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` (`0x13`), closes the deletion handle,
+and establishes both name absence and a successful writable-parent flush before recording progress. There is no
+weaker deletion fallback; any grant, open, identity or disposition refusal leaves that object uncounted, and a
+refused disposition preserves the Win32 error code. The attribute right and ignore flag are both required for
+read-only leaves and directories, including snapshot retirement. Clearing the only read-only
+attribute writes `FILE_ATTRIBUTE_NORMAL` (`0x80`), since a zero attribute mask means no change. Windows candidate
+tests exercise sharing and this close/reopen contract with fake APIs; native
+Windows CI remains required and does not qualify reference delivery or reboot recovery.
+
+The platform contracts are [CreateFileW sharing](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
+[NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile),
+[extended disposition flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)
+and [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle).
+Directory durability also follows the [FlushFileBuffers access contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+Semantic security fields follow [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+[GetSecurityDescriptorControl](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorcontrol),
+[IsValidSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-isvalidsid),
+[GetLengthSid](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getlengthsid),
+[ACL](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-acl) and
+[ACCESS_ALLOWED_ACE](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-access_allowed_ace).
+
 ## Gates
 
 "Done" is not something an agent says; it is a ledger of evidence. A **gate** is one checkable result with a
