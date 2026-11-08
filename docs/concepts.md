@@ -598,7 +598,8 @@ keeps every other field of that pre-grant native sample unchanged. Oah grants on
 a dedicated mutation handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
 The dedicated handle must match the helper's full expected identity unchanged, and oah rechecks complete file
 bytes (or directory emptiness). The last identity and semantic owner/DACL comparison uses that dedicated handle
-after the content or emptiness check, immediately before the `SetFileInformationByHandle` disposition call.
+in the final validation before the `SetFileInformationByHandle` disposition call. For a DATA file, the byte-digest
+comparison follows that last security check; the other paths have already checked content or emptiness.
 The comparison and disposition are separate operations: a security change after that last comparison and before
 disposition can remain unobserved. No documented Windows API excludes changes during this interval. This is an
 accepted Windows limit of the guard, not a continuous or atomic ownership guarantee. Regression tests change

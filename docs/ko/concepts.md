@@ -554,8 +554,9 @@ hash는 원래 raw descriptor 형식을 유지한다. 이후의 모든 관측은
 검증된 기존 소유자에게만 `FILE_WRITE_ATTRIBUTES`를 주고 정확한 결과를 검증한 뒤, 대상의 고정 핸들을 모두
 닫고 전용 `DELETE | FILE_WRITE_ATTRIBUTES` 변경 핸들을 연다. 전용 핸들은 헬퍼의 전체 예상 식별과 그대로
 일치해야 한다. 전체 파일 바이트 또는 디렉터리가 비었는지도 다시 확인한다. 마지막 식별 및 소유자/DACL
-의미 비교는 내용·비어 있음 검사를 마친 전용 핸들에서 `SetFileInformationByHandle` disposition 호출 직전에
-수행한다. 비교와 disposition은 별도 연산이므로 마지막 비교 뒤부터 disposition 전까지의 보안 변경은
+의미 비교는 전용 핸들의 최종 검증에서 `SetFileInformationByHandle` disposition 호출 전에 수행한다.
+DATA 파일은 이 마지막 보안 검사 뒤에 바이트 digest를 비교하며, 나머지 경로는 내용·비어 있음 검사를 먼저
+마친다. 비교와 disposition은 별도 연산이므로 마지막 비교 뒤부터 disposition 전까지의 보안 변경은
 관측하지 못할 수 있다. 이 구간의 변경을 배제하는 문서화된 Windows API는 없다. 이는 가드의 수용된 Windows
 한계이며 소유권의 연속성이나 원자성을 보장하지 않는다. 회귀 시험은 이름 붙인 앞선 검사 지점에서 시험 소유
 객체의 기록 필드 하나를 바꾸고, 정리가 거부되어 객체가 남으며 완료를 기록하지 않는지 확인한다.
