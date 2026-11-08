@@ -331,6 +331,92 @@ class RecordsTest(unittest.TestCase):
 
 
 class SnapshotTest(unittest.TestCase):
+    def test_inventory_closes_live_readers_before_its_database(self):
+        directory, parent = make_tmp_dir(self), make_tmp_dir(self)
+        (parent / 'a.txt').write_bytes(b'a')
+        (parent / 'b.txt').write_bytes(b'b')
+        streams, observations = [], []
+        connect = snapshot.sqlite3.connect
+
+        class CheckedConnection(snapshot.sqlite3.Connection):
+            def close(self) -> None:
+                for stream in streams:
+                    try:
+                        next(stream)
+                    except snapshot.sqlite3.ProgrammingError:
+                        observations.append('closed')
+                    else:
+                        observations.append('open')
+                super().close()
+
+        def opened(database: str) -> snapshot.sqlite3.Connection:
+            return connect(database, factory=CheckedConnection)
+
+        with mock.patch.object(snapshot.sqlite3, 'connect', side_effect=opened):
+            inventory = snapshot.Inventory(directory)
+        self.addCleanup(inventory.close)
+        for entry in snapshot._census(parent):
+            inventory.add(entry)
+        streams.extend((iter(inventory.entries()), inventory.original_order()))
+        for stream in streams:
+            next(stream)
+        inventory.close()
+        self.assertEqual(observations, ['closed', 'closed'])
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_inventory_initialization_failure_closes_its_database(self):
+        directory = make_tmp_dir(self)
+        connections: list[snapshot.sqlite3.Connection] = []
+        connect = snapshot.sqlite3.connect
+
+        class InitializationFailure(snapshot.sqlite3.Connection):
+            def execute(self, sql: str, parameters=()) -> snapshot.sqlite3.Cursor:
+                if sql == 'PRAGMA cache_size=-2048':
+                    raise snapshot.sqlite3.OperationalError('controlled census initialization failure')
+                return super().execute(sql, parameters)
+
+        def opened(database: str) -> snapshot.sqlite3.Connection:
+            connection = connect(database, factory=InitializationFailure)
+            connections.append(connection)
+            self.addCleanup(connection.close)
+            return connection
+
+        with mock.patch.object(snapshot.sqlite3, 'connect', side_effect=opened):
+            with self.assertRaises(snapshot.sqlite3.OperationalError):
+                snapshot.Inventory(directory)
+        self.assertEqual(len(connections), 1)
+        with self.assertRaises(snapshot.sqlite3.ProgrammingError):
+            connections[0].execute('SELECT 1')
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_retirement_validation_closes_its_inventory_on_refusal_or_interrupt(self):
+        parent, state = make_tmp_dir(self), make_tmp_dir(self)
+        created = snapshot._container_object(parent, empty=True)
+        (parent / 'probe.txt').write_bytes(b'retained snapshot contents\n')
+        captured = snapshot.capture_retirement_plan({'version': 1, 'run': 'rS', 'container_object': created},
+                    parent, state, output_slot={'path': ['last-message.md']})
+        final = snapshot.finalize_retirement_plan(captured, {'presence': 'absent'})
+        initialize = snapshot.Inventory.__init__
+
+        for boundary in ('read_evidence', '_census'):
+            for error in (snapshot.Retained('controlled census refusal'), KeyboardInterrupt()):
+                with self.subTest(boundary=boundary, error=type(error).__name__):
+                    inventories: list[snapshot.Inventory] = []
+
+                    def keep_inventory(inventory: snapshot.Inventory, directory: pathlib.Path) -> None:
+                        initialize(inventory, directory)
+                        inventories.append(inventory)
+                        self.addCleanup(inventory.close)
+
+                    with mock.patch.object(snapshot.Inventory, '__init__', keep_inventory), \
+                            mock.patch.object(snapshot, boundary, side_effect=error):
+                        with self.assertRaises(type(error)):
+                            snapshot.validate_retirement_plan(final, parent, captured.pages_dir)
+                    self.assertEqual(len(inventories), 1)
+                    with self.assertRaises(snapshot.sqlite3.ProgrammingError):
+                        inventories[0].db.execute('SELECT 1')
+                    self.assertEqual((parent / 'probe.txt').read_bytes(), b'retained snapshot contents\n')
+
     def test_finalizer_interrupts_and_authority_errors_propagate(self):
         from oah.lease import LeaseError
 

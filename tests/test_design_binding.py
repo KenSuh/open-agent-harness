@@ -547,15 +547,27 @@ class ReviewDesignTest(unittest.TestCase):
 
         native = WindowsNativeRosterTest.SemanticNative('work', 'different-control')
         native.security.GetSecurityInfo = lambda *_: 5
+        inventories: list[snapshot.Inventory] = []
+        initialize = snapshot.Inventory.__init__
+
+        def keep_inventory(inventory: snapshot.Inventory, directory: pathlib.Path) -> None:
+            initialize(inventory, directory)
+            inventories.append(inventory)
+            self.addCleanup(inventory.close)
 
         def native_remove(parent, plan, progress, guard=None, *, refusals=None):
             with mock.patch.object(tc, '_safe_windows_path', return_value=pathlib.PureWindowsPath(r'C:\work')):
                 return snapshot._windows_guarded_remove(parent, plan, progress, guard, native=native,
                                                          refusals=refusals)
 
-        with mock.patch.object(snapshot, '_guarded_remove', side_effect=native_remove):
+        with mock.patch.object(snapshot, '_guarded_remove', side_effect=native_remove), \
+                mock.patch.object(snapshot.Inventory, '__init__', keep_inventory):
             self.origin_round(interrupt=False,
                               retirement_refusal='windows-owner-or-acl-unreadable:get-security-info=5')
+        self.assertTrue(inventories)
+        for inventory in inventories:
+            with self.assertRaises(snapshot.sqlite3.ProgrammingError):
+                inventory.db.execute('SELECT 1')
         self.assertFalse(any(row[0] == 'disposition' for row in native.native_calls))
         self.assertEqual(native.allocations, {})
 
@@ -713,6 +725,7 @@ class ReviewDesignTest(unittest.TestCase):
         if temp_root is not None:
             project.temp_root = temp_root
         project.commit({"probe.txt": "written by the fake reviewer\n"})
+        expected_probe = (project.repo / "probe.txt").read_bytes()
         prepare, execute = runner.call.prepare, runner.call.execute
         capture_final = runner._SnapshotDisposal.capture_final
         writer = Store(project.state)
@@ -810,7 +823,7 @@ class ReviewDesignTest(unittest.TestCase):
                 result = project.review()
         if identity_refusal:
             self.assertTrue(observed["root"].parent.is_dir())
-            self.assertEqual((observed["root"] / "probe.txt").read_bytes(), b"written by the fake reviewer\n")
+            self.assertEqual((observed["root"] / "probe.txt").read_bytes(), expected_probe)
             self.assertTrue(observed["replacement"].is_dir())
             self.assertEqual(observed["marker"].read_bytes(), b"existing fixture contents\n")
             self.assertEqual(project.names(), [])
@@ -836,7 +849,7 @@ class ReviewDesignTest(unittest.TestCase):
             self.assertEqual(result.code, 'OAH_REVIEW_SNAPSHOT_RETAINED', result.message)
             self.assertIn(retirement_refusal, result.message)
             self.assertIn(retirement_refusal, observed['disposition'][-1][1])
-            self.assertEqual((observed['root'] / 'probe.txt').read_bytes(), b'written by the fake reviewer\n')
+            self.assertEqual((observed['root'] / 'probe.txt').read_bytes(), expected_probe)
             self.assertIsNone(tc.transport_views(project.state)[observed['origin']].last('retired'))
             self.assertFalse(any(line.get('counted') for line in runner.receipts.read_round_log(project.state, 't1')))
             self.assertEqual(project.names(), [])

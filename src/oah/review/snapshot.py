@@ -252,9 +252,9 @@ class Entries:
 
     def __iter__(self) -> Iterator[dict]:
         where = " WHERE removed=0" if self.remaining else ""
-        cursor = self.inventory.db.execute("SELECT raw FROM entry" + where + " ORDER BY depth, spelling")
-        for row in cursor:
-            yield json.loads(row[0])
+        with self.inventory.cursor("SELECT raw FROM entry" + where + " ORDER BY depth, spelling") as cursor:
+            for row in cursor:
+                yield json.loads(row[0])
 
     def at(self, path: Sequence[str]) -> dict | None:
         row = self.inventory.db.execute("SELECT raw FROM entry WHERE path=?", (_canonical(list(path)),)).fetchone()
@@ -263,21 +263,39 @@ class Entries:
 
 class Inventory:
     def __init__(self, directory: pathlib.Path):
-        self.scratch = tempfile.TemporaryDirectory(prefix="census-", dir=directory)
-        self.db = sqlite3.connect(str(pathlib.Path(self.scratch.name) / "inventory.sqlite3"))
-        self.db.execute("PRAGMA cache_size=-2048")
-        self.db.execute("PRAGMA temp_store=FILE")
-        self.db.execute("CREATE TABLE entry(path BLOB PRIMARY KEY, folded BLOB UNIQUE, depth INTEGER NOT NULL, spelling BLOB NOT NULL, "
-                        "raw BLOB NOT NULL, page INTEGER NOT NULL, position INTEGER NOT NULL, "
-                        "seen INTEGER NOT NULL DEFAULT 0, removed INTEGER NOT NULL DEFAULT 0)")
-        self.db.execute("CREATE INDEX removal_order ON entry(depth, spelling)")
-        self.closed = False
+        with contextlib.ExitStack() as resources:
+            self.scratch = tempfile.TemporaryDirectory(prefix="census-", dir=directory)
+            resources.callback(self.scratch.cleanup)
+            self.db = sqlite3.connect(str(pathlib.Path(self.scratch.name) / "inventory.sqlite3"))
+            resources.callback(self.db.close)
+            self.db.execute("PRAGMA cache_size=-2048")
+            self.db.execute("PRAGMA temp_store=FILE")
+            self.db.execute("CREATE TABLE entry(path BLOB PRIMARY KEY, folded BLOB UNIQUE, depth INTEGER NOT NULL, spelling BLOB NOT NULL, "
+                            "raw BLOB NOT NULL, page INTEGER NOT NULL, position INTEGER NOT NULL, "
+                            "seen INTEGER NOT NULL DEFAULT 0, removed INTEGER NOT NULL DEFAULT 0)")
+            self.db.execute("CREATE INDEX removal_order ON entry(depth, spelling)")
+            self.cursors: set[sqlite3.Cursor] = set()
+            self.closed = False
+            resources.pop_all()
 
     def close(self) -> None:
         if not self.closed:
             self.closed = True
+            while self.cursors:
+                self.cursors.pop().close()
             self.db.close()
             self.scratch.cleanup()
+
+    @contextlib.contextmanager
+    def cursor(self, query: str) -> Iterator[sqlite3.Cursor]:
+        cursor = self.db.execute(query)
+        self.cursors.add(cursor)
+        try:
+            yield cursor
+        finally:
+            if cursor in self.cursors:
+                self.cursors.remove(cursor)
+                cursor.close()
 
     def __del__(self):
         if hasattr(self, "closed"):
@@ -325,8 +343,9 @@ class Inventory:
         self.db.execute("DELETE FROM entry WHERE path=?", (_canonical(list(path)),))
 
     def original_order(self) -> Iterator[dict]:
-        for row in self.db.execute("SELECT raw FROM entry ORDER BY page, position"):
-            yield json.loads(row[0])
+        with self.cursor("SELECT raw FROM entry ORDER BY page, position") as cursor:
+            for row in cursor:
+                yield json.loads(row[0])
 
     def observe(self, item: dict) -> None:
         key = _canonical(item["path"])
@@ -708,6 +727,9 @@ class ValidatedPlan:
     all_entries: Entries
     pending_absent: bool = False
 
+    def close(self) -> None:
+        self.entries.inventory.close()
+
 
 def _uint64(value) -> bool:
     return type(value) is int and 0 <= value <= UINT64
@@ -830,89 +852,92 @@ def validate_retirement_plan(final: dict, parent: pathlib.Path, pages_dir: pathl
         raise Retained("the retirement plan has no creation allocation")
     require_creation_identity(parent, allocation.get("container_object"), descriptor.get("container_object"),
                               current=not container_removed and not pending_root)
-    working = Inventory(pathlib.Path(pages_dir).parent)
-    link, total_bytes = descriptor["head"], 0
-    for expected_ordinal in range(descriptor["page_count"] - 1, -1, -1):
-        if not isinstance(link, dict) or not isinstance(link.get("sha256"), str) or not _uint64(link.get("bytes")):
-            raise Retained("a page link is missing or malformed")
-        path = pathlib.Path(pages_dir) / f"{link['sha256']}.json"
-        data = read_evidence(path, PAGE_BYTES)
-        if hashlib.sha256(data).hexdigest() != link["sha256"] or len(data) != link["bytes"]:
-            raise Retained(f"page {link['sha256']} was changed")
+    with contextlib.ExitStack() as resources:
+        working = resources.enter_context(Inventory(pathlib.Path(pages_dir).parent))
+        link, total_bytes = descriptor["head"], 0
+        for expected_ordinal in range(descriptor["page_count"] - 1, -1, -1):
+            if not isinstance(link, dict) or not isinstance(link.get("sha256"), str) or not _uint64(link.get("bytes")):
+                raise Retained("a page link is missing or malformed")
+            path = pathlib.Path(pages_dir) / f"{link['sha256']}.json"
+            data = read_evidence(path, PAGE_BYTES)
+            if hashlib.sha256(data).hexdigest() != link["sha256"] or len(data) != link["bytes"]:
+                raise Retained(f"page {link['sha256']} was changed")
+            try:
+                from oah.design.task_context import strict_json
+                page = strict_json(data.decode("utf-8"))
+            except ValueError:
+                raise Retained(f"page {link['sha256']} is not JSON") from None
+            if (not isinstance(page, dict) or set(page) != {"version", "allocation", "ordinal", "previous", "entries"}
+                    or page["version"] != 1 or page["allocation"] != descriptor["allocation"]
+                    or page["ordinal"] != expected_ordinal or not isinstance(page["entries"], list)
+                    or len(page["entries"]) > PAGE_ENTRIES or _canonical(page) != data):
+                raise Retained(f"page {link['sha256']} has the wrong schema, allocation or ordinal")
+            if expected_ordinal == 0 and page["previous"] is not None:
+                raise Retained("the page chain does not end at ordinal 0")
+            if expected_ordinal and (not isinstance(page["previous"], dict)
+                                     or page["previous"].get("ordinal") != expected_ordinal - 1):
+                raise Retained("the page chain is not contiguous")
+            total_bytes += len(data)
+            try:
+                for position, item in enumerate(page["entries"]):
+                    working.add(item, page=expected_ordinal, position=position)
+            except (ValueError, sqlite3.Error) as exc:
+                raise Retained("the immutable page has an invalid, repeated or unreadable entry") from exc
+            link = page["previous"]
+        scan = hashlib.sha256()
+        previous = None
+        for item in working.original_order():
+            if previous is not None and _order(previous) >= _order(item):
+                raise Retained("the planned entries are out of order or duplicated")
+            scan.update(_canonical(item) + b"\n")
+            previous = item
+        if (len(working.entries()) != descriptor["total_entries"] or total_bytes != descriptor["total_page_bytes"]
+                or "sha256:" + scan.hexdigest() != descriptor["complete_scan_digest"]):
+            raise Retained("the pages do not hold the complete plan (entry count, byte total or scan digest)")
+        slot = tuple((descriptor.get("output_slot") or {}).get("path") or ())
+        final_slot = final.get("output_slot_final") or {}
+        output_entry = None
+        if final_slot.get("presence") == "present":
+            producer = final_slot.get("producer")
+            if (not isinstance(producer, dict) or producer.get("run") != descriptor["allocation"].get("run")
+                    or not isinstance(producer.get("checkpoint"), str) or not producer["checkpoint"]):
+                raise Retained("the final output lacks its exact run and producer checkpoint")
+            observed = final_slot
+            if slot not in removed and not container_removed and (pending is None or pending["fact"]["path"] != list(slot)):
+                observed = capture_output_slot(parent, list(slot), producer=producer)
+                if observed != final_slot:
+                    raise Retained("the output slot changed after its final capture")
+            output_entry = {key: value for key, value in observed.items() if key not in ("presence", "parents", "producer")}
+        elif final_slot.get("presence") != "absent":
+            raise Retained("the output slot's absence is not established")
+        working.remove_slot(slot)
+        if output_entry is not None:
+            working.add(output_entry)
+        pending_entry = _pending_retirement_entry(pending, final, working.entries(), removed) if pending is not None else None
+        pending_absent = False
         try:
-            from oah.design.task_context import strict_json
-            page = strict_json(data.decode("utf-8"))
-        except ValueError:
-            raise Retained(f"page {link['sha256']} is not JSON") from None
-        if (not isinstance(page, dict) or set(page) != {"version", "allocation", "ordinal", "previous", "entries"}
-                or page["version"] != 1 or page["allocation"] != descriptor["allocation"]
-                or page["ordinal"] != expected_ordinal or not isinstance(page["entries"], list)
-                or len(page["entries"]) > PAGE_ENTRIES or _canonical(page) != data):
-            raise Retained(f"page {link['sha256']} has the wrong schema, allocation or ordinal")
-        if expected_ordinal == 0 and page["previous"] is not None:
-            raise Retained("the page chain does not end at ordinal 0")
-        if expected_ordinal and (not isinstance(page["previous"], dict)
-                                 or page["previous"].get("ordinal") != expected_ordinal - 1):
-            raise Retained("the page chain is not contiguous")
-        total_bytes += len(data)
-        try:
-            for position, item in enumerate(page["entries"]):
-                working.add(item, page=expected_ordinal, position=position)
-        except (ValueError, sqlite3.Error) as exc:
-            raise Retained("the immutable page has an invalid, repeated or unreadable entry") from exc
-        link = page["previous"]
-    scan = hashlib.sha256()
-    previous = None
-    for item in working.original_order():
-        if previous is not None and _order(previous) >= _order(item):
-            raise Retained("the planned entries are out of order or duplicated")
-        scan.update(_canonical(item) + b"\n")
-        previous = item
-    if (len(working.entries()) != descriptor["total_entries"] or total_bytes != descriptor["total_page_bytes"]
-            or "sha256:" + scan.hexdigest() != descriptor["complete_scan_digest"]):
-        raise Retained("the pages do not hold the complete plan (entry count, byte total or scan digest)")
-    slot = tuple((descriptor.get("output_slot") or {}).get("path") or ())
-    final_slot = final.get("output_slot_final") or {}
-    output_entry = None
-    if final_slot.get("presence") == "present":
-        producer = final_slot.get("producer")
-        if (not isinstance(producer, dict) or producer.get("run") != descriptor["allocation"].get("run")
-                or not isinstance(producer.get("checkpoint"), str) or not producer["checkpoint"]):
-            raise Retained("the final output lacks its exact run and producer checkpoint")
-        observed = final_slot
-        if slot not in removed and not container_removed and (pending is None or pending["fact"]["path"] != list(slot)):
-            observed = capture_output_slot(parent, list(slot), producer=producer)
-            if observed != final_slot:
-                raise Retained("the output slot changed after its final capture")
-        output_entry = {key: value for key, value in observed.items() if key not in ("presence", "parents", "producer")}
-    elif final_slot.get("presence") != "absent":
-        raise Retained("the output slot's absence is not established")
-    working.remove_slot(slot)
-    if output_entry is not None:
-        working.add(output_entry)
-    pending_entry = _pending_retirement_entry(pending, final, working.entries(), removed) if pending is not None else None
-    pending_absent = False
-    try:
-        working.removed(removed)
-        if container_removed or pending_root:
-            if os.path.lexists(parent) or len(working.entries(remaining=True)) != 0:
-                raise Retained("the removed container has no exact complete durable progress")
-            if pending_root:
-                if pending_entry != {"path": [], "type": "root"} or not _pending_root_absent(parent, final, pending):
-                    raise Retained("the missing container has no exact pending root proof")
-                pending_absent = True
-        else:
-            for item in _census(parent):
-                working.observe(item)
-            if not working.complete() and pending is not None and pending_entry is not None and pending_entry["path"]:
-                working.removed([tuple(pending["fact"]["path"])])
-                pending_absent = True
-            if not working.complete():
-                raise Retained("a planned entry is missing without recorded progress")
-    except (PlanUnavailable, ValueError, sqlite3.Error) as exc:
-        raise Retained(f"the complete census does not match the immutable plan ({type(exc).__name__})") from exc
-    return ValidatedPlan(json.loads(_canonical(final)), working.entries(remaining=True), pathlib.Path(parent),
-                         working.entries(), pending_absent)
+            working.removed(removed)
+            if container_removed or pending_root:
+                if os.path.lexists(parent) or len(working.entries(remaining=True)) != 0:
+                    raise Retained("the removed container has no exact complete durable progress")
+                if pending_root:
+                    if pending_entry != {"path": [], "type": "root"} or not _pending_root_absent(parent, final, pending):
+                        raise Retained("the missing container has no exact pending root proof")
+                    pending_absent = True
+            else:
+                for item in _census(parent):
+                    working.observe(item)
+                if not working.complete() and pending is not None and pending_entry is not None and pending_entry["path"]:
+                    working.removed([tuple(pending["fact"]["path"])])
+                    pending_absent = True
+                if not working.complete():
+                    raise Retained("a planned entry is missing without recorded progress")
+        except (PlanUnavailable, ValueError, sqlite3.Error) as exc:
+            raise Retained(f"the complete census does not match the immutable plan ({type(exc).__name__})") from exc
+        plan = ValidatedPlan(json.loads(_canonical(final)), working.entries(remaining=True), pathlib.Path(parent),
+                             working.entries(), pending_absent)
+        resources.pop_all()
+        return plan
 
 
 def _guarded_remove(parent: pathlib.Path, plan: ValidatedPlan, progress, guard=None, *,

@@ -316,8 +316,8 @@ class _SnapshotDisposal:
                 or slot["size"] != len(source))) or (slot["presence"] == "absent" and source):
             raise snapshot.Retained("the copied review output is not the final owned output bytes")
         final = snapshot.finalize_retirement_plan(self.plan, slot)
-        snapshot.validate_retirement_plan(final, parent, self.plan.pages_dir)
-        raw = snapshot._canonical(final)
+        with contextlib.closing(snapshot.validate_retirement_plan(final, parent, self.plan.pages_dir)):
+            raw = snapshot._canonical(final)
         digest = hashlib.sha256(raw).hexdigest()
         target = self.plan.pages_dir.parent / (digest + ".json")
         persist_create_only(target, raw)
@@ -488,97 +488,99 @@ def retire_snapshot(state: pathlib.Path, view, parent: pathlib.Path) -> tuple[st
     if len(removed) != len(recorded):
         return "retained", "the retirement cursor repeats a path"
     root_removed = () in removed
-    planned = snapshot.validate_retirement_plan(final, parent, pages, removed=removed - {()},
-                                               container_removed=root_removed, pending=pending_proof)
-    entries_recorded = recorded[:-1] if root_removed else recorded
-    for item, progress_fact in zip(planned.all_entries, entries_recorded):
-        if (item["path"] != progress_fact["path"] or
-                hashlib.sha256(snapshot._canonical(item)).hexdigest() != progress_fact["entry_sha256"]):
-            return "retained", "recorded progress is not the exact prefix of the immutable complete plan"
-    if len(entries_recorded) > len(planned.all_entries):
-        return "retained", "the recorded retirement exceeds its complete plan"
-    if root_removed and (len(entries_recorded) != len(planned.all_entries) or recorded[-1]["path"] != [] or
-            recorded[-1]["entry_sha256"] != hashlib.sha256(snapshot._canonical({"path": [], "type": "root"})).hexdigest()):
-        return "retained", "the container removal is not the last exact complete progress entry"
-    if finalized:
-        return (("disposed-noncounting" if interrupted else "disposed", None) if root_removed else
-                ("retained", "the durable retirement has no root progress"))
-    writer = Store(state)
-    expected = view.latest
-    removed_paths = set(removed)
+    with contextlib.ExitStack() as plans:
+        planned = plans.enter_context(contextlib.closing(snapshot.validate_retirement_plan(
+            final, parent, pages, removed=removed - {()}, container_removed=root_removed, pending=pending_proof)))
+        entries_recorded = recorded[:-1] if root_removed else recorded
+        for item, progress_fact in zip(planned.all_entries, entries_recorded):
+            if (item["path"] != progress_fact["path"] or
+                    hashlib.sha256(snapshot._canonical(item)).hexdigest() != progress_fact["entry_sha256"]):
+                return "retained", "recorded progress is not the exact prefix of the immutable complete plan"
+        if len(entries_recorded) > len(planned.all_entries):
+            return "retained", "the recorded retirement exceeds its complete plan"
+        if root_removed and (len(entries_recorded) != len(planned.all_entries) or recorded[-1]["path"] != [] or
+                recorded[-1]["entry_sha256"] != hashlib.sha256(snapshot._canonical({"path": [], "type": "root"})).hexdigest()):
+            return "retained", "the container removal is not the last exact complete progress entry"
+        if finalized:
+            return (("disposed-noncounting" if interrupted else "disposed", None) if root_removed else
+                    ("retained", "the durable retirement has no root progress"))
+        writer = Store(state)
+        expected = view.latest
+        removed_paths = set(removed)
 
-    def retired_roles(additional=()):
-        roles = []
-        for name, path in (("receiving-git-common", ("tree", ".git")), ("receiving-root", ("tree",)),
-                           ("snapshot-parent", ())):
-            if path in removed_paths or path in additional:
-                roles.append(name)
-        return roles
+        def retired_roles(additional=()):
+            roles = []
+            for name, path in (("receiving-git-common", ("tree", ".git")), ("receiving-root", ("tree",)),
+                               ("snapshot-parent", ())):
+                if path in removed_paths or path in additional:
+                    roles.append(name)
+            return roles
 
-    pending_removed = {tuple(pending["path"])} if pending is not None and planned.pending_absent else set()
-    authority = writer.transport_action_basis(task=view.task, origin=view.origin, expected=expected,
-                    receiving_root=parent / "tree", retired_roles=retired_roles(pending_removed))
-    if pending is not None:
-        if pending_proof is None:
-            return "retained", "the pending entry has no exact durable intent proof"
-        with writer.transport_action(task=view.task, origin=view.origin, expected=expected, authority=authority,
-                    receiving_root=parent / "tree", retired_roles=retired_roles(pending_removed)):
-            fresh = snapshot.validate_retirement_plan(final, parent, pages, removed=removed - {()}, pending=pending_proof)
-            if fresh.pending_absent != planned.pending_absent:
-                return "retained", "the pending entry changed during its full-plan recovery check"
-            planned = fresh
-            if planned.pending_absent:
-                expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected,
-                    kind="retirement-absence-ack", authority=authority, held=True,
-                    fact={**pending, "observed": "absence-after-intent", "causality": "unknown", "counted": False,
-                          "intent_record": {"sequence": pending_proof["sequence"], "record_digest": pending_proof["record_digest"]},
-                          "predecessor_record": pending_proof["predecessor"]})
-                removed_paths.add(tuple(pending["path"]))
-                removed = frozenset(removed_paths)
-                root_removed = () in removed_paths
-                interrupted = True
-            else:
-                expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected,
-                        kind="retirement-cancel", authority=authority, held=True,
-                        fact={**pending, "observed": "present-unchanged"})
-    if not removed:
-        checked = tc.verify_transport_origin(view.record, parent / "tree", expect="cleaned")
-        if checked["state"] != "clean" or checked["head"] != fact.get("head"):
-            return "retained", "the pre-delete Git and DATA checkpoint cannot be verified"
-    cursor = len(removed)
+        pending_removed = {tuple(pending["path"])} if pending is not None and planned.pending_absent else set()
+        authority = writer.transport_action_basis(task=view.task, origin=view.origin, expected=expected,
+                        receiving_root=parent / "tree", retired_roles=retired_roles(pending_removed))
+        if pending is not None:
+            if pending_proof is None:
+                return "retained", "the pending entry has no exact durable intent proof"
+            with writer.transport_action(task=view.task, origin=view.origin, expected=expected, authority=authority,
+                        receiving_root=parent / "tree", retired_roles=retired_roles(pending_removed)):
+                fresh = plans.enter_context(contextlib.closing(snapshot.validate_retirement_plan(
+                    final, parent, pages, removed=removed - {()}, pending=pending_proof)))
+                if fresh.pending_absent != planned.pending_absent:
+                    return "retained", "the pending entry changed during its full-plan recovery check"
+                planned = fresh
+                if planned.pending_absent:
+                    expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected,
+                        kind="retirement-absence-ack", authority=authority, held=True,
+                        fact={**pending, "observed": "absence-after-intent", "causality": "unknown", "counted": False,
+                              "intent_record": {"sequence": pending_proof["sequence"], "record_digest": pending_proof["record_digest"]},
+                              "predecessor_record": pending_proof["predecessor"]})
+                    removed_paths.add(tuple(pending["path"]))
+                    removed = frozenset(removed_paths)
+                    root_removed = () in removed_paths
+                    interrupted = True
+                else:
+                    expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected,
+                            kind="retirement-cancel", authority=authority, held=True,
+                            fact={**pending, "observed": "present-unchanged"})
+        if not removed:
+            checked = tc.verify_transport_origin(view.record, parent / "tree", expect="cleaned")
+            if checked["state"] != "clean" or checked["head"] != fact.get("head"):
+                return "retained", "the pre-delete Git and DATA checkpoint cannot be verified"
+        cursor = len(removed)
 
-    def guard(item):
-        return writer.transport_action(task=view.task, origin=view.origin, expected=expected, authority=authority,
-                    receiving_root=parent / "tree", retired_roles=retired_roles())
+        def guard(item):
+            return writer.transport_action(task=view.task, origin=view.origin, expected=expected, authority=authority,
+                        receiving_root=parent / "tree", retired_roles=retired_roles())
 
-    def progress(item, observed):
-        nonlocal expected, cursor
-        kind = "retirement-intent" if observed == "intent" else "retirement-progress"
-        expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected, kind=kind,
-                    authority=authority, held=True,
-                    fact={"plan_sha256": registration["sha256"], "final_sha256": fact["final_sha256"],
-                          "cursor": cursor, "path": item["path"], "observed": observed,
-                          "entry_sha256": hashlib.sha256(snapshot._canonical(item)).hexdigest(),
-                          **({"surviving_parent": snapshot.retirement_parent_proof(parent, registration["sha256"])}
-                             if observed == "intent" and not item["path"] else {})})
-        if observed == "absent":
-            cursor += 1
-            removed_paths.add(tuple(item["path"]))
-        return True
+        def progress(item, observed):
+            nonlocal expected, cursor
+            kind = "retirement-intent" if observed == "intent" else "retirement-progress"
+            expected = writer.observe_transport(task=view.task, origin=view.origin, expected=expected, kind=kind,
+                        authority=authority, held=True,
+                        fact={"plan_sha256": registration["sha256"], "final_sha256": fact["final_sha256"],
+                              "cursor": cursor, "path": item["path"], "observed": observed,
+                              "entry_sha256": hashlib.sha256(snapshot._canonical(item)).hexdigest(),
+                              **({"surviving_parent": snapshot.retirement_parent_proof(parent, registration["sha256"])}
+                                 if observed == "intent" and not item["path"] else {})})
+            if observed == "absent":
+                cursor += 1
+                removed_paths.add(tuple(item["path"]))
+            return True
 
-    refusals: list[str] = []
-    try:
-        disposed = root_removed or snapshot.remove(parent, expected_plan=planned, progress=progress, guard=guard,
-                                                   refusals=refusals)
-    except (LeaseError, OSError) as exc:
-        return "retained", f"retirement stopped ({getattr(exc, 'code', type(exc).__name__)})"
-    if not disposed:
-        detail = f" ({'; '.join(refusals)})" if refusals else ""
-        return "retained", f"guarded deletion stopped{detail}; the exact progress and remainder were kept"
-    writer.observe_transport(task=view.task, origin=view.origin, expected=expected, kind="retired", authority=authority,
-                              fact={"plan_sha256": registration["sha256"], "final_sha256": fact["final_sha256"],
-                                    "removed_entries": cursor, **({"counted": False} if interrupted else {})})
-    return "disposed-noncounting" if interrupted else "disposed", None
+        refusals: list[str] = []
+        try:
+            disposed = root_removed or snapshot.remove(parent, expected_plan=planned, progress=progress, guard=guard,
+                                                       refusals=refusals)
+        except (LeaseError, OSError) as exc:
+            return "retained", f"retirement stopped ({getattr(exc, 'code', type(exc).__name__)})"
+        if not disposed:
+            detail = f" ({'; '.join(refusals)})" if refusals else ""
+            return "retained", f"guarded deletion stopped{detail}; the exact progress and remainder were kept"
+        writer.observe_transport(task=view.task, origin=view.origin, expected=expected, kind="retired", authority=authority,
+                                  fact={"plan_sha256": registration["sha256"], "final_sha256": fact["final_sha256"],
+                                        "removed_entries": cursor, **({"counted": False} if interrupted else {})})
+        return "disposed-noncounting" if interrupted else "disposed", None
 
 
 def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Binding) -> tuple[tuple[str, str], ...]:
