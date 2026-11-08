@@ -216,7 +216,7 @@ class ClosedTaskTest(DesignTask, unittest.TestCase):
         judged = design.judge_task(self.state_dir, "t1", root=self.repo)
         self.assertEqual(judged.state, "current")
         head = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, capture_output=True,
-                              text=True).stdout.strip()
+                              text=True, encoding="utf-8").stdout.strip()
         _evidence, check = land._design_check(self.repo, self.state_dir, "t1", head, lease.binding())
         self.assertEqual(check.state, land.PASSED, check)
 
@@ -228,7 +228,7 @@ class ClosedTaskTest(DesignTask, unittest.TestCase):
         lease = next(item for item, _stale in Store(self.state_dir).snapshot() if item.task == "t1")
         self.assertEqual(self.oah("release", "--task", "t1", "--agent", "claude", "--reason", "stop").returncode, 0)
         head = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, capture_output=True,
-                              text=True).stdout.strip()
+                              text=True, encoding="utf-8").stdout.strip()
         _evidence, check = land._design_check(self.repo, self.state_dir, "t1", head, lease.binding())
         self.assertNotEqual(check.state, land.PASSED)
 
@@ -482,7 +482,7 @@ class ReadoutTest(DesignTask, unittest.TestCase):
 
     def test_intent_show_explains_unknown_design_history(self):
         self.build({"design": "People book.\n"})
-        with (self.state_dir / "events.jsonl").open("a") as handle:
+        with (self.state_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write("unreadable event\n")
         shown = self.oah("intent", "show", "t1")
         self.assertEqual(shown.returncode, 0, shown.stderr)
@@ -525,7 +525,7 @@ def design_fix_project(test: unittest.TestCase):
     project.commit({PACKET: design.replace_section(packet, section)}, "design bound")
     env = dict(project.env, PYTHONPATH=SRC_DIR)
     bound = subprocess.run([sys.executable, "-m", "oah", "start", "--task", "t1", "--agent", "claude", "--packet",
-                            PACKET], cwd=project.repo, env=env, capture_output=True, text=True, timeout=120)
+                            PACKET], cwd=project.repo, env=env, capture_output=True, text=True, timeout=120, encoding="utf-8")
     test.assertEqual(bound.returncode, 0, bound.stdout + bound.stderr)
     project.design_store = store
     return project
@@ -961,7 +961,7 @@ class ReviewDesignTest(unittest.TestCase):
         from oah.review import summary
 
         head = subprocess.run(["git", "-C", str(project.repo), "rev-parse", "HEAD"], check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, encoding="utf-8").stdout.strip()
         from oah.lease import Store
 
         lease = next(item for item, _stale in Store(project.state).snapshot() if item.task == "t1")
@@ -1192,7 +1192,7 @@ class CorrectionAuthorityTest(DesignTask, unittest.TestCase):
         data = json.loads(path.read_bytes())
         data["leases"][0]["design#future"] = {"keep": "first"}
         data["leases"][0]["design#0"] = "real field"
-        path.write_text(json.dumps(data))
+        path.write_text(json.dumps(data), encoding="utf-8")
         document = read_lease_document(path.read_bytes(), path)
         before, _ = _target(document, "t1")
         self.assertEqual(document.record("t1").core["design#future"], {"keep": "first"})
@@ -1252,11 +1252,11 @@ class HistoricalReadFailureTest(unittest.TestCase):
                 rel = fs.acceptance_rel("acme", "booking", 1)
                 acceptance = json.loads((case.repo / rel).read_bytes())
                 acceptance["reason"] = "rewritten historical acceptance"
-                (case.repo / rel).write_text(json.dumps(acceptance))
+                (case.repo / rel).write_text(json.dumps(acceptance), encoding="utf-8")
                 pointer_path = case.repo / fs.pointer_rel("acme", "booking")
                 pointer = json.loads(pointer_path.read_bytes())
                 pointer["accepted"]["record"] = digest_of(acceptance)
-                pointer_path.write_text(json.dumps(pointer))
+                pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
                 run_git = paths.run_git
 
                 def failed(root, *args):

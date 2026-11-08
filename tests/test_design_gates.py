@@ -108,13 +108,13 @@ class DesignGateTest(DesignTask, unittest.TestCase):
         original = path.read_bytes()
         data = json.loads(original)
         data["leases"][0]["expires_at"] = "2000-01-01T00:00:00Z"
-        path.write_text(json.dumps(data))
+        path.write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaises(check_mod.GateRefused):
             self.check()
         self.assertEqual(self.stub.calls("gate-check.mjs"), [])
         path.write_bytes(original)
         packet = self.repo / PACKET
-        packet.write_text(packet.read_text().replace("Revision: 1", "Revision: 2"))
+        packet.write_text(packet.read_text(encoding="utf-8").replace("Revision: 1", "Revision: 2"), encoding="utf-8")
         with self.assertRaises(check_mod.GateRefused):
             self.check()
         self.assertEqual(self.stub.calls("gate-check.mjs"), [])
@@ -129,7 +129,7 @@ class DesignGateTest(DesignTask, unittest.TestCase):
             path = self.state_dir / "leases.json"
             data = json.loads(path.read_bytes())
             data["leases"][0]["expires_at"] = "2000-01-01T00:00:00Z"
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data), encoding="utf-8")
             return result
 
         with mock.patch.object(check_mod.unlazy_mod, "gate_check", expire_after):
@@ -168,7 +168,7 @@ class DesignGateTest(DesignTask, unittest.TestCase):
         def changed(*args, **kwargs):
             result = collect(*args, **kwargs)
             packet = self.repo / PACKET
-            packet.write_text(packet.read_text().replace("Revision: 1", "Revision: 2"), encoding="utf-8")
+            packet.write_text(packet.read_text(encoding="utf-8").replace("Revision: 1", "Revision: 2"), encoding="utf-8")
             return result
 
         with mock.patch.object(check_mod, "collect_inputs", changed):

@@ -67,7 +67,7 @@ def main(argv):
         import subprocess
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        open(os.environ["FAKE_REDIRECTED_CHILD"], "w").write(str(child.pid))
+        open(os.environ["FAKE_REDIRECTED_CHILD"], "w", encoding="utf-8").write(str(child.pid))
     if "-p" not in argv or "stream-json" not in argv:
         return fake_claude.main(argv)
     prompt = fakelib.read_stdin()
@@ -298,7 +298,7 @@ class DesignTask(DesignRepo):
         codex_home.mkdir()
         (codex_home / "models_cache.json").write_text(json.dumps({"models": [{
             "slug": "gpt-test-a", "is_default": True,
-            "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max")]}]}))
+            "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max")]}]}), encoding="utf-8")
         toml = lambda argv: "[" + ", ".join(json.dumps(part) for part in argv) + "]"  # noqa: E731
         config = ("[models]\nfetch_scores = false\n"
                   f"[engines.claude]\ncommand = {toml([sys.executable, str(fake)])}\n"
@@ -357,10 +357,10 @@ class StoredBriefMarkerTest(DesignTask, unittest.TestCase):
 
         self.record.unlink(missing_ok=True)
         brief = self.work / "stored.md"
-        packet = (self.repo / f".oah/tasks/{task}/PACKET.md").read_text()
+        packet = (self.repo / f".oah/tasks/{task}/PACKET.md").read_text(encoding="utf-8")
         section = briefs.raw_section(packet)
         self.assertIsNotNone(section)
-        brief.write_text(f"{section}\n\n{content}")
+        brief.write_text(f"{section}\n\n{content}", encoding="utf-8")
         return self.oah("call", "claude", "--stage", "initial", "--task", task, "--tier", "low",
                         "--brief-file", str(brief), "--no-rerank")
 
@@ -371,7 +371,7 @@ class StoredBriefMarkerTest(DesignTask, unittest.TestCase):
                     content = f"Document {mention} in prose.\n"
                     result = self.stored_call(task, content)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn(content, json.loads(self.record.read_text())["stdin"])
+                    self.assertIn(content, json.loads(self.record.read_text(encoding="utf-8"))["stdin"])
 
     def test_ambiguous_whole_line_blocks_refuse_without_traceback_or_child(self):
         block = f"{tc.BEGIN}\nold\n{tc.END}\n"
@@ -483,7 +483,7 @@ class PrivacyScreenTest(DesignTask, unittest.TestCase):
         self.assertIn(base64.b64encode(raw).decode(), selected.text)
         result = self.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        received = json.loads(self.record.read_text())["stdin"]
+        received = json.loads(self.record.read_text(encoding="utf-8"))["stdin"]
         self.assertIn(base64.b64encode(raw).decode(), received)
         self.assertIn("People book.", received)
 
@@ -508,7 +508,7 @@ class OutgoingPrivacyTest(DesignTask, unittest.TestCase):
                     store = self.store(self.repo)
                     current = store.context("acme", "booking").current
                     draft = self.work / "draft.txt"
-                    draft.write_text(current.texts.get("request", "") + "Complete public draft request.\n")
+                    draft.write_text(current.texts.get("request", "") + "Complete public draft request.\n", encoding="utf-8")
                     saved = self.oah("design", "save", "acme", "booking", "--expect-revision", str(current.revision),
                                      "--expect-digest", current.digest, "--reason",
                                      text if field == "revision-reason" else "Public revision clarification",
@@ -530,7 +530,7 @@ class OutgoingPrivacyTest(DesignTask, unittest.TestCase):
                     resumed = self.oah("start", "--task", "t1", "--agent", self.actor,
                                        "--packet", ".oah/tasks/t1/PACKET.md", "--scope", "src/")
                     needle = self.actor if field.endswith("actor") else text
-                    received = json.loads(self.record.read_text())["stdin"] if self.record.exists() else ""
+                    received = json.loads(self.record.read_text(encoding="utf-8"))["stdin"] if self.record.exists() else ""
                     results = {"call": called, "json-readout": shown, "plain-readout": plain, "start": resumed}
                     print("OUTGOING_HEADER", json.dumps({"field": field, "reference": reference, "negative": negative,
                           "rc": {name: result.returncode for name, result in results.items()},
@@ -549,7 +549,7 @@ class OutgoingPrivacyTest(DesignTask, unittest.TestCase):
                             with self.subTest(path=name):
                                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                         self.assertIn(needle, received)
-                        self.assertIn(draft.read_text(), received)
+                        self.assertIn(draft.read_text(encoding="utf-8"), received)
                         self.assertIn(needle, json.loads(shown.stdout)["block"])
                         self.assertIn(needle, plain.stdout)
                         self.assertIn(needle, resumed.stdout)
@@ -3241,7 +3241,7 @@ class InstallExposureTest(unittest.TestCase):
 
     def git(self, *args: str) -> str:
         return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True,
-                              env=git_env()).stdout
+                              env=git_env(), encoding="utf-8").stdout
 
     def installed(self) -> tc.Installation:
         done = tc.install(self.repo, self.manifest, self.payloads)
@@ -3260,12 +3260,12 @@ class InstallExposureTest(unittest.TestCase):
         with self.assertRaises(tc.InstallRefused):
             tc.install(self.repo, self.manifest, self.payloads)  # an existing M is never adopted
         os.chmod(directory, 0o755)
-        (directory / "extra").write_text("x")
+        (directory / "extra").write_text("x", encoding="utf-8")
         self.assertIn("unexpected", tc.check_leaves(done))
 
     def test_existing_parent_is_kept_and_none_of_its_entries_adopted(self):
         (self.repo / tc.DATA_DIR).mkdir()
-        (self.repo / tc.DATA_DIR / "mine.txt").write_text("user\n")
+        (self.repo / tc.DATA_DIR / "mine.txt").write_text("user\n", encoding="utf-8")
         done = self.installed()
         self.assertFalse(done.data_created)
         steps = []
@@ -3351,7 +3351,7 @@ def git_commit_paths(repo: pathlib.Path, paths, files: dict) -> str:
     subprocess.run(["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-q", "-m", "product"],
                    check=True, env=git_env())
     return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
-                          text=True).stdout.strip()
+                          text=True, encoding="utf-8").stdout.strip()
 
 
 class ReadObservationTest(unittest.TestCase):
@@ -3454,7 +3454,7 @@ class TransportLedgerTest(DesignTask, unittest.TestCase):
         self.assertEqual(readout.returncode, 0, readout.stderr)
         commands = [line.removeprefix("  run: ") for line in readout.stdout.splitlines() if line.startswith("  run: ")]
         self.assertEqual(len(commands), 1)
-        parsed = subprocess.run(["/bin/sh", "-n", "-c", commands[0]], capture_output=True, text=True)
+        parsed = subprocess.run(["/bin/sh", "-n", "-c", commands[0]], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(parsed.returncode, 0, parsed.stderr)
         self.assertIn("--settle aborted", commands[0])
 
@@ -3517,7 +3517,7 @@ class TransportLedgerTest(DesignTask, unittest.TestCase):
 
         parent = make_tmp_dir(self) / "snapshot"
         parent.mkdir()
-        (parent / "owned").write_text("keep")
+        (parent / "owned").write_text("keep", encoding="utf-8")
         self.store._commit(self.store._load(), "design_transport_origin", "t1", "claude", self.lease.id,
                            design_schema=2, transport={"version": 1, "origin": "sha256:" + "f" * 64,
                                                       "record": self.origin_record})
@@ -3658,7 +3658,7 @@ with mock.patch.object(Store, "observe_transport_exit", persist):
     raise SystemExit(main(["call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low"]))
 '''
         result = subprocess.run([sys.executable, "-B", "-c", program, "fault" if fail else "normal"], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True, timeout=90)
+                                env=self.env, text=True, capture_output=True, timeout=90, encoding="utf-8")
         print("READ_FACT_CHILD", "fault" if fail else "normal", result.returncode, result.stdout, result.stderr)
         return result
 
@@ -3713,14 +3713,14 @@ with mock.patch.object(Store, "observe_transport_exit", persist):
         self.assertTrue(progress[-1]["leaves"])
         self.assertEqual(kinds[-1], "verified-cleaned")
         run = self.last_run()
-        saved = json.loads((run / "design.json").read_text())
+        saved = json.loads((run / "design.json").read_text(encoding="utf-8"))
         self.assertTrue(saved["receiving"]["delivered"])
         self.assertEqual(saved["receiving"]["preflight"], "local-policy-verified-remote-unobserved")
         self.assertFalse((self.repo / tc.DATA_DIR).exists())
-        argv = json.loads(self.record.read_text())["argv"]
+        argv = json.loads(self.record.read_text(encoding="utf-8"))["argv"]
         self.assertIn("stream-json", argv)
         self.assertIn("--verbose", argv)
-        logged = (run / "stdout.log").read_text().strip().splitlines()
+        logged = (run / "stdout.log").read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(len(logged), 1)  # the json result only, never the transcript
         self.assertEqual(json.loads(logged[0])["type"], "result")
         status = self.oah("design", "task", "t1", "--run", run.name)
@@ -3730,7 +3730,7 @@ with mock.patch.object(Store, "observe_transport_exit", persist):
         self.build(BIG_PARTS)
         result = self.call(FAKE_STREAM_MODE="partial")
         self.assertEqual(result.returncode, 0, result.stderr)
-        warnings = json.loads((self.last_run() / "result.json").read_text())["warnings"]
+        warnings = json.loads((self.last_run() / "result.json").read_text(encoding="utf-8"))["warnings"]
         self.assertTrue(any(item.startswith(tc.TRANSPORT_NOT_DELIVERED) for item in warnings))
         finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "s",
                             "--return", str(self.returned()))
@@ -3754,12 +3754,12 @@ with mock.patch.object(Store, "observe_transport_exit", persist):
         result = self.oah("call", "claude", "--stage", "review", "--task", "t1", "--tier", "high",
                           "--override-stage")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        argv = json.loads(self.record.read_text())["argv"]
+        argv = json.loads(self.record.read_text(encoding="utf-8"))["argv"]
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
         origin = self.events("design_transport_origin")[0]["transport"]["record"]
         self.assertEqual(origin["profile"]["operation"], "inspect")
-        self.assertTrue(json.loads((self.last_run() / "design.json").read_text())["receiving"]["delivered"])
+        self.assertTrue(json.loads((self.last_run() / "design.json").read_text(encoding="utf-8"))["receiving"]["delivered"])
 
     def test_continuity_is_recorded_typed_before_any_data(self):
         self.build(BIG_PARTS)
@@ -3787,7 +3787,7 @@ with mock.patch.object(Store, "observe_transport_exit", persist):
             time.sleep(0.1)
         self.assertIn("running", kinds)
         run = self.last_run()
-        pid = json.loads((run / "result.json").read_text())["pid"]
+        pid = json.loads((run / "result.json").read_text(encoding="utf-8"))["pid"]
         os.kill(pid, signal.SIGKILL)  # before any durable exit; the child keeps its own session
         time.sleep(6)
         view = next(iter(tc.transport_views(self.state_dir).values()))
@@ -3858,10 +3858,10 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
     def test_missing_stream_result_does_not_retain_the_tool_transcript(self):
         self.build(BIG_PARTS)
         script = self.work / "fake_stream_claude.py"
-        script.write_text(script.read_text().replace("for event in out:", "for event in out[:-1]:"))
+        script.write_text(script.read_text(encoding="utf-8").replace("for event in out:", "for event in out[:-1]:"), encoding="utf-8")
         called = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low")
         self.assertEqual(called.returncode, 0, called.stderr)
-        self.assertEqual((self.last_run() / "stdout.log").read_text(), "")
+        self.assertEqual((self.last_run() / "stdout.log").read_text(encoding="utf-8"), "")
         self.assertFalse(json.loads((self.last_run() / "design.json").read_bytes())["receiving"]["delivered"])
 
     @unittest.skipUnless(NATIVE, NATIVE_ONLY)
@@ -3878,7 +3878,7 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
         for task in ("other", "t1"):
             with self.subTest(task=task):
                 self.build({"design": "People book.\n"})
-                with (self.state_dir / "events.jsonl").open("a") as handle:
+                with (self.state_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps({"event": "design_transport_origin", "task": task}) + "\n")
                 checked = tc.completion_guard(self.state_dir, "t1", root=self.repo,
                                                repo=repo_identity(self.repo), current=None)
@@ -3891,7 +3891,7 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
         finish = Store.finish
 
         def racing(writer, **kwargs):
-            with (self.state_dir / "events.jsonl").open("a") as handle:
+            with (self.state_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"event": "design_transport_origin", "task": "t1"}) + "\n")
             return finish(writer, **kwargs)
 
@@ -3926,7 +3926,7 @@ class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
                            newer.digest, "--reason", "wording only")
         self.assertEqual(carried.returncode, 0, carried.stderr)
         path = self.repo / ".oah/tasks/t1/PACKET.md"
-        path.write_text(path.read_text().replace("Reports miss files.", "Reports miss many files."))
+        path.write_text(path.read_text(encoding="utf-8").replace("Reports miss files.", "Reports miss many files."), encoding="utf-8")
         text = self.oah("design", "task", "t1")
         self.assertEqual(text.returncode, 0, text.stderr)
         self.assertIn("state=stale", text.stdout)
@@ -4165,7 +4165,7 @@ class CodexDeliveryTest(DesignTask, unittest.TestCase):
         result = self.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high",
                           env={"FAKE_CODEX_HEADER_MODEL": "gpt-other"})
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        saved = json.loads((self.last_run() / "result.json").read_text())
+        saved = json.loads((self.last_run() / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["status"], "failed")
         self.assertEqual(saved["header_code"], "OAH_MODEL_MISMATCH")
         self.assertIn("ALPHA people book a lesson.", self.stdin())  # the human header route is unchanged
@@ -4209,7 +4209,7 @@ class DescendantPolicyTest(DesignTask, unittest.TestCase):
         result = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low",
                           env={"FAKE_REDIRECTED_CHILD": str(pidfile), "FAKE_SLEEP": "0.5"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertFalse(self.alive(int(pidfile.read_text())))
+        self.assertFalse(self.alive(int(pidfile.read_text(encoding="utf-8"))))
         git_commit(self.repo, {".oah/tasks/t2/PACKET.md": packet_text("t2", scope=("lib",))}, "plain packet")
         started = self.oah("start", "--task", "t2", "--agent", "claude", "--packet", ".oah/tasks/t2/PACKET.md")
         self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
@@ -4217,7 +4217,7 @@ class DescendantPolicyTest(DesignTask, unittest.TestCase):
         result = self.oah("call", "claude", "--stage", "initial", "--task", "t2", "--tier", "low",
                           env={"FAKE_REDIRECTED_CHILD": str(pidfile), "FAKE_SLEEP": "0.5"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        pid = int(pidfile.read_text())
+        pid = int(pidfile.read_text(encoding="utf-8"))
         try:
             os.kill(pid, 0)
             survived = True
@@ -4570,7 +4570,7 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
                 path = self.state_dir / "leases.json"
                 data = json.loads(path.read_bytes())
                 data["leases"][0]["expires_at"] = "2000-01-01T00:00:00Z"
-                path.write_text(json.dumps(data))
+                path.write_text(json.dumps(data), encoding="utf-8")
             return result
 
         args = build_args(["design", "task", "t1", "--transport-cleanup", *self.expect()])
@@ -4881,7 +4881,7 @@ class SnapshotRetirementTest(unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.setUp()
         head = subprocess.run(["git", "-C", str(case.repo), "rev-parse", "HEAD"], check=True,
-                              text=True, capture_output=True).stdout.strip()
+                              text=True, capture_output=True, encoding="utf-8").stdout.strip()
         disposition = []
         dispose = runner._snapshot_disposal(case.state_dir, "rS", disposition)
         parent = None
@@ -5148,7 +5148,7 @@ class SnapshotRetirementTest(unittest.TestCase):
         record = {"run": "rS"}
         origin = tc.origin_digest(record)
         events.write_text(json.dumps({"event": "design_transport_origin", "task": "t1", "design_schema": 2,
-                                      "transport": {"version": 1, "origin": origin, "record": record}}) + "\n")
+                                      "transport": {"version": 1, "origin": origin, "record": record}}) + "\n", encoding="utf-8")
         outcomes.clear()
         with snapshot.make(source, head, base=head, dispose=runner._snapshot_disposal(self.state, "rS", outcomes)) \
                 as snap:
