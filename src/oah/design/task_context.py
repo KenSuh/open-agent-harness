@@ -2482,14 +2482,33 @@ class _WindowsSecurity:
     control: int
 
     def digest(self) -> str:
-        return "sha256:" + _sha(canonical([self.owner.hex(), self.dacl.hex(), self.control]))
-
-    def deletion_grant(self) -> "_WindowsSecurity":
         import struct
 
-        acl = struct.pack("<BBHHHBBHI", 2, 0, 16 + len(self.owner), 1, 0,
-                          0, 0, 8 + len(self.owner), 0x130189) + self.owner
-        return _WindowsSecurity(self.owner, acl, (self.control | 0x1004) & ~0x0008)
+        if len(self.dacl) < 8:
+            raise InstallRefused("windows-delete-acl-bound")
+        revision, _, size, count, _ = struct.unpack_from("<BBHHH", self.dacl)
+        if revision not in (2, 4) or size != len(self.dacl):
+            raise InstallRefused("windows-delete-acl-layout")
+        fields: list[str | int | bool] = [self.owner.hex(), bool(self.control & 4),
+                                         bool(self.control & 0x1000), count]
+        if count == 1:
+            if size < 12:
+                raise InstallRefused("windows-delete-ace-bound")
+            kind, flags, ace_size = struct.unpack_from("<BBH", self.dacl, 8)
+            if not 4 <= ace_size <= size - 8:
+                raise InstallRefused("windows-delete-ace-bound")
+            fields.extend([kind, flags])
+            if kind == 0:
+                if ace_size < 16:
+                    raise InstallRefused("windows-delete-ace-sid-bound")
+                sid = self.dacl[16:8 + ace_size]
+                if sid[0] != 1 or not 8 <= len(sid) <= 68 or len(sid) != 8 + 4 * sid[1]:
+                    raise InstallRefused("windows-delete-ace-sid-bound")
+                fields.extend([struct.unpack_from("<I", self.dacl, 12)[0], sid.hex()])
+        return "sha256:" + _sha(canonical(fields))
+
+    def deletion_grant_digest(self) -> str:
+        return "sha256:" + _sha(canonical([self.owner.hex(), True, True, 1, 0, 0, 0x130189, self.owner.hex()]))
 
 
 class _WindowsIO:
@@ -2660,7 +2679,7 @@ class _WindowsIO:
                 self.kernel.LocalFree(descriptor)
 
     def delete_info(self, handle) -> dict[str, int | str]:
-        # Deletion compares exact security fields, independent of self-relative buffer offsets; persisted hashes stay raw.
+        # Compare owner/ACE semantics and DACL present/protected; persisted original hashes stay raw.
         info = self.info(handle)
         raw_digest, security = self._security_state(handle)
         if raw_digest != info["uid"]:
@@ -2698,7 +2717,7 @@ class _WindowsIO:
         raw_digest, security = self._security_state(handle)
         if raw_digest != before["uid"]:
             self._error("windows-security-changed-before-delete-grant")
-        prepared = dict(before, uid=security.deletion_grant().digest())
+        prepared = dict(before, uid=security.deletion_grant_digest())
         self._owner_acl(handle, 0x130189)
         after = self.delete_info(handle)
         if set(after) != set(prepared) or any(after[key] != value for key, value in prepared.items()

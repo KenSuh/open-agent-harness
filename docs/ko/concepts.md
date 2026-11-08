@@ -520,7 +520,7 @@ docs/wiki/
 네이티브 Windows의 DATA 보존과 스냅샷 은퇴는 같은 `_WindowsIO` 객체 식별을 쓴다. 볼륨·파일 ID,
 소유자 SID와 DACL 보안 설명자의 digest, 속성, 크기와 전체 바이트를 확인하고, 조상 디렉터리도 ID와 보안
 digest를 확인한다. `mode`는 DOS 읽기 전용 속성만 나타낸다. POSIX 소유자·그룹·실행 비트는 Windows 권한을
-나타내지 않는다. 외부 변경을 재현하는 시험은 `GetSecurityInfo` / `SetSecurityInfo`로 소유자에게 쓰기 권한을
+나타내지 않는다. 시험 소유 파일을 쓰는 시험은 `GetSecurityInfo` / `SetSecurityInfo`로 소유자에게 쓰기 권한을
 주고 네이티브 속성을 바꾼다. 내용만 바꾸는 시험은 원래 DACL과 속성을 복구하고, 소유자 변경은 네이티브 식별
 조회 결과를 바꿔 재현한다.
 
@@ -540,16 +540,25 @@ DACL을 준다. 읽기 핸들을 닫고 정확한 디렉터리를 쓰기 권한�
 
 현재 권한 가드 안에서 의도를 기록한 뒤, 보유 중인 객체의 권한 부여 전 메타데이터를 원래 파일 기록,
 계획 항목 또는 생성 식별과 비교한다. 불일치하면 ACL을 바꾸기 전에 거부한다. 공통 네이티브 헬퍼는 권한을
-주기 전에 정확한 예상 보안 상태를 계산한다. 검증된 기존 소유자, 상속하지 않는 소유자 ACE 하나만 가진
-보호 DACL(`0x130189`), 그리고 DACL-present/protected를 설정하고 DACL-defaulted를 해제한 원래 descriptor
-제어 플래그다. 소유자/DACL/제어 필드를 self-relative 버퍼의 오프셋과 무관하게 정확히 비교하며, 저장된 식별
+주기 전에 검증된 기존 소유자 SID로 예상 보안 의미를 계산한다. 같은 소유자, 존재하며 보호된 DACL,
+정확히 하나의 `ACCESS_ALLOWED_ACE`(type `0`), ACE flags `0`, mask `0x130189`, ACE 안의 같은 SID다.
+`GetSecurityInfo`의 `OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION` 조회와
+`SetSecurityInfo`의 `DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION` 설정 계약에
+따르며 소유자는 바꾸지 않는다. 문서화된 self-relative descriptor·ACL·ACE 구조를 범위 검사하며 파싱해
+해당 필드를 읽는다. 자동 상속·자동 상속 요청 비트를 비롯한 나머지 descriptor 제어 비트와 ACL 할당의
+미사용 바이트는 의미 동등성 판정에 쓰지 않는다. 관측한 보안 값을 예상 값으로 채택하지 않는다. 저장된 식별
 hash는 원래 raw descriptor 형식을 유지한다. 이후의 모든 관측은 보안 값만 미리 계산한 값으로 바꾼 원래
 식별과 일치해야 하고, 권한 부여 중에는 변경 시각만 추가로 달라질 수 있다. 디렉터리 크기·링크 수·쓰기/변경
 시각은 이 정리가 앞서 자식을 지운 뒤에 관측한다. 원래 앵커·계획·생성 기록은 안정된 식별 스키마의 모든
 필드에 계속 기준이 되며, 헬퍼는 권한 부여 전 네이티브 관측의 나머지 필드를 모두 보존한다. 보유한 핸들로
 검증된 기존 소유자에게만 `FILE_WRITE_ATTRIBUTES`를 주고 정확한 결과를 검증한 뒤, 대상의 고정 핸들을 모두
 닫고 전용 `DELETE | FILE_WRITE_ATTRIBUTES` 변경 핸들을 연다. 전용 핸들은 헬퍼의 전체 예상 식별과 그대로
-일치해야 한다. 전체 파일 바이트 또는 디렉터리가 비었는지도 다시 확인한다.
+일치해야 한다. 전체 파일 바이트 또는 디렉터리가 비었는지도 다시 확인한다. 마지막 식별 및 소유자/DACL
+의미 비교는 내용·비어 있음 검사를 마친 전용 핸들에서 `SetFileInformationByHandle` disposition 호출 직전에
+수행한다. 비교와 disposition은 별도 연산이므로 마지막 비교 뒤부터 disposition 전까지의 보안 변경은
+관측하지 못할 수 있다. 이 구간의 변경을 배제하는 문서화된 Windows API는 없다. 이는 가드의 수용된 Windows
+한계이며 소유권의 연속성이나 원자성을 보장하지 않는다. 회귀 시험은 이름 붙인 앞선 검사 지점에서 시험 소유
+객체의 기록 필드 하나를 바꾸고, 정리가 거부되어 객체가 남으며 완료를 기록하지 않는지 확인한다.
 권한 부여 뒤, disposition 전의 식별 검사에서 거부하면 대상은 남고 삭제 건수에 넣지 않으며, 이미 부여한 소유자 전용 ACL을
 유지한다. 오래되었을 수 있는 ACL로 복원하지 않는다.
 파일을 먼저 닫고 manifest 디렉터리를,
@@ -568,6 +577,10 @@ disposition 실패의 Win32 오류 코드를 보존한다. 읽기 전용 파일�
 [확장 disposition 플래그](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex),
 [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle),
 [FlushFileBuffers 권한](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)에 따른다.
+보안 의미 필드는 [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+[ACL](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-acl),
+[ACCESS_ALLOWED_ACE](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-access_allowed_ace)의 계약을 따른다.
 
 ## 게이트
 

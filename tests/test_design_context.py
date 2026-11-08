@@ -37,6 +37,10 @@ NATIVE = sys.platform == "darwin" and platform.machine() == "arm64"
 NATIVE_ONLY = "the reference profile is qualified only for native macOS arm64"
 _GrantSecurityChange = Literal['unchanged', 'preparation', 'owner', 'access', 'ace-flags',
                                'extra-ace', 'unprotected', 'control']
+_SemanticFixture = Literal['different-control', 'padded-acl', 'owner', 'ace-owner', 'extra-ace',
+                           'ace-type', 'ace-flags', 'access', 'unprotected', 'absent', 'null']
+_SEMANTIC_FIXTURES: tuple[_SemanticFixture, ...] = ('different-control', 'padded-acl', 'owner', 'ace-owner',
+    'extra-ace', 'ace-type', 'ace-flags', 'access', 'unprotected', 'absent', 'null')
 
 FAKE_STREAM = '''# 스트림 가짜 Claude — 브리프의 Design data 파일을 Read 도구 이벤트로 읽은 것처럼 stream-json 을 낸다.
 import json, os, re, sys
@@ -1304,6 +1308,218 @@ class WindowsNativeRosterTest(unittest.TestCase):
             with mock.patch.object(self.ct, 'get_last_error', side_effect=lambda: self.last_error, create=True):
                 super().delete(handle)
 
+    class SemanticNative(Native):
+        SID = bytes.fromhex('010200000000000515000000e9030000')
+        OTHER_SID = bytes.fromhex('010200000000000515000000ea030000')
+
+        def __init__(self, target: str, fixture: _SemanticFixture):
+            import types
+
+            super().__init__()
+            self.target = target
+            self.fixture: _SemanticFixture = fixture
+            self.states: dict[int, tuple[bytes, bytes | None, int]] = {}
+            self.allocations = {}
+            self.submitted: list[tuple[int, int, bytes]] = []
+            self.security = types.SimpleNamespace(GetSecurityInfo=self._get_security,
+                GetSecurityDescriptorLength=lambda sd: len(self.allocations[sd.value]),
+                GetLengthSid=lambda sid: 8 + 4 * self.ct.string_at(sid, 2)[1],
+                IsValidSid=lambda sid: int(self.ct.string_at(sid, 2) == b'\x01\x02'),
+                InitializeAcl=self._initialize_acl, AddAccessAllowedAce=self._add_ace,
+                SetSecurityInfo=self._set_security)
+            self.free = mock.patch.object(self.kernel, 'LocalFree', new=lambda sd: self.allocations.pop(sd.value))
+            self.free.start()
+
+        @staticmethod
+        def _acl(aces: list[bytes], padding: int = 0) -> bytes:
+            size = 8 + sum(map(len, aces)) + padding
+            return b'\x02\0' + size.to_bytes(2, 'little') + len(aces).to_bytes(2, 'little') + b'\0\0' + \
+                b''.join(aces) + bytes(padding)
+
+        @staticmethod
+        def _ace(mask: int, sid: bytes) -> bytes:
+            return b'\0\0' + (8 + len(sid)).to_bytes(2, 'little') + mask.to_bytes(4, 'little') + sid
+
+        def _state(self, handle) -> tuple[bytes, bytes | None, int]:
+            inode = self.handles[handle]
+            if inode not in self.states:
+                item = self.nodes[inode]
+                access = item.get('acl_access', 0x1F01FF)
+                assert isinstance(access, int)
+                self.states[inode] = (self.SID, self._acl([self._ace(access, self.SID)]),
+                                      0x9504 if item['name'] == self.target else 0x9004)
+            return self.states[inode]
+
+        def _get_security(self, handle, kind, fields, owner, group, dacl, sacl, descriptor):
+            sid, acl, control = self._state(handle)
+            assert (kind, fields, group, sacl) == (1, 5, None, None)
+            acl_offset, owner_offset = (20, 20 + len(acl)) if acl is not None else (0, 20)
+            raw = struct.pack('<BBHIIII', 1, 0, control, owner_offset, 0, 0, acl_offset) + (acl or b'') + sid
+            buffer = self.ct.create_string_buffer(raw, len(raw))
+            address = self.ct.addressof(buffer)
+            self.allocations[address] = buffer
+            descriptor._obj.value, owner._obj.value = address, address + owner_offset
+            dacl._obj.value = address + acl_offset if acl is not None else None
+            return 0
+
+        def _initialize_acl(self, acl, length, revision):
+            assert revision == 2 and length >= 8
+            raw = b'\x02\0' + length.to_bytes(2, 'little') + bytes(length - 4)
+            self.ct.memmove(acl, raw, length)
+            return 1
+
+        def _add_ace(self, acl, revision, mask, sid):
+            header = self.ct.string_at(acl, 8)
+            assert header[:2] == b'\x02\0' and header[4:] == bytes(4) and revision == 2
+            ace = self._ace(mask, self.ct.string_at(sid, self.security.GetLengthSid(sid)))
+            raw = self._acl([ace])
+            assert len(raw) == int.from_bytes(header[2:4], 'little')
+            self.ct.memmove(acl, raw, len(raw))
+            return 1
+
+        def _set_security(self, handle, kind, fields, owner, group, dacl, sacl):
+            assert (kind, fields, owner, group, sacl) == (1, 0x80000004, None, None, None)
+            header = self.ct.string_at(dacl, 8)
+            acl = self.ct.string_at(dacl, int.from_bytes(header[2:4], 'little'))
+            assert header[:2] == b'\x02\0' and header[4:6] == b'\x01\0'
+            ace = acl[8:]
+            assert ace[:2] == b'\0\0' and int.from_bytes(ace[2:4], 'little') == len(ace)
+            mask, sid = int.from_bytes(ace[4:8], 'little'), ace[8:]
+            assert sid == self._state(handle)[0]
+            inode = self.handles[handle]
+            self.submitted.append((inode, mask, acl))
+            self.nodes[inode]['acl_access'] = mask
+            stored_owner, stored_acl = sid, self._acl([self._ace(mask, sid)])
+            control = 0x9504 if self.nodes[inode]['name'] == self.target else 0x9004
+            if mask == 0x130189 and self.nodes[inode]['name'] == self.target:
+                control = 0x9004
+                match self.fixture:
+                    case 'different-control':
+                        pass
+                    case 'padded-acl':
+                        stored_acl = self._acl([ace], padding=16)
+                    case 'owner':
+                        stored_owner = self.OTHER_SID
+                    case 'ace-owner':
+                        stored_acl = self._acl([self._ace(mask, self.OTHER_SID)])
+                    case 'extra-ace':
+                        stored_acl = self._acl([ace, ace])
+                    case 'ace-type':
+                        stored_acl = self._acl([b'\x01' + ace[1:]])
+                    case 'ace-flags':
+                        stored_acl = self._acl([ace[:1] + b'\x02' + ace[2:]])
+                    case 'access':
+                        stored_acl = self._acl([self._ace(0x1F01FF, sid)])
+                    case 'unprotected':
+                        control = 0x8004
+                    case 'absent':
+                        control, stored_acl = 0x9000, None
+                    case 'null':
+                        stored_acl = None
+                    case other:
+                        assert_never(other)
+            self.states[inode] = stored_owner, stored_acl, control
+            return 0
+
+        def _require_principal(self, owner):
+            assert self.ct.string_at(owner, 16) in (self.SID, self.OTHER_SID)
+
+        def info(self, handle):
+            return dict(super().info(handle), uid=self.security_digest(handle))
+
+        def _security_state(self, handle):
+            return tc._WindowsIO._security_state(self, handle)
+
+        def _owner_acl(self, handle, access):
+            tc._WindowsIO._owner_acl(self, handle, access)
+            self.native_calls.append(('owner-acl', self.handles[handle], access))
+
+        def seal(self, handle):
+            super().seal(handle)
+            self._owner_acl(handle, 0x130089)
+
+        def grant_writes(self, handle):
+            super().grant_writes(handle)
+            self._owner_acl(handle, 0x1F01FF)
+
+    def test_native_cleanup_compares_semantic_grant(self):
+        for target in ('leaf', 'manifest', 'data'):
+            for fixture in _SEMANTIC_FIXTURES:
+                with self.subTest(target=target, fixture=fixture):
+                    root, manifest, name = pathlib.PureWindowsPath(r'C:\work'), 'a' * 64, 'b' * 64
+                    target_name = {'leaf': name, 'manifest': manifest, 'data': tc.DATA_DIR}[target]
+                    native = self.SemanticNative(target_name, fixture)
+                    done = tc._install_windows(root, manifest, {name: b'original'}, native=native)
+                    installed = done.facts()
+                    done.close()
+                    reopened, states = tc._reopen_windows(root, manifest, installed, native=native)
+                    if reopened is None:
+                        self.fail('the original native installation could not be reopened')
+                    self.addCleanup(reopened.close)
+                    self.assertEqual(states, {name: 'present-unchanged'})
+                    if target != 'leaf':
+                        tc.remove_leaves(reopened, [name], before=lambda _: None, after=lambda *row: None)
+                    held = {'leaf': reopened.leaf_handles.get(name), 'manifest': reopened.m_fd,
+                            'data': reopened.data_fd}[target]
+                    inode, progress = native.handles[held], []
+                    accepted = fixture in ('different-control', 'padded-acl')
+                    installation: tc.WindowsInstallation = reopened
+
+                    def remove():
+                        if target == 'leaf':
+                            return tc.remove_leaves(installation, [name], before=lambda _: None,
+                                                    after=lambda *row: progress.append(row))
+                        return tc.remove_directories(installation, before=lambda _: None,
+                                                     after=lambda *row: progress.append(row))
+
+                    if accepted:
+                        remove()
+                    else:
+                        with self.assertRaises(tc.InstallRefused):
+                            remove()
+                    self.assertEqual(inode in native.nodes, not accepted)
+                    self.assertEqual(any(row[:2] == (target_name, 'absent') for row in progress), accepted)
+                    self.assertEqual([row for row in native.native_calls if row[:2] == ('disposition', inode)],
+                                     [('disposition', inode, 0x130181, 0x13)] if accepted else [])
+                    self.assertTrue(any(row[:2] == (inode, 0x130189) for row in native.submitted))
+                    self.assertEqual(native.allocations, {})
+
+    def test_native_retirement_compares_semantic_grant(self):
+        for target in ('leaf', 'directory', 'root'):
+            for fixture in _SEMANTIC_FIXTURES:
+                with self.subTest(target=target, fixture=fixture):
+                    target_name = {'leaf': 'product.txt', 'directory': 'nested', 'root': 'work'}[target]
+                    native = self.SemanticNative(target_name, fixture)
+                    parent = pathlib.Path(r'C:\work')
+                    root, anchors = native.open_anchor(parent)
+                    inode, target_path = native.handles[root], []
+                    if target != 'root':
+                        directory = root
+                        if target == 'directory':
+                            directory, _ = native.open_child(root, 'nested', directory=True, create=True, writable=True)
+                            inode, target_path = native.handles[directory], ['nested']
+                        leaf, _ = native.open_child(directory, 'product.txt', directory=False, create=True, writable=True)
+                        native.write(leaf, b'original')
+                        if target == 'leaf':
+                            inode, target_path = native.handles[leaf], ['product.txt']
+                        native.close(leaf)
+                        if directory != root:
+                            native.close(directory)
+                    for held in reversed(anchors):
+                        native.close(held)
+                    plan = self._native_retirement_plan(native, parent)
+                    progress = []
+                    disposed = snapshot._windows_guarded_remove(parent, plan,
+                        lambda item, phase: progress.append((item['path'], phase)) or True, native=native)
+                    accepted = fixture in ('different-control', 'padded-acl')
+                    self.assertEqual(disposed, accepted)
+                    self.assertEqual(inode in native.nodes, not accepted)
+                    self.assertEqual((target_path, 'absent') in progress, accepted)
+                    self.assertEqual([row for row in native.native_calls if row[:2] == ('disposition', inode)],
+                                     [('disposition', inode, 0x130181, 0x13)] if accepted else [])
+                    self.assertTrue(any(row[:2] == (inode, 0x130189) for row in native.submitted))
+                    self.assertEqual(native.allocations, {})
+
     def test_native_create_only_evidence_recovers_an_exact_prefix(self):
         import errno
 
@@ -2036,7 +2252,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 self.assertEqual(calls, [*expected, ('LocalFree', address)])
                 native.security.MakeSelfRelativeSD.assert_not_called()
 
-    def test_native_grant_verifies_exact_owner_dacl_and_control_across_descriptor_layouts(self):
+    def test_native_grant_compares_owner_dacl_semantics_across_descriptor_layouts(self):
         import ctypes as ct
         import types
 
@@ -2046,7 +2262,9 @@ class WindowsNativeRosterTest(unittest.TestCase):
         changes: tuple[_GrantSecurityChange, ...] = (
             'unchanged', 'preparation', 'owner', 'access', 'ace-flags', 'extra-ace', 'unprotected', 'control')
         change: _GrantSecurityChange
-        for control in (0x8004, 0x800C, 0x8404, 0x9004):
+        for control, stored_control in ((0x8004, 0x9004), (0x800C, 0x9004), (0x8404, 0x9004),
+                                        (0x9004, 0x9404), (0x8104, 0x9004), (0x8504, 0x9404),
+                                        (0x9504, 0x9004)):
             for change in changes:
                 with self.subTest(control=control, change=change):
                     current_owner, current_acl, current_control, granted = owner, original_acl, control, False
@@ -2069,7 +2287,14 @@ class WindowsNativeRosterTest(unittest.TestCase):
                         descriptor._obj.value = address
                         return 0
 
+                    def initialize_acl(acl, length, revision):
+                        self.assertEqual((length, revision), (32, 2))
+                        ct.memmove(acl, b'\x02\0\x20\0' + bytes(28), length)
+                        return 1
+
                     def add_ace(acl, revision, access, sid):
+                        self.assertEqual(ct.string_at(acl, 8), b'\x02\0\x20\0\0\0\0\0')
+                        self.assertEqual(revision, 2)
                         sid_bytes = ct.string_at(sid, 16)
                         raw = struct.pack('<BBHHHBBHI', 2, 0, 32, 1, 0, 0, 0, 24, access) + sid_bytes
                         ct.memmove(acl, raw, len(raw))
@@ -2078,8 +2303,10 @@ class WindowsNativeRosterTest(unittest.TestCase):
                     def set_security(handle, kind, fields, sid, group, dacl, sacl):
                         nonlocal current_owner, current_acl, current_control, granted
                         self.assertEqual(fields, 0x80000004)
-                        current_acl = ct.string_at(dacl, 32)
-                        current_control = (current_control | 0x1004) & ~0x0008
+                        header = ct.string_at(dacl, 8)
+                        current_acl = ct.string_at(dacl, int.from_bytes(header[2:4], 'little'))
+                        self.assertEqual(current_acl, expected_acl)
+                        current_control = stored_control
                         granted = True
                         calls.append('set-dacl')
                         match change:
@@ -2104,7 +2331,7 @@ class WindowsNativeRosterTest(unittest.TestCase):
                     security = types.SimpleNamespace(GetSecurityInfo=get_security,
                         GetSecurityDescriptorLength=lambda descriptor: len(allocations[descriptor.value]),
                         IsValidSid=lambda sid: 1, GetLengthSid=lambda sid: 16,
-                        InitializeAcl=lambda acl, length, revision: 1, AddAccessAllowedAce=add_ace,
+                        InitializeAcl=initialize_acl, AddAccessAllowedAce=add_ace,
                         SetSecurityInfo=set_security)
                     kernel = types.SimpleNamespace(LocalFree=lambda descriptor: allocations.pop(descriptor.value))
                     metadata = {'dev': 10, 'ino': 7, 'size': 8, 'nlink': 1, 'mode': 0o444, 'type': 'file',
@@ -2118,10 +2345,10 @@ class WindowsNativeRosterTest(unittest.TestCase):
                             mock.patch.object(native, 'info', side_effect=info), \
                             mock.patch.object(native, '_require_principal'):
                         expected = native.info(7)
-                        if change == 'unchanged':
+                        if change in ('unchanged', 'control'):
                             prepared = native.grant_delete(7, expected)
                             digest = 'sha256:' + hashlib.sha256(canonical([
-                                owner.hex(), expected_acl.hex(), (control | 0x1004) & ~0x0008])).hexdigest()
+                                owner.hex(), True, True, 1, 0, 0, 0x130189, owner.hex()])).hexdigest()
                             self.assertEqual(prepared, dict(expected, uid=digest, change_time=5))
                             self.assertEqual(native.delete_info(7), prepared)
                         else:

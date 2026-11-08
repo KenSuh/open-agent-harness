@@ -560,7 +560,7 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
 On native Windows, DATA retention and snapshot retirement use the same `_WindowsIO` object identity: volume and
 file ID, the owner SID and DACL security-descriptor digest, attributes, size and complete content. Ancestor checks
 include each directory's file ID and security digest. The `mode` value describes the DOS read-only attribute;
-POSIX owner/group/execute bits do not describe Windows access. Tests that simulate a foreign change grant the
+POSIX owner/group/execute bits do not describe Windows access. Tests of test-owned files grant the
 owner write access through `GetSecurityInfo` / `SetSecurityInfo` and change the native attribute, restoring the
 original DACL and attribute when testing content alone. Simulated owner changes alter the native identity readout.
 
@@ -580,10 +580,15 @@ deleted them or reports `VERIFIED_CLEANED`. A mismatch refuses
 before deleting data. Cleanup records the permission transition before leaf progress; retained acknowledgments
 still require their exact captured metadata. Inside the current authority guard and after recording intent, oah
 compares the held object's pre-grant metadata with its original leaf record, plan entry or creation identity.
-A mismatch refuses before changing its ACL. Before the grant, the shared native helper computes its exact
-expected security state: the verified existing owner, a protected DACL with one non-inheriting owner ACE
-(`0x130189`), and the original descriptor control flags with DACL-present/protected set and DACL-defaulted
-cleared. It compares exact owner/DACL/control fields independently of self-relative buffer offsets; persisted
+A mismatch refuses before changing its ACL. Before the grant, the shared native helper computes its expected
+semantic security state from the verified existing owner SID: that same owner; a present, protected DACL;
+exactly one `ACCESS_ALLOWED_ACE` (type `0`), ACE flags `0`, mask `0x130189`, and that same SID in the ACE.
+It relies on `GetSecurityInfo` with `OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION` and
+`SetSecurityInfo` with `DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION`, which leaves the
+owner unchanged. A bounded parse of the documented self-relative descriptor, ACL and ACE layouts reads those
+fields. Other descriptor control bits, including automatic-inheritance and auto-inherit-request bits, and unused
+ACL allocation bytes do not determine semantic equality. No observed security value becomes the expectation;
+persisted
 identity hashes keep their original raw-descriptor format. Every later observation must match the original
 identity with security replaced by this precomputed value; only change time may also change during the grant.
 Directory size, link count and write/change timestamps are sampled after this cleanup's earlier child removals;
@@ -592,7 +597,13 @@ keeps every other field of that pre-grant native sample unchanged. Oah grants on
 `FILE_WRITE_ATTRIBUTES` on the held object, verifies that exact result, closes every pin on the target, and opens
 a dedicated mutation handle with `DELETE | FILE_WRITE_ATTRIBUTES`.
 The dedicated handle must match the helper's full expected identity unchanged, and oah rechecks complete file
-bytes (or directory emptiness). If a post-grant identity check
+bytes (or directory emptiness). The last identity and semantic owner/DACL comparison uses that dedicated handle
+after the content or emptiness check, immediately before the `SetFileInformationByHandle` disposition call.
+The comparison and disposition are separate operations: a security change after that last comparison and before
+disposition can remain unobserved. No documented Windows API excludes changes during this interval. This is an
+accepted Windows limit of the guard, not a continuous or atomic ownership guarantee. Regression tests change
+one recorded field of a test-owned object at named earlier check points and assert that cleanup refuses, keeps
+the object and records no completion. If a post-grant identity check
 refuses before disposition,
 the target remains present and uncounted with the owner-only ACL already granted; oah does not restore a
 possibly stale ACL. Leaves close before their manifest directory, and that
@@ -612,6 +623,10 @@ The platform contracts are [CreateFileW sharing](https://learn.microsoft.com/en-
 [extended disposition flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)
 and [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle).
 Directory durability also follows the [FlushFileBuffers access contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+Semantic security fields follow [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo),
+[SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo),
+[ACL](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-acl) and
+[ACCESS_ALLOWED_ACE](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-access_allowed_ace).
 
 ## Gates
 
