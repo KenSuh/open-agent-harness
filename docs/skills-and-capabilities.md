@@ -120,6 +120,18 @@ selections and authorized relays and save only their closed digest/count/enum pr
 in memory. What it costs you: queued work, a correction or a settlement must be prepared again after a relevant
 local change or expiry; a direct API call cannot skip admission.
 
+**One request boundary.** `skills find --task` checks the same existing required capabilities, target capacity
+and access as a dispatch. Managed skill ordering also rechecks that admission immediately before its request.
+Taskless exploration and design inspection keep their own bounded lead admission. Every managed search,
+collector fetch and advice request writes a bounded attempt summary before sending. What it costs you: an
+unavailable required capability or a changed local input needs an explicit correction and a new preparation
+before another request; failed work that used requests or tokens stays inspectable before retry.
+
+**Ordinary work keeps its existing path.** With no managed delivery, discovery, capability inputs or permitted,
+configured task advice, the same prompt, judges and reservation sequence run. Global rerank and judgement
+enable flags alone require no managed target profile. What it costs you: nothing; a run that cannot reach
+managed work behaves exactly as before.
+
 A required skill that cannot be delivered initially refuses the call with a
 typed code: `OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE` (`inaccessible` or
 `unsupported-engine`, `profile` or `access`) or `OAH_SKILL_NOT_DELIVERABLE` with its reason (`excluded`, `scope`,
@@ -139,7 +151,9 @@ route; elsewhere use inline or smaller material outside managed delivery, or spl
 is visible before any request.
 
 **Independent byte budgets.** Serialized inline skill texts may take up to 196,608 bytes; the whole reachable
-brief, including full referenced payload renders and read envelopes, may take up to 524,288 bytes. Deferred design
+brief, including full referenced payload renders and read envelopes, may take up to 524,288 bytes. Each required
+line/byte slice contributes its own read envelope to both that total and the token upper bound; 29,000 short
+lines read in slices of at most 2,000 lines require 15 envelopes. Deferred design
 content also keeps its independent 262,144-byte limit. There are at
 most 128 payloads, counting every skill body and auxiliary file. Every inline file is included once, including
 packs with more than 26 auxiliary files, using numeric labels. Over a budget, the call refuses with

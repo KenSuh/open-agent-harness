@@ -161,11 +161,21 @@ def qualify(target: Target, *, now: dt.datetime) -> TargetBudgetProfileV1:
 
 
 def read_render(data: bytes, *, envelope_bytes: int = READ_ENVELOPE_BYTES) -> int:
-    from oah.design.task_context import CHUNK_LIMIT
+    from oah.design.task_context import CHUNK_LIMIT, READ_LINE_LIMIT, file_lines
 
-    lines = data.decode("utf-8", "strict").splitlines()
-    rendered = sum(len(f"{number:6d}→{line}\n".encode("utf-8")) for number, line in enumerate(lines, 1))
-    reads = max(1, (rendered + CHUNK_LIMIT - 1) // CHUNK_LIMIT)
+    rendered, reads, slice_bytes, slice_lines = 0, 0, 0, 0
+    for number, line in enumerate(file_lines(data), 1):
+        size = len(f"{number:6d}→{line}\n".encode("utf-8"))
+        rendered += size
+        if slice_lines and (slice_lines == READ_LINE_LIMIT or slice_bytes + size > CHUNK_LIMIT):
+            reads += 1
+            slice_bytes, slice_lines = 0, 0
+        if size > CHUNK_LIMIT:
+            reads += (size + CHUNK_LIMIT - 1) // CHUNK_LIMIT
+        else:
+            slice_bytes += size
+            slice_lines += 1
+    reads += int(bool(slice_lines) or reads == 0)
     return rendered + reads * envelope_bytes
 
 

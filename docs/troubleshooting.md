@@ -185,7 +185,10 @@ These appear in v0.3.0.
 [Skills and capabilities](skills-and-capabilities.md) explains these steps. Initial deterministic admission and
 capacity refusals happen before a run folder or spend. Later preparation, receiving or settlement refusals can
 follow started requests or a child process. Inspect the state folder's `skills/attempts/*.json` for bounded per-attempt request
-facts and `capabilities-receiving.json` in the run for available usage before retrying. Unknown totals are recorded
+facts, including skill ordering, and `capabilities-receiving.json` in the run for available usage before retrying.
+If that first receiving write fails, the closed available-usage summary is retained in `skills-receiving.json`
+when that path is writable, before output normalization. The run still fails; a saved usage summary proves no
+delivery or application. Unknown totals are recorded
 as unknown, never zero; an observed partial count is not a total. What it costs you: a failed attempt may still
 have used requests or tokens, and that remains inspectable before retry.
 

@@ -138,7 +138,7 @@ def review(state_dir, *, repo: str, path: str, candidate: Mapping, allow: list[s
     so repeating a review (or `--update` with no upstream change) adds nothing. With `require_fresh`, a check that
     did not reach the upstream now (the collector kept its last verified commit) is ReviewFailed, never a review."""
     from oah import skillpack
-    from oah.discovery import attempts
+    from oah.discovery import gateway
 
     skillpack.require(admitted)
     short, full, fields = identity(repo, path)
@@ -150,16 +150,12 @@ def review(state_dir, *, repo: str, path: str, candidate: Mapping, allow: list[s
     original_transport, original_observer = sources.transport, sources.observer.transport
 
     def getter(url, **options):
-        admitted.reserve_query()
-        with attempts.request("skill-review", store.digest({"url": url}), state=state_dir,
-                              preparation=str(admitted.prepared.record()["digest"])):
-            return original_observer.getter(url, **options)
+        return gateway.send(admitted, "skill-review", store.digest({"url": url}),
+                            lambda: original_observer.getter(url, **options), state=state_dir, query=True)
 
     def git_url(locator):
-        admitted.reserve_query()
-        with attempts.request("skill-review", store.digest({"locator": locator}), state=state_dir, known=False,
-                              preparation=str(admitted.prepared.record()["digest"])):
-            return original_observer.git_url(locator)
+        return gateway.send(admitted, "skill-review", store.digest({"locator": locator}),
+                            lambda: original_observer.git_url(locator), state=state_dir, query=True, known=False)
 
     guarded = dataclasses.replace(original_observer, getter=getter, git_url=git_url)
     sources.transport = sources.observer.transport = guarded

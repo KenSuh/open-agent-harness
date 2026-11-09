@@ -248,7 +248,7 @@ class NeedsUnitTest(unittest.TestCase):
             sent.append(urllib.parse.unquote(url.rsplit("=", 1)[1]))
             return web.WebResult(200, url, {"Content-Type": "application/json"}, b'{"skills": []}')
 
-        settings = dict(providers.DEFAULTS)
+        settings = dict(providers.DEFAULTS, max_queries=1)
         class CachedTask(TaskRepo, unittest.TestCase):
             pass
 
@@ -256,6 +256,9 @@ class NeedsUnitTest(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.start_task()
+        config = fixture.repo / ".oah/config.toml"
+        git_commit(fixture.repo, {".oah/config.toml": config.read_text(encoding="utf-8") +
+                                  "\n[skills.discovery]\nmax_queries=1\n"}, "one query fixture")
         from oah.discovery import policy_digest
 
         with contextlib.chdir(fixture.repo):
@@ -267,10 +270,8 @@ class NeedsUnitTest(unittest.TestCase):
             current = call.task_basis(holder, task_design, packet, root=fixture.repo)
             item = tasks.need(current, dispatch_stage="initial", policy=policy_digest(settings),
                               tech=[("database", "mysql")])
-            admitted = skillpack.admit(skillpack.Operation("dispatch", task="t1",
-                lease=(holder.id, holder.generation), max_queries=1), task_design=task_design,
-                state_dir=fixture.state_dir, engine="claude", stage="initial", query_needs=[item],
-                scope=current.scope)
+            admitted = call.admit_task_discovery(call.CallRequest(engine="claude", stage="initial", task="t1"),
+                [item], root=fixture.repo, state_dir=fixture.state_dir, env=os.environ).admitted
             with mock.patch.object(providers, "GETTER", getter), contextlib.redirect_stderr(io.StringIO()):
                 (found,) = tasks.prepare_task(admitted, [item], state_dir=state, settings=settings, now=now,
                                               basis=current)

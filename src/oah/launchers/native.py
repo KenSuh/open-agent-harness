@@ -111,7 +111,7 @@ def _create_only(path: pathlib.Path, record: Mapping) -> bool:
             pass
 
 
-def _read(path: pathlib.Path, keys: tuple[str, ...]) -> dict | None:
+def _read(path: pathlib.Path, keys: tuple[str, ...], *, optional: tuple[str, ...] = ()) -> dict | None:
     try:
         data = json.loads(path.read_bytes().decode("utf-8"))
     except FileNotFoundError:
@@ -121,7 +121,7 @@ def _read(path: pathlib.Path, keys: tuple[str, ...]) -> dict | None:
                            "resets it, so repair or remove the file by hand") from None
     except OSError as exc:
         raise StorageError(path, exc) from exc
-    if not isinstance(data, dict) or set(data) != set(keys) or data.get("version") != 1:
+    if not isinstance(data, dict) or not set(keys) <= set(data) <= {*keys, *optional} or data.get("version") != 1:
         raise StateCorrupt(f"{StateCorrupt.code}: {path} is not a version 1 record with exactly its documented keys")
     return data
 
@@ -200,7 +200,15 @@ def read_settlement(run_dir: pathlib.Path) -> dict | None:
 
 
 def read_receiving(run_dir: pathlib.Path) -> dict | None:
-    return _read(pathlib.Path(run_dir) / RECEIVING_NAME, RECEIVING_KEYS)
+    from oah.capabilities.usage import valid_summary
+
+    path = pathlib.Path(run_dir) / RECEIVING_NAME
+    record = _read(path, RECEIVING_KEYS, optional=("available_usage",))
+    if record is not None and "available_usage" in record and (
+            not valid_summary(record["available_usage"])
+            or record["id"] != digest({key: value for key, value in record.items() if key != "id"})):
+        raise StateCorrupt(f"{StateCorrupt.code}: {path} does not keep a closed available-usage summary")
+    return record
 
 
 def receiving_record(run_id: str, offer: Mapping, bundle: Mapping | None, reads: Iterable[Mapping], *,

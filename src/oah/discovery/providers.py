@@ -202,15 +202,12 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitt
         (notify or (lambda text: print(text, file=sys.stderr)))(NOTICE)
         store.record_notice(state_dir, PROVIDER, at)
     try:
-        from oah.discovery import attempts
+        from oah.discovery import gateway
 
-        skillpack.require(admitted)
-        with attempts.request("skill-search", store.digest({"url": url}), state=state_dir,
-                              preparation=str(admitted.prepared.record()["digest"])) as fact:
-            result = GETTER(url, policy=POLICY, headers={"Accept": "application/json"})
-            outcome, hits = parse(result.body)
-            if fact is not None:
-                fact["outcome_digest"] = store.digest(outcome)
+        result = gateway.send(admitted, "skill-search", store.digest({"url": url}),
+                              lambda: GETTER(url, policy=POLICY, headers={"Accept": "application/json"}),
+                              state=state_dir)
+        outcome, hits = parse(result.body)
         detail = f"{len(hits)} result(s)" if outcome == "ok" else ("no results" if outcome == "zero-results"
                                                                    else "the answer did not match " + PARSER)
     except web.WebFailure as exc:

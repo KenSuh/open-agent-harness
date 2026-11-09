@@ -24,6 +24,24 @@ class TargetBudgetTest(unittest.TestCase):
         with mock.patch.object(budget, "_profile_source", e_qualification.source):
             return budget.qualify(TARGET, now=NOW)
 
+    def test_numbered_read_slices_respect_both_line_and_byte_limits(self):
+        profile = self.profile()
+        cases = ((b"\n" * 29000, 290000, 15), (b"a" * 2000 + b"\n", 2010, 1),
+                 ((b"a" * 2000 + b"\n") * 33, 66330, 3), (b"", 0, 1),
+                 ("a\u2028b\n".encode("utf-8"), 15, 1),
+                 (("\U0001f600" * 1750 + "\n").encode("utf-8") * 9, 63090, 3))
+        for data, rendered, reads in cases:
+            with self.subTest(lines=len(data)):
+                expected = rendered + reads * 2048
+                self.assertEqual(budget.read_render(data), expected)
+                measured = budget.measure(profile, "inline", deferred=(data,))
+                self.assertEqual(measured["deferred_render_bytes"], expected)
+                self.assertEqual(measured["upper_tokens"], 6 + expected +
+                    profile["estimator"]["fixed_render_tokens"] + profile["estimator"]["tool_schema_upper_tokens"])
+        with self.assertRaises(budget.BudgetRefused) as refused:
+            budget.measure(profile, "q" * 215000, deferred=(b"\n" * 29000,))
+        self.assertEqual(refused.exception.reason, "brief")
+
     def test_test_only_qualified_route_measures_the_whole_render_and_all_reserves(self):
         profile = self.profile()
         deferred = (b"first\nsecond\n", b"x" * 70000)

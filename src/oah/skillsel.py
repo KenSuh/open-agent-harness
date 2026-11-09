@@ -683,7 +683,7 @@ def home_of(env: Mapping[str, str]) -> pathlib.Path:
 
 def rerank_skills(selection: Selection, *, config: Mapping, query: str, brief_disabled: bool = False,
                   env: Mapping[str, str] | None = None, keychain=None, providers=None,
-                  state_dir: pathlib.Path | None = None) -> tuple[Selection, str]:
+                  state_dir: pathlib.Path | None = None, admitted=None) -> tuple[Selection, str]:
     """The selection in the re-ranker's order, and `used` or `unused(<reason>)`.
 
     The re-ranker may only re-order: a result that is not the same set of skills keeps the rule order and
@@ -691,12 +691,22 @@ def rerank_skills(selection: Selection, *, config: Mapping, query: str, brief_di
     `state_dir`, the re-ranker's breaker there applies (`oah.rerank.circuit`)."""
     from oah import rerank
 
+    if admitted is not None:
+        from oah import skillpack
+        from oah.discovery import gateway
+
+        skillpack.require(admitted)
+        providers = {name: gateway.SkillOrderProvider(provider, admitted, state_dir)
+                     for name, provider in (rerank.PROVIDERS if providers is None else providers).items()}
+
     candidates = [rerank.Candidate(skill.id, "; ".join(skill.reasons)) for skill in selection.skills]
     try:
         result = rerank.rerank("skills", candidates, config=config, query=query, brief_disabled=brief_disabled,
                                env=env, keychain=keychain, providers=providers, state_dir=state_dir)
     except rerank.ProviderError as exc:
         return selection, f"unused(error:{exc.code})"
+    if admitted is not None:
+        skillpack.require(admitted)
     names = [candidate.name for candidate in result.order]
     if sorted(names) != sorted(skill.id for skill in selection.skills):
         return selection, "unused(error:dropped)"
@@ -708,7 +718,7 @@ def rerank_skills(selection: Selection, *, config: Mapping, query: str, brief_di
 
 def choose(root: pathlib.Path, *, kind: str, stage: str, risk: str, scope: Sequence[str],
            state_dir: pathlib.Path | None, env: Mapping[str, str], brief_disabled: bool = False,
-           keychain=None, providers=None, now: dt.datetime | None = None) -> tuple[Selection, str]:
+           keychain=None, providers=None, now: dt.datetime | None = None, admitted=None) -> tuple[Selection, str]:
     """Select and re-rank the skills for one task in the repository `root` (see the module docstring)."""
     from oah import rerank
     from oah.config import load_config
@@ -723,4 +733,4 @@ def choose(root: pathlib.Path, *, kind: str, stage: str, risk: str, scope: Seque
     config = load_config(root).section("rerank", rerank.DEFAULTS)
     return rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
                          brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
-                         state_dir=state_dir)
+                         state_dir=state_dir, admitted=admitted)

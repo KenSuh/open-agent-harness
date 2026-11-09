@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from typing import Literal, Mapping, NotRequired, TypedDict
+from typing import Literal, Mapping, NotRequired, TypeAlias, TypedDict
 
 from oah.capabilities import digest
 
@@ -11,6 +11,7 @@ ALIASES = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
            "cache_read_input_tokens": "cacheReadInputTokens", "cache_creation_input_tokens": "cacheCreationInputTokens",
            "cost_usd": "costUSD"}
 Values = dict[str, int | float | None]
+Json: TypeAlias = str | int | float | bool | None | list["Json"] | dict[str, "Json"]
 
 
 class UsageSummary(TypedDict):
@@ -22,6 +23,20 @@ class UsageSummary(TypedDict):
     omitted_messages: int
     availability: Literal["available", "partial", "unknown"]
     digest: NotRequired[str]
+
+
+def valid_summary(raw: Json) -> bool:
+    if not isinstance(raw, dict) or set(raw) != set(UsageSummary.__annotations__) or type(raw["version"]) is not int \
+            or raw["version"] != 1 or type(raw["reported_result"]) is not bool \
+            or raw["availability"] not in ("available", "partial", "unknown") \
+            or type(raw["observed_messages"]) is not int or not 0 <= raw["observed_messages"] <= 128 \
+            or type(raw["omitted_messages"]) is not int or not 0 <= raw["omitted_messages"] <= 10**9:
+        return False
+    for key in ("totals", "observed"):
+        row = raw[key]
+        if not isinstance(row, dict) or set(row) != set(FIELDS) or values(row) != row:
+            return False
+    return raw["digest"] == digest({key: value for key, value in raw.items() if key != "digest"})
 
 
 def values(raw: object) -> Values:

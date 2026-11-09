@@ -15,6 +15,18 @@ from tests.test_skill_delivery import DeliveryTask
 
 
 class UsageFactsTest(unittest.TestCase):
+    def test_a_changed_usage_field_cannot_be_saved_as_a_closed_receiving_record(self):
+        from oah import skillpack
+        from oah.capabilities.usage import AvailableUsage
+
+        usage = AvailableUsage()
+        usage.event({"type": "assistant", "message": {"id": "m1", "usage": {"input_tokens": 7}}})
+        changed = json.loads(json.dumps(usage.record()))
+        changed["observed"]["input_tokens"] = "unavailable"
+        with self.assertRaisesRegex(ValueError, "not closed"):
+            skillpack.stream_receiving("r1", {"items": [], "digest": None},
+                {"rows": [], "whole": {}, "session": None}, target={}, at="2026-11-10T00:00:00Z", usage=changed)
+
     def test_a_summary_with_a_changed_digest_refuses_and_keeps_the_earlier_record(self):
         from oah.discovery.attempts import Attempt
         from oah.discovery.store import digest
@@ -87,6 +99,32 @@ class UsageFactsTest(unittest.TestCase):
 
 
 class AttemptEvidenceTest(DeliveryTask, unittest.TestCase):
+    def test_a_raw_reference_stream_keeps_available_usage_before_result_normalization(self):
+        from oah import call, skillpack
+        from oah.engines.proc import RunResult
+        from oah.launchers import native
+
+        self.build_skills(fixture.PLAIN)
+        prepared = self.prepare()
+        bundle = skillpack.bundle_of(prepared.run.path)
+        assert bundle is not None
+        raw = json.dumps({"type": "assistant", "message": {"id": "m1", "usage": {
+            "input_tokens": 7, "output_tokens": 3}}}) + "\n{broken\n"
+
+        result, _warnings, failure = call._conclude_skill_reads(prepared, bundle, raw,
+            RunResult(1, raw, "", False), normalize=True)
+
+        self.assertEqual(result.stdout, "")
+        assert failure is not None
+        self.assertIn("OAH_ENGINE_FAILED", failure)
+        record = native.read_receiving(prepared.run.path)
+        assert record is not None
+        self.assertIn("available_usage", record)
+        usage = record["available_usage"]
+        self.assertEqual((usage["observed"]["input_tokens"], usage["observed"]["output_tokens"]), (7, 3))
+        self.assertTrue(all(value is None for value in usage["totals"].values()))
+        self.assertEqual(usage["availability"], "partial")
+
     def test_a_late_prepare_refusal_keeps_the_started_skill_judge_summary(self):
         from oah import call
         from tests.helpers import git_commit

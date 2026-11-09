@@ -666,12 +666,12 @@ def _find_task(args: argparse.Namespace, info: RepoInfo, state: pathlib.Path, se
     else:
         needs = tasks.derive(basis, dispatch_stage=args.dispatch_stage, policy=policy)
     roots = _roots(info, state, settings)
-    # The task's dispatch admission comes first: an existing mandatory obligation that cannot be met refuses before
-    # any search. The needs being looked for are not yet obligations of this admission (nothing is selected yet).
-    admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation),
-                                                   max_queries=found_settings["max_queries"]),
-                               task_design=judged, state_dir=state, engine=args.engine, stage=args.dispatch_stage,
-                               roots=roots, policy=settings, scope=basis.scope, query_needs=needs)
+    try:
+        pack = call.admit_task_discovery(call.CallRequest(engine=args.engine, stage=args.dispatch_stage, task=args.task),
+            needs, root=info.root, state_dir=state, env=os.environ, query_file=args.needs)
+    except call.EngineError as exc:
+        raise Refused(exc.code, str(exc).split(": ", 1)[1]) from None
+    admitted = pack.admitted
     found = tasks.prepare_task(admitted, needs, state_dir=state, settings=found_settings,
                                now=dt.datetime.now(dt.timezone.utc), basis=basis,
                                notify=lambda notice: print(notice, file=sys.stderr))

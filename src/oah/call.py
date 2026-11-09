@@ -1341,7 +1341,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                   brief_disabled: bool = False, packet: Packet | None = None,
                   design_text: str | None = None, target=None, target_check=None, preview=None,
                   design=None, frozen_needs=None, advise: bool = True,
-                  expected: bool | None = None) -> SkillPack | None:
+                  expected: bool | None = None, query_needs=None, query_file: str | None = None) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links or task selections deliver skill texts, capabilities apply or task
     discovery ran, else None (the brief stays byte-identical). The skill admission, the capability plan's required
@@ -1355,7 +1355,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     from oah import discovery, skillpack
     from oah.capabilities import CapabilityRefused, inventory, plan as capability_plan
     from oah.config import ConfigError, load_config
-    from oah.discovery import budget, preparation, providers, tasks
+    from oah.discovery import budget, gateway, preparation, providers, tasks
     from oah.discovery.store import digest
 
     inputs = _CORRECTION_INPUTS.get() if expected is not False else None
@@ -1381,7 +1381,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         except tasks.NeedsInvalid as exc:
             raise EngineError(f"{exc.code}({exc.reason})", f"{str(exc).split(': ', 1)[1]}; nothing was "
                               "launched") from None
-    answerable = [item for item in needs if tasks.answerable(item)]
+    search_needs = needs if query_needs is None else query_needs
+    answerable = [item for item in search_needs if tasks.answerable(item)]
     section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
                else load_config(root).section("capabilities", capability_plan.DEFAULTS))
     capability_settings = capability_plan.check_settings(section)
@@ -1405,6 +1406,11 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                           for item in frozen_needs] if frozen_needs is not None else
                          task_needs(live_basis, stage=request.stage, policy=discovery.policy_digest(current_found),
                                     needs_file=request.skill_needs))
+        current_queries = ([tasks.verify(item, live_basis, policy=discovery.policy_digest(current_found))
+                            for item in query_needs] if query_needs is not None else [])
+        if query_file is not None and task_needs(live_basis, stage=request.stage,
+                policy=discovery.policy_digest(current_found), needs_file=query_file) != list(query_needs):
+            raise tasks.NeedsInvalid("stale", "the search needs file changed; prepare the operation again")
         selections = [tasks.selection_for(state_dir, item, lease_id=live.id) for item in current_needs]
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env), now=current,
                                 classes=capability_settings["classes"])
@@ -1426,7 +1432,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         return {"operation": value.operation.to_json(), "task": digest(dataclasses.asdict(live_basis)),
                 "lease": {"digest": digest(live.to_json()), "expires_at": live.expires_at},
                 "engine": request.engine, "stage": request.stage, "route": "native" if native else request.route,
-                "needs": current_needs, "selections": selections, "payloads": sorted(bodies, key=digest),
+                "needs": list({item["id"]: item for item in (*current_needs, *current_queries)}.values()),
+                "selections": selections, "payloads": sorted(bodies, key=digest),
                 "not_delivered": list(value.not_delivered),
                 "policy": digest({"skills": current_policy, "capabilities": load_config(root).section(
                     "capabilities", capability_plan.DEFAULTS),
@@ -1437,7 +1444,9 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                 "target": current_target,
                 "request_budget": value.operation.max_queries,
                 "references": digest({"parent": request.parent_inventory, "relay": list(request.relay_results),
-                                       "needs": request.skill_needs})}
+                                       "needs": request.skill_needs,
+                                       **({"query_file": skillpack._sha(pathlib.Path(query_file).read_bytes())}
+                                          if query_file else {})})}
 
     def prepare_e(value):
         nonlocal target
@@ -1445,22 +1454,22 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
             relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings)
-        needed = bool(value.items or value.not_delivered or answerable or capabilities is not None
-                      or request.skill_needs is not None or request.parent_inventory or request.relay_results)
-        if expected is not True and not needed:
-            if not (needs and not native and request.stage != "review" and request.retain_worker_text
-                    and not brief_disabled):
-                return None
+        needed = bool(value.items or value.not_delivered or capabilities is not None
+                      or request.skill_needs is not None or request.parent_inventory or request.relay_results
+                      or query_needs is not None)
+        config = None
+        task_advice = bool(needs and not native and request.stage != "review" and request.retain_worker_text
+                           and not brief_disabled)
+        if expected is not True and not needed and not answerable and task_advice:
             try:
                 from oah.rerank import DEFAULTS as RERANK_DEFAULTS
 
                 config = (inputs.config if inputs is not None else load_config(root)).section("rerank", RERANK_DEFAULTS)
             except (ImportError, AttributeError, ConfigError):
-                return None
-            judgement = config.get("judgement")
-            if not (config.get("enabled") is True and isinstance(judgement, Mapping)
-                    and judgement.get("enabled") is True):
-                return None
+                config = None
+        if expected is not True and not gateway.reachable(value.operation.kind, managed=needed,
+                discovery=bool(answerable), task_advice=task_advice, config=config, env=env, keychain=keychain):
+            return None
         if expected is False:
             raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed",
                                        "current managed E inputs need a new preparation")
@@ -1517,7 +1526,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     try:
         admitted = skillpack.admit(skillpack.Operation("dispatch", task=request.task,
                                                        lease=(holder.id, holder.generation),
-                                                       max_queries=found_settings["max_queries"] if answerable else 0),
+                                                       max_queries=found_settings["max_queries"]
+                                                       if answerable or query_needs is not None else 0),
                                    task_design=task_design, state_dir=state_dir, engine=request.engine,
                                    stage=request.stage, roots=roots,
                                    receiving_root=root if not native and request.retain_worker_text else None,
@@ -2341,11 +2351,15 @@ def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warn
                         native_canary=native_canary)
 
 
-def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, brief_disabled, now):
+def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, brief_disabled, now, admitted=None):
+    if admitted is not None:
+        from oah import skillpack
+
+        skillpack.require(admitted)
     check = _CORRECTION_INPUT_CHECK.get()
     if check is None:
         return skillsel.choose(root, kind=kind, stage=stage, risk=risk, scope=scope, state_dir=state_dir,
-                               env=env, keychain=keychain, brief_disabled=brief_disabled, now=now)
+                               env=env, keychain=keychain, brief_disabled=brief_disabled, now=now, admitted=admitted)
     from oah import rerank
 
     settings = _CORRECTION_INPUTS.get().config.section("skills", skillsel.config_defaults())
@@ -2359,7 +2373,7 @@ def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, b
     check(selection.to_record())
     config = _CORRECTION_INPUTS.get().config.section("rerank", rerank.DEFAULTS)
     return skillsel.rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
-                                 brief_disabled=brief_disabled, env=env, keychain=keychain)
+                                 brief_disabled=brief_disabled, env=env, keychain=keychain, admitted=admitted)
 
 
 def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
@@ -2579,9 +2593,13 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     advisory = difficulty.advisory
     skill_axes = scored.axes
     check_budget()
-    selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
-                              state_dir=state_dir, env=env, keychain=keychain,
-                              brief_disabled=disabled, now=now)
+    try:
+        selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
+                                  state_dir=state_dir, env=env, keychain=keychain,
+                                  brief_disabled=disabled, now=now,
+                                  **({"admitted": skill_pack.admitted} if skill_pack is not None else {}))
+    except skillpack.PackRefused as exc:
+        raise _pack_error(exc) from None
     check_budget()
     if task_design.state == "needs-review":
         warnings.append(f"{task_design.code}: {task_design.task.binding.line()} has a newer draft "
@@ -2820,7 +2838,7 @@ class _NativeBasis:
 
 
 def _native_basis(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
-                  parse_intent=None, read_source=None) -> _NativeBasis:
+                  parse_intent=None, read_source=None, allow_reference: bool = False) -> _NativeBasis:
     """The common pure preflight's reads in `_prepare`'s order (lease, packet, binding, design), spending nothing."""
     warnings = list(routing.check_stage(request.engine, request.stage, settings.stages,
                                         override=request.override_stage))
@@ -2843,7 +2861,7 @@ def _native_basis(request: CallRequest, settings: Settings, *, root: pathlib.Pat
     check_dispatch_binding(bound, packet, request.task)
     task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=request.stage, task=request.task,
                                        engine=request.engine)
-    if design is not None and not design.delivered:
+    if design is not None and not design.delivered and not allow_reference:
         from oah.design import task_context
 
         raise EngineError(task_context.REFERENCE_UNAVAILABLE_CODE, f"task {request.task}: the design does not fit the "
@@ -2879,6 +2897,34 @@ def _native_tier(request: CallRequest, basis: _NativeBasis) -> tuple[str, str, l
         tier = basis.floor_tier
         reasons.append(f"floor {basis.floor_tier}: this review's scope")
     return tier, "flag" if explicit else "rules", reasons, scored.axes
+
+
+def admit_task_discovery(request: CallRequest, query_needs, *, root: pathlib.Path, state_dir: pathlib.Path,
+                         env: Mapping[str, str], query_file: str | None = None) -> SkillPack:
+    from oah import call_cli, skillpack
+
+    settings = call_cli.load_settings(root)
+    basis = _native_basis(request, settings, root=root, state_dir=state_dir, allow_reference=True)
+    tier = _native_tier(request, basis)[0]
+    run = runs._plan_run(state_dir, request.task, request.engine, request.stage)[0]
+    design = basis.design
+    if design is not None and not design.delivered:
+        design = _reference_design(basis.task_design, design, request, root=root, run_id=run.id)
+    tools = call_cli.intent_tools()
+
+    def preview(pack):
+        chosen = skillsel.select(basis.scored.axes.kind, request.stage, basis.scored.axes.risk, basis.scope,
+                                 roots=skillpack.environment_roots(root, state_dir, env),
+                                 settings=skillsel.settings_for(root), state_dir=None, repo_root=root)
+        return _brief_text(request, run.id, basis.packet, basis.scope, None, tools.footer, tools.has_footer, [],
+                           (chosen, "unused(error:" + "x" * 40 + ")"), basis.holder, design, pack)
+
+    pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env,
+        packet=basis.packet, design_text=design.text if design is not None else None, design=design,
+        target_check=lambda: _e_target(request, tier, root=root, state_dir=state_dir, env=env),
+        preview=preview, advise=False, query_needs=query_needs, query_file=query_file)
+    assert pack is not None
+    return pack
 
 
 def _native_agent(tier: str, *, root: pathlib.Path, env: Mapping[str, str]) -> pathlib.Path | None:
@@ -3316,6 +3362,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     try:
         result = _run_prepared(prepared, env, prompt, sink=sink)
     except (OSError, ValueError, subprocess.SubprocessError, RootUnavailable) as exc:
+        _conclude_observation(prepared, sink)
         if prepared.retain_worker_text:
             run.write_logs("", "")
         extra = _end_reference_failed(reference)
@@ -3324,6 +3371,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                                  _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False)),
                           **({"warnings": [*run.read().get("warnings", []), *extra]} if extra else {}))
     except (KeyboardInterrupt, SystemExit):
+        _conclude_observation(prepared, sink)
         # _run_prepared already stopped the process tree; never leave the run looking alive.
         if prepared.retain_worker_text:
             run.write_logs("", "")
@@ -3340,6 +3388,17 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             var.reset(token)
     transport_warnings, transport_failure = [], None
     raw_stdout = result.stdout  # the skill reads below come from the stream as the engine wrote it
+    observation_failure = _conclude_observation(prepared, sink)
+    skill_warnings, skill_failure = [], None
+    receiving_bundle = skill_bundle
+    if receiving_bundle is None and reference is not None and prepared.e_digest is not None:
+        from oah import skillpack
+
+        receiving_bundle = skillpack.bundle_of(prepared.run.path) or {"items": [], "digest": None}
+    if receiving_bundle is not None:
+        result, skill_warnings, skill_failure = _conclude_skill_reads(prepared, receiving_bundle, raw_stdout, result,
+            normalize=reference is None,
+            usage=sink.observation["available_usage"] if sink is not None and sink.observation is not None else None)
     if reference is not None:
         concluded = False
         accounting_problem = "transport accounting did not complete"
@@ -3364,11 +3423,6 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                 reference.release()
         if not concluded:
             return run.read()
-    skill_warnings, skill_failure = [], None
-    observation_failure = _conclude_observation(prepared, sink)
-    if skill_bundle is not None:
-        result, skill_warnings, skill_failure = _conclude_skill_reads(prepared, skill_bundle, raw_stdout, result,
-                                                                      normalize=reference is None)
     finished = dt.datetime.now(dt.timezone.utc)
     if prepared.retain_worker_text:
         run.write_logs(clean(result.stdout), clean(result.stderr))
@@ -3426,15 +3480,13 @@ def _conclude_observation(prepared: "Prepared", sink) -> str | None:
     live check stopped it, its process tree did not go quiet, or the projection could not be written."""
     if sink is None or sink.observation is None:
         return None
-    from oah.atomic import write_json_atomic
-    from oah.capabilities import inventory
+    from oah.discovery import gateway
 
     observation = sink.observation
-    try:
-        write_json_atomic(prepared.run.file_path(inventory.RECEIVING_NAME), observation)
-    except OSError as exc:
+    failure = gateway.receive(prepared.run, observation)
+    if failure is not None:
         return (f"OAH_CAPABILITY_RECEIVING_FAILED: the stream observation of run {prepared.run_id} could not be "
-                f"recorded ({type(exc).__name__}); this run does not count. Check the run folder, then call again")
+                f"recorded ({failure}); this run does not count. Check the run folder, then call again")
     if observation["stopped"]:
         return (f"OAH_ENGINE_FAILED: claude's stream-json output failed the live check ({observation['reason']}: "
                 f"{observation['detail']}); oah stopped its process tree and this run does not count")
@@ -3457,7 +3509,7 @@ def _streamed_skill_bundle(prepared: "Prepared") -> dict | None:
     return bundle if bundle is not None and skillpack.references(bundle) else None
 
 
-def _conclude_skill_reads(prepared: "Prepared", bundle: Mapping, raw: str, result, *, normalize: bool):
+def _conclude_skill_reads(prepared: "Prepared", bundle: Mapping, raw: str, result, *, normalize: bool, usage=None):
     """(result, warnings, failure): pair the referenced reads in the raw stream and record them in
     skills-receiving.json. When E switched the output mode (`normalize`), stdout becomes the result line json mode
     prints, and a stream without one fails the run. Unread references leave delivery incomplete, not the run."""
@@ -3466,13 +3518,18 @@ def _conclude_skill_reads(prepared: "Prepared", bundle: Mapping, raw: str, resul
     from oah.design import task_context
 
     line, events, problem = task_context.parse_stream(raw)
-    if normalize:
-        result = dataclasses.replace(result, stdout=line)
+    if usage is None:
+        from oah.capabilities.usage import AvailableUsage
+
+        available = AvailableUsage()
+        for event in events:
+            available.event(event)
+        usage = available.record()
     observed = skillpack.observe_reads(events, root=pathlib.Path(prepared.cwd), bundle=bundle)
     record = skillpack.stream_receiving(prepared.run_id, bundle, observed,
                                         target={"engine": prepared.engine, "model": prepared.model,
                                                 "effort": prepared.launch_effort},
-                                        at=_iso(dt.datetime.now(dt.timezone.utc)))
+                                        at=_iso(dt.datetime.now(dt.timezone.utc)), usage=usage)
     warnings, failure = [], None
     if record["reference_delivery"] != "complete":
         unread = [f"{item['skill']} {aux['reference']['path']}" for item, aux in skillpack.references(bundle)
@@ -3488,6 +3545,8 @@ def _conclude_skill_reads(prepared: "Prepared", bundle: Mapping, raw: str, resul
     except OSError as exc:
         failure = (f"OAH_SKILL_RECEIVING_FAILED: the skill reads of run {prepared.run_id} could not be recorded "
                    f"({type(exc).__name__}); this run does not count. Check the run folder, then call again")
+    if normalize:
+        result = dataclasses.replace(result, stdout=line)
     return result, warnings, failure
 
 

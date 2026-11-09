@@ -812,13 +812,11 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         if not _admitted(request.rubric, admitted):
             return Judgement(unused("admission"), request.purpose, None)
         if request.rubric in E_RUBRICS:
-            from oah.discovery import attempts
+            from oah.discovery import gateway
 
-            with attempts.request("skill-judge", key_id, state=state_dir,
-                                  preparation=str(admitted.prepared.record()["digest"])) as fact:
-                raw, status = _call(lambda: provider.judge(state, questions, key=key, config=config))
-                if fact is not None:
-                    fact["outcome_digest"] = cache_key({"status": status})
+            raw, status = _call(lambda: gateway.send(admitted, "skill-judge", key_id,
+                lambda: provider.judge(state, questions, key=key, config=config),
+                state=state_dir if state_dir is not None else getattr(sources, "state_dir", None)))
         else:
             raw, status = _call(lambda: provider.judge(state, questions, key=key, config=config))
         if status == USED and isinstance(RUBRICS[request.rubric], OptionNoulRubric) and isinstance(raw, Mapping) \

@@ -867,7 +867,7 @@ def observe_reads(events: Sequence[Mapping], *, root: pathlib.Path, bundle: Mapp
     return {"session": session, "rows": rows, "whole": coverage}
 
 
-def stream_receiving(run_id: str, bundle: Mapping, observed: Mapping, *, target: Mapping, at: str) -> dict:
+def stream_receiving(run_id: str, bundle: Mapping, observed: Mapping, *, target: Mapping, at: str, usage=None) -> dict:
     """ReceivingRecordV1 of a Claude process run that read references: inline texts were written to the prompt; a
     reference counts as delivered only when a whole read of its exact bytes was observed. Never application."""
     from oah.launchers import native
@@ -890,8 +890,14 @@ def stream_receiving(run_id: str, bundle: Mapping, observed: Mapping, *, target:
               "session_id_digest": native.digest(observed["session"]) if observed["session"] else None,
               "delivery": "prompt-written", "items": items, "reference_delivery": "complete" if complete else
               "incomplete", "capability_receiving_ref": None, "at": at}
+    if usage is not None:
+        from oah.capabilities.usage import valid_summary
+
+        if not valid_summary(usage):
+            raise ValueError("the available-usage summary changed or is not closed")
+        record["available_usage"] = usage
     record["id"] = native.digest(record)
-    return {key: record[key] for key in native.RECEIVING_KEYS}
+    return {key: record[key] for key in (*native.RECEIVING_KEYS, *(["available_usage"] if usage is not None else []))}
 
 
 BUNDLE_KEYS = {"version", "operation", "design", "engine", "stage", "items", "not_delivered", "budget", "block_sha256",
