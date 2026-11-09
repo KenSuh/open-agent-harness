@@ -146,14 +146,50 @@ def _need_outcome(searches: list[dict], need: Mapping, deferred: list[dict]) -> 
     return "local-only" if need["local"] else "not-searched"
 
 
+def _terms(query: Mapping) -> tuple[str, ...]:
+    return tuple(sorted(set(query["used"].values())))
+
+
+def search_path(need: Mapping, provider: str, advise=None) -> dict:
+    """SearchPathV1 of one need (DESIGN §4.5, §7.1 skill-search/v1): its admitted public queries as opaque options,
+    one per distinct public term in template order, each carrying only the provider and that term as fixed labels.
+    Jev may choose which goes first; the search itself stays this adapter's, and the rest keep template order. One
+    option is taken without asking (`unused(single-option)`), none gives `unused(no-candidate)`. `advise(request)`
+    gets {"options": [...]} and returns {"status", "applied", "choice", "reason"}."""
+    keys = list(dict.fromkeys(_terms(query) for query in need["queries"]))
+    options = [{"option": f"o{index}", "provider": provider, "public_tech": list(key)} for index, key in enumerate(keys)]
+    path = {"version": 1, "options": options, "first": options[0]["option"] if options else None, "jev": None,
+            "applied": False, "reason": None}
+    if not options:
+        return dict(path, jev="unused(no-candidate)")
+    if len(options) == 1:
+        return dict(path, jev="unused(single-option)")
+    if advise is None:
+        return dict(path, jev="unused(judgement-off)")
+    answer = advise({"options": [dict(option) for option in options]})
+    if answer.get("applied") is True and answer.get("choice") in {option["option"] for option in options}:
+        return dict(path, first=answer["choice"], jev=answer["status"], applied=True)
+    return dict(path, jev=answer["status"], reason=answer.get("reason") or "not-applied")
+
+
+def _ordered(need: Mapping, path: Mapping | None) -> list[Mapping]:
+    """The need's queries with the chosen option's first, then the rest in template order."""
+    if not path or not path["applied"]:
+        return list(need["queries"])
+    first = tuple(next(option["public_tech"] for option in path["options"] if option["option"] == path["first"]))
+    return ([query for query in need["queries"] if _terms(query) == first]
+            + [query for query in need["queries"] if _terms(query) != first])
+
+
 def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.datetime, provider: str,
          view: Mapping | None, admitted, roots=(), choice: Mapping | None = None,
-         notify: Callable[[str], None] | None = None) -> dict:
+         notify: Callable[[str], None] | None = None, advise=None) -> dict:
     """Run the needs' public queries within the admitted budget and gather seeds and installed skills.
 
     `admitted` is skillpack's Admitted value of a taskless operation (E-DR3-F01): `design-inspect` for a design's
     needs, `public-explore` for a bare search. Its explicit request budget is the only one, every external search
-    carries it, and the report records the operation."""
+    carries it, and the report records the operation. With `advise`, a need with two or more admitted public
+    terms asks skill-search/v1 which goes first (`search_path`); the budget then reaches that one first."""
     from oah import skillpack
 
     if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind not in skillpack.TASKLESS:
@@ -162,7 +198,8 @@ def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.date
     entries = []
     for need in needs:
         searches, deferred = [], []
-        wanted = [(item["text"], "template", None) for item in need["queries"]]
+        path = search_path(need, provider, advise) if provider == "skills-sh" else None
+        wanted = [(item["text"], "template", None) for item in _ordered(need, path)]
         if choice is not None and choice["need_id"] == need["id"]:
             wanted.append((choice["exact_query"], "choice", choice["id"]))
         for text, origin, choice_id in (wanted if provider == "skills-sh" else ()):
@@ -177,7 +214,7 @@ def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.date
             searches.append(result.to_json())
         entries.append({"id": need["id"], "design_stage": need["design_stage"], "check": need["check"],
                         "tech": need["tech"], "queries": need["queries"], "local": need["local"],
-                        "searches": searches, "deferred": deferred,
+                        "searches": searches, "deferred": deferred, "search_path": path,
                         "outcome": _need_outcome(searches, need, deferred)})
     stages_seen = list(dict.fromkeys(need["design_stage"] for need in needs))
     seeds = []

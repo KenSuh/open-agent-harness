@@ -100,7 +100,7 @@ def _plan(args: argparse.Namespace) -> int:
                                       stage=args.stage, items=admitted.items, root=info.root, env=os.environ,
                                       state_dir=state, parent_path=args.parent_inventory,
                                       relay_refs=tuple(args.relay_result), now=_now(),
-                                      settings=plan.settings_for(info.root))
+                                      settings=plan.settings_for(info.root), class_status="unused(plan-pure)")
     except CapabilityRefused as exc:
         if args.json:
             print(json.dumps({"refused": {"code": exc.code, "reason": exc.reason, "message": exc.message},

@@ -1161,6 +1161,13 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         admitted, advice = skillpack.rank(admitted, advise=_skill_fit_advisor(
             root=root, state_dir=state_dir, env=env, keychain=keychain, brief_disabled=brief_disabled))
     block, bundle = skillpack.finalize(admitted)
+    class_needs, capability_advise = (), None
+    class_status = ("unused(native)" if native else "unused(review-isolated)" if request.stage == "review"
+                    else None)
+    if needs and class_status is None and request.retain_worker_text:
+        class_needs, class_status, capability_advise = _capability_advice(
+            root=root, state_dir=state_dir, env=env, keychain=keychain, brief_disabled=brief_disabled, basis=basis,
+            packet=packet, task=request.task, needs=needs)
     section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
                else load_config(root).section("capabilities", capability_plan.DEFAULTS))
     try:
@@ -1168,7 +1175,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
             relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc),
-            settings=capability_plan.check_settings(section))
+            settings=capability_plan.check_settings(section), class_needs=class_needs, class_status=class_status,
+            advise=capability_advise)
     except CapabilityRefused as exc:
         raise _pack_error(exc) from None
     if block is None and capability_block is None and not discovered:
@@ -1230,6 +1238,80 @@ def _skill_fit_advisor(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
                 "scores": [result.answers[key]["noul"] for key in options]}
 
     return advise
+
+
+def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapping[str, str], keychain,
+                       brief_disabled: bool, basis, packet: Packet, task: str, needs: Sequence[Mapping]):
+    """(class needs, class status, entry advise) for the capability plan (DESIGN §6.3.4, §7.1.1). One
+    capability-needs/v1 judgement per task need without a design, over that need's own slice of the packet's intent
+    section, infers its optional capability classes; a class counts only after the judge's recheck. Choosing an entry
+    among two or more qualified ones is a separate capability-select/v1 Choice that the plan asks with the same task
+    slice. Task text leaves only with send_task_text, and nothing here is asked under a lock."""
+    from oah.capabilities import digest as capability_digest
+    from oah.config import load_config
+    from oah.design.sources import open_sources
+    from oah.rerank import DEFAULTS as RERANK_DEFAULTS, judge
+
+    eligible = [item for item in needs if item["design"] is None and item["requirement"]["source"] == "packet-intent"]
+    if not eligible:
+        return (), None, None
+    config = load_config(root).section("rerank", RERANK_DEFAULTS)
+    sources = open_sources(root)
+    policy = sources.policy_digest()
+    task_view = judge.TaskView.of(task, packet)
+    start, _total = basis.section("packet-intent")
+    data = task_view.texts["intent"].encode("utf-8")
+
+    def ask(request, input_ref: str):
+        result = judge.judge(request, config=config, policy=policy, sources=sources, brief_disabled=brief_disabled,
+                             env=env, keychain=keychain, state_dir=state_dir, task_view=task_view)
+        if not result.status.startswith("used"):
+            return result, None
+        return result, judge.apply(result, current_input_ref=input_ref, config=config, sources=sources,
+                                   request=request, policy=policy, task_view=task_view)
+
+    class_needs, statuses = [], []
+    for item in eligible:
+        span = item["requirement"]
+        offset, size = span["offset"] - start, min(span["length"], judge.FIELD_BYTES)
+        while 0 < size < span["length"] and data[offset + size] & 0xC0 == 0x80:
+            size -= 1  # never cut a character
+        try:
+            field = judge.task_field(task_view, "intent", offset, size)
+        except judge.JudgeError:
+            statuses.append("unused(scope)")
+            continue
+        input_ref = capability_digest({"need": item["id"], "task_need": field.identity()})
+        result, applied = ask(judge.Request("capability-needs", "capability-needs/v1", (("task_need", field),),
+                                            input_ref=input_ref), input_ref)
+        statuses.append(result.status)
+        if applied is None or not applied.applied:
+            continue
+        for cls in sorted(label for label, reading in (applied.outcomes.get("labels") or {}).items()
+                          if reading == "yes"):
+            class_needs.append({"id": capability_digest({"class": cls, "need": item["id"], "origin": "jev"}),
+                                "class": cls, "capability_id": None, "required": False, "origin": "jev",
+                                "by": [f"need:{item['id'][7:19]}"], "advice_ref": applied.policy_digest,
+                                "task_need": field})
+    status = "used" if any(item.startswith("used") for item in statuses) else (statuses[0] if statuses else None)
+
+    def advise(need: Mapping, request: Mapping) -> dict:
+        fields = [("capability_class", judge.label("capability-class", request["class"])),
+                  ("task_need", need["task_need"])]
+        fields += [(f"{key}:capability_excerpt", field) for key, field in request["fields"].items()]
+        input_ref = capability_digest({"options": request["option_map_digest"],
+                                       "task_need": need["task_need"].identity()})
+        result, applied = ask(judge.Request("capability-needs", "capability-select/v1", tuple(fields),
+                                            tuple(request["fields"]), input_ref=input_ref), input_ref)
+        ref = judge.cache_key(result.identity) if result.identity else None
+        if applied is None:
+            return {"status": result.status, "applied": False, "choice": None, "reason": None, "judgement_ref": ref}
+        chosen = applied.applied and applied.outcomes.get("outcome") == "chosen"
+        return {"status": result.status, "applied": chosen, "choice": applied.outcomes.get("choice") if chosen else None,
+                "reason": None if chosen else (applied.outcomes.get("outcome") if applied.applied else applied.reason),
+                "judgement_ref": ref}
+
+    return tuple(class_needs), status, advise
 
 
 def _record_refusal(prepared: Prepared, error: EngineError) -> None:

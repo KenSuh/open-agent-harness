@@ -102,7 +102,8 @@ def register(commands: argparse._SubParsersAction) -> None:
 
     coverage = sub.add_parser("coverage", help="the nine design stages: status, re-checks, skills and gaps "
                               "(reads only), or `coverage edit` to build a new coverage part",
-                              usage="oah design coverage P D [--revision N | --accepted] [--json] [--check]\n"
+                              usage="oah design coverage P D [--revision N | --accepted] [--json] [--check] "
+                              "[--next]\n"
                               "       oah design coverage edit P D --from EDITS.json [--lang en|ko] [--out FILE]",
                               description="Reads only. `edit` writes nothing to the design: it prints the new coverage "
                               "part and the exact `oah design save` command that stores it.")
@@ -112,6 +113,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     coverage.add_argument("--accepted", action="store_true", help="read the accepted revision")
     coverage.add_argument("--json", action="store_true")
     coverage.add_argument("--check", action="store_true", help="exit 1 (OAH_COVERAGE_INCOMPLETE) unless complete")
+    coverage.add_argument("--next", action="store_true", help="the stage to work on next: the first frontier "
+                          "stage, or the one Jev chose among two or more (current revision only)")
     coverage.add_argument("--from", dest="from_file", metavar="EDITS.json", help="edit: a CoverageEditV1 file")
     coverage.add_argument("--lang", choices=("en", "ko"), help="edit: the language of the human section")
     coverage.add_argument("--out", help="edit: write the new part to this new file instead of standard output")
@@ -374,6 +377,48 @@ def _quote(arg: str) -> str:
     return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
 
 
+def _stage_advisor(store, view, snapshot):
+    """design-stage/v1 over the frontier (DESIGN §7.1): each option is an opaque `oN` with only its stage label, and
+    the design's own text is the one authored field, so nothing is sent unless send_design_text is on. The answer is
+    applied only after the judge's recheck against the same frontier, revision and text."""
+
+    def advise(options: dict) -> dict:
+        import hashlib
+
+        from oah.config import load_config
+        from oah.design.model import DESIGN_PART
+        from oah.discovery import review as reviews
+        from oah.rerank import DEFAULTS as RERANK_DEFAULTS, judge
+
+        config = load_config(store.root).section("rerank", RERANK_DEFAULTS)
+        sources = reviews.skill_sources(store.state, [])  # no public slice is read; the judge wants its policy
+        policy = sources.policy_digest()
+        data = snapshot.texts[DESIGN_PART].encode("utf-8")
+        size = min(len(data), judge.FIELD_BYTES)
+        while 0 < size < len(data) and data[size] & 0xC0 == 0x80:
+            size -= 1  # never cut a character
+        try:
+            fields = [(f"{key}:stage", judge.label("design-stage", stage)) for key, stage in options.items()]
+            fields.append(("context", judge.design_field(view, f"part:{DESIGN_PART}", 0, size)))
+        except judge.JudgeError:
+            return {"status": "unused(scope)", "applied": False, "choice": None, "reason": "scope"}
+        input_ref = "sha256:" + hashlib.sha256(json.dumps(
+            {"frontier": list(options.values()), "revision": snapshot.revision, "digest": snapshot.digest},
+            sort_keys=True).encode("utf-8")).hexdigest()
+        request = judge.Request("design-stage", "design-stage/v1", tuple(fields), tuple(options), input_ref=input_ref)
+        result = judge.judge(request, config=config, policy=policy, sources=sources, view=view, env=os.environ,
+                             state_dir=store.state, budget=judge.Budget(1))
+        if not result.status.startswith("used"):
+            return {"status": result.status, "applied": False, "choice": None, "reason": None}
+        applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, view=view,
+                              request=request, policy=policy)
+        chosen = applied.applied and applied.outcomes.get("outcome") == "chosen"
+        return {"status": result.status, "applied": chosen, "choice": applied.outcomes.get("choice") if chosen else None,
+                "reason": None if chosen else (applied.outcomes.get("outcome") if applied.applied else applied.reason)}
+
+    return advise
+
+
 def _coverage(args: argparse.Namespace, store) -> int:
     from oah.design import coverage
     from oah.design.model import check_id
@@ -385,13 +430,15 @@ def _coverage(args: argparse.Namespace, store) -> int:
                           "EDITS.json`")
     project, design = check_id(words[-2]), check_id(words[-1], "design")
     if editing:
-        if args.revision is not None or args.accepted or args.json or args.check:
+        if args.revision is not None or args.accepted or args.json or args.check or args.next:
             raise DesignError(INPUT_INVALID_CODE, "coverage edit takes --from, --lang and --out only")
         return _coverage_edit(args, store, project, design)
     if args.from_file or args.lang or args.out:
         raise DesignError(INPUT_INVALID_CODE, "--from, --lang and --out belong to `oah design coverage edit`")
     if args.revision is not None and args.accepted:
         raise DesignError(INPUT_INVALID_CODE, "give --revision or --accepted, not both")
+    if args.next and (args.revision is not None or args.accepted):
+        raise DesignError(INPUT_INVALID_CODE, "--next reads the current revision only")
     context = store.context(project, design)
     if args.accepted:
         if context.accepted is None:
@@ -405,6 +452,10 @@ def _coverage(args: argparse.Namespace, store) -> int:
     report = coverage.evaluate(record, snapshot.texts, evidence=_coverage_evidence(store))
     data = {"project": project, "design": design, "revision": snapshot.revision, "digest": snapshot.digest,
             "source": source, **report}
+    if args.next:
+        from oah.design.sources.view import view_of
+
+        data["next"] = coverage.choose_stage(report, advise=_stage_advisor(store, view_of(context), snapshot))
     if args.json:
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
@@ -418,6 +469,11 @@ def _coverage(args: argparse.Namespace, store) -> int:
                 extra.append("open: " + ", ".join(stage["open"]))
             lines.append(f"  {stage['id']:<10} {stage['status']:<15} {'; '.join(extra)}".rstrip())
         lines.append("frontier: " + (", ".join(report["frontier"]) or "-"))
+        if args.next:
+            step = data["next"]
+            lines.append(f"next: {step['stage'] or '-'} (jev={step['jev']}, applied="
+                         f"{'yes' if step['applied'] else 'no'}"
+                         + (f", {step['reason']}" if step["reason"] else "") + ")")
         if report["blocking"]:
             lines.append("blocking:")
             lines.extend(f"  {item}" for item in report["blocking"])

@@ -492,6 +492,46 @@ def _roots(info: RepoInfo, state: pathlib.Path, settings: Mapping) -> list:
                                   codex_plugin_cache=settings["codex_plugin_cache"])
 
 
+def _search_advisor(info: RepoInfo, state: pathlib.Path):
+    """skill-search/v1 for `oah skills find` (DESIGN §4.5, §7.1): each option is an opaque `oN` with only its provider
+    and public technology labels, so nothing authored leaves the machine. A choice applies only after the judge's
+    recheck; otherwise the template order stands."""
+
+    def advise(request: dict) -> dict:
+        import hashlib
+
+        from oah.config import load_config
+        from oah.discovery import review as reviews
+        from oah.rerank import DEFAULTS as RERANK_DEFAULTS, judge
+
+        config = load_config(info.root).section("rerank", RERANK_DEFAULTS)
+        sources = reviews.skill_sources(state, [])  # no public slice is read; the judge wants its policy
+        policy = sources.policy_digest()
+        fields, keys = [], []
+        try:
+            for option in request["options"]:
+                fields.append((f"{option['option']}:provider", judge.label("skill-provider", option["provider"])))
+                if len(option["public_tech"]) == 1:
+                    fields.append((f"{option['option']}:public_tech",
+                                   judge.label("public-tech", option["public_tech"][0])))
+                keys.append(option["option"])
+        except judge.JudgeError:
+            return {"status": "unused(scope)", "applied": False, "choice": None, "reason": "scope"}
+        input_ref = "sha256:" + hashlib.sha256(json.dumps(request["options"], sort_keys=True)
+                                               .encode("utf-8")).hexdigest()
+        req = judge.Request("search-path", "skill-search/v1", tuple(fields), tuple(keys), input_ref=input_ref)
+        result = judge.judge(req, config=config, policy=policy, sources=sources, env=os.environ, state_dir=state)
+        if not result.status.startswith("used"):
+            return {"status": result.status, "applied": False, "choice": None, "reason": None}
+        applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, request=req,
+                              policy=policy)
+        chosen = applied.applied and applied.outcomes.get("outcome") == "chosen"
+        return {"status": result.status, "applied": chosen, "choice": applied.outcomes.get("choice") if chosen else None,
+                "reason": None if chosen else (applied.outcomes.get("outcome") if applied.applied else applied.reason)}
+
+    return advise
+
+
 def _find(args: argparse.Namespace) -> int:
     from oah import discovery
 
@@ -534,13 +574,19 @@ def _find(args: argparse.Namespace) -> int:
     report = discovery.find(needs, state_dir=state, settings=found_settings, now=dt.datetime.now(dt.timezone.utc),
                             provider=provider, view=view, admitted=admitted,
                             roots=_roots(info, state, settings), choice=choice,
-                            notify=lambda notice: print(notice, file=sys.stderr))
+                            notify=lambda notice: print(notice, file=sys.stderr),
+                            advise=_search_advisor(info, state))
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         print(f"OAH_SKILL_FIND provider={report['provider']} requests={report['requests']}/{report['budget']}")
         for need in report["needs"]:
             where = f"{need['design_stage']}.{need['check']}"
+            path = need.get("search_path")
+            if path and len(path["options"]) > 1:
+                first = next(option for option in path["options"] if option["option"] == path["first"])
+                print(f"  {where:28} {'search-path':14} {' '.join(first['public_tech']) or '-'} first "
+                      f"(jev={path['jev']}, applied={'yes' if path['applied'] else 'no'})")
             for search in need["searches"]:
                 print(f"  {where:28} {search['outcome']:14} {search['query']!r} {search['detail']}"
                       f"{' (cached)' if search['cached'] else ''} [{search['query_id']}]")

@@ -104,6 +104,7 @@ PURPOSES = {
     "stack-comparison": ({"component_excerpt": "snapshot", "runtime": "label:runtime", "platform": "label:platform"},
                          {"stack_description", "assumptions", "tradeoffs"}, False),
     "next-stage": ({"stage": "label:stage"}, {"answers", "unresolved", "context"}, True),
+    "design-stage": ({"stage": "label:design-stage"}, {"answers", "unresolved", "context"}, True),
     "skill-fit": ({"skill_excerpt": "snapshot", "compatibility_excerpt": "snapshot",
                    "design_stage": "label:design-stage", "check": "label:design-check", "tech": "label:public-tech",
                    "platform": "label:platform"}, {"need"}, False),
@@ -114,6 +115,26 @@ PURPOSES = {
 REQUIRED_ROLES = {"skill-fit": (("design_stage", "check"), ("skill_excerpt",)),
                   "capability-needs": (("task_need",), ())}
 TASK_TEXT_PURPOSES = frozenset({"capability-needs"})  # their authored roles take task text, never design text
+# E's new rubrics carry their own exact allowlist (DESIGN §7.1, §7.3 step 1): (shared roles, roles every option has
+# under its `oN:` prefix), each with its one allowed tag. A role in the wrong place, an unknown role or another tag
+# is unused(scope). The legacy rubrics keep their purpose's allowlist unchanged.
+RUBRIC_ROLES = {
+    "skill-search/v1": ({"technology": "label:technology", "public_tech": "label:public-tech",
+                         "query": "design-text"},
+                        {"provider": "label:skill-provider", "public_tech": "label:public-tech",
+                         "candidate_description": "snapshot"}),
+    "design-stage/v1": ({"answers": "design-text", "unresolved": "design-text", "context": "design-text"},
+                        {"stage": "label:design-stage"}),
+    "capability-select/v1": ({"capability_class": "label:capability-class", "task_need": "task-text",
+                              "task_context": "task-text"},
+                             {"capability_excerpt": "snapshot"}),
+}
+# rubric -> (shared roles, per-option roles) that must be present, over REQUIRED_ROLES of its purpose
+RUBRIC_REQUIRED = {"skill-search/v1": ((), ("provider",)),
+                   "design-stage/v1": ((), ("stage",)),
+                   "capability-select/v1": (("capability_class", "task_need"), ("capability_excerpt",))}
+# rubric -> the most options one request may carry (DESIGN §7.1.1: at most eight qualified entries per need)
+RUBRIC_OPTIONS = {"capability-select/v1": 8}
 
 @dataclasses.dataclass(frozen=True)
 class ChoiceRubric:
@@ -221,6 +242,21 @@ RUBRICS: dict[str, ChoiceRubric | LabelRubric | OptionNoulRubric | ScoreRubric |
         "stage named in design_stage?",
         "The excerpt explains actions or constraints for that check.",
         "The excerpt mentions the area without usable guidance for that check."),
+    "skill-search/v1": ChoiceRubric(
+        "search-path", "Which permitted provider or template covers this public technology need?", None,
+        ("Does any permitted provider or template cover this public technology need?",
+         "At least one option covers where skills for this public technology are published.",
+         "None of the options covers it, for example every option is about another technology.")),
+    "design-stage/v1": ChoiceRubric(
+        "design-stage", "Which candidate design stage covers the unresolved decision in context?", None,
+        ("Does any candidate stage cover that unresolved decision?",
+         "At least one candidate's stage or its checks cover the unresolved decision.",
+         "The decision is outside every candidate stage.")),
+    "capability-select/v1": ChoiceRubric(
+        "capability-needs", "Which candidate capability's documented function fits task_need?", None,
+        ("Does any candidate's documented function fit task_need?",
+         "At least one excerpt describes a function needed for the bounded task.",
+         "The excerpts describe functions outside that task, even if their capability class is relevant.")),
     "capability-needs/v1": LabelRubric(
         "capability-needs", "Does task_need require {meaning}?",
         "Accomplishing this bounded task needs {meaning}.",
@@ -501,10 +537,42 @@ def _questions(request: Request) -> dict[str, dict] | None:
             "fits": {"type": "noul", "instructions": instructions, "criteria": {"true": true, "false": false}}}
 
 
+def _tag_ok(expected: str | None, value: object) -> bool:
+    if expected == "snapshot":
+        return type(value) is PublicSnapshotField
+    if expected == "design-text":
+        return type(value) is DesignTextField
+    if expected == "task-text":
+        return type(value) is TaskTextField
+    return bool(expected and expected.startswith("label:") and type(value) is PublicLabel
+                and value.enum_id == expected[6:] and value.value in label_values(value.enum_id))
+
+
+def _rubric_scope_ok(request: Request) -> tuple[bool, bool, bool]:
+    """The exact allowlist of one of E's rubrics: every role in its place with its one tag (RUBRIC_ROLES), and no
+    more options than the rubric takes (RUBRIC_OPTIONS)."""
+    shared, per_option = RUBRIC_ROLES[request.rubric]
+    has_design = has_task = False
+    if len(request.options) > RUBRIC_OPTIONS.get(request.rubric, OPTION_LIMIT):
+        return False, has_design, has_task
+    for role, value in request.fields:
+        if not isinstance(role, str):
+            return False, has_design, has_task
+        option, sep, bare = role.partition(":")
+        expected = (per_option.get(bare) if option in request.options else None) if sep else shared.get(option)
+        if not _tag_ok(expected, value):
+            return False, has_design, has_task
+        has_design = has_design or expected == "design-text"
+        has_task = has_task or expected == "task-text"
+    return True, has_design, has_task
+
+
 def _scope_ok(request: Request) -> tuple[bool, bool, bool]:
     """(allowed, has design text, has task text) against the purpose's closed allowlist; tags must match exactly.
     A purpose in TASK_TEXT_PURPOSES takes task text in its authored roles and never design text; every other purpose
-    the reverse."""
+    the reverse. One of E's rubrics in RUBRIC_ROLES uses its own exact allowlist instead."""
+    if request.rubric in RUBRIC_ROLES:
+        return _rubric_scope_ok(request)
     public, authored, _required = PURPOSES[request.purpose]
     authored_type = TaskTextField if request.purpose in TASK_TEXT_PURPOSES else DesignTextField
     has_design = has_task = False
@@ -532,7 +600,7 @@ def _scope_ok(request: Request) -> tuple[bool, bool, bool]:
 
 
 def _missing_required(request: Request) -> bool:
-    shared, per_option = REQUIRED_ROLES.get(request.purpose, ((), ()))
+    shared, per_option = RUBRIC_REQUIRED.get(request.rubric) or REQUIRED_ROLES.get(request.purpose, ((), ()))
     roles = {role for role, _value in request.fields}
     return not (set(shared) <= roles and all(f"{option}:{role}" in roles for option in request.options
                                               for role in per_option))

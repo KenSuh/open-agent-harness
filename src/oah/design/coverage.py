@@ -946,6 +946,31 @@ def evaluate(record: Mapping, texts: Mapping[str, str], *, evidence: Evidence = 
             "wanted": [item for stage in catalog.STAGE_IDS for item in _wanted(record, rows[stage])]}
 
 
+def choose_stage(report: Mapping, *, advise=None) -> dict:
+    """The next design stage for the design flow (DESIGN §7.1, design-stage/v1): the frontier's first stage in catalog
+    order, unless an admitted Choice over two or more frontier stages picked another one and passed its recheck. One
+    stage is taken without asking (`unused(single-option)`); an empty frontier takes none (`unused(no-candidate)`) and
+    says whether the design is complete or blocked, since an empty frontier alone is not a finished design.
+    `advise(options)` receives only the opaque map {"o0": stage, ...} in catalog order and returns {"status",
+    "applied", "choice", "reason"}; a choice outside the map is never matched to a stage by similarity."""
+    frontier = list(report["frontier"])
+    first = frontier[0] if frontier else None
+    choice = {"version": 1, "frontier": frontier, "stage": first, "fallback": first, "jev": None, "applied": False,
+              "reason": None, "complete": bool(report["complete"])}
+    if not frontier:
+        return dict(choice, jev="unused(no-candidate)", reason="complete" if report["complete"] else "blocked")
+    if len(frontier) == 1:
+        return dict(choice, jev="unused(single-option)")
+    if advise is None:
+        return dict(choice, jev="unused(judgement-off)")
+    options = {f"o{index}": stage for index, stage in enumerate(frontier)}
+    advice = advise(dict(options))
+    picked = options.get(advice.get("choice")) if advice.get("applied") is True else None
+    if picked is None:
+        return dict(choice, jev=advice["status"], reason=advice.get("reason") or "not-applied")
+    return dict(choice, stage=picked, jev=advice["status"], applied=True)
+
+
 def needs(record: Mapping, texts: Mapping[str, str], *, evidence: Evidence = NO_EVIDENCE) -> list[dict]:
     """Every stored need, re-resolved: its applicability now and its effective resolution."""
     out = []

@@ -413,6 +413,147 @@ class SkillFitAndTaskTextTest(JudgementCase):
         self.assertIn("label-changed:check", reasons(retired))
 
 
+class NewRubricTest(JudgementCase):
+    """AC13 and AC18 (DESIGN §7.1, §7.1.1, §7.3): skill-search/v1, design-stage/v1 and capability-select/v1 each take
+    exactly their own roles in their own places, refuse missing input and unpermitted authored text before anything
+    is sent, and are read as one Choice plus a fits question under the recorded thresholds."""
+
+    DESIGN = "Bookings for a small clinic: patients pick a slot, staff confirm it.\n"
+
+    @staticmethod
+    def label(enum_id: str, value: str) -> judge.PublicLabel:
+        return judge.label(enum_id, value)
+
+    def task(self) -> tuple[judge.TaskView, judge.TaskTextField]:
+        task = judge.TaskView.of("t1", packet())
+        return task, judge.task_field(task, "intent", 0, len(INTENT.split(". ")[0].encode("utf-8")) + 1)
+
+    def design(self) -> tuple[DesignView, judge.DesignTextField]:
+        current = view({"design": self.DESIGN})
+        return current, judge.design_field(current, "part:design", 0, len(self.DESIGN.encode("utf-8")))
+
+    def search(self, *extra, options=("o0", "o1")) -> judge.Request:
+        fields = []
+        for key, tech in zip(options, ("postgresql", "supabase", "mysql")):
+            fields += [(f"{key}:provider", self.label("skill-provider", "skills-sh")),
+                       (f"{key}:public_tech", self.label("public-tech", tech))]
+        return judge.Request("search-path", "skill-search/v1", (*fields, *extra), options)
+
+    def stages(self, *extra, options=("o0", "o1"), context=True) -> judge.Request:
+        fields = [(f"{key}:stage", self.label("design-stage", stage)) for key, stage in zip(options, ("data", "quality"))]
+        if context:
+            fields.append(("context", self.design()[1]))
+        return judge.Request("design-stage", "design-stage/v1", (*fields, *extra), options)
+
+    def select(self, *extra, options=("o0", "o1"), cls="library-docs", need=True) -> judge.Request:
+        fields = [] if cls is None else [("capability_class", self.label("capability-class", cls))]
+        if need:
+            fields.append(("task_need", self.task()[1]))
+        fields += [(f"{key}:capability_excerpt", self.notes()) for key in options]
+        return judge.Request("capability-needs", "capability-select/v1", (*fields, *extra), options)
+
+    def judge_all(self, request, **cfg) -> judge.Judgement:
+        current, _field = self.design()
+        task, _need = self.task()
+        return self.run_judge(request, config(**cfg), view=current, task_view=task)
+
+    def test_each_new_rubric_takes_only_its_own_roles_in_their_places(self) -> None:
+        _task, need = self.task()
+        _view, design = self.design()
+        cases = {
+            "skill-search: a provider label as a shared role": self.search(
+                ("provider", self.label("skill-provider", "seed"))),
+            "skill-search: the legacy handler label": self.search(("o0:handler", self.label("handler", "official-doc"))),
+            "skill-search: task text as the query": self.search(("query", need)),
+            "skill-search: design text as a candidate description": self.search(("o0:candidate_description", design)),
+            "skill-search: an option that was not offered": self.search(
+                ("o2:provider", self.label("skill-provider", "seed"))),
+            "design-stage: a flow stage as an option": judge.Request(
+                "design-stage", "design-stage/v1", (("o0:stage", self.label("stage", "implement")),
+                                                    ("o1:stage", self.label("design-stage", "data")),
+                                                    ("context", design)), ("o0", "o1")),
+            "design-stage: a stage without its option": self.stages(("stage", self.label("design-stage", "access"))),
+            "design-stage: task text as context": self.stages(("unresolved", need)),
+            "capability-select: design text as the task need": judge.Request(
+                "capability-needs", "capability-select/v1",
+                (("capability_class", self.label("capability-class", "library-docs")), ("task_need", design),
+                 ("o0:capability_excerpt", self.notes()), ("o1:capability_excerpt", self.notes())), ("o0", "o1")),
+            "capability-select: an excerpt as a shared role": self.select(("capability_excerpt", self.notes())),
+            "capability-select: task text as an option excerpt": judge.Request(
+                "capability-needs", "capability-select/v1",
+                (("capability_class", self.label("capability-class", "library-docs")), ("task_need", need),
+                 ("o0:capability_excerpt", need), ("o1:capability_excerpt", self.notes())), ("o0", "o1")),
+            "capability-select: a design stage as the class": judge.Request(
+                "capability-needs", "capability-select/v1",
+                (("capability_class", self.label("design-stage", "data")), ("task_need", need),
+                 ("o0:capability_excerpt", self.notes()), ("o1:capability_excerpt", self.notes())), ("o0", "o1")),
+            "capability-select: nine options": self.select(options=tuple(f"o{index}" for index in range(9))),
+            "search-path/v2 keeps its own roles: no provider label": judge.Request(
+                "search-path", "search-path/v2", (("o0:provider", self.label("skill-provider", "skills-sh")),
+                                                  ("o1:handler", self.label("handler", "official-doc"))),
+                ("o0", "o1")),
+        }
+        for name, request in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual("unused(scope)", self.judge_all(request, design_text=True, task_text=True).status)
+        self.assertEqual([], self.provider.calls)
+
+    def test_missing_input_sends_nothing(self) -> None:
+        cases = {
+            "skill-search: an option without its provider": judge.Request(
+                "search-path", "skill-search/v1", (("o0:provider", self.label("skill-provider", "skills-sh")),
+                                                   ("o1:public_tech", self.label("public-tech", "mysql"))),
+                ("o0", "o1")),
+            "design-stage: no authored field": self.stages(context=False),
+            "design-stage: an option without its stage": judge.Request(
+                "design-stage", "design-stage/v1", (("o0:stage", self.label("design-stage", "data")),
+                                                    ("context", self.design()[1])), ("o0", "o1")),
+            "capability-select: no class": self.select(cls=None),
+            "capability-select: no task need": self.select(need=False),
+            "capability-select: an option without its excerpt": judge.Request(
+                "capability-needs", "capability-select/v1",
+                (("capability_class", self.label("capability-class", "library-docs")), ("task_need", self.task()[1]),
+                 ("o0:capability_excerpt", self.notes())), ("o0", "o1")),
+        }
+        for name, request in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual("unused(insufficient-input)",
+                                 self.judge_all(request, design_text=True, task_text=True).status)
+        self.assertEqual([], self.provider.calls)
+
+    def test_authored_text_needs_its_own_permission(self) -> None:
+        self.assertEqual("unused(design-text-off)", self.judge_all(self.stages(), task_text=True).status)
+        self.assertEqual("unused(design-text-off)",
+                         self.judge_all(self.search(("query", self.design()[1])), task_text=True).status)
+        self.assertEqual("unused(task-text-off)", self.judge_all(self.select(), design_text=True).status)
+        self.assertEqual([], self.provider.calls)
+        self.provider.choice = "o0"
+        self.assertEqual("used", self.judge_all(self.search()).status)  # labels alone need no text permission
+
+    def test_each_rubric_is_one_choice_and_a_fits_question(self) -> None:
+        for request, permission in ((self.search(), {}), (self.stages(), {"design_text": True}),
+                                    (self.select(), {"task_text": True})):
+            with self.subTest(rubric=request.rubric):
+                self.provider.choice, self.provider.top, self.provider.fits = "o1", 0.8, 0.9
+                result = self.judge_all(request, **permission)
+                self.assertEqual(("used", "chosen", "o1"), (result.status, result.outcome, result.choice))
+                state, questions = self.provider.calls[-1]
+                self.assertEqual({"choice", "fits"}, set(questions))
+                self.assertEqual(["o0", "o1"], sorted(questions["choice"]["criteria"]))
+                self.assertEqual({role for role, _value in request.fields}, set(state["fields"]))
+                self.provider.fits = 0.1
+                self.assertEqual("no-match", self.judge_all(request, **permission).outcome)
+                self.provider.fits, self.provider.top = 0.9, 0.55  # the top option, but under choice_min
+                self.assertEqual("uncertain", self.judge_all(request, **permission).outcome)
+        _state, questions = self.provider.calls[-1]
+        self.assertEqual("Which candidate capability's documented function fits task_need?",
+                         questions["choice"]["instructions"])
+        stage_questions = [questions for _state, questions in self.provider.calls
+                           if "design stage" in questions["choice"]["instructions"]]
+        self.assertEqual("Which candidate design stage covers the unresolved decision in context?",
+                         stage_questions[0]["choice"]["instructions"])
+
+
 class RecheckTest(JudgementCase):
     """A recorded result applies only while every identity still holds."""
 

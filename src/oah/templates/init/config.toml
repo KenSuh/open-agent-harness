@@ -101,10 +101,12 @@ update_interval_days = 1
 # max_queries = 4
 # license_allow = []   # empty: the [sources] license list
 
-# Tools that delivered skills name (oah capabilities plan): tag a server with a capability class, add dependencies.
+# Tools that delivered skills name (oah capabilities plan): tag a server with a capability class, add dependencies,
+# and link one exact capability to a public documentation file Jev may read ("SOURCE:PATH" of oah sources).
 # [capabilities]
 # classes = {}
 # requires = {}
+# docs = {}
 
 # Where oah call runs a worker: "process" (the default) or "orca". The native route is a flag only:
 # oah call --launcher native offers the brief to your own AI's subagent; launcher = "native" here is refused.

@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 from oah.cli import main
-from tests.helpers import make_tmp_dir
+from tests.helpers import git_commit, make_tmp_dir
 from tests.test_design_store import PAGE, SRC, DesignRepo
 
 STAGE_IDS = ("purpose", "behavior", "data", "access", "server", "payment", "quality", "materials", "confirm")
@@ -349,6 +349,112 @@ class RecheckTest(CoverageRepo, unittest.TestCase):
         self.assertEqual(stages["server"]["status"], "not-applicable")
         self.assertTrue(stages["payment"]["recheck"])
         self.assertTrue(stages["quality"]["recheck"])
+
+
+class NextStageTest(CoverageRepo, unittest.TestCase):
+    """AC13, AC15 (DESIGN §7.1 design-stage/v1, F10): `coverage --next` takes a one-stage frontier without asking,
+    asks Jev only among two or more stages, applies its choice only after the recheck, and names an empty frontier
+    complete or blocked instead of calling it done."""
+
+    def defer(self, *names: str) -> None:
+        out, _, _ = self.edit([{"op": "defer-stage", "stage": name,
+                                "deferral": {"reason": "later", "resolve_by": "before-release", "impact": "minor"}}
+                               for name in names])
+        self.save_printed(out)
+
+    def jev(self, url: str) -> None:
+        git_commit(self.repo, {".oah/config.toml": f"[rerank]\nenabled = true\nprovider = \"typesafe\"\n"
+                                                   f"[rerank.typesafe]\nurl = \"{url}\"\n[rerank.judgement]\n"
+                                                   "enabled = true\nsend_design_text = true\n"}, "jev settings")
+
+    @staticmethod
+    def choosing(option: str, *, fits: float = 0.9):
+        def respond(path, body):
+            criteria = sorted(body["questions"]["choice"]["criteria"])
+            rest = 0.2 / (len(criteria) - 1)
+            answers = {"choice": {"type": "choice", "choice": option, "confidence": 0.8,
+                                  "probabilities": {key: 0.8 if key == option else rest for key in criteria}},
+                       "fits": {"type": "noul", "noul": fits}}
+            return 200, {"model": "jev-test", "answers": answers, "usage": {"input_tokens": 1}}, 0, {}
+        return respond
+
+    def test_a_one_stage_frontier_is_taken_without_asking(self):
+        self.new_design({})
+        step = self.readout("--next")["next"]
+        self.assertEqual((step["frontier"], step["stage"], step["jev"], step["applied"]),
+                         (["purpose"], "purpose", "unused(single-option)", False))
+
+    def two_stages(self) -> None:
+        self.new_design({})
+        self.defer("purpose", "behavior")
+
+    def test_two_stages_keep_catalog_order_while_design_text_may_not_leave(self):
+        self.two_stages()
+        step = self.readout("--next")["next"]
+        self.assertEqual((step["frontier"], step["stage"], step["applied"]), (["data", "quality"], "data", False))
+        self.assertEqual(step["jev"], "unused(design-text-off)")
+        code, out, err = self.oah("design", "coverage", "acme", "booking", "--next")
+        self.assertEqual(code, 0, err)
+        self.assertIn("next: data (jev=unused(design-text-off), applied=no", out)
+
+    def ask(self, respond) -> tuple[dict, list]:
+        from tests.test_rerank import FakeServer, fake_key
+
+        self.two_stages()
+        server = FakeServer(self, respond)
+        self.jev(server.url())
+        with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": fake_key()}):
+            return self.readout("--next")["next"], server.requests
+
+    def test_a_rechecked_choice_moves_the_next_stage_and_sends_only_opaque_options(self):
+        step, requests = self.ask(self.choosing("o1"))
+        self.assertEqual((step["stage"], step["jev"], step["applied"]), ("quality", "used", True))
+        (sent,) = requests
+        fields = sent["body"]["state"]["fields"]
+        self.assertEqual(set(fields), {"o0:stage", "o1:stage", "context"})  # opaque options, one authored field
+        self.assertEqual((fields["o0:stage"], fields["o1:stage"]), ("data", "quality"))
+        self.assertEqual(fields["context"], self.current()[2][:len(fields["context"])])
+
+    def test_no_match_keeps_catalog_order(self):
+        step, _requests = self.ask(self.choosing("o1", fits=0.1))
+        self.assertEqual((step["stage"], step["jev"], step["applied"], step["reason"]),
+                         ("data", "used", False, "no-match"))
+
+    def test_choose_stage_never_maps_an_answer_outside_the_options(self):
+        from oah.design import coverage
+
+        report = {"frontier": ["data", "quality"], "complete": False}
+        seen = []
+
+        def advise(options):
+            seen.append(options)
+            return {"status": "used", "applied": True, "choice": answer, "reason": None}
+
+        for answer, stage, applied in (("o1", "quality", True), ("o9", "data", False), ("quality", "data", False)):
+            with self.subTest(answer=answer):
+                step = coverage.choose_stage(report, advise=advise)
+                self.assertEqual((step["stage"], step["applied"]), (stage, applied))
+        self.assertEqual(seen[0], {"o0": "data", "o1": "quality"})
+        unapplied = coverage.choose_stage(report, advise=lambda options: {"status": "used", "applied": False,
+                                                                          "choice": "o1", "reason": "uncertain"})
+        self.assertEqual((unapplied["stage"], unapplied["reason"]), ("data", "uncertain"))
+        self.assertEqual(coverage.choose_stage({"frontier": ["purpose"], "complete": False},
+                                               advise=lambda options: self.fail("asked"))["jev"],
+                         "unused(single-option)")
+
+    def test_an_empty_frontier_says_complete_or_blocked(self):
+        self.new_design({})
+        self.defer(*STAGE_IDS)
+        data = self.readout("--next")
+        self.assertEqual((data["frontier"], data["complete"]), ([], False))
+        self.assertEqual((data["next"]["stage"], data["next"]["jev"], data["next"]["reason"]),
+                         (None, "unused(no-candidate)", "blocked"))
+
+    def test_next_reads_the_current_revision_only(self):
+        self.new_design({})
+        code, _out, err = self.oah("design", "coverage", "acme", "booking", "--next", "--revision", "1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("--next reads the current revision only", err)
 
 
 class InvalidInputTest(CoverageRepo, unittest.TestCase):

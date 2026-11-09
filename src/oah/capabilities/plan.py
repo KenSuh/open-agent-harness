@@ -1,8 +1,9 @@
 # 능력 계획 — 전달된 스킬의 도구 요구를 필요로 바꾸고, 자식·상위 목록과 맞춰 경로를 고르며, 의존을 3 단계까지 풀고, 상위 중계 요청·결과를 내용 주소로 남긴다.
 """Capability plans and parent relays (DESIGN §6.3, §6.4, §6.7).
 
-Needs come from the delivered skills' `allowed-tools` (an MCP tool a required skill names is a required need) and
-from `[capabilities] requires` edges; packet lines and Jev needs are not read here. Routes:
+Needs come from the delivered skills' `allowed-tools` (an MCP tool a required skill names is a required need), from
+`[capabilities] requires` edges and, as optional class needs, from the caller's applied capability-needs/v1
+judgements (DESIGN §6.3.4); packet lines naming capability IDs are not read in this release. Routes:
 
 - `direct-unverified`: the child's configuration names the server (names only, schema unknown). Optional needs may
   use it, labelled unverified; a required need cannot rest on it (`OAH_CAPABILITY_UNSUPPORTED(unknown-schema)`).
@@ -11,8 +12,10 @@ from `[capabilities] requires` edges; packet lines and Jev needs are not read he
   itself and stores the result with `oah capabilities relay`; the next call delivers that result as data.
 - `unsupported` / unavailable: an isolated review never relays; a need nobody has is unavailable.
 
-The prep id hashes the pre-result identity only (task, lease, intent, design, target, needs, inventories), so storing
-a result never changes it and two relays never depend on each other. Nothing here calls a tool, a model or Jev.
+The prep id hashes the pre-result identity only (task, lease, intent, design, target, skill and rule needs,
+inventories), so storing a result or a changed Jev answer never changes it and two relays never depend on each
+other. Nothing here calls a tool or a model; Jev is asked only through the caller's `advise`, for a class need with
+two or more qualified entries that all have linked public documentation (`select`).
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ from oah.capabilities import (BEGIN, DEPENDENCY_CODE, END, MAX_ROUNDS, RELAY_EFF
                               RELAY_REQUIRED_CODE, UNAVAILABLE_CODE, UNSUPPORTED_CODE, CapabilityRefused, check_id,
                               digest, server_of, tool_id)
 from oah.capabilities import inventory as inventories
+from oah.capabilities import select as selection
 
 POLICY = "oah-capability-plan/v1"
 POLICY_DIGEST = digest({"policy": POLICY, "relay_effects": list(RELAY_EFFECTS), "max_bytes": RELAY_MAX_BYTES})
@@ -127,8 +131,14 @@ def prep_id(*, task: Mapping, design: Mapping | None, target: Mapping, needs: Se
 
 def assess(*, task: Mapping, design: Mapping | None, engine: str, stage: str, needs: Sequence[Mapping],
            child: Mapping, parent: Mapping | None, results: Sequence[Mapping], requires: Mapping, now: dt.datetime,
-           state_dir: os.PathLike) -> dict:
-    """CapabilityPlanV1 (the subset this release records), or CapabilityRefused for a required need."""
+           state_dir: os.PathLike, class_needs: Sequence[Mapping] = (), class_status: str | None = None,
+           evidence=None, advise=None) -> dict:
+    """CapabilityPlanV1 (the subset this release records), or CapabilityRefused for a required need.
+
+    `class_needs` are optional capability-class needs (Jev's class inference, already applied by the caller); each
+    gets one entry by `selection.select`, which asks `advise(need, request)` only for two or more qualified entries
+    with linked public documentation. They never refuse, never ask for a relay and stay out of the preparation
+    identity, so an answer that changes cannot make a stored relay result stale."""
     expanded, rounds = _dependencies(list(needs), child, requires)
     target = {"engine": engine, "stage": stage, "route": "process"}
     prep = prep_id(task=task, design=design, target=target, needs=expanded, child=child, parent=parent)
@@ -191,13 +201,40 @@ def assess(*, task: Mapping, design: Mapping | None, engine: str, stage: str, ne
                                  + (" (a review stays isolated and never takes relays)"
                                     if row["reason"] == "review-isolated" else "")))
         selected.append(row)
+    advice, chosen = [], {row["id"] for row in selected}
+    for need in class_needs:
+        record, pick, deferred = selection.select(
+            need, selection.candidates(need["class"], child, parent, now), prep=prep,
+            inventory_digest=inventories.stable_digest(child), evidence=evidence or (lambda _capability: None),
+            advise=None if advise is None else (lambda request, need=need: advise(need, request)))
+        advice.append(record)
+        if pick is None or pick[0]["id"] in chosen:
+            continue
+        entry, route = pick
+        chosen.add(entry["id"])
+        selected.append({"id": entry["id"], "need_id": need["id"], "required": False, "by": list(need["by"]),
+                         "entry_digest": entry["entry_digest"], "schema_digest": entry["schema"]["sha256"],
+                         "route": route, "qualification": "qualified", "enforcement": "recommended",
+                         "reason": f"{need['class']}, " + ("chosen by Jev" if record["applied"]
+                                                            else "first in configuration order"),
+                         "class": need["class"], "advice": record["id"], "deferred": deferred})
+    answered = any(item["outcome"] in ("selected", "no-match", "uncertain") for item in advice)
+    first = advice[0] if advice else None
+    word = first and (first["reason"] if first["outcome"] in ("off", "error", "stale") else first["outcome"])
+    jev_status = ("used" if answered or class_status == "used" else class_status
+                  or (f"unused({word})" if first else "unused(no-class-need)"))
+    class_refs = sorted({need["advice_ref"] for need in class_needs if need.get("advice_ref")})
+    changed = sorted(set(class_refs) | {item["judgement_ref"] for item in advice
+                                        if item["applied"] and item["judgement_ref"]})
     plan = {"version": 1, "prep_id": prep, "task": dict(task), "design": design, "target": target,
             "inventory": {"child": inventories.stable_digest(child), "parent": parent["digest"] if parent else None,
                           "effective": None},
             "needs": [{key: need[key] for key in ("id", "class", "capability_id", "required", "origin")}
-                      for need in expanded],
+                      for need in (*expanded, *class_needs)],
             "selected": selected, "dependencies": {"rounds": rounds},
-            "jev": {"status": "unused(not-implemented)", "applied": False},
+            "jev": {"status": jev_status, "applied": bool(class_refs) or any(item["applied"] for item in advice),
+                    "judgement_ref": changed[0] if len(changed) == 1 else None},
+            "class_advice_refs": class_refs, "entry_advice": advice,
             "relay_refs": sorted(result["id"] for result in by_need.values()), "policy_digest": POLICY_DIGEST}
     plan["plan_id"] = digest(plan)
     if refusals:
@@ -212,11 +249,13 @@ def assess(*, task: Mapping, design: Mapping | None, engine: str, stage: str, ne
     return plan
 
 
-DEFAULTS = {"classes": {}, "requires": {}}
+DEFAULTS = {"classes": {}, "requires": {}, "docs": {}}
 
 
 def check_settings(section: Mapping) -> dict:
-    """`[capabilities]`: `classes = {server = "class"}` and `requires = {"<id>" = ["<id>", ...]}`."""
+    """`[capabilities]`: `classes = {server = "class"}`, `requires = {"<id>" = ["<id>", ...]}` and
+    `docs = {"<id>" = "SOURCE:PATH"}`, the public documentation file of a registered source (`oah sources`) that
+    describes that exact capability; Jev compares entries only by these verified slices."""
     from oah.capabilities import CLASSES
     from oah.config import ConfigError
 
@@ -232,7 +271,18 @@ def check_settings(section: Mapping) -> dict:
             requires[check_id(key)] = [check_id(item) for item in value]
         except ValueError as exc:
             raise ConfigError("OAH_CONFIG_INVALID", f"capabilities.requires.{key}: {exc}") from None
-    return {"classes": classes, "requires": requires}
+    docs = {}
+    for key, value in dict(section.get("docs") or {}).items():
+        source, sep, path = value.partition(":") if isinstance(value, str) else ("", "", "")
+        try:
+            capability = check_id(key)
+        except ValueError as exc:
+            raise ConfigError("OAH_CONFIG_INVALID", f"capabilities.docs.{key}: {exc}") from None
+        if not sep or not source or not path or path.startswith("/") or ".." in path.split("/"):
+            raise ConfigError("OAH_CONFIG_INVALID", f"capabilities.docs.{key} is SOURCE:PATH: a source from oah "
+                              "sources list and a file of its verified snapshot, such as context7:README.md")
+        docs[capability] = value
+    return {"classes": classes, "requires": requires, "docs": docs}
 
 
 def settings_for(root) -> dict:
@@ -243,13 +293,14 @@ def settings_for(root) -> dict:
 
 def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: Sequence[Mapping], root, env,
              state_dir: os.PathLike, parent_path: str | None, relay_refs: Sequence[str], now: dt.datetime,
-             settings: Mapping) -> tuple[dict | None, str | None]:
+             settings: Mapping, class_needs: Sequence[Mapping] = (), class_status: str | None = None,
+             advise=None) -> tuple[dict | None, str | None]:
     """(CapabilityPlanV1, `## Capabilities` block) for one dispatch, or (None, None) when it has no capability needs
     and no relay inputs (the brief then stays byte-identical). CapabilityRefused before anything is spent."""
     from oah import skillpack, skillsel
 
     needs = needs_of(items, state_dir=state_dir)
-    if not needs and not relay_refs:
+    if not needs and not class_needs and not relay_refs:
         return None, None
     child = inventories.child(engine, root=root, env=env, home=skillsel.home_of(env), now=now,
                               classes=settings["classes"])
@@ -258,7 +309,9 @@ def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: 
     design = skillpack._accepted_coverage(task_design)[2]
     found = assess(task=task_identity(holder, task), design=design, engine=engine, stage=stage, needs=needs,
                    child=child, parent=parent, results=[record for record, _text in loaded],
-                   requires=settings["requires"], now=now, state_dir=state_dir)
+                   requires=settings["requires"], now=now, state_dir=state_dir, class_needs=class_needs,
+                   class_status=class_status, advise=advise,
+                   evidence=selection.linked_evidence(settings.get("docs") or {}, root) if class_needs else None)
     if not found["selected"]:
         return None, None
     return found, block(found, {record["id"]: text for record, text in loaded})

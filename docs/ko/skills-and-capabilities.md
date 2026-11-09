@@ -26,7 +26,8 @@
 
 - `oah design coverage P D`는 단계마다 상태, 다시 확인할 것, 다음에 물을 단계를 보여 준다. 읽기만 한다.
   `--accepted`나 `--revision N`은 다른 판을 읽는다. `--check`는 설계가 완료될 때까지
-  `OAH_COVERAGE_INCOMPLETE`와 함께 1로 끝난다.
+  `OAH_COVERAGE_INCOMPLETE`와 함께 1로 끝난다. `--next`는 다음에 다룰 단계 하나를 알려 준다
+  ([이 단계들에서 Jev](#이-단계들에서-jev) 참고).
 - `oah design coverage edit P D --from EDITS.json`은 작업 목록으로 새 coverage 부분을 만들고, 그것을 저장할
   정확한 `oah design save` 명령과 함께 출력한다. 스스로는 아무것도 쓰지 않는다. 작업은 `set-applicability`,
   `set-check`, `defer-stage`, `confirm-stage`, `set-tech`, `link-skill`, `unlink-skill`, `add-gap`,
@@ -242,9 +243,10 @@ Claude 제안에는 단 에이전트 파일이 있어야 한다. 없으면 `OAH_
   리드가 도구를 직접 실행하고 `oah capabilities relay --request FILE --capability ID --result-file FILE
   --invocation FILE`로 결과를 저장한다. 그다음 `oah call ... --parent-inventory FILE --relay-result HASH`가
   스킬 본문 뒤의 `## Capabilities` 블록에 결과를 넣어 넘긴다.
-- `.oah/config.toml`의 `[capabilities]`에는 서버에 oah의 능력 분류 하나를 붙이는 `classes = {server = "class"}`와
-  능력 사이 의존을 더하는 `requires = {"<id>" = ["<id>", ...]}`가 있다. 플러그인의 서버는 그 플러그인이 켜져
-  있어야 한다. 의존은 최대 세 번에 걸쳐 풀고, 순환이 있으면 찾은 고리를 적어 거절한다.
+- `.oah/config.toml`의 `[capabilities]`에는 서버에 oah의 능력 분류 하나를 붙이는 `classes = {server = "class"}`,
+  능력 사이 의존을 더하는 `requires = {"<id>" = ["<id>", ...]}`, 정확한 능력 하나를 Jev가 읽을 수 있는 공개 문서
+  파일에 잇는 `docs = {"<id>" = "SOURCE:PATH"}`가 있다([이 단계들에서 Jev](#이-단계들에서-jev) 참고). 플러그인의
+  서버는 그 플러그인이 켜져 있어야 한다. 의존은 최대 세 번에 걸쳐 풀고, 순환이 있으면 찾은 고리를 적어 거절한다.
 
 **설정에 적힌 이름은 연결이 아니다.** 필수 필요는 새로 받은 중계로만 채운다. 설정에 이름만 있는 도구는
 `OAH_CAPABILITY_UNSUPPORTED(unknown-schema)`나 `(pending-approval)`로 거절된다. 사용자가 치르는 비용은 이렇다.
@@ -261,13 +263,16 @@ run은 격리된 채로 남아 중계를 받지 않는다(`OAH_CAPABILITY_UNSUPP
 
 ## 이 단계들에서 Jev
 
-이번 릴리스에서 Jev는 이 문서의 어떤 스킬이나 도구도 고르지 않는다. coverage, 탐색, 받아들임, 능력 경로는 정해진
-규칙을 따르고, 능력 계획은 `jev: unused(not-implemented)`를 기록한다. 네이티브 제안은 어떤 판정도 묻지 않고
-`jev_status: unused(native)`를 기록한다. [스킬 선택](concepts.md#스킬-선택)에서 설명하는 스킬
-재정렬기는 브리프에 넣을 설치된 스킬의 순서를 바꿀 뿐이고, 어떤 스킬 본문을 넘길지는 바꾸지 않는다.
+이 문서에서 Jev는 아무것도 혼자 정하지 않는다. coverage, 탐색, 받아들임, 능력 경로는 정해진 규칙을 따른다. Jev는
+그 규칙이 이미 허락한 선택지 사이에서만 고를 수 있고, oah는 판정이 같은 입력으로 다시 확인된 뒤에만 답을 적용한다.
+Jev가 꺼져 있거나, 답이 확실하지 않거나 낡았거나, 요청이 실패하면 정해진 순서를 그대로 쓴다. Jev는
+`[rerank] enabled`, `[rerank.judgement] enabled`, 키가 모두 있을 때 켜진다. 사용자가 쓴 글은 각자의 허락이 있을
+때만 나간다. 설계 글은 `send_design_text`, 작업 패킷의 의도 글은 `send_task_text`이며 둘 다 기본으로 꺼져 있다.
+네이티브 제안은 어떤 판정도 묻지 않고 `jev_status: unused(native)`를 기록한다. [스킬 선택](concepts.md#스킬-선택)에서
+설명하는 스킬 재정렬기는 브리프에 넣을 설치된 스킬의 순서를 바꿀 뿐이고, 어떤 스킬 본문을 넘길지는 바꾸지 않는다.
 
 **Jev는 한 확인 항목의 선택 스킬 순서만 바꿀 수 있다.** 일반 run이 같은 설계 확인 항목에 선택 스킬을 둘 이상
-넘기고 Jev가 켜져 있으면(`[rerank] enabled`, `[rerank.judgement] enabled`, 키), oah는 그 확인 항목마다 한 번 각
+넘기고 Jev가 켜져 있으면, oah는 그 확인 항목마다 한 번 각
 스킬 본문이 그 항목에 구체적인 지침을 주는지 Jev에게 묻고, 그 순서로 스킬을 놓는다. 필수 스킬은 자리를 지키고,
 스킬을 더하거나 빼지 않으며, 본문도 그대로다. 결과는 `skills.json`의 묶음 옆 `skill_fit`에 남는다. Jev가 꺼진
 모든 상태(`unused(judgement-off)`, `unused(not-enabled)`, `unused(no key)`, `--no-rerank`의
@@ -277,6 +282,41 @@ TypeSafe는 답한 id를 엄격하게 확인하므로 스킬 하나를 빠뜨린
 검증된 공개 스냅샷에서 읽은 앞 4,000바이트와 정해진 단계·확인 항목 이름뿐이고, 설계 글이나 작업 글은 보내지
 않는다. 사용자가 치르는 비용은 이렇다. run마다 그런 확인 항목 하나에 판정 요청이 한 번 가고, 판정을 묻지 않는
 `oah skills plan`은 조언 전의 순서를 보여 준다.
+
+**Jev는 어느 검색을 먼저 돌릴지 고를 수 있다.** `oah skills find`의 필요에
+`--tech auth=passkey --tech platform=supabase`처럼 공개 기술 단어가 둘 이상 있으면, oah는 어느 단어의 질의가 그
+필요를 덮는지 Jev에게 묻고 그 질의를 먼저 돌려 요청 예산이 거기에 닿게 한다. 나가는 것은 제공자 이름과 공개
+단어뿐이고 정해진 라벨로 나가며, 질의는 oah 자신의 틀 그대로다. 보고서의 `search_path`에 선택지, 먼저 돌린 것,
+`jev`가 남는다. 공개 단어가 하나이거나, Jev가 꺼져 있거나, oah가 적용할 수 없는 답이면 틀의 순서를 지킨다.
+사용자가 치르는 비용은 이렇다. `find`마다 그런 필요 하나에 판정 요청이 한 번 간다. `oah call` 안의 탐색은 틀의
+순서를 그대로 쓴다.
+
+**Jev는 다음 설계 단계를 제안할 수 있다.** `oah design coverage P D --next`는 현재 판에서 처음으로 열린 단계를
+알려 준다. 열린 단계가 둘 이상이고 `send_design_text = true`이면, oah는 그중 어느 단계가 풀리지 않은
+결정을 덮는지 Jev에게 묻고 그 단계를 대신 알려 준다. 이때 단계 이름과 설계 글의 앞부분(최대 4,096바이트)을
+보낸다. 출력은 `next: <stage> (jev=..., applied=yes|no)` 꼴이다. 열린 단계가 하나면 아무것도 묻지 않고, 하나도
+없으면 출력이 `complete`나 `blocked`라고 말한다. 사용자가 치르는 비용은 이렇다. `--next`마다 판정 요청이 한 번
+간다. 제안일 뿐이라 아무것도 저장하지 않고 coverage도 그대로다.
+
+**Jev는 작업의 부분마다 능력을 고를 수 있다.** 일반 `oah call`(네이티브 제안도 리뷰도 아닌 run)에서 설계가 없는
+작업 필요는 각각 패킷 의도 절의 한 구간을 덮는다. `send_task_text = true`이면 oah는 그 구간만 보내 oah의 능력
+분류 중 무엇이 필요한지 Jev에게 묻는다(`capability-needs/v1`). 예로 읽힌 분류는 선택 필요가 된다. 그 후보는 그
+분류의 자격 있는 항목이며, 이번 릴리스에서는 리드의 목록(`--parent-inventory`)이 현재 증거와 읽기 전용 효과로
+보고한 항목을 목록 순서대로 쓴다. 앞의 여덟 개가 선택지가 되고 나머지는 미뤄진다. 모든 선택지에
+`[capabilities] docs`로 이은 문서가 있으면 oah는 어느 선택지의 문서에 적힌 기능이 그 구간에 맞는지 Jev에게
+묻고(`capability-select/v1`) 그 항목을 올린다. 그렇지 않으면 첫 항목을 쓴다. 고른 항목은 `## Capabilities` 블록에
+선택 경로로 나오고, oah는 그것을 호출하지 않는다. `capabilities.json`에는 분류 판정마다 `class_advice_refs`, 선택마다
+`entry_advice`가 결과와 함께 남는다. 결과는 `selected`, `no-match`, `uncertain`, `off`, `error`, `stale`,
+`single-option`, `no-candidate`, `no-public-candidate-evidence` 중 하나다. 분류 필요는 run을 거절하지 않고, 중계를
+요청하지 않으며, 준비 id를 바꾸지 않으므로 저장한 중계 결과는 그대로 유효하다. `oah capabilities plan`은 아무것도
+묻지 않고 `jev: unused(plan-pure)`를 기록한다. 사용자가 치르는 비용은 이렇다. run마다 작업 필요 하나에 판정
+요청이 한 번, 문서가 이어진 선택지가 둘 이상인 분류 하나에 한 번 더 가고, 요청마다 패킷 글의 그 구간이 실린다.
+
+**Jev는 사용자가 이은 문서로만 항목을 비교한다.** `docs = {"mcp:docs/lookup" = "docs:document-text"}`는 정확한
+능력 ID 하나에 `oah sources`로 등록한 출처와 그 검증된 스냅샷의 파일을 잇는다(문서 페이지는 `document-text`,
+저장소는 `README.md` 같은 경로). oah는 그 파일의 앞 4,000바이트를 스냅샷에서 다시 읽어 보낸다. 항목을 이름으로
+맞추지 않으며, 설정에 이름만 있는 서버는 선택지가 되지 않는다. 사용자가 치르는 비용은 이렇다. 출처를 등록하고
+Jev가 비교할 항목마다 문서를 이어야 하며, 하나라도 빠지면 그 분류는 첫 항목을 쓴다.
 
 ## 이번 릴리스의 한계
 
@@ -288,8 +328,14 @@ TypeSafe는 답한 id를 엄격하게 확인하므로 스킬 하나를 빠뜨린
   경로를 보고하지 않는다.
 - 예산은 고정된 바이트 수다. 모델의 문맥 창을 재지 않는다.
 - 작업 선택은 모든 `oah call` run과 네이티브 제안에 들어가지만, 고정된 입력을 쓰는 `oah fix` 수정에는 들어가지
-  않는다. 필요의 요구는 패킷의 의도 절 전체이며, 그 안의 범위를 고르는 방법은 아직 없다.
+  않는다. oah가 이끌어 내거나 `oah skills find --task`가 쓰는 필요는 패킷의 의도 절 전체를 덮는다. 리드는 필요
+  파일에서 그것을 바이트 범위로 좁힐 수 있고, oah는 그 범위를 패킷과 다시 맞춰 본다. 명령에는 범위를 고르는
+  방법이 없다.
 - 네이티브 서브에이전트의 읽기는 `oah skills read`로만 보인다. 호스트가 직접 읽은 파일은 관찰하지 않는다.
   `oah call settle`은 능력 중계를 다시 확인하지 않는다.
-- 작업 패킷의 의도 글을 읽을 수 있는 유일한 Jev 질문인 능력 필요 질문은(그것도 기본으로 꺼진
-  `[rerank.judgement] send_task_text = true`일 때만) 아직 어떤 단계도 묻지 않는다. 능력 계획은 정해진 규칙을 따른다.
+- 능력 분류는 Jev와 스킬이 이름 붙인 도구에서만 온다. 발주의 단계와 종류는 분류를 더하지 않고, 능력 ID를 적은
+  패킷 줄은 읽지 않으며, 분류로 고른 항목은 자기 의존을 끌어오지 않는다.
+- 후보가 없는 분류 필요는 다른 계획할 것이 없으면 계획을 남기지 않으므로, 그 run에는 `capabilities.json`이 쓰이지
+  않는다.
+- Jev는 `oah skills find`에서만 검색 순서를 고른다. `oah design coverage --next`는 단계를 제안할 뿐이고, 이번
+  릴리스에서 설계 시작과 재개는 그것을 묻지 않는다.

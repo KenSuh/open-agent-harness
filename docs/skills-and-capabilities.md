@@ -26,7 +26,8 @@ the state of each check, the skills linked to it and the gaps left open.
 
 - `oah design coverage P D` shows each stage's status, what needs a re-check and the stages to ask about next.
   It reads only. `--accepted` or `--revision N` reads another revision. `--check` exits 1 with
-  `OAH_COVERAGE_INCOMPLETE` until the design is complete.
+  `OAH_COVERAGE_INCOMPLETE` until the design is complete. `--next` names one stage to work on next (see
+  [Jev in these steps](#jev-in-these-steps)).
 - `oah design coverage edit P D --from EDITS.json` builds a new coverage part from a list of operations and
   prints it together with the exact `oah design save` command that stores it. It writes nothing itself. The
   operations are `set-applicability`, `set-check`, `defer-stage`, `confirm-stage`, `set-tech`, `link-skill`,
@@ -252,9 +253,10 @@ named tool into a capability need and routes it.
   --capability ID --result-file FILE --invocation FILE`. Then `oah call ... --parent-inventory FILE
   --relay-result HASH` delivers it in a `## Capabilities` block after the skill texts.
 - `[capabilities]` in `.oah/config.toml` holds `classes = {server = "class"}`, which tags a server with one of
-  oah's capability classes, and `requires = {"<id>" = ["<id>", ...]}`, which adds dependencies between
-  capabilities. A plugin's server also needs its plugin enabled. Dependencies resolve in at most three rounds,
-  and a cycle refuses with the chain it found.
+  oah's capability classes, `requires = {"<id>" = ["<id>", ...]}`, which adds dependencies between
+  capabilities, and `docs = {"<id>" = "SOURCE:PATH"}`, which links one exact capability to a public documentation
+  file that Jev may read (see [Jev in these steps](#jev-in-these-steps)). A plugin's server also needs its plugin
+  enabled. Dependencies resolve in at most three rounds, and a cycle refuses with the chain it found.
 
 **A configured name is not a connection.** A required need is met only by a fresh relay. A tool that is only named
 in configuration refuses with `OAH_CAPABILITY_UNSUPPORTED(unknown-schema)` or `(pending-approval)`. What it costs
@@ -272,16 +274,19 @@ enable it yourself and plan again.
 
 ## Jev in these steps
 
-Jev chooses no skill and no tool on this page in this release. Coverage, discovery, admission and capability
-routing follow fixed rules, and the capability plan records `jev: unused(not-implemented)`. A native offer asks no
-judge at all and records `jev_status: unused(native)`. The skill re-ranker described in
-[Skill selection](concepts.md#skill-selection) reorders installed skills for the brief; it never changes which
-skill texts are delivered.
+Jev never decides anything alone on this page. Coverage, discovery, admission and capability routing follow fixed
+rules; Jev may only choose among options those rules already allow, and oah applies an answer only after the judge
+checks it again against the same inputs. Jev off, an uncertain or stale answer and a failed request all keep the
+fixed order. Jev is on when `[rerank] enabled`, `[rerank.judgement] enabled` and a key are all set, and text you
+wrote leaves only with its own permission: `send_design_text` for design text and `send_task_text` for the task's
+packet intent, both off by default. A native offer asks no judge at all and records `jev_status: unused(native)`.
+The skill re-ranker described in [Skill selection](concepts.md#skill-selection) reorders installed skills for the
+brief; it never changes which skill texts are delivered.
 
 **Jev may only reorder the optional skills of one check.** When an ordinary run delivers two or more optional
-skills for the same design check and Jev is on (`[rerank] enabled`, `[rerank.judgement] enabled` and a key), oah
-asks Jev once for that check whether each skill's text gives concrete guidance for it, and puts those skills in
-that order. Required skills keep their place, no skill is added or dropped, and every text stays the same.
+skills for the same design check and Jev is on, oah asks Jev once for that check whether each skill's text gives
+concrete guidance for it, and puts those skills in that order. Required skills keep their place, no skill is added
+or dropped, and every text stays the same.
 `skills.json` records the outcome as `skill_fit` beside the bundle. Every Jev-off state (`unused(judgement-off)`,
 `unused(not-enabled)`, `unused(no key)`, `unused(disabled-by-brief)` for `--no-rerank`) and every answer oah cannot
 apply, such as an uncertain one, keeps the bundle exactly as admitted. TypeSafe checks the answered ids strictly,
@@ -290,6 +295,43 @@ judge provider that returns a partial ranking. Only the first 4,000 bytes of eac
 its verified public snapshot, and the fixed stage and check names are sent, never your design or task text. What
 it costs you: one judge request per such check on each run, and `oah skills plan`, which asks no judge, shows the
 order before advice.
+
+**Jev may choose which search runs first.** When a need in `oah skills find` has two or more public technology
+words, such as `--tech auth=passkey --tech platform=supabase`, oah asks Jev which word's query covers the need, and
+runs that query first so the request budget reaches it. Only the provider name and the public words leave, as
+fixed labels; the queries stay oah's own templates. The report's `search_path` lists the options, the one run
+first and `jev`. One public word, Jev off and every answer oah cannot apply keep template order. What it costs
+you: one judge request per such need on each `find`. Discovery inside `oah call` keeps template order.
+
+**Jev may suggest the next design stage.** `oah design coverage P D --next` names the first open stage of the
+current revision. When two or more stages are open and `send_design_text = true`, oah asks Jev which of them
+covers the unresolved decision, sending the stage names and the start of the design's own text (at most 4,096
+bytes), and names that stage instead. The readout prints `next: <stage> (jev=..., applied=yes|no)`. One open stage
+asks nothing; with none open, the readout says `complete` or `blocked`. What it costs you: one judge request per
+`--next`. It is a suggestion; nothing is stored and the coverage stays as it is.
+
+**Jev may choose a capability for each part of a task.** In an ordinary `oah call` (not a native offer, not a
+review), each task need without a design covers one span of the packet's intent section. With
+`send_task_text = true`, oah asks Jev, for that span alone, which of oah's capability classes it needs
+(`capability-needs/v1`). A class read as yes becomes an optional need. Its candidates are the qualified entries of
+that class, which in this release means the ones the lead's inventory (`--parent-inventory`) reports with current
+evidence and read-only effects, in inventory order; the first eight are options and the rest are deferred. When
+every option has documentation linked in `[capabilities] docs`, oah asks Jev which option's documented function
+fits the span (`capability-select/v1`) and lists that entry; otherwise the first stands. The chosen entry appears
+in the `## Capabilities` block as an optional route, and oah never calls it. `capabilities.json` keeps each class
+judgement in `class_advice_refs` and each choice in `entry_advice`, with its outcome: `selected`, `no-match`,
+`uncertain`, `off`, `error`, `stale`, `single-option`, `no-candidate` or `no-public-candidate-evidence`. A class
+need never refuses a run, never asks for a relay and never changes the preparation id, so a stored relay result
+stays valid. `oah capabilities plan` asks nothing and records `jev: unused(plan-pure)`. What it costs you: on each
+run, one judge request per task need and one per class with two or more documented options, and each request
+carries that span of your packet text.
+
+**Jev compares entries only by documentation you link.** `docs = {"mcp:docs/lookup" = "docs:document-text"}`
+names, for one exact capability ID, a source registered with `oah sources` and a file of its verified snapshot
+(`document-text` for a document page, or a path such as `README.md` in a repository). oah sends the first 4,000
+bytes of that file, read again from the snapshot. An entry is never matched by its name, and a server that is only
+named in configuration never becomes an option. What it costs you: you register a source and link every entry Jev
+should compare; one missing link keeps the first entry for that class.
 
 ## Limits in this release
 
@@ -303,10 +345,15 @@ order before advice.
   `direct` route, which would need that.
 - The budgets are fixed byte counts. They do not measure the model's context window.
 - Task selections reach every `oah call` run and native offer, but not `oah fix` corrections, which keep their
-  frozen inputs. A need's requirement is the packet's whole intent section; choosing a range inside it is not
-  offered yet.
+  frozen inputs. A need that oah derives, or that `oah skills find --task` writes, covers the packet's whole intent
+  section. A lead may narrow it to a byte range in the needs file, and oah checks that range against the packet
+  again; the command offers no way to choose one.
 - A native subagent's reads are seen only through `oah skills read`; the host's own file reads are not observed.
   `oah call settle` does not check capability relays again.
-- Jev's capability-needs question, the only one that may read the task's packet intent (and only with
-  `[rerank.judgement] send_task_text = true`, off by default), is not asked by any step yet. The capability plan
-  keeps its fixed rules.
+- Capability classes come only from Jev and from the tools a skill names. A dispatch's stage and kind add no
+  class, packet lines that name a capability ID are not read, and an entry chosen for a class does not bring its
+  own dependencies.
+- A class need that finds no candidate leaves no plan when nothing else is planned, so `capabilities.json` is not
+  written for that run.
+- Jev chooses the search order only in `oah skills find`. `oah design coverage --next` only suggests a stage;
+  design start and resume do not ask it in this release.

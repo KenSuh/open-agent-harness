@@ -334,6 +334,76 @@ def mit_repo(skills: dict[str, str]) -> dict:
     return {"LICENSE": MIT_LICENSE, **{f"{path}/SKILL.md": text for path, text in skills.items()}}
 
 
+class SearchPathTest(DiscoveryRepo, unittest.TestCase):
+    """AC13 (DESIGN §4.5, §7.1 skill-search/v1): only a need with two or more admitted public terms may let Jev
+    choose which query goes first; only the provider and each term leave, as fixed labels, the search itself stays
+    oah's, and every other state keeps template order."""
+
+    ACCESS = ("--design-stage", "access", "--check", "rules", "--tech", "auth=passkey", "--tech", "platform=supabase")
+
+    @staticmethod
+    def choosing(option: str, *, fits: float = 0.9):
+        def respond(path, body):
+            criteria = sorted(body["questions"]["choice"]["criteria"])
+            answers = {"choice": {"type": "choice", "choice": option, "confidence": 0.8,
+                                  "probabilities": {key: 0.8 if key == option else 0.2 / (len(criteria) - 1)
+                                                    for key in criteria}},
+                       "fits": {"type": "noul", "noul": fits}}
+            return 200, {"model": "jev-test", "answers": answers, "usage": {"input_tokens": 1}}, 0, {}
+        return respond
+
+    def jev(self, url: str) -> None:
+        self.config(f"[skills.discovery]\nmax_queries = 1\n[rerank]\nenabled = true\nprovider = \"typesafe\"\n"
+                    f"[rerank.typesafe]\nurl = \"{url}\"\n[rerank.judgement]\nenabled = true\n")
+
+    def test_template_order_stands_without_jev(self):
+        self.config("[skills.discovery]\nmax_queries = 1\n")
+        report, _ = self.find(*self.ACCESS)
+        (need,) = report["needs"]
+        path = need["search_path"]
+        self.assertEqual([option["public_tech"] for option in path["options"]], [["passkey"], ["supabase"]])
+        self.assertEqual((path["first"], path["applied"]), ("o0", False))
+        self.assertEqual(path["jev"], "unused(judgement-off)")
+        self.assertEqual(self.server.requests, ["passkey authorization patterns"])
+        self.assertEqual([item["query"] for item in need["deferred"]], ["supabase row level security"])
+
+    def test_a_rechecked_choice_runs_its_query_first_and_sends_only_labels(self):
+        from tests.test_rerank import FakeServer, fake_key
+
+        server = FakeServer(self, self.choosing("o1"))
+        self.jev(server.url())
+        with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": fake_key()}):
+            report, _ = self.find(*self.ACCESS)
+            code, out, err = self.skills("find", *self.ACCESS)
+        (need,) = report["needs"]
+        path = need["search_path"]
+        self.assertEqual((path["first"], path["applied"], path["jev"]), ("o1", True, "used"))
+        self.assertEqual(self.server.requests[0], "supabase row level security")  # the budget reaches it first
+        self.assertEqual([item["query"] for item in need["deferred"]], ["passkey authorization patterns"])
+        sent = server.requests[0]["body"]
+        self.assertEqual(sent["state"], {"purpose": "search-path",
+                                         "fields": {"o0:provider": "skills-sh", "o0:public_tech": "passkey",
+                                                    "o1:provider": "skills-sh", "o1:public_tech": "supabase"}})
+        self.assertIn("search-path", out)
+        self.assertIn("supabase first (jev=used", out)
+
+    def test_no_match_keeps_template_order(self):
+        from tests.test_rerank import FakeServer, fake_key
+
+        server = FakeServer(self, self.choosing("o1", fits=0.1))
+        self.jev(server.url())
+        with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": fake_key()}):
+            report, _ = self.find(*self.ACCESS)
+        path = report["needs"][0]["search_path"]
+        self.assertEqual((path["first"], path["applied"], path["reason"]), ("o0", False, "no-match"))
+        self.assertEqual(self.server.requests, ["passkey authorization patterns"])
+
+    def test_one_public_term_asks_nothing(self):
+        report, _ = self.find("--design-stage", "data", "--check", "entities", "--tech", "database=postgresql")
+        (need,) = report["needs"]
+        self.assertEqual((need["search_path"]["jev"], need["search_path"]["first"]), ("unused(single-option)", "o0"))
+
+
 class ReviewTest(DiscoveryRepo, unittest.TestCase):
     """E-T09 and F07: reviews pin a folder through the collector and classify it; external text stays data."""
 
