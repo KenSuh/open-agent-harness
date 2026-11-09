@@ -92,6 +92,10 @@ DEFAULTS = {
         {"skill": ["vercel-react-best-practices", "react-best-practices"], "file_kinds": ["react"],
          "reason": "the scope has React files"},
     ],
+    # [skills.discovery]: the external skill search (oah skills find). Only public technology words are sent;
+    # `enabled = false` or `provider = "none"` turns it off. An empty license_allow uses [sources] license_allow.
+    "discovery": {"enabled": True, "provider": "skills-sh", "cache_hours": 24.0, "max_queries": 4,
+                  "license_allow": []},
 }
 
 

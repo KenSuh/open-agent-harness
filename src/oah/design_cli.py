@@ -361,9 +361,10 @@ def _check(args: argparse.Namespace, store) -> int:
 
 
 def _coverage_evidence(store):
-    from oah.design import coverage
+    """Reviewed skills and verified source snapshots in this clone's state folder (`oah skills review` writes them)."""
+    from oah.discovery.store import ReviewEvidence
 
-    return coverage.NO_EVIDENCE
+    return ReviewEvidence(store.state)
 
 
 def _quote(arg: str) -> str:

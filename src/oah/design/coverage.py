@@ -141,6 +141,22 @@ class Evidence:
 NO_EVIDENCE = Evidence()
 
 
+def review_pin(review: Mapping) -> dict | None:
+    """The pin a link to this ReviewedSkillV1 must carry: its locator, commit, folder and SKILL.md digests."""
+    source = review.get("source") if isinstance(review, Mapping) else None
+    if not isinstance(source, Mapping):
+        return None
+    return {"locator": source.get("locator"), "commit": source.get("commit"), "path": source.get("path"),
+            "sha256": source.get("skill_sha256"), "lf_sha256": source.get("skill_lf_sha256")}
+
+
+def review_license(review: Mapping) -> dict | None:
+    license_ = review.get("license") if isinstance(review, Mapping) else None
+    if not isinstance(license_, Mapping):
+        return None
+    return {"expression": license_.get("expression"), "eligibility": license_.get("eligibility")}
+
+
 # Field validators ---------------------------------------------------------------------------------------------------
 
 def _keys(value: object, keys: set[str], what: str) -> Mapping:
@@ -721,8 +737,10 @@ def _link_view(link: Mapping, record: Mapping, evidence: Evidence) -> dict:
         review = evidence.review(link["review"]) if link["review"] else None
         if review is None:
             status, reason = "unavailable", "review-missing: the reviewed record is not in this state folder"
-        elif link["pin"] is not None and review.get("pin") != link["pin"]:
+        elif link["pin"] is not None and review_pin(review) != link["pin"]:
             status, reason = "unavailable", "tampered: the link's pin differs from its review"
+        elif review_license(review) != link["license"] or (link["license"] or {}).get("eligibility") != "eligible":
+            status, reason = "unavailable", "license: the link's license differs from its review or is not eligible"
     return {**link, "status": status, "reason": reason}
 
 
@@ -1032,12 +1050,19 @@ def _need_and_link(op: Mapping, stage: str, evidence: Evidence) -> tuple[dict, d
     if review is None:
         raise _invalid(f"link-skill {link['skill']}: review {link['review']} is not a reviewed skill in this state "
                        "folder; review it first (`oah skills review`)")
-    if link["pin"] is not None and review.get("pin") != link["pin"]:
+    if link["pin"] != review_pin(review):
         raise _invalid(f"link-skill {link['skill']}: the pin differs from its review")
-    if link["license"] is not None and review.get("license") != link["license"]:
+    if link["license"] != review_license(review):
         raise _invalid(f"link-skill {link['skill']}: the license differs from its review")
-    if (review.get("license") or {}).get("eligibility") not in ("eligible", "usable"):
+    if (review.get("license") or {}).get("eligibility") != "eligible":
         raise _invalid(f"link-skill {link['skill']}: its license is not eligible under the policy")
+    hosts = (review.get("compatibility") or {}).get("hosts") or []
+    if any(host not in hosts for host in need["host"]):
+        raise _invalid(f"link-skill {link['skill']}: the review supports {', '.join(hosts) or 'no host'}, not "
+                       f"{', '.join(need['host'])}")
+    model_invocable = (review.get("frontmatter") or {}).get("model_invocable")
+    if model_invocable is False and need["invocation"] != "user-only":
+        raise _invalid(f"link-skill {link['skill']}: the skill disables model invocation; its need is user-only")
     return need, link
 
 
