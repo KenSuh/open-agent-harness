@@ -3,8 +3,8 @@
 
 A real repository holds an accepted design whose coverage part links skills reviewed from local upstream
 repositories into the task's own state folder; fake engines record what they were given. Nothing reaches the
-network or a real engine. Reference mode, observed stream reads, Jev ordering and native offers are outside this
-file (they are not implemented; the report lists them as limits).
+network or a real engine. A required file too large to inline goes by reference to a Claude process run, whose
+stream-json reads a fake pairs. Jev skill-fit ordering and native offers are tested in their own files.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 from tests.helpers import git_commit, make_tmp_dir
-from tests.test_design_context import DesignTask
+from tests.test_design_context import FAKES, DesignTask
 from tests.test_design_sources import LICENSE as MIT_LICENSE
 from tests.test_design_store import TODAY
 from tests.test_intent_wiring import packet_text
@@ -136,6 +136,18 @@ class DeliveryTask(DesignTask):
     def bundle(self, run: pathlib.Path) -> dict | None:
         return json.loads((run / "skills.json").read_text(encoding="utf-8")).get("bundle") \
             if (run / "skills.json").exists() else None
+
+    def prepare(self):
+        """An in-process Claude prepare of t1, as the launchers hand it on."""
+        from oah import call, call_cli
+        from oah.secrets import NoKeychain
+
+        tools = call_cli.intent_tools()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
+            return call.prepare(call.CallRequest(engine="claude", stage="initial", task="t1", tier="low",
+                                                 no_rerank=True),
+                                call_cli.load_settings(self.repo), root=self.repo, state_dir=self.state_dir,
+                                env=self.env, footer=tools.footer, has_footer=tools.has_footer, keychain=NoKeychain())
 
     @staticmethod
     def block(prompt: str) -> str:
@@ -314,17 +326,6 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         path.write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
         return path
 
-    def prepare(self):
-        from oah import call, call_cli
-        from oah.secrets import NoKeychain
-
-        tools = call_cli.intent_tools()
-        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
-            return call.prepare(call.CallRequest(engine="claude", stage="initial", task="t1", tier="low",
-                                                 no_rerank=True),
-                                call_cli.load_settings(self.repo), root=self.repo, state_dir=self.state_dir,
-                                env=self.env, footer=tools.footer, has_footer=tools.has_footer, keychain=NoKeychain())
-
     def test_a_matching_installed_copy_is_delivered_and_a_change_before_the_spawn_refuses(self):
         from oah import call
 
@@ -381,6 +382,197 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         self.assertTrue(refused.stderr.startswith("OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)"), refused.stderr)
         self.assertFalse(self.record.exists())
         self.assertEqual(len(self.runs()), 1)
+
+
+GUIDE_LINES = 4_200
+GUIDE_REFERENCE = "".join(f"Reference line {n:04d}: keep the booking rules in this order.\n"
+                          for n in range(1, GUIDE_LINES + 1))  # about 248 KB: over the 196,608-byte skill budget
+GUIDE_FILES = {"LICENSE": MIT_LICENSE,
+               "skills/guide/SKILL.md": skill_md("guide", "Read `references/rules.md` before you start.\n"),
+               "skills/guide/references/rules.md": GUIDE_REFERENCE}
+GUIDE = ("acme/guide", "skills/guide", GUIDE_FILES,
+         {"aux": ({"path": "references/rules.md", "required": True, "sha256": sha(GUIDE_REFERENCE.encode())},)})
+REFERENCE_PATH = ".claude/skills/guide/references/rules.md"
+SKILL_STREAM = '''# 스킬 참조 스트림 가짜 Claude — 브리프가 가리키는 스킬 참조 파일을 Read 도구 이벤트로 읽은 것처럼 stream-json 을 낸다.
+import json, os, re, sys
+sys.path.insert(0, {fakes!r})
+import fake_claude, fakelib
+
+def main(argv):
+    if "-p" not in argv or "stream-json" not in argv:
+        return fake_claude.main(argv)
+    prompt = fakelib.read_stdin()
+    fakelib.record(argv, prompt)
+    mode = os.environ.get("FAKE_SKILL_READS", "full")
+    out = [{{"type": "system", "subtype": "init", "session_id": "s1", "cwd": os.getcwd(), "tools": ["Read", "Grep"],
+            "model": "fake"}}]
+    n = 0
+    for path in re.findall(r"^Read `([^`]+)` in full with your Read tool", prompt, re.M):
+        if mode != "full":
+            break
+        path = os.path.abspath(path)
+        lines = open(path, "rb").read().decode("utf-8").split("\\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        for start in range(1, len(lines) + 1, 2000):
+            chunk = lines[start - 1:start + 1999]
+            n += 1
+            out.append({{"type": "assistant", "session_id": "s1", "parent_tool_use_id": None, "message": {{"content": [
+                {{"type": "tool_use", "id": f"t{{n}}", "name": "Read", "input": {{"file_path": path}}}}]}}}})
+            out.append({{"type": "user", "session_id": "s1", "parent_tool_use_id": None, "message": {{"content": [
+                {{"type": "tool_result", "tool_use_id": f"t{{n}}",
+                  "content": "\\n".join(f"{{i:6d}}\\u2192{{line}}" for i, line in enumerate(chunk, start))}}]}},
+                "tool_use_result": {{"type": "text", "file": {{"filePath": path, "content": "\\n".join(chunk),
+                                    "numLines": len(chunk), "startLine": start, "totalLines": len(lines)}}}}}})
+    if mode != "no-result":
+        out.append({{"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": "s1",
+                    "modelUsage": {{"claude-opus-fake": {{"inputTokens": 1, "outputTokens": 1}}}}}})
+    for event in out:
+        print(json.dumps(event))
+    return fakelib.exit_code()
+
+sys.exit(main(sys.argv[1:]))
+'''
+
+
+class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
+    """E-T11 (a required file too large to inline goes by reference; the stream read is paired, or never happens),
+    E-T12 (Codex and the native route refuse a required reference before launch), E-T14 (a copy outside the working
+    directory) and E-T15 (a referenced file changed before the spawn)."""
+
+    def build_guide(self, *, place: str = "project") -> None:
+        self.build_skills(GUIDE)
+        copy = {f".claude/skills/guide/{name.split('skills/guide/', 1)[1]}": text.encode("utf-8")
+                for name, text in GUIDE_FILES.items() if name.startswith("skills/guide/")}
+        if place == "project":
+            git_commit(self.repo, copy, "install the guide skill")
+        else:
+            for name, data in copy.items():
+                path = self.work / "home" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+        (self.work / "fake_stream_claude.py").write_text(SKILL_STREAM.format(fakes=str(FAKES)), encoding="utf-8")
+
+    def receiving(self, run: pathlib.Path) -> dict:
+        return json.loads((run / "skills-receiving.json").read_text(encoding="utf-8"))
+
+    @staticmethod
+    def saved(run: pathlib.Path) -> dict:
+        return json.loads((run / "result.json").read_text(encoding="utf-8"))
+
+    def test_a_required_file_too_large_to_inline_goes_by_reference_and_its_read_is_paired(self):
+        self.build_guide()
+        result = self.call()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (run,) = self.runs()
+        prompt = (run / "prompt.md").read_text(encoding="utf-8")
+        recorded = json.loads(self.record.read_text(encoding="utf-8"))
+        self.assertEqual(recorded["stdin"], prompt)
+        at = recorded["argv"].index("--output-format")
+        self.assertEqual(recorded["argv"][at + 1:at + 3], ["stream-json", "--verbose"])  # the only argv change
+        bundle = self.bundle(run)
+        (item,) = bundle["items"]
+        (aux,) = item["aux"]
+        self.assertEqual((item["mode"], aux["mode"], aux["required"]), ("inline", "reference", True))
+        self.assertEqual(aux["reference"], {"path": REFERENCE_PATH, "lines": GUIDE_LINES})
+        self.assertEqual((aux["sha256"], aux["bytes"]), (sha(GUIDE_REFERENCE.encode()), len(GUIDE_REFERENCE)))
+        self.assertNotIn("text", aux)
+        self.assertEqual(bundle["budget"]["reference_bytes"], len(GUIDE_REFERENCE))
+        body = (self.upstreams["acme/guide"] / "skills/guide/SKILL.md").read_text(encoding="utf-8")
+        block = self.block(prompt)
+        self.assertEqual(bundle["block_sha256"], sha(block.encode("utf-8")))
+        self.assertIn(body.rstrip("\n"), block)  # the body itself stays inline
+        self.assertIn(f"Read `{REFERENCE_PATH}` in full with your Read tool before you start", block)
+        self.assertNotIn("Reference line 0002:", prompt)  # the file itself is not copied into the brief
+        self.assertEqual(self.saved(run)["status"], "finished")
+        receiving = self.receiving(run)
+        self.assertEqual((receiving["delivery"], receiving["reference_delivery"], receiving["bundle_id"]),
+                         ("prompt-written", "complete", bundle["digest"]))
+        (seen,) = receiving["items"]
+        self.assertEqual((seen["ordinal"], seen["read"], seen["application"]),
+                         (1, "observed", {"state": "not-observed", "evidence_refs": []}))
+        self.assertEqual([row["kind"] for row in seen["observations"]], ["stream-read"] * 3)  # 2000-line reads
+        self.assertTrue(all(row["exact"] and row["model_directed"] for row in seen["observations"]))
+        self.assertNotIn("did not read", json.dumps(self.saved(run).get("warnings")))
+
+        # The dry run admits the same bundle, with the same reference.
+        planned = self.oah("skills", "plan", "--task", "t1", "--stage", "initial", "--json")
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self.assertEqual(json.loads(planned.stdout)["bundle"]["digest"], bundle["digest"])
+
+    def test_a_child_that_never_reads_the_reference_leaves_delivery_incomplete(self):
+        self.build_guide()
+        result = self.call(env={"FAKE_SKILL_READS": "none"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)  # the ordinary result stays
+        (run,) = self.runs()
+        receiving = self.receiving(run)
+        self.assertEqual(receiving["reference_delivery"], "incomplete")
+        (seen,) = receiving["items"]
+        self.assertEqual((seen["read"], seen["observations"], seen["application"]["state"]),
+                         ("none", [], "not-observed"))
+        warnings = self.saved(run)["warnings"]
+        self.assertTrue(any("did not read every required skill reference" in line and REFERENCE_PATH in line
+                            for line in warnings), warnings)
+
+    def test_a_stream_without_a_result_event_does_not_count(self):
+        self.build_guide()
+        result = self.call(env={"FAKE_SKILL_READS": "no-result"})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        (run,) = self.runs()
+        saved = self.saved(run)
+        self.assertEqual(saved["status"], "failed")
+        self.assertTrue(saved["error"].startswith("OAH_ENGINE_FAILED: "), saved["error"])
+        self.assertIn("this run does not count", saved["error"])
+        self.assertEqual(self.receiving(run)["reference_delivery"], "incomplete")
+
+    def test_codex_refuses_a_required_reference_before_launch(self):
+        self.build_guide()
+        result = self.call("codex", "correction")
+        self.assert_refused_before_any_run(result, "OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)",
+                                           planner=("skills", "plan", "--task", "t1", "--stage", "correction",
+                                                    "--engine", "codex"))
+        self.assertIn("references/rules.md", result.stderr)
+
+    def test_a_native_offer_refuses_a_required_reference(self):
+        self.build_guide()
+        result = self.call("claude", "initial", "--launcher", "native")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(result.stderr.startswith("OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)"),
+                        result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual((self.runs(), self.record.exists()), ([], False))
+
+    def test_a_copy_outside_the_working_directory_refuses(self):
+        self.build_guide(place="home")
+        result = self.call()
+        self.assert_refused_before_any_run(result, "OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)")
+        self.assertIn("references/rules.md", result.stderr)
+
+    def test_a_referenced_file_changed_before_the_spawn_refuses(self):
+        from oah import call
+
+        self.build_guide()
+        prepared = self.prepare()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
+            call.check_prepared(prepared)  # unchanged: the launch check passes
+            (self.repo / REFERENCE_PATH).write_bytes(GUIDE_REFERENCE.encode("utf-8") + b"One more rule.\n")
+            with self.assertRaises(call.EngineError) as caught:
+                call.check_prepared(prepared)
+        self.assertTrue(str(caught.exception).startswith("OAH_SKILL_NOT_DELIVERABLE(changed): "), caught.exception)
+        self.assertIn(REFERENCE_PATH, str(caught.exception))
+        self.assertFalse(self.record.exists())
+
+    def test_reads_that_cannot_be_recorded_do_not_count(self):
+        from oah import call
+
+        self.build_guide()
+        prepared = self.prepare()
+        (pathlib.Path(prepared.run_dir) / "skills-receiving.json").mkdir()  # the record cannot be written there
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
+            data = call.execute(prepared, base_env=self.env)
+        self.assertEqual(data["status"], "failed")
+        self.assertTrue(data["error"].startswith("OAH_SKILL_RECEIVING_FAILED: "), data["error"])
+        self.assertIn("this run does not count", data["error"])
 
 
 class DraftAndLegacyTest(DeliveryTask, unittest.TestCase):
@@ -496,6 +688,13 @@ class PackUnitTest(unittest.TestCase):
         with self.assertRaises(skillpack.PackRefused) as caught:
             skillpack.check_brief("x" * (skillpack.BRIEF_BUDGET + 1))
         self.assertEqual((caught.exception.code, caught.exception.reason), ("OAH_SKILLS_BUDGET_EXCEEDED", "brief"))
+
+    def test_a_path_on_another_drive_is_outside_the_receiving_root(self):
+        from oah import skillpack
+
+        self.assertTrue(skillpack._inside(os.path.join("repo", "a.md"), "repo"))
+        with mock.patch("os.path.commonpath", side_effect=ValueError("Paths don't have the same drive")):
+            self.assertFalse(skillpack._inside("D:\\skills\\a.md", "C:\\repo"))
 
     def test_a_reused_brief_drops_one_whole_skill_texts_block_and_refuses_a_damaged_one(self):
         from oah import skillpack

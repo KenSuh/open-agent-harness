@@ -194,7 +194,8 @@
 | `OAH_SKILLS_WORKER_REFUSED` | 발주된 워커가 검색, 검토, 검토 읽기, 중계 결과 저장을 하려 했거나 다른 run의 묶음을 읽으려 했다. | 리드 세션에서 실행한다. 워커는 `oah skills read --run`으로 자기 run만 읽는다. |
 | `OAH_SKILLS_USAGE` | `oah skills` 옵션이 빠졌거나 다른 옵션과 맞지 않는다. | 메시지를 따른다. `oah skills <subcommand> --help`가 옵션을 보여 준다. |
 | `OAH_SKILL_MANDATORY_MISSING` | 이번 발주 단계의 필수 스킬 필요에 살아 있는 연결이 없거나, 연결된 스킬의 검토가 이 상태 폴더에 없다. 아무것도 시작하지 않았다. | 스킬을 검토하고 `coverage edit`으로 연결하거나 그 필요에 공백을 기록한 뒤 다시 호출한다. `oah skills plan`이 시작하지 않고 같은 답을 보여 준다. |
-| `OAH_SKILL_REFERENCE_UNAVAILABLE` | 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나 `<!-- oah`로 시작하는 줄을 담고 있다. 아무것도 시작하지 않았다. | 그 파일이 고정되도록 스킬을 다시 검토하거나, 연결에서 그 파일을 선택으로 바꾼다. |
+| `OAH_SKILL_REFERENCE_UNAVAILABLE` | `(inaccessible)`: 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나, `<!-- oah`로 시작하는 줄을 담고 있거나, 브리프에 들어가지 않는데 작업 디렉터리 안에 고정된 바이트 그대로인 설치본이 없다. `(unsupported-engine)`: 파일이 브리프에 들어가지 않는데 대상이 oah에 읽기를 보여 주지 않거나(Codex, 네이티브 서브에이전트, `oah fix` 수정 run), Claude의 Read 도구가 그 파일을 그대로 돌려줄 수 없다. 아무것도 시작하지 않았다. | 그 파일이 고정되도록 스킬을 다시 검토한다. 큰 파일이면 스킬을 저장소 안(예: `.claude/skills/<이름>/`)에 설치하고 그 단계를 `oah call claude`로 발주하거나, 스킬 안에서 파일을 나누거나, 연결에서 그 파일을 선택으로 바꾼다. |
+| `OAH_SKILL_RECEIVING_FAILED` | 스킬 참조를 읽은 Claude run이 끝났지만 oah가 run 폴더에 `skills-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
 | `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유는 괄호 안에 있다. `user-only`, `license`, `host`, `marker`, `pin-mismatch`, 그리고 시작 직전에 설치본이 바뀌면 `changed`다. 아무것도 시작하지 않았다. | `changed`나 `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 나머지는 다른 스킬을 연결하거나 필요에서 그 발주 단계를 뺀다. |
 | `OAH_SKILLS_BUDGET_EXCEEDED` | 스킬 본문이나 브리프 전체가 바이트 예산을 넘었거나 항목이 128개를 넘었다. 메시지가 스킬마다 크기를 보여 준다. | 작업을 나누거나 선택 스킬의 연결을 끊은 뒤 다시 호출한다. |
 | `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run`이 스킬 묶음이 없는 run을 가리켰거나, `oah call settle`이 네이티브 제안이 없는 run을 가리켰다. | run id를 확인한다. 연결된 스킬이 없는 run에는 읽을 것이 없고, `oah call --launcher native`로 만든 run만 정산할 수 있다. |

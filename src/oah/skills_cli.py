@@ -702,7 +702,8 @@ def _plan(args: argparse.Namespace) -> int:
     judged = lease_design(holder, state)
     roots = _roots(info, state, settings_for(info.root))
     admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation)),
-                               task_design=judged, state_dir=state, engine=args.engine, stage=args.stage, roots=roots)
+                               task_design=judged, state_dir=state, engine=args.engine, stage=args.stage, roots=roots,
+                               receiving_root=info.root)  # as an ordinary run there, which observes reference reads
     _block, bundle = skillpack.finalize(admitted)
     data = {"task": args.task, "stage": args.stage, "engine": args.engine, "bundle": bundle}
     if args.json:

@@ -1022,7 +1022,8 @@ def _check_skill_bundle(prepared: Prepared, run) -> None:
         return
     state_dir = run.path.parents[2]
     roots = skillpack.environment_roots(pathlib.Path(prepared.cwd), state_dir, os.environ)
-    problems = skillpack.recheck(bundle, state_dir=state_dir) + skillpack.recheck_installed(bundle, roots)
+    problems = (skillpack.recheck(bundle, state_dir=state_dir) + skillpack.recheck_installed(bundle, roots)
+                + skillpack.recheck_references(bundle, pathlib.Path(prepared.cwd)))
     if problems:
         raise EngineError(f"{skillpack.NOT_DELIVERABLE_CODE}(changed)", "; ".join(problems)
                           + "; nothing was launched. Prepare the run again with oah call")
@@ -1034,10 +1035,11 @@ def _pack_error(exc) -> EngineError:
 
 
 def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir: pathlib.Path,
-                  env: Mapping[str, str]) -> SkillPack | None:
+                  env: Mapping[str, str], references: bool = True) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links deliver skill texts or capabilities apply, else None (the brief stays
-    byte-identical)."""
+    byte-identical). A file goes by reference only to an ordinary run that keeps its output, where execute observes
+    the reads (`references=False` for the native route)."""
     from oah import skillpack
     from oah.capabilities import CapabilityRefused, plan as capability_plan
     from oah.config import load_config
@@ -1051,7 +1053,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         admitted = skillpack.admit(skillpack.Operation("dispatch", task=request.task,
                                                        lease=(holder.id, holder.generation)),
                                    task_design=task_design, state_dir=state_dir, engine=request.engine,
-                                   stage=request.stage, roots=roots)
+                                   stage=request.stage, roots=roots,
+                                   receiving_root=root if references and request.retain_worker_text else None)
     except skillpack.PackRefused as exc:
         raise _pack_error(exc) from None
     block, bundle = skillpack.finalize(admitted)
@@ -1963,6 +1966,12 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
             at = argv.index("--output-format")
             argv[at + 1] = "stream-json"
             argv.insert(at + 2, "--verbose")
+        elif skill_pack is not None and skill_pack.bundle is not None and skillpack.references(skill_pack.bundle):
+            # Q8 (DESIGN §7.4): a planned skill reference read is observed from stream-json; only these two tokens
+            # change, and execute keeps the result line json mode prints.
+            at = argv.index("--output-format")
+            argv[at + 1] = "stream-json"
+            argv.insert(at + 2, "--verbose")
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": request.task}
     timeout_s = float(request.timeout_s) if request.timeout_s else resolution.timeout_s
     result_fields = dict(status="prepared", command=list(argv) if request.retain_worker_text else None,
@@ -2217,7 +2226,8 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     briefs.check_footer(footer, has_footer)
     basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                           read_source=read_source)
-    skill_pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env)
+    skill_pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env,
+                               references=False)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -2453,6 +2463,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     env = dict(os.environ if base_env is None else base_env)
     env.update(prepared.env_additions)
     clean = redact or (lambda text: text)
+    skill_bundle = _streamed_skill_bundle(prepared)
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
     publication = _CORRECTION_PUBLICATION.get()
@@ -2488,6 +2499,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         for var, token in zip((_REFERENCE_RUN, _DESIGN_RUN), tokens):
             var.reset(token)
     transport_warnings, transport_failure = [], None
+    raw_stdout = result.stdout  # the skill reads below come from the stream as the engine wrote it
     if reference is not None:
         concluded = False
         accounting_problem = "transport accounting did not complete"
@@ -2512,6 +2524,10 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                 reference.release()
         if not concluded:
             return run.read()
+    skill_warnings, skill_failure = [], None
+    if skill_bundle is not None:
+        result, skill_warnings, skill_failure = _conclude_skill_reads(prepared, skill_bundle, raw_stdout, result,
+                                                                      normalize=reference is None)
     finished = dt.datetime.now(dt.timezone.utc)
     if prepared.retain_worker_text:
         run.write_logs(clean(result.stdout), clean(result.stderr))
@@ -2548,16 +2564,65 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         status, error = "finished", None
     if transport_failure is not None and status == "finished":
         status, error = "failed", transport_warnings[0]  # exposed design data: this run does not count
+    if skill_failure is not None and status == "finished":
+        status, error = "failed", skill_failure  # an E receiving failure never counts as success (DESIGN §7.4)
     if prepared.retain_worker_text:
         moved = _design_after(prepared)  # corrections keep their closed vocabulary; their next checkpoint re-judges
-        if moved is not None or transport_warnings:
-            fields["warnings"] = [*run.read().get("warnings", []), *transport_warnings,
+        if moved is not None or transport_warnings or skill_warnings:
+            fields["warnings"] = [*run.read().get("warnings", []), *transport_warnings, *skill_warnings,
                                   *([moved] if moved is not None else [])]
     completed = run.result(status=status, finished_at=_iso(finished), duration_s=round((finished - started).total_seconds(), 3),
                            exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
     if status == "finished" and reference is None:
         _finish_inline_delivery(prepared)
     return completed
+
+
+def _streamed_skill_bundle(prepared: "Prepared") -> dict | None:
+    """The run's skill bundle when it sends files by reference, whose reads execute observes; else None."""
+    if prepared.engine != "claude" or not prepared.retain_worker_text:
+        return None
+    from oah import skillpack
+
+    try:
+        bundle = skillpack.bundle_of(prepared.run.path)
+    except ValueError as exc:
+        raise EngineError("OAH_RUN_LAUNCH_INVALID", f"{exc}; run oah call again to prepare it") from None
+    return bundle if bundle is not None and skillpack.references(bundle) else None
+
+
+def _conclude_skill_reads(prepared: "Prepared", bundle: Mapping, raw: str, result, *, normalize: bool):
+    """(result, warnings, failure): pair the referenced reads in the raw stream and record them in
+    skills-receiving.json. When E switched the output mode (`normalize`), stdout becomes the result line json mode
+    prints, and a stream without one fails the run. Unread references leave delivery incomplete, not the run."""
+    from oah import skillpack
+    from oah.atomic import write_json_atomic
+    from oah.design import task_context
+
+    line, events, problem = task_context.parse_stream(raw)
+    if normalize:
+        result = dataclasses.replace(result, stdout=line)
+    observed = skillpack.observe_reads(events, root=pathlib.Path(prepared.cwd), bundle=bundle)
+    record = skillpack.stream_receiving(prepared.run_id, bundle, observed,
+                                        target={"engine": prepared.engine, "model": prepared.model,
+                                                "effort": prepared.launch_effort},
+                                        at=_iso(dt.datetime.now(dt.timezone.utc)))
+    warnings, failure = [], None
+    if record["reference_delivery"] != "complete":
+        unread = [f"{item['skill']} {aux['reference']['path']}" for item, aux in skillpack.references(bundle)
+                  if aux["required"] and not observed["whole"].get((item["n"], aux["path"]))]
+        warnings.append(f"skills: run {prepared.run_id} did not read every required skill reference whole "
+                        f"({', '.join(unread)}); its edits stay, but skill delivery is incomplete "
+                        f"({skillpack.RECEIVING_NAME})")
+    if normalize and problem is not None:
+        failure = (f"OAH_ENGINE_FAILED: claude's stream-json output is incomplete ({problem}); this run does not "
+                   "count")
+    try:
+        write_json_atomic(prepared.run.file_path(skillpack.RECEIVING_NAME), record)
+    except OSError as exc:
+        failure = (f"OAH_SKILL_RECEIVING_FAILED: the skill reads of run {prepared.run_id} could not be recorded "
+                   f"({type(exc).__name__}); this run does not count. Check the run folder, then call again")
+    return result, warnings, failure
 
 
 def _start_reference(prepared: "Prepared", env: Mapping[str, str]):

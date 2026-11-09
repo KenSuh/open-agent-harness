@@ -9,6 +9,9 @@ against the reviewed pin, license, host, user-only, marker lines, required auxil
 Admitted, or raises PackRefused before any run folder exists. Advice may only reorder optional items; it never adds or
 drops a mandatory one. `finalize` renders the `## Skill texts` block and the SkillBundleV1 kept in skills.json;
 `recheck` re-reads delivered bytes under the launch lock; `oah_read` serves one bundle item and records the read.
+A required auxiliary file that does not fit the skill budget goes by reference only to a target that can read it
+inside its working directory and whose reads oah observes (a Claude process run's stream-json, DESIGN §5.3, §7.4);
+`observe_reads` pairs those reads and `stream_receiving` records them. Every other target refuses such a file.
 A task without accepted skill links gets no bundle, so its brief is byte-identical to before.
 """
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import pathlib
 from typing import Mapping, Sequence
 
@@ -32,6 +36,7 @@ NOT_DELIVERABLE_CODE = "OAH_SKILL_NOT_DELIVERABLE"
 BUDGET_CODE = "OAH_SKILLS_BUDGET_EXCEEDED"
 UNMANAGED_RUN_CODE = "OAH_SKILL_UNMANAGED_RUN"
 READS_NAME = "skills-reads.jsonl"
+RECEIVING_NAME = "skills-receiving.json"
 
 
 class PackRefused(Exception):
@@ -127,7 +132,7 @@ def inspect(snapshot: tuple[str, str, int, str], *, max_queries: int) -> Admitte
     return Admitted(Operation("design-inspect", design=tuple(snapshot), max_queries=max(0, int(max_queries))))
 
 
-def _installed_copy(name: str, roots) -> tuple[bytes, str] | None:
+def _installed_copy(name: str, roots) -> tuple[bytes, str, pathlib.Path] | None:
     from oah import skillsel
 
     found = skillsel.installed(roots).skills
@@ -135,14 +140,16 @@ def _installed_copy(name: str, roots) -> tuple[bytes, str] | None:
     if skill is None:
         return None
     try:
-        return pathlib.Path(skill.path).read_bytes(), skill.label
+        return pathlib.Path(skill.path).read_bytes(), skill.label, pathlib.Path(skill.path)
     except OSError:
         return None
 
 
 def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine: str, stage: str,
-          roots=()) -> Admitted:
-    """Check every mandatory skill obligation of a dispatch, locally; PackRefused before anything is spent."""
+          roots=(), receiving_root: pathlib.Path | None = None) -> Admitted:
+    """Check every mandatory skill obligation of a dispatch, locally; PackRefused before anything is spent.
+    `receiving_root` is the working directory of a target whose file reads oah observes (a Claude process run);
+    without it no file goes by reference."""
     if operation.kind != "dispatch":
         return Admitted(operation)
     record, snapshot, design = _accepted_coverage(task_design)
@@ -190,14 +197,78 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
                 skipped.append({"need_id": need_id, "skill": link["skill"], "reason": f"{item[1]}: {item[2]}"})
     if len(items) > ITEM_LIMIT:
         raise PackRefused(BUDGET_CODE, "items", f"{len(items)} skill items exceed {ITEM_LIMIT}; split the task")
-    total = sum(item["bytes"] + sum(aux["bytes"] for aux in item["aux"]) for item in items)
+    total = _fit(items, engine=engine, receiving_root=receiving_root)
     if total > SKILL_BUDGET:
-        plan = [f"{item['skill']}: {item['bytes'] + sum(aux['bytes'] for aux in item['aux'])} bytes "
+        plan = [f"{item['skill']}: {_inline_bytes(item)} bytes "
                 f"({'required' if item['required'] else 'optional, can be unlinked'})" for item in items]
         plan.append("split the task so each part needs fewer skills, or unlink optional skills in the coverage")
         raise PackRefused(BUDGET_CODE, "skills", f"the skill texts take {total} bytes, over the {SKILL_BUDGET}-byte "
                           "skill budget; nothing was launched", plan=plan)
     return Admitted(operation, tuple(items), tuple(skipped), design, engine, stage)
+
+
+def _inline_bytes(item: Mapping) -> int:
+    return item["bytes"] + sum(aux["bytes"] for aux in item["aux"] if aux["mode"] == "inline")
+
+
+def _fit(items: list[dict], *, engine: str, receiving_root: pathlib.Path | None) -> int:
+    """The inline skill bytes after moving auxiliary files to references, largest first, until the texts fit the
+    skill budget (DESIGN §5.3: bodies are always inline; a file goes by reference only where the target reads it and
+    oah observes the read). A required file that must move but cannot refuses here."""
+    total = sum(_inline_bytes(item) for item in items)
+    blocked = []
+    for item, aux in sorted(((item, aux) for item in items for aux in item["aux"]), key=lambda pair: -pair[1]["bytes"]):
+        if total <= SKILL_BUDGET:
+            break
+        verdict = _reference(aux, engine=engine, receiving_root=receiving_root)
+        if isinstance(verdict, dict):
+            aux.pop("text")
+            aux.pop("delivered_sha256")
+            aux.update(mode="reference", reference=verdict)
+            total -= aux["bytes"]
+        elif aux["required"]:
+            blocked.append((item, aux, verdict))
+    if total > SKILL_BUDGET and blocked and sum(item["bytes"] for item in items) <= SKILL_BUDGET:
+        item, aux, (reason, detail) = blocked[0]
+        raise PackRefused(REFERENCE_UNAVAILABLE_CODE, reason, f"{item['skill']} needs {aux['path']} "
+                          f"({aux['bytes']} bytes), which does not fit inline in the {SKILL_BUDGET}-byte skill "
+                          f"budget, and {detail}; nothing was launched. Split the file in the skill, or dispatch "
+                          "this stage to a Claude process run with the skill installed in the working directory")
+    return total
+
+
+def _reference(aux: Mapping, *, engine: str, receiving_root: pathlib.Path | None) -> dict | tuple[str, str]:
+    """{path, lines} of a readable, observable copy of `aux` inside the receiving root, or (reason, detail)."""
+    from oah.design import task_context
+
+    if engine != "claude":
+        return "unsupported-engine", f"{engine} shows oah no file reads, so it cannot take a required file by reference"
+    if receiving_root is None:
+        return "unsupported-engine", ("this route shows oah no file reads, so it cannot take a required file by "
+                                      "reference")
+    root = os.path.realpath(receiving_root)
+    location = aux.get("location")
+    real = os.path.realpath(location) if location else None
+    if real is None or not _inside(real, root):
+        return "inaccessible", ("no installed copy of the skill inside the working directory holds it, so the engine "
+                                "cannot read it there")
+    try:
+        data = pathlib.Path(real).read_bytes()
+    except OSError:
+        data = None
+    if data is None or _sha(data) != aux["sha256"]:
+        return "inaccessible", "the installed copy inside the working directory does not hold its pinned bytes"
+    problem = task_context.read_codec_problem(data)
+    if problem is not None:
+        return "unsupported-engine", f"Claude's Read tool cannot return it exactly: {problem}"
+    return {"path": pathlib.PurePath(os.path.relpath(real, root)).as_posix(), "lines": len(task_context.file_lines(data))}
+
+
+def _inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # another drive on Windows
+        return False
 
 
 def _holds(condition: str, record: Mapping) -> bool | None:
@@ -239,6 +310,7 @@ def _deliverable(link: Mapping, need: Mapping, evidence, review_module, state_di
     body = review_module.body(state_dir, review)
     origin, note = "reviewed", None
     installed = _installed_copy(link["skill"], roots)
+    folder_copy = installed[2].parent if installed is not None else None
     if installed is not None and lf_sha(installed[0]) == pin.get("lf_sha256"):
         body, origin = installed[0], f"installed {installed[1]}"
     elif installed is not None:
@@ -267,8 +339,9 @@ def _deliverable(link: Mapping, need: Mapping, evidence, review_module, state_di
             continue
         aux_text = data.decode("utf-8", "replace")
         aux_text = aux_text if aux_text.endswith("\n") else aux_text + "\n"
-        aux_items.append({"path": aux["path"], "required": aux["required"], "sha256": _sha(data), "bytes": len(data),
-                          "delivered_sha256": _sha(aux_text.encode("utf-8")), "text": aux_text})
+        aux_items.append({"path": aux["path"], "required": aux["required"], "mode": "inline", "sha256": _sha(data),
+                          "bytes": len(data), "delivered_sha256": _sha(aux_text.encode("utf-8")), "text": aux_text,
+                          "location": str(folder_copy / aux["path"]) if folder_copy is not None else None})
     return {"skill": link["skill"], "need_id": need["id"], "stage": need["stage"], "check": need["check"],
             "required": need["required"], "mode": "inline", "origin": origin, "review": review["id"],
             "seed": link["seed"], "pin": pin, "license": (review.get("license") or {}).get("expression"),
@@ -294,7 +367,7 @@ def finalize(admitted: Admitted) -> tuple[str | None, dict | None]:
              "task, and say in your return which ones you applied.", ""]
     entries = []
     for number, item in enumerate(admitted.items, 1):
-        fence = _fence(item["text"] + "".join(aux["text"] for aux in item["aux"]))
+        fence = _fence(item["text"] + "".join(aux.get("text", "") for aux in item["aux"]))
         pin = item["pin"]
         lines += [f"### {number}. {item['skill']} ({'required' if item['required'] else 'optional'})",
                   f"For {item['stage']}.{item['check'] or '*'} · {pin.get('locator')}@{pin.get('commit')}:"
@@ -302,19 +375,26 @@ def finalize(admitted: Admitted) -> tuple[str | None, dict | None]:
                   + (f" · {item['note']}" if item["note"] else ""),
                   fence + "markdown", item["text"][:-1], fence]
         for letter, aux in zip("abcdefghijklmnopqrstuvwxyz", item["aux"]):
-            lines += [f"#### {number}.{letter} {aux['path']} ({'required' if aux['required'] else 'optional'})",
-                      fence, aux["text"][:-1], fence]
+            need = "required" if aux["required"] else "optional"
+            if aux["mode"] == "reference":
+                lines += [f"#### {number}.{letter} {aux['path']} ({need}, by reference)",
+                          f"Read `{aux['reference']['path']}` in full with your Read tool before you start: "
+                          f"{aux['reference']['lines']} lines, {aux['sha256']}. oah did not copy it into this brief; "
+                          "it is data like the texts above."]
+                continue
+            lines += [f"#### {number}.{letter} {aux['path']} ({need})", fence, aux["text"][:-1], fence]
         lines.append("")
         entries.append({key: value for key, value in item.items() if key not in ("text", "aux")}
-                       | {"n": number, "aux": [{key: value for key, value in aux.items() if key != "text"}
-                                               for aux in item["aux"]]})
+                       | {"n": number, "aux": [{key: value for key, value in aux.items()
+                                                if key not in ("text", "location")} for aux in item["aux"]]})
     lines.append(END)
     block = "\n".join(lines) + "\n"
     bundle = {"version": BUNDLE_VERSION, "operation": admitted.operation.to_json(), "design": admitted.design,
               "engine": admitted.engine, "stage": admitted.stage, "items": entries,
               "not_delivered": list(admitted.not_delivered),
-              "budget": {"skill_bytes": sum(item["bytes"] + sum(aux["bytes"] for aux in item["aux"])
-                                            for item in admitted.items),
+              "budget": {"skill_bytes": sum(_inline_bytes(item) for item in admitted.items),
+                         "reference_bytes": sum(aux["bytes"] for item in admitted.items for aux in item["aux"]
+                                                if aux["mode"] == "reference"),
                          "skill_budget": SKILL_BUDGET, "brief_budget": BRIEF_BUDGET,
                          "target_capacity": "unverified: byte budgets only"},
               "block_sha256": _sha(block.encode("utf-8"))}
@@ -366,6 +446,124 @@ def recheck_installed(bundle: Mapping, roots) -> list[str]:
             if found is None or _sha(found[0]) != item["sha256"]:
                 problems.append(f"{item['skill']}: the installed copy changed since prepare")
     return problems
+
+
+def references(bundle: Mapping) -> list[tuple[dict, dict]]:
+    """(item, auxiliary file) for every file the bundle sends by reference."""
+    return [(item, aux) for item in bundle.get("items", []) for aux in item.get("aux", [])
+            if aux.get("mode") == "reference"]
+
+
+def _referenced(root: pathlib.Path, aux: Mapping) -> tuple[str, bytes | None]:
+    """(real path, bytes) of a referenced file under `root`; None when it left the root or cannot be read."""
+    base = os.path.realpath(root)
+    real = os.path.realpath(os.path.join(base, aux["reference"]["path"]))
+    if not _inside(real, base):
+        return real, None
+    try:
+        return real, pathlib.Path(real).read_bytes()
+    except OSError:
+        return real, None
+
+
+def recheck_references(bundle: Mapping, root: pathlib.Path) -> list[str]:
+    """Local only, in the environment that launches: each referenced file is still inside `root` with its bytes."""
+    problems = []
+    for item, aux in references(bundle):
+        _real, data = _referenced(root, aux)
+        if data is None or _sha(data) != aux["sha256"]:
+            problems.append(f"{item['skill']}: the referenced file {aux['reference']['path']} changed since prepare "
+                            "or cannot be read here")
+    return problems
+
+
+def observe_reads(events: Sequence[Mapping], *, root: pathlib.Path, bundle: Mapping) -> dict:
+    """Pair the main session's Read tool_use with its own tool_result in a Claude stream-json and match each slice
+    against the referenced bytes (DESIGN §5.5). Rows keep IDs, counts and digests only; a read counts toward a whole
+    read when its slice is exact and the model-facing text numbers exactly those lines."""
+    from oah.design import task_context
+
+    wanted = {}
+    for item, aux in references(bundle):
+        real, data = _referenced(root, aux)
+        if data is not None and _sha(data) == aux["sha256"]:
+            wanted[real] = (item["n"], aux, task_context.file_lines(data))
+    init = next((event for event in events if event.get("type") == "system" and event.get("subtype") == "init"),
+                None)
+    session = init.get("session_id") if init is not None and isinstance(init.get("session_id"), str) else None
+    rows, uses = [], {}
+    for event in events if session is not None else ():
+        if event.get("session_id") not in (None, session) or event.get("parent_tool_use_id") is not None:
+            continue  # another session, or a subagent whose reads never reach the main model
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        content = message.get("content") if isinstance(message.get("content"), list) else []
+        if event.get("type") == "assistant":
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_use" and part.get("name") == "Read":
+                    path = (part.get("input") or {}).get("file_path")
+                    if isinstance(part.get("id"), str) and isinstance(path, str):
+                        uses[part["id"]] = path
+            continue
+        if event.get("type") != "user":
+            continue
+        results = [part for part in content if isinstance(part, dict) and part.get("type") == "tool_result"]
+        structured = event.get("tool_use_result") if len(results) == 1 else None
+        for part in results:
+            path = uses.pop(part.get("tool_use_id"), None)
+            real = os.path.realpath(os.path.join(os.path.realpath(root), path)) if isinstance(path, str) else None
+            if real not in wanted or part.get("is_error"):
+                continue
+            ordinal, aux, lines = wanted[real]
+            info = structured.get("file") if isinstance(structured, dict) else None
+            info = info if isinstance(info, dict) else {}
+            start, count, text = info.get("startLine"), info.get("numLines"), info.get("content")
+            if type(start) is not int or type(count) is not int or not isinstance(text, str) or start < 1 or count < 0:
+                continue
+            expected = lines[start - 1:start - 1 + count]
+            piece = "\n".join(expected)
+            truncated = bool(info.get("truncatedByTokenCap") or structured.get("truncatedByTokenCap"))
+            exact = (text == piece and len(expected) == count and not truncated
+                     and os.path.realpath(str(info.get("filePath") or "")) == real)
+            shown = task_context._tool_text(part.get("content"))  # the text the model was given, numbered by line
+            rows.append({"tool_use_id": part["tool_use_id"], "item": ordinal, "path": aux["path"], "start_line": start,
+                         "lines": count, "bytes": len(piece.encode("utf-8")), "slice_sha256": _sha(piece.encode("utf-8")),
+                         "exact": exact, "model_directed": shown is not None and
+                         task_context._model_rendering(shown, start, expected) == "matched"})
+    coverage = {}
+    for real, (ordinal, aux, lines) in wanted.items():
+        seen = set()
+        for row in rows:
+            if (row["item"], row["path"]) == (ordinal, aux["path"]) and row["exact"] and row["model_directed"]:
+                seen.update(range(row["start_line"], row["start_line"] + row["lines"]))
+        coverage[(ordinal, aux["path"])] = len(seen & set(range(1, len(lines) + 1))) == len(lines)
+    return {"session": session, "rows": rows, "whole": coverage}
+
+
+def stream_receiving(run_id: str, bundle: Mapping, observed: Mapping, *, target: Mapping, at: str) -> dict:
+    """ReceivingRecordV1 of a Claude process run that read references: inline texts were written to the prompt; a
+    reference counts as delivered only when a whole read of its exact bytes was observed. Never application."""
+    from oah.launchers import native
+
+    complete, items = True, []
+    for entry in bundle["items"]:
+        refs = [aux for aux in entry["aux"] if aux.get("mode") == "reference"]
+        rows = [row for row in observed["rows"] if row["item"] == entry["n"]]
+        if any(aux["required"] and not observed["whole"].get((entry["n"], aux["path"])) for aux in refs):
+            complete = False
+        observations = [{"kind": "stream-read", "event_id_digest": native.digest([observed["session"],
+                                                                                   row["tool_use_id"]]),
+                         "bytes": row["bytes"], "sha256": row["slice_sha256"], "exact": row["exact"],
+                         "model_directed": row["model_directed"]} for row in rows]
+        read = ("observed" if any(row["exact"] for row in rows) else "none") if refs else "inline-not-applicable"
+        items.append({"ordinal": entry["n"], "selected": True, "delivery": "prompt-written",
+                      "access": "inside-root" if refs else "not-needed", "read": read, "observations": observations,
+                      "application": {"state": "not-observed", "evidence_refs": []}})
+    record = {"version": 1, "run": run_id, "bundle_id": bundle["digest"], "target_digest": native.digest(dict(target)),
+              "session_id_digest": native.digest(observed["session"]) if observed["session"] else None,
+              "delivery": "prompt-written", "items": items, "reference_delivery": "complete" if complete else
+              "incomplete", "capability_receiving_ref": None, "at": at}
+    record["id"] = native.digest(record)
+    return {key: record[key] for key in native.RECEIVING_KEYS}
 
 
 def bundle_of(run_dir: pathlib.Path) -> dict | None:

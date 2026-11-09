@@ -99,7 +99,8 @@
 - coverage에 연결된 스킬이 없는 작업은 이전과 똑같은 브리프를 받는다.
 
 **받아들임은 한 번, 무엇이든 쓰기 전에 한다.** 넘길 수 없는 필수 스킬이 있으면 호출은 정해진 코드로 거절된다.
-`OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE`, 또는 이유(`user-only`, `license`, `host`,
+`OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE`(`inaccessible` 또는 `unsupported-engine`), 또는
+이유(`user-only`, `license`, `host`,
 `marker`, `pin-mismatch`)가 붙은 `OAH_SKILL_NOT_DELIVERABLE`이다. 다시 시도하지도, 다른 길로 돌아가지도 않고,
 run 폴더도 만들지 않는다. 넘길 수 없는 선택 스킬은 건너뛰고 목록에 남긴다. 사용자가 치르는 비용은 이렇다.
 검토가 없거나 고정값이 어긋나면 다시 검토하거나 스킬 연결을 끊을 때까지 발주가 막힌다.
@@ -107,6 +108,21 @@ run 폴더도 만들지 않는다. 넘길 수 없는 선택 스킬은 건너뛰�
 **바이트 예산은 고정돼 있다.** 스킬 본문은 196,608바이트까지, 브리프 전체는 524,288바이트까지, 항목은 128개까지다.
 예산을 넘으면 호출은 `OAH_SKILLS_BUDGET_EXCEEDED`로 거절되고 스킬마다 크기를 보여 준다. 그것을 보고 작업을
 나누거나 선택 스킬의 연결을 끊는다. 사용자가 치르는 비용은 이렇다. 스킬이 많으면 작업을 여러 개로 나눠야 한다.
+
+**큰 파일은 참조로 넘긴다.** 스킬 본문이 스킬 예산에 들어가지 않으면, oah는 스킬의 보조 파일을 큰 것부터 브리프
+밖으로 빼고 그 자리에 "Read `<경로>` in full with your Read tool before you start"라는 줄과 줄 수, digest를
+적는다. 스킬 본문 자체는 언제나 브리프 안에 남는다. 이 방식은 Claude 프로세스 run(`oah call claude`를 앞에서,
+백그라운드에서, 또는 Orca 워커로 실행)에서만 쓰고, 작업 디렉터리 안에 고정된 바이트 그대로인 스킬 설치본이
+있어야 한다. 예를 들면 `.claude/skills/<이름>/` 아래다. 그 run에서만 oah는 Claude에
+`--output-format stream-json --verbose`를 요청하고(다른 인자는 바꾸지 않는다), 스트림의 Read마다 파일 바이트와
+맞춰 보고, run 폴더에 `skills-receiving.json`을 쓴다. 필수 파일을 모두 끝까지 읽었으면 `reference_delivery: complete`, 아니면
+`incomplete`다. 읽지 않은 파일이 있어도 run의 결과는 그대로 두고 경고를 남기며, 기록은 전달이 끝나지 않았다고
+적는다. result 이벤트가 없는 스트림은 `OAH_ENGINE_FAILED`로, 읽기를 기록하지 못하면 `OAH_SKILL_RECEIVING_FAILED`로
+run을 실패 처리한다. Codex, 네이티브 서브에이전트, `oah fix` 수정 run은 oah에 읽기를 보여 주지 않으므로, 그곳에서는
+브리프에 들어가지 않는 필수 파일이 `OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)`으로 거절된다. 작업
+디렉터리 밖의 설치본은 `OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)`로 거절된다. 엔진을 시작하기 직전에 oah는
+참조한 파일의 해시를 다시 잰다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 저장소 안에 설치해야 하고 Claude 프로세스
+run에서만 돌며, 모델은 파일마다 끝까지 읽느라 컨텍스트를 쓴다.
 
 **사람이 직접 부르는 스킬은 사람에게 남는다.** 사람만 부를 수 있는 스킬은 넘기지 않는다. 그런 스킬이 필수면
 `OAH_SKILL_NOT_DELIVERABLE(user-only)`로 거절된다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 직접 실행한다.
@@ -197,7 +213,8 @@ run은 격리된 채로 남아 중계를 받지 않는다(`OAH_CAPABILITY_UNSUPP
 
 ## 이번 릴리스의 한계
 
-- 스킬 본문은 언제나 브리프 안에 넣어 넘긴다. 대신 경로를 넘기는 참조 방식은 아직 없다.
+- 참조 읽기는 run이 끝난 뒤 스트림에서 확인한다. 자식이 파일을 읽기 전에 일을 시작해도 oah는 막지 못하고, run을
+  실패시키는 대신 읽지 않은 파일을 기록한다. 자식이 띄운 서브에이전트의 읽기는 세지 않는다.
 - `oah fix`의 수정 run은 스킬 본문을 담지만 `skills.json`에 묶음을 기록하지 않고, 시작할 때 설치본 해시를 다시
   재지 않는다. `oah fix`는 중계 입력을 받지 않으므로, 스킬이 리드만 가진 도구를 필요로 하는 수정은 거절된다.
 - 경로는 run이 시작하기 전에 정한다. oah는 자식의 도구 시작을 지켜보지 않으며, 그것이 있어야 하는 `direct`

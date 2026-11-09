@@ -99,8 +99,8 @@ judges, the round and the reservation. The links in the task's accepted coverage
 - A task whose coverage links no skill gets exactly the brief it got before.
 
 **One admission, before anything is spent.** A required skill that cannot be delivered refuses the call with a
-typed code: `OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE` or `OAH_SKILL_NOT_DELIVERABLE`
-with its reason (`user-only`, `license`, `host`, `marker` or `pin-mismatch`). There is no retry and no fallback,
+typed code: `OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE` (`inaccessible` or
+`unsupported-engine`) or `OAH_SKILL_NOT_DELIVERABLE` with its reason (`user-only`, `license`, `host`, `marker` or `pin-mismatch`). There is no retry and no fallback,
 and no run folder is created. An optional skill that cannot be delivered is skipped and listed. What it costs
 you: a missing review or a moved pin blocks the dispatch until you review again or unlink the skill.
 
@@ -108,6 +108,22 @@ you: a missing review or a moved pin blocks the dispatch until you review again 
 most 128 items. Over a budget, the call refuses with `OAH_SKILLS_BUDGET_EXCEEDED` and lists each skill's size, so
 you can split the task or unlink optional skills. What it costs you: a large skill set has to be split across
 tasks.
+
+**Large files by reference.** When the skill texts do not fit the skill budget, oah takes a skill's auxiliary
+files out of the brief, largest first, and names each one instead: "Read `<path>` in full with your Read tool
+before you start", with its line count and digest. The skill text itself always stays inline. This works only for
+a Claude process run (`oah call claude` in the foreground, in the background or as an Orca worker) whose working
+directory holds an installed copy of the skill with the pinned bytes, for example under `.claude/skills/<name>/`.
+For that run oah asks Claude for `--output-format stream-json --verbose` (no other argument changes), pairs each
+Read in the stream with the file's bytes, and writes `skills-receiving.json` in the run folder:
+`reference_delivery: complete` when every required file was read whole, `incomplete` otherwise. An unread file
+leaves the run's result as it is, adds a warning, and the record says the delivery is incomplete. A stream without
+a result event fails the run with `OAH_ENGINE_FAILED`, and reads that cannot be recorded fail it with
+`OAH_SKILL_RECEIVING_FAILED`. Codex, a native subagent and `oah fix` corrections show oah no reads, so there a
+required file that does not fit inline refuses with `OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)`; a copy
+outside the working directory refuses with `OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)`. Just before the
+engine starts, oah hashes each referenced file again. What it costs you: such a skill has to be installed in the
+repository and runs only on Claude process runs, and the model spends context reading each file whole.
 
 **Skills meant for explicit use stay with you.** A skill that only a person may invoke is never delivered. A
 required one refuses with `OAH_SKILL_NOT_DELIVERABLE(user-only)`. What it costs you: you run such a skill
@@ -203,7 +219,9 @@ skill texts are delivered.
 
 ## Limits in this release
 
-- Skill texts are always delivered inline. A reference mode that hands the worker paths instead does not exist yet.
+- A reference read is observed from the stream after the run. oah cannot stop a child that starts working before it
+  reads the file; it records the unread file instead of failing the run. Reads by the child's own subagents do not
+  count.
 - `oah fix` correction runs carry the skill texts but record no bundle in `skills.json` and do not hash installed
   copies again at launch. `oah fix` takes no relay inputs, so a correction whose skill needs a lead-only tool
   refuses.
