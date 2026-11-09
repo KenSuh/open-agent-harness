@@ -127,6 +127,46 @@ run에서만 돌며, 모델은 파일마다 끝까지 읽느라 컨텍스트를 
 **사람이 직접 부르는 스킬은 사람에게 남는다.** 사람만 부를 수 있는 스킬은 넘기지 않는다. 그런 스킬이 필수면
 `OAH_SKILL_NOT_DELIVERABLE(user-only)`로 거절된다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 직접 실행한다.
 
+## 작업과 하위 작업의 스킬
+
+`oah call`은 디스패치 단계마다 작업의 스킬 필요도 정한다. 설계가 없으면 작업 의도에 대한 필요 하나, 설계가 있으면
+수락된 coverage가 스킬을 요구하는 단계 점검마다 하나다. 필요에는 요구를 적은 패킷 바이트(본문이 아니라 범위와
+digest), 하위 작업, 공개 기술 단어, 플랫폼, 사용자 로컬 제약의 digest, 탐색 설정이 들어간다. 무엇이든 바뀌면 다른
+필요가 된다.
+
+- `oah skills find --task T`는 시작한 작업의 필요를 그 작업 자신의 승인 아래에서 `max_queries` 안으로 찾는다.
+  `--subtask ID`, `--tech LABEL=VALUE`, `--constraint TEXT`(예: 버전), `--required`를 주면 필요 하나를 직접
+  적는다. 설계가 있으면 `--design-stage`와 `--check`로 점검을 고른다. `--dispatch-stage`는 `initial`(기본),
+  `correction`, `review` 중 하나다. `--out FILE`은 필요 파일을 저장하고, `--needs FILE`은 저장한 파일의 필요를
+  다시 찾는다.
+- `oah skills select --needs FILE [--need ID] --review ID ...`는 설계 없는 작업의 필요 하나에 검토한 스킬을
+  묶는다. 리드만 고른다. 선택은 `<state>/skills/task-selections/` 아래에 한 번 저장되고, 만든 lease 아래에서만
+  쓰인다.
+- `oah call ... --skill-needs FILE`과 `oah skills plan ... --skill-needs FILE`은 그 파일의 필요를 쓴다. oah는
+  각 필요를 지금의 패킷, 범위, 종류, 위험도, 플랫폼, 설정과 다시 맞춰 보고, 더는 맞지 않는 필요는
+  `OAH_SKILL_NEEDS_INVALID(stale)`로 거절한다(다른 이유는 `malformed`, `foreign`, `scope`, `design-bound`).
+- 고른 스킬은 링크된 스킬처럼 전달되고, 브리프의 줄은 `For task need …`로 적힌다. 선택이 없는 필수 필요는 무엇도
+  쓰기 전에 `OAH_SKILL_MANDATORY_MISSING`으로 거절된다. 엔진이 시작하기 직전에 oah는 그 선택이 아직 리드의
+  현재 선택인지 확인하고, 아니면 `OAH_SKILL_NOT_DELIVERABLE(changed)`로 거절한다.
+- 승인 뒤에 호출은 기술이나 설계 점검을 적은 필요마다 직접 찾아보고 작업 탐색 기록을 저장한다.
+  `skills.json`은 그것을 `task_discovery`에 적는다. 검토한 결과는 사용자가 고를 때까지, 설계가 있으면 coverage에
+  링크하고 설계를 수락할 때까지 제안일 뿐이다. `OAH_SKILL_DISCOVERY`로 시작하는 줄이 제안이 기다릴 때, 링크한
+  스킬 아래의 기술 결정이 바뀌었을 때, 검색이 실패했을 때를 알려 준다. 사용자만 쓰는 기술 값은 보내지 않고, 그
+  기록에 `public-term-required` 공백이 남는다. 기술도 설계 점검도 적지 않은 필요는 저장하지 않는다.
+
+**설계가 있는 작업은 설계를 따른다.** 그런 작업에서 `oah skills select`는
+`OAH_SKILL_NEEDS_INVALID(design-bound)`로 거절되고, 수락된 coverage가 링크하지 않은 필수 필요는 호출을
+거절한다. 사용자가 치르는 비용은 이렇다. 그런 작업에 새 스킬을 쓰려면 coverage 링크와 설계 수락이 한 번 더 필요하다.
+
+**선택은 필요 하나와 lease 하나에 속한다.** 같은 기술을 쓰는 두 하위 작업은 필요도 선택도 다르고, 버전 제약이
+다르면 다른 필요다. 작업을 다시 시작하면 예전 선택은 더는 쓰이지 않는다. 사용자가 치르는 비용은 이렇다. 바뀐 필요나 새
+lease에서는 다시 고른다.
+
+**호출이 검색할 수 있다.** 필요에 공개 기술 단어가 있는 호출은 승인 뒤에 skills.sh로 최대 `max_queries`번
+검색하며, 한 번에 15초 제한이 있고 실행 잠금 아래에서는 하지 않는다. 답과 바뀌지 않은 필요의 탐색 결과는
+`cache_hours` 동안 다시 쓴다. `[skills.discovery] enabled = false`로 끈다. 사용자가 치르는 비용은 이렇다. 그런 호출 중
+그날 첫 호출은 검색을 기다릴 수 있다. `oah fix` 수정은 검색하지 않고 작업 선택도 담지 않는다.
+
 ## 네이티브 서브에이전트
 
 `oah call ENGINE --stage S --task T --launcher native`는 별도 프로세스를 띄우지 않고, 지금 함께 일하는 AI에게
@@ -232,6 +272,8 @@ TypeSafe는 답한 id를 엄격하게 확인하므로 스킬 하나를 빠뜨린
 - 경로는 run이 시작하기 전에 정한다. oah는 자식의 도구 시작을 지켜보지 않으며, 그것이 있어야 하는 `direct`
   경로를 보고하지 않는다.
 - 예산은 고정된 바이트 수다. 모델의 문맥 창을 재지 않는다.
+- 작업 선택은 모든 `oah call` run과 네이티브 제안에 들어가지만, 고정된 입력을 쓰는 `oah fix` 수정에는 들어가지
+  않는다. 필요의 요구는 패킷의 의도 절 전체이며, 그 안의 범위를 고르는 방법은 아직 없다.
 - 네이티브 서브에이전트의 읽기는 `oah skills read`로만 보인다. 호스트가 직접 읽은 파일은 관찰하지 않는다.
   `oah call settle`은 능력 중계를 다시 확인하지 않는다.
 - 작업 패킷의 의도 글을 읽을 수 있는 유일한 Jev 질문인 능력 필요 질문은(그것도 기본으로 꺼진

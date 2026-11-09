@@ -170,6 +170,62 @@
     "block_sha256": "sha256:5c91447ddccea0e3c935e4b41ce2d0a8f2535432478df5380507628bbe5e0525",
     "digest": "sha256:6b3bdfa895a1eb8b412728456e3839a6348922e8f60f19fcb2c9da7f80e5b51e"
    }
+  },
+  {
+   "name": "task-selection-without-design",
+   "bundle": {
+    "version": 1,
+    "operation": {
+     "kind": "dispatch",
+     "task": "t3",
+     "lease": [
+      "lease-3",
+      1
+     ],
+     "design": null
+    },
+    "design": null,
+    "engine": "claude",
+    "stage": "initial",
+    "items": [
+     {
+      "skill": "mysql-migrate",
+      "need_id": "sha256:86c52568a9ec130bd9a49d18536208f630df7a79cd14a176ec2f4f550cb52fd4",
+      "stage": null,
+      "check": null,
+      "required": true,
+      "mode": "inline",
+      "origin": "reviewed",
+      "review": "sha256:a7f5e0be25e2797c9dfd7d555ce08da75d7cdee7b0dc6468f6656f73011fdd0e",
+      "seed": null,
+      "pin": {
+       "locator": "github:acme/db",
+       "commit": "5d6e7f8000000000000000000000000000000000",
+       "path": "skills/mysql-migrate",
+       "sha256": "sha256:89e8412e91804f7c724ad3090f93d68cd5f9a8d3ae65e04758b2da183426f341",
+       "lf_sha256": "sha256:89e8412e91804f7c724ad3090f93d68cd5f9a8d3ae65e04758b2da183426f341"
+      },
+      "license": "MIT",
+      "sha256": "sha256:89e8412e91804f7c724ad3090f93d68cd5f9a8d3ae65e04758b2da183426f341",
+      "lf_sha256": "sha256:89e8412e91804f7c724ad3090f93d68cd5f9a8d3ae65e04758b2da183426f341",
+      "bytes": 410,
+      "delivered_sha256": "sha256:70479b425361050667be8eaf0363b4434a6219344eccb10fee842ac35575d4d8",
+      "note": null,
+      "n": 1,
+      "aux": []
+     }
+    ],
+    "not_delivered": [],
+    "budget": {
+     "skill_bytes": 410,
+     "reference_bytes": 0,
+     "skill_budget": 196608,
+     "brief_budget": 524288,
+     "target_capacity": "unverified: byte budgets only"
+    },
+    "block_sha256": "sha256:432fd5dbec589a8efd15a17475a52322a4590344c226f1e063a5fe7d4ca2c6cb",
+    "digest": "sha256:3f8a1111ff62ba6f9b1e01ae23b8dbf1e245c0bce01b9c273d03a3833d816827"
+   }
   }
  ],
  "invalid": [
@@ -779,6 +835,23 @@
    ],
    "expect": "digest",
    "reseal": false
+  },
+  {
+   "name": "task item names a check",
+   "from": "task-selection-without-design",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "check"
+     ],
+     "value": "entities"
+    }
+   ],
+   "expect": "check",
+   "reseal": true
   }
  ]
 }

@@ -70,7 +70,7 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Collection, Mapping, Sequence
 
 import oah.intent as oah_intent
 import oah.packet as oah_packet
@@ -988,7 +988,7 @@ def dispatch_guard(prepared: Prepared):
                     raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record cannot be read; run oah "
                                       "call again to prepare it from the current design") from None
                 _check_design_unchanged(prepared, live, design_saved)
-            _check_skill_bundle(prepared, run)
+            _check_skill_bundle(prepared, run, live.id)
             reference = _REFERENCE_RUN.get()
             if reference is not None and reference.run_id == prepared.run_id:
                 from oah.design.model import DesignError
@@ -1010,9 +1010,11 @@ def dispatch_guard(prepared: Prepared):
         raise error from None
 
 
-def _check_skill_bundle(prepared: Prepared, run) -> None:
-    """Local only, under the launch lock: every delivered skill text still has its recorded bytes."""
+def _check_skill_bundle(prepared: Prepared, run, lease_id: str) -> None:
+    """Local only, under the launch lock: every delivered skill text still has its recorded bytes, and a task
+    selection's item is still the lead's current selection for its need under this lease (DESIGN §4.1)."""
     from oah import skillpack
+    from oah.discovery import tasks
 
     try:
         bundle = skillpack.bundle_of(run.path)
@@ -1024,6 +1026,9 @@ def _check_skill_bundle(prepared: Prepared, run) -> None:
     roots = skillpack.environment_roots(pathlib.Path(prepared.cwd), state_dir, os.environ)
     problems = (skillpack.recheck(bundle, state_dir=state_dir) + skillpack.recheck_installed(bundle, roots)
                 + skillpack.recheck_references(bundle, pathlib.Path(prepared.cwd)))
+    problems += [f"{item['skill']}: the lead's task selection for need {item['need_id'][7:19]} changed since prepare"
+                 for item in bundle.get("items", []) if item.get("stage") is None
+                 and not tasks.still_selected(state_dir, item["need_id"], item["review"], lease_id=lease_id)]
     if problems:
         raise EngineError(f"{skillpack.NOT_DELIVERABLE_CODE}(changed)", "; ".join(problems)
                           + "; nothing was launched. Prepare the run again with oah call")
@@ -1034,30 +1039,122 @@ def _pack_error(exc) -> EngineError:
     return EngineError(f"{exc.code}({exc.reason})" if exc.reason else exc.code, exc.message)
 
 
+def task_basis(holder, task_design, packet: Packet, *, root: pathlib.Path):
+    """The current, verified facts a task's skill needs are built from (DESIGN §4.8): the packet bytes read now and
+    checked against the intent section the call already verified, the lease, the kind and risk per dispatch stage from
+    the packet and its scope (never from command-line overrides, so the lead's needs file and the call agree), and the
+    accepted coverage of a design-bound task."""
+    from oah.design import coverage
+    from oah.discovery import tasks
+
+    try:
+        text = oah_intent.read_source(pathlib.Path(root) / packet.source)
+    except Exception as exc:  # the source helpers raise their own coded errors
+        raise tasks.NeedsInvalid("stale", f"the packet cannot be read again ({exc})") from None
+    if packet.intent is None or briefs.raw_section(text) != packet.section:
+        raise tasks.NeedsInvalid("stale", "the packet's intent section changed while this call read it")
+    scope = tuple(packet.scope or holder.scope)
+    axes = {}
+    for stage in coverage.DISPATCH_STAGES:
+        recorded = packet.axes.get(stage)
+        given = recorded.to_json() if recorded is not None else {}
+        scored = routing.score_axes(stage=stage, kind=given.pop("kind", None), scope=scope, overrides=given)
+        axes[stage] = (scored.axes.kind, scored.axes.risk)
+    intent = packet.intent
+    return tasks.TaskBasis(task=holder.task, text=text,
+                           intent={"id": intent.id, "revision": intent.revision, "digest": intent.digest},
+                           scope=scope, axes=axes, lease=(holder.id, holder.generation),
+                           design=tasks.design_of(task_design),
+                           bound=task_design is not None and getattr(task_design, "task", None) is not None)
+
+
+def task_needs(basis, *, stage: str, policy: str, needs_file: str | None) -> list[dict]:
+    """The task's verified needs for one dispatch stage: the lead's file re-resolved, or the ones oah derives."""
+    from oah.discovery import tasks
+
+    if needs_file:
+        try:
+            with open(needs_file, "rb") as handle:
+                raw = handle.read(tasks.NEEDS_BYTES + 1)
+        except OSError as exc:
+            raise tasks.NeedsInvalid("malformed", f"cannot read the needs file: {exc.strerror or exc}") from None
+        needs = tasks.parse_needs(raw, basis, policy=policy)
+    else:
+        needs = tasks.derive(basis, dispatch_stage=stage, policy=policy)
+    return [item for item in needs if item["dispatch_stage"] == stage]
+
+
+def _discovery_notices(task: str, found: Sequence[Mapping], *, bound: Collection[str]) -> None:
+    """One line for each need that waits on the lead: reviewed proposals, a decision changed, a failed search.
+    `bound` holds the needs only an accepted coverage link can serve (tasks.design_bound)."""
+    for entry in found:
+        short = entry["need_id"][7:19]
+        gaps = {gap["code"] for gap in entry["gaps"]}
+        if entry["proposed_reviews"]:
+            how = ("link one in the design's coverage and accept the design" if entry["need_id"] in bound
+                   else "choose with oah skills select --needs FILE --review ID")
+            print(f"OAH_SKILL_DISCOVERY {task} need {short}: {len(entry['proposed_reviews'])} reviewed skill(s) "
+                  f"proposed, not delivered by this run; {how}", file=sys.stderr)
+        if "reselect" in gaps:
+            print(f"OAH_SKILL_DISCOVERY {task} need {short}: the design's technology changed since its linked skill "
+                  "was found; review one for the new decision and link it again", file=sys.stderr)
+        if "provider-failed" in gaps:
+            print(f"OAH_SKILL_DISCOVERY {task} need {short}: the skill search failed ({entry['outcome']}); linked "
+                  "skills, installed skills and stored reviews still apply", file=sys.stderr)
+
+
 def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir: pathlib.Path,
                   env: Mapping[str, str], native: bool = False, keychain=None,
-                  brief_disabled: bool = False) -> SkillPack | None:
+                  brief_disabled: bool = False, packet: Packet | None = None) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
-    A SkillPack when accepted coverage links deliver skill texts or capabilities apply, else None (the brief stays
-    byte-identical). Only an ordinary run that keeps its output takes a file by reference (execute observes the
-    reads) and asks skill-fit advice, after admission; a native offer or a correction never does."""
-    from oah import skillpack
+    A SkillPack when accepted coverage links or task selections deliver skill texts, capabilities apply or task
+    discovery ran, else None (the brief stays byte-identical). Task discovery runs only after admission, within the
+    call's [skills.discovery] request budget and never for a correction (frozen inputs). Only an ordinary run that
+    keeps its output takes a file by reference (execute observes the reads) and asks skill-fit advice, after
+    admission; a native offer or a correction never does."""
+    from oah import discovery, skillpack
     from oah.capabilities import CapabilityRefused, plan as capability_plan
     from oah.config import load_config
+    from oah.discovery import providers, tasks
 
     inputs = _CORRECTION_INPUTS.get()
     settings = (inputs.config.section("skills", skillsel.config_defaults()) if inputs is not None
                 else skillsel.settings_for(root))
     roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env,
                                    kit_cache=skillsel.kit_roots(state_dir, pins=settings["pins"]))
+    basis, needs, found_settings = None, [], None
+    if packet is not None and inputs is None:
+        try:
+            found_settings = providers.settings_of(settings)
+        except ValueError as exc:
+            raise EngineError("OAH_CONFIG_INVALID", f"{exc}; nothing was launched") from None
+        try:
+            basis = task_basis(holder, task_design, packet, root=root)
+            needs = task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings),
+                               needs_file=request.skill_needs)
+        except tasks.NeedsInvalid as exc:
+            raise EngineError(f"{exc.code}({exc.reason})", f"{str(exc).split(': ', 1)[1]}; nothing was "
+                              "launched") from None
+    answerable = [item for item in needs if tasks.answerable(item)]
     try:
         admitted = skillpack.admit(skillpack.Operation("dispatch", task=request.task,
-                                                       lease=(holder.id, holder.generation)),
+                                                       lease=(holder.id, holder.generation),
+                                                       max_queries=found_settings["max_queries"] if answerable else 0),
                                    task_design=task_design, state_dir=state_dir, engine=request.engine,
                                    stage=request.stage, roots=roots,
-                                   receiving_root=root if not native and request.retain_worker_text else None)
+                                   receiving_root=root if not native and request.retain_worker_text else None,
+                                   needs=needs)
     except skillpack.PackRefused as exc:
         raise _pack_error(exc) from None
+    found = []
+    if answerable:
+        found = tasks.prepare_task(admitted, answerable, state_dir=state_dir, settings=found_settings,
+                                   now=dt.datetime.now(dt.timezone.utc), basis=basis,
+                                   notify=lambda text: print(text, file=sys.stderr), reuse=True)
+        _discovery_notices(request.task, found,
+                           bound={item["id"] for item in answerable if tasks.design_bound(basis, item)})
+    discovered = tuple({key: value for key, value in entry.items()
+                        if key not in ("searches", "deferred", "local", "public", "reused")} for entry in found)
     advice = None
     if admitted.items and not native and request.retain_worker_text:
         admitted, advice = skillpack.rank(admitted, advise=_skill_fit_advisor(
@@ -1073,12 +1170,12 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             settings=capability_plan.check_settings(section))
     except CapabilityRefused as exc:
         raise _pack_error(exc) from None
-    if block is None and capability_block is None:
+    if block is None and capability_block is None and not discovered:
         return None
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
         check([block, capability_block])
-    return SkillPack(block, bundle, capability_block, capabilities, advice)
+    return SkillPack(block, bundle, capability_block, capabilities, advice, discovered)
 
 
 SKILL_EXCERPT_BYTES = 4000  # the start of each reviewed SKILL.md a skill-fit judgement may read
@@ -1380,6 +1477,7 @@ class CallRequest:
     retain_worker_text: bool = True  # oah fix streams output without creating logs or a last-message file
     parent_inventory: str | None = None  # the lead's InventoryV1 file (--parent-inventory)
     relay_results: tuple[str, ...] = ()  # stored parent relay results (--relay-result)
+    skill_needs: str | None = None  # the lead's TaskSkillNeedV1 file (--skill-needs), re-resolved before use
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1391,6 +1489,11 @@ class SkillPack:
     capability_block: str | None = None
     capabilities: dict | None = None
     advice: dict | None = None  # skill-fit advice: kept in skills.json beside the bundle, never inside it
+    discovery: tuple[dict, ...] = ()  # TaskDiscoveryV1 records of this call's task needs: proposals, never items
+
+    @property
+    def delivers(self) -> bool:
+        return self.block is not None or self.capability_block is not None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1802,7 +1905,8 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                                        engine=request.engine)
     # Lane E: the single deterministic skill admission, before any budget gate, judge, round or reservation.
     skill_pack = _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env,
-                               keychain=keychain, brief_disabled=request.no_rerank or packet.rerank_disabled)
+                               keychain=keychain, brief_disabled=request.no_rerank or packet.rerank_disabled,
+                               packet=packet)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -1997,7 +2101,7 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
     chosen, skills_rerank = selection if selection is not None else (None, None)
     text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
                        design, skill_pack)
-    if skill_pack is not None:
+    if skill_pack is not None and skill_pack.delivers:
         from oah import skillpack
 
         try:
@@ -2049,6 +2153,8 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
         skills_record = {**(skills_record or {}), "bundle": skill_pack.bundle}
         if skill_pack.advice is not None:
             skills_record["skill_fit"] = skill_pack.advice
+    if skill_pack is not None and skill_pack.discovery and _CORRECTION_INPUT_CHECK.get() is None:
+        skills_record = {**(skills_record or {}), "task_discovery": list(skill_pack.discovery)}
     if skills_record is not None and _CORRECTION_INPUT_CHECK.get() is not None:
         skills_record = runs._correction_record(
             {"count": len(chosen.skills), "sha256": hashlib.sha256(
@@ -2289,7 +2395,7 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                           read_source=read_source)
     skill_pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env,
-                               native=True)
+                               native=True, packet=basis.packet)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -2306,7 +2412,7 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     warnings = basis.warnings
     message = _brief_text(request, run.id, basis.packet, basis.scope, stored, footer, has_footer, warnings, selection,
                           basis.holder, basis.design, skill_pack, native_canary=token)
-    if skill_pack is not None:
+    if skill_pack is not None and skill_pack.delivers:
         try:
             skillpack.check_brief(message)
         except skillpack.PackRefused as exc:
@@ -2330,6 +2436,8 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
         skills_record = {"rerank": skills_rerank, **chosen.to_record()}
         if bundle is not None:
             skills_record["bundle"] = bundle
+        if skill_pack is not None and skill_pack.discovery:
+            skills_record["task_discovery"] = list(skill_pack.discovery)
         write_json_atomic(run.file_path("skills.json"), skills_record)
         if skill_pack is not None and skill_pack.capabilities is not None:
             write_json_atomic(run.file_path("capabilities.json"), skill_pack.capabilities)

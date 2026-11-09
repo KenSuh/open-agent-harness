@@ -94,7 +94,29 @@ def register(commands: argparse._SubParsersAction) -> None:
     find.add_argument("--query", metavar="TEXT", help=argparse.SUPPRESS)  # alias of --public-query, same rules
     find.add_argument("--public-source", metavar="URL", help="the public https page that uses those exact words")
     find.add_argument("--need", metavar="ID", help="the need id (from --json) the public query is for")
+    find.add_argument("--task", metavar="T", help="find for this started task's own skill needs (its packet, scope "
+                      "and design); prints and with --out saves the needs for oah skills select and oah call")
+    find.add_argument("--subtask", metavar="ID", help="with --task: one subtask's need, such as migrate")
+    find.add_argument("--constraint", metavar="TEXT", action="append", default=[],
+                      help="with --task: a local compatibility constraint such as a version (kept as a digest, "
+                      "never searched; repeatable)")
+    find.add_argument("--required", action="store_true", help="with --task: the call refuses until this need is "
+                      "met by a selected (or, with a design, an accepted linked) skill")
+    find.add_argument("--dispatch-stage", choices=("initial", "correction", "review"), default="initial",
+                      help="with --task: the dispatch stage the need is for (default initial)")
+    find.add_argument("--engine", choices=("claude", "codex"), default="claude",
+                      help="with --task: the engine the task's next dispatch uses (default claude)")
+    find.add_argument("--needs", metavar="FILE", help="with --task: search again for the needs in this file")
+    find.add_argument("--out", metavar="FILE", help="with --task: write the needs file here")
     find.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+    select = sub.add_parser("select", help="choose reviewed skills for a need of a task without a design (lead only)")
+    select.add_argument("--needs", metavar="FILE", required=True, help="the needs file from oah skills find --task")
+    select.add_argument("--need", metavar="ID", help="the need id, when the file holds several")
+    select.add_argument("--review", metavar="ID", action="append", required=True,
+                        help="a reviewed skill to deliver for that need (repeatable)")
+    select.add_argument("--out", metavar="FILE", help="also write the stored selection here")
+    select.add_argument("--json", action="store_true", help="print machine-readable JSON")
 
     review = sub.add_parser("review", help="pin one GitHub skill folder and record its license, front matter, "
                             "compatibility and screening (installs nothing)")
@@ -125,6 +147,7 @@ def register(commands: argparse._SubParsersAction) -> None:
     plan.add_argument("--task", required=True)
     plan.add_argument("--stage", choices=("initial", "correction", "review"), required=True)
     plan.add_argument("--engine", choices=("claude", "codex"), default="claude")
+    plan.add_argument("--skill-needs", metavar="FILE", help="plan with this needs file, as oah call --skill-needs")
     plan.add_argument("--json", action="store_true", help="print machine-readable JSON")
 
 
@@ -161,6 +184,7 @@ def run(args: argparse.Namespace) -> int:
 
     from oah.discovery import NeedInvalid
     from oah.discovery.review import ReviewFailed, SourceUnsupported
+    from oah.discovery.tasks import NeedsInvalid
     from oah.discovery.store import StoreProblem
     from oah.skillpack import PackRefused
     from oah.wiki.base import WikiError
@@ -171,7 +195,7 @@ def run(args: argparse.Namespace) -> int:
     except (Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive) as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT if getattr(exc, "code", "") in ENVIRONMENT_CODES else EXIT_REFUSED
-    except (NeedInvalid, SourceUnsupported) as exc:
+    except (NeedInvalid, NeedsInvalid, SourceUnsupported) as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_REFUSED
     except ReviewFailed as exc:
@@ -471,6 +495,11 @@ def _find(args: argparse.Namespace) -> int:
     _lead_only("find")
     info, state, _home = _context()
     settings, found_settings = _discovery_settings(info)
+    task_only = (args.subtask, args.constraint, args.required, args.needs, args.out)
+    if args.task:
+        return _find_task(args, info, state, settings, found_settings)
+    if any(task_only):
+        raise Refused("OAH_SKILLS_USAGE", "--subtask, --constraint, --required, --needs and --out go with --task")
     record = snapshot = None
     if args.design:
         if args.tech:
@@ -528,6 +557,139 @@ def _find(args: argparse.Namespace) -> int:
         print(f"{DISCOVERY_FAILED_CODE}({report['outcome']}): {failed['detail']}; seeds, installed skills and "
               "stored reviews above still apply", file=sys.stderr)
         return EXIT_ENVIRONMENT
+    return EXIT_OK
+
+
+def _task_context(info: RepoInfo, state: pathlib.Path, task: str):
+    """(holder, judged design, TaskBasis) of a started task, read the way oah call reads it."""
+    from oah import call, intent as oah_intent
+    from oah.lease_cli import lease_design
+
+    holder = call.bound_lease(state, task)
+    if holder is None:
+        raise Refused("OAH_SKILLS_USAGE", f"task {task} has no active lease with an intent binding; start it with "
+                      "oah start --packet first")
+    bound = call.dispatch_binding(state, task)
+    source = bound["source"] if bound else holder.binding().source
+    try:
+        packet = call.read_packet(info.root, info.root / source, parse_intent=oah_intent.parse,
+                                  read_source=oah_intent.read_source)
+        call.check_dispatch_binding(bound, packet, task)
+    except call.EngineError as exc:
+        raise Refused(exc.code, str(exc).split(": ", 1)[1]) from None
+    judged = lease_design(holder, state)
+    return holder, judged, call.task_basis(holder, judged, packet, root=info.root)
+
+
+def _tech_pairs(values: list[str]) -> list[tuple[str, str]]:
+    pairs = []
+    for value in values:
+        label, sep, chosen = value.partition("=")
+        if not sep or not label or not chosen:
+            raise Refused("OAH_SKILLS_USAGE", f"--tech is LABEL=VALUE, such as database=mysql (got {value!r})")
+        pairs.append((label.strip(), chosen.strip()))
+    return pairs
+
+
+def _find_task(args: argparse.Namespace, info: RepoInfo, state: pathlib.Path, settings: Mapping,
+               found_settings: Mapping) -> int:
+    """Discovery for a started task's own needs, under that task's dispatch admission (DESIGN §4.1, §4.8)."""
+    from oah import call, discovery, skillpack
+    from oah.atomic import write_text_atomic
+    from oah.discovery import providers, tasks
+
+    if args.design or args.provider or args.public_query or args.query or args.public_source or args.need:
+        raise Refused("OAH_SKILLS_USAGE", "with --task the task's own design and the configured provider are used; "
+                      "--design, --provider and public query choices are for oah skills find without --task")
+    holder, judged, basis = _task_context(info, state, args.task)
+    policy = discovery.policy_digest(found_settings)
+    explicit = (args.subtask, args.tech, args.constraint, args.required, args.design_stage, args.check)
+    if args.needs and any(explicit):
+        raise Refused("OAH_SKILLS_USAGE", "--needs reads the needs from the file; give either the file or the need's "
+                      "own options")
+    if args.needs:
+        needs = call.task_needs(basis, stage=args.dispatch_stage, policy=policy, needs_file=args.needs)
+    elif any(explicit):
+        needs = [tasks.need(basis, dispatch_stage=args.dispatch_stage, policy=policy, subtask=args.subtask,
+                            tech=_tech_pairs(args.tech), constraints=args.constraint, required=args.required,
+                            stage=args.design_stage, check=args.check)]
+    else:
+        needs = tasks.derive(basis, dispatch_stage=args.dispatch_stage, policy=policy)
+    roots = _roots(info, state, settings)
+    # The task's dispatch admission comes first: an existing mandatory obligation that cannot be met refuses before
+    # any search. The needs being looked for are not yet obligations of this admission (nothing is selected yet).
+    admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation),
+                                                   max_queries=found_settings["max_queries"]),
+                               task_design=judged, state_dir=state, engine=args.engine, stage=args.dispatch_stage,
+                               roots=roots)
+    found = tasks.prepare_task(admitted, needs, state_dir=state, settings=found_settings,
+                               now=dt.datetime.now(dt.timezone.utc), basis=basis,
+                               notify=lambda notice: print(notice, file=sys.stderr))
+    installed = providers.installed_candidates(tasks.installed_terms(needs), roots)
+    if args.out:
+        write_text_atomic(pathlib.Path(args.out), json.dumps(tasks.needs_file(args.task, needs), indent=1,
+                                                             ensure_ascii=False) + "\n")
+    failures = [entry["outcome"] for entry in found if entry["outcome"] not in
+                ("ok", "zero-results", "deferred", "local-only", "not-searched")]
+    report = {"version": 1, "task": args.task, "operation": admitted.operation.to_json(),
+              "budget": admitted.allows_requests(),
+              "requests": sum(int(search["requested"]) for entry in found for search in entry["searches"]),
+              "needs": needs, "discovery": found, "installed": installed,
+              "outcome": failures[0] if failures else "ok"}
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"OAH_SKILL_FIND task={args.task} needs={len(needs)} requests={report['requests']}/{report['budget']}"
+              + (f" saved={args.out}" if args.out else ""))
+        for item, entry in zip(needs, found):
+            where = (f"{item['design']['stage']}.{item['design']['check'] or '*'}" if item["design"] is not None
+                     else f"subtask {item['subtask']}" if item["subtask"] else "task")
+            print(f"  need {item['id'][7:19]} {where:24} {entry['outcome']:14} proposed={len(entry['proposed_reviews'])}"
+                  f" selection={'yes' if entry['selection_ref'] else 'no'}"
+                  + "".join(f" gap={gap['code']}" for gap in entry["gaps"]))
+            for search in entry["searches"]:
+                print(f"    {search['outcome']:14} {search['query']!r}{' (cached)' if search['cached'] else ''} "
+                      f"[{search['query_id']}]")
+        for item in installed:
+            print(f"  installed {item['skill']:30} {item['label']}")
+    if failures:
+        print(f"{DISCOVERY_FAILED_CODE}({failures[0]}): a search failed; installed skills, stored reviews and "
+              "selections above still apply", file=sys.stderr)
+        return EXIT_ENVIRONMENT
+    return EXIT_OK
+
+
+def _select(args: argparse.Namespace) -> int:
+    """A lead's TaskSkillSelectionV1 for one need of a task without a design (DESIGN §4.8)."""
+    from oah import discovery
+    from oah.atomic import write_text_atomic
+    from oah.discovery import tasks
+
+    _lead_only("select")
+    info, state, _home = _context()
+    _settings, found_settings = _discovery_settings(info)
+    try:
+        raw = pathlib.Path(args.needs).read_bytes()[:tasks.NEEDS_BYTES + 1]
+        task = json.loads(raw.decode("utf-8")).get("task")
+    except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+        raise tasks.NeedsInvalid("malformed", f"{args.needs} is not a needs file from oah skills find --task") \
+            from None
+    if not isinstance(task, str):
+        raise tasks.NeedsInvalid("malformed", "the needs file names no task")
+    _holder, _judged, basis = _task_context(info, state, task)
+    needs = tasks.parse_needs(raw, basis, policy=discovery.policy_digest(found_settings))
+    chosen = [item for item in needs if args.need in (None, item["id"])]
+    if len(chosen) != 1:
+        raise Refused("OAH_SKILLS_USAGE", "the file holds several needs; name one with --need ID" if args.need is None
+                      else f"{args.need} is not a need in {args.needs}")
+    word, record = tasks.select(state, chosen[0], args.review, basis=basis)
+    if args.out:
+        write_text_atomic(pathlib.Path(args.out), json.dumps(record, indent=1, ensure_ascii=False) + "\n")
+    if args.json:
+        print(json.dumps(record, indent=2, ensure_ascii=False))
+    else:
+        print(f"OAH_SKILL_SELECTED {record['id']} task={task} need={record['need_id'][7:19]} "
+              f"reviews={len(record['review_ids'])}{' (unchanged)' if word == 'unchanged' else ''}")
     return EXIT_OK
 
 
@@ -690,8 +852,8 @@ def _read_run(args: argparse.Namespace) -> int:
 
 
 def _plan(args: argparse.Namespace) -> int:
-    """The deterministic admission of a task's next dispatch, without preparing anything."""
-    from oah import skillpack
+    """The deterministic admission of a task's next dispatch, without preparing anything or searching."""
+    from oah import call, discovery, skillpack
     from oah.call import bound_lease
     from oah.lease_cli import lease_design
 
@@ -700,10 +862,14 @@ def _plan(args: argparse.Namespace) -> int:
     if holder is None:
         raise Refused("OAH_SKILLS_USAGE", f"task {args.task} has no active lease; start it before planning")
     judged = lease_design(holder, state)
-    roots = _roots(info, state, settings_for(info.root))
+    settings, found_settings = _discovery_settings(info)
+    roots = _roots(info, state, settings)
+    _holder, _judged, basis = _task_context(info, state, args.task)  # the needs the call would admit
+    needs = call.task_needs(basis, stage=args.stage, policy=discovery.policy_digest(found_settings),
+                            needs_file=args.skill_needs)
     admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation)),
                                task_design=judged, state_dir=state, engine=args.engine, stage=args.stage, roots=roots,
-                               receiving_root=info.root)  # as an ordinary run there, which observes reference reads
+                               receiving_root=info.root, needs=needs)  # as an ordinary run there
     _block, bundle = skillpack.finalize(admitted)
     data = {"task": args.task, "stage": args.stage, "engine": args.engine, "bundle": bundle}
     if args.json:
@@ -723,4 +889,4 @@ def _plan(args: argparse.Namespace) -> int:
 
 HANDLERS: Mapping[str, object] = {"list": _list, "install": _install, "update": _update, "schedule": _schedule,
                                   "find": _find, "review": _review, "candidates": _candidates, "read": _read,
-                                  "plan": _plan}
+                                  "plan": _plan, "select": _select}

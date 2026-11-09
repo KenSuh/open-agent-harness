@@ -102,6 +102,8 @@ def register(commands: argparse._SubParsersAction) -> None:
                         "capability needs only the lead can meet (see oah capabilities plan)")
     parser.add_argument("--relay-result", metavar="HASH", action="append", default=[],
                         help="a parent relay result stored with oah capabilities relay (repeatable)")
+    parser.add_argument("--skill-needs", metavar="FILE", help="the task's skill needs from oah skills find --task "
+                        "--out, checked again against the current packet (a subtask's own needs and selections)")
     parser.add_argument("--json", action="store_true", help="print the run record as JSON")
 
     wait = commands.add_parser("wait", help="wait up to 9 minutes for a background run; call it again if needed")
@@ -265,7 +267,8 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False),
         parent_inventory=(str(pathlib.Path(args.parent_inventory).resolve())
                           if getattr(args, "parent_inventory", None) else None),
-        relay_results=tuple(getattr(args, "relay_result", None) or ()))
+        relay_results=tuple(getattr(args, "relay_result", None) or ()),
+        skill_needs=(str(pathlib.Path(args.skill_needs).resolve()) if getattr(args, "skill_needs", None) else None))
     try:
         prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
                                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
@@ -308,7 +311,8 @@ def _offer(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, ax
         packet=(root / args.packet) if args.packet else None, no_rerank=True,
         parent_inventory=(str(pathlib.Path(args.parent_inventory).resolve())
                           if getattr(args, "parent_inventory", None) else None),
-        relay_results=tuple(getattr(args, "relay_result", None) or ()))
+        relay_results=tuple(getattr(args, "relay_result", None) or ()),
+        skill_needs=(str(pathlib.Path(args.skill_needs).resolve()) if getattr(args, "skill_needs", None) else None))
     offered = call.prepare_native(request, load_settings(root), root=root, state_dir=state, env=os.environ,
                                   footer=tools.footer, has_footer=tools.has_footer, parse_intent=tools.parse,
                                   read_source=tools.read_source)

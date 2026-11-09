@@ -171,12 +171,13 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitt
            purpose: Mapping | None = None) -> Search:
     """One search through the external provider (or its fresh cache); never raises for a provider failure.
 
-    Only a caller holding skillpack's Admitted value of a taskless operation with a request budget may search; any
-    other call refuses before the cache, the notice or the transport (E-DR3-F01)."""
+    Only a caller holding skillpack's Admitted value may search: a taskless exploration (E-DR3-F01) or a task's own
+    dispatch (DESIGN §4.1), and a request goes out only within that admission's explicit request budget. Any other
+    call refuses before the cache, the notice or the transport."""
     from oah import skillpack
 
-    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind not in skillpack.TASKLESS:
-        raise ValueError("providers.search runs only under a taskless admission (skillpack.inspect or explore)")
+    if not isinstance(admitted, skillpack.Admitted):
+        raise ValueError("providers.search runs only under skillpack's admission (inspect, explore or a dispatch)")
     query_id = store.query_id(PROVIDER, query, PARSER)
     at = now.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
     if not settings["enabled"] or settings["provider"] != PROVIDER:
@@ -194,7 +195,7 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitt
         return Search(PROVIDER, query, query_id, "blocked", f"policy: the request would carry {problem}", [], at,
                       origin=origin, choice=choice)
     if admitted.allows_requests() < 1:
-        raise ValueError("this public exploration was admitted with no request budget; nothing is sent")
+        raise ValueError("this operation was admitted with no request budget; nothing is sent")
     if not store.notice_shown(state_dir):
         (notify or (lambda text: print(text, file=sys.stderr)))(NOTICE)
         store.record_notice(state_dir, PROVIDER, at)

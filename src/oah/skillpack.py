@@ -69,11 +69,13 @@ class Operation:
     def __post_init__(self) -> None:
         if self.kind not in OPERATIONS:
             raise ValueError(f"operation is one of {', '.join(OPERATIONS)}")
+        if type(self.max_queries) is not int or self.max_queries < 0:
+            raise ValueError("max_queries is a whole number, 0 or more")
         if self.kind == "dispatch":
             if not self.task or self.lease is None:
                 raise ValueError("a dispatch operation needs its task and checked lease (TaskIdentity is mandatory)")
-            if self.design is not None or self.max_queries:
-                raise ValueError("a dispatch reads its own task's design and sends no search")
+            if self.design is not None:
+                raise ValueError("a dispatch reads its own task's design, never a named snapshot")
             return
         if self.task is not None or self.lease is not None:
             raise ValueError("a taskless operation carries no task or lease; a task's skills come from its own "
@@ -106,7 +108,10 @@ class Admitted:
     stage: str | None = None
 
     def allows_requests(self) -> int:
-        return self.operation.max_queries if self.operation.kind in TASKLESS else 0
+        """The operation's explicit external request budget: a taskless exploration's, or the one a lead call
+        (process, Orca or native offer) grants its task discovery (DESIGN §4.1); a plan or a correction grants
+        none. A native offer still asks no model for advice (§5.1)."""
+        return self.operation.max_queries
 
 
 def _sha(data: bytes) -> str:
@@ -147,15 +152,20 @@ def _installed_copy(name: str, roots) -> tuple[bytes, str, pathlib.Path] | None:
 
 
 def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine: str, stage: str,
-          roots=(), receiving_root: pathlib.Path | None = None) -> Admitted:
+          roots=(), receiving_root: pathlib.Path | None = None, needs: Sequence[Mapping] = ()) -> Admitted:
     """Check every mandatory skill obligation of a dispatch, locally; PackRefused before anything is spent.
     `receiving_root` is the working directory of a target whose file reads oah observes (a Claude process run);
-    without it no file goes by reference."""
+    without it no file goes by reference. `needs` are the task's verified TaskSkillNeedV1 for this dispatch stage:
+    without a design, the lead's task selections for them are delivered and a required one without a selection
+    refuses; with a design, a required need is met only by an accepted coverage link (DESIGN §4.8, §5.2)."""
     if operation.kind != "dispatch":
         return Admitted(operation)
+    task_needs = tuple(needs)
     record, snapshot, design = _accepted_coverage(task_design)
     if record is None:
-        return Admitted(operation, engine=engine, stage=stage)
+        bound = task_design is not None and getattr(task_design, "task", None) is not None
+        return _admit_selected(operation, task_needs, bound=bound, state_dir=state_dir, engine=engine, stage=stage,
+                               roots=roots, receiving_root=receiving_root)
     from oah.design import coverage
     from oah.discovery import review as review_module, store
 
@@ -196,6 +206,21 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
                 raise PackRefused(code, reason, f"{link['skill']} for {where}: {detail}; nothing was launched")
             else:
                 skipped.append({"need_id": need_id, "skill": link["skill"], "reason": f"{item[1]}: {item[2]}"})
+    for wanted in task_needs:
+        bound_to = wanted["design"]
+        if wanted["required"] and bound_to is not None and not any(
+                item["stage"] == bound_to["stage"] and bound_to["check"] in (None, item["check"]) for item in items):
+            where = f"{bound_to['stage']}.{bound_to['check'] or '*'}"
+            raise PackRefused(MANDATORY_MISSING_CODE, "", f"the task needs a skill for {where} that the accepted "
+                              "coverage does not link; nothing was launched. A reviewed skill is only a proposal "
+                              "until it is linked: link it in the design's coverage, save and accept the design, then "
+                              "call again")
+    return _sealed(operation, items, skipped, design, engine, stage, receiving_root)
+
+
+def _sealed(operation: Operation, items: list[dict], skipped: list[dict], design, engine: str, stage: str,
+            receiving_root) -> Admitted:
+    """The item and byte budgets every admitted route shares (DESIGN §5.3)."""
     if len(items) > ITEM_LIMIT:
         raise PackRefused(BUDGET_CODE, "items", f"{len(items)} skill items exceed {ITEM_LIMIT}; split the task")
     total = _fit(items, engine=engine, receiving_root=receiving_root)
@@ -208,6 +233,51 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
     return Admitted(operation, tuple(items), tuple(skipped), design, engine, stage)
 
 
+def _admit_selected(operation: Operation, needs: Sequence[Mapping], *, bound: bool, state_dir: pathlib.Path,
+                    engine: str, stage: str, roots, receiving_root) -> Admitted:
+    """Candidate route 4 (DESIGN §5.2, §4.8): a task without a design delivers the reviews its lead selected for each
+    need (TaskSkillSelectionV1, rechecked under this lease); a required need without one refuses. A task bound to a
+    design without an accepted coverage part has no task selections: a required need there refuses too."""
+    if not needs:
+        return Admitted(operation, engine=engine, stage=stage)
+    from oah.design import coverage
+    from oah.discovery import review as review_module, store, tasks
+
+    evidence = store.ReviewEvidence(state_dir)
+    items, skipped, seen = [], [], set()
+    for need in needs:
+        short = need["id"][7:19]
+        selection = None if bound else tasks.selection_for(state_dir, need, lease_id=operation.lease[0])
+        if selection is None:
+            if need["required"]:
+                action = ("Link a reviewed skill in the design's coverage, save and accept the design" if bound else
+                          f"Find and review one (oah skills find --task {operation.task} --out FILE), choose it with "
+                          "oah skills select --needs FILE --review ID")
+                raise PackRefused(MANDATORY_MISSING_CODE, "", f"task need {short} is required and has no "
+                                  f"{'accepted coverage link' if bound else 'task selection under this lease'}; "
+                                  f"nothing was launched. {action}, then call again")
+            continue
+        for review_id in selection["review_ids"]:
+            if review_id in seen:
+                continue
+            review = evidence.review(review_id) or {}
+            link = {"review": review_id, "skill": (review.get("frontmatter") or {}).get("name") or review_id,
+                    "pin": coverage.review_pin(review) if review else {}, "seed": None}
+            item = _deliverable(link, {"id": need["id"], "stage": None, "check": None, "required": need["required"],
+                                       "invocation": "model", "auxiliary": []},
+                                evidence, review_module, state_dir, engine, roots)
+            if isinstance(item, dict):
+                items.append(item)
+                seen.add(review_id)
+            elif need["required"]:
+                code, reason, detail = item
+                raise PackRefused(code, reason, f"{link['skill']} for task need {short}: {detail}; nothing was "
+                                  "launched")
+            else:
+                skipped.append({"need_id": need["id"], "skill": link["skill"], "reason": f"{item[1]}: {item[2]}"})
+    return _sealed(operation, items, skipped, None, engine, stage, receiving_root)
+
+
 def rank(admitted: Admitted, *, advise) -> tuple[Admitted, dict]:
     """Advice reorders only optional items, and only among the optional items of one need's stage and check (DESIGN
     §5.1, §7.1): no advice adds, drops or moves a mandatory item. `advise(items)` gets two or more such items and
@@ -216,7 +286,8 @@ def rank(admitted: Admitted, *, advise) -> tuple[Admitted, dict]:
     groups: dict[tuple, list[int]] = {}
     for index, item in enumerate(admitted.items):
         if not item["required"]:
-            groups.setdefault((item["stage"], item["check"]), []).append(index)
+            key = (item["stage"], item["check"]) if item["stage"] is not None else ("task", item["need_id"])
+            groups.setdefault(key, []).append(index)
     groups = {key: indexes for key, indexes in groups.items() if len(indexes) >= 2}
     if not groups:
         return admitted, {"purpose": "skill-fit", "status": "unused(single-option)", "applied": False, "reason": None}
@@ -396,8 +467,10 @@ def finalize(admitted: Admitted) -> tuple[str | None, dict | None]:
     for number, item in enumerate(admitted.items, 1):
         fence = _fence(item["text"] + "".join(aux.get("text", "") for aux in item["aux"]))
         pin = item["pin"]
+        where = (f"{item['stage']}.{item['check'] or '*'}" if item["stage"] is not None
+                 else f"task need {item['need_id'][7:19]}")
         lines += [f"### {number}. {item['skill']} ({'required' if item['required'] else 'optional'})",
-                  f"For {item['stage']}.{item['check'] or '*'} · {pin.get('locator')}@{pin.get('commit')}:"
+                  f"For {where} · {pin.get('locator')}@{pin.get('commit')}:"
                   f"{pin.get('path')} · {item['sha256']} · license {item['license']} · from {item['origin']}"
                   + (f" · {item['note']}" if item["note"] else ""),
                   fence + "markdown", item["text"][:-1], fence]
@@ -671,8 +744,10 @@ def parse_bundle(data) -> dict:
         _wire(_text(item["skill"]), f"{where} names no skill")
         for key in ("need_id", "review", "sha256", "lf_sha256", "delivered_sha256"):
             _wire(_digest_ok(item[key]), f"{where} {key} is not a sha256 digest")
-        _wire(item["stage"] in stages.STAGE_IDS, f"{where} stage {item['stage']!r} is not a design stage")
-        _wire(item["check"] is None or (_text(item["check"]) and item["check"] in stages.all_checks(item["stage"])),
+        _wire(item["stage"] is None or item["stage"] in stages.STAGE_IDS,
+              f"{where} stage {item['stage']!r} is not a design stage")
+        _wire(item["check"] is None or (item["stage"] is not None and _text(item["check"])
+                                        and item["check"] in stages.all_checks(item["stage"])),
               f"{where} check {item['check']!r} is not a check of stage {item['stage']}")
         _wire(type(item["required"]) is bool, f"{where} required is true or false")
         _wire(item["mode"] == "inline", f"{where}: a skill body is always inline; only its files go by reference")

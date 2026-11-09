@@ -129,6 +129,51 @@ repository and runs only on Claude process runs, and the model spends context re
 required one refuses with `OAH_SKILL_NOT_DELIVERABLE(user-only)`. What it costs you: you run such a skill
 yourself.
 
+## Skills for a task and its subtasks
+
+Each `oah call` also works out the task's skill needs for its dispatch stage. Without a design, that is one need
+for the task's intent; with a design, one need for each stage check the accepted coverage asks a skill for. A need
+names the packet bytes that state the requirement (a range and a digest, never the text), the subtask, the public
+technology words, the platform, a digest of your local constraints and the discovery settings. Any change makes it
+another need.
+
+- `oah skills find --task T` searches for a started task's needs under that task's own admission, within
+  `max_queries`. `--subtask ID`, `--tech LABEL=VALUE`, `--constraint TEXT` (a version, for example) and
+  `--required` describe one need instead; with a design, `--design-stage` and `--check` name its check.
+  `--dispatch-stage` picks `initial` (the default), `correction` or `review`. `--out FILE` saves the needs file,
+  and `--needs FILE` searches again for a saved file's needs.
+- `oah skills select --needs FILE [--need ID] --review ID ...` binds reviewed skills to one need of a task without
+  a design. Only the lead selects. A selection is stored once under `<state>/skills/task-selections/` and applies
+  only under the lease it was made under.
+- `oah call ... --skill-needs FILE` and `oah skills plan ... --skill-needs FILE` use that file's needs. oah checks
+  each one again against the current packet, scope, kind, risk, platform and settings, and refuses a need that no
+  longer matches with `OAH_SKILL_NEEDS_INVALID(stale)` (the other reasons are `malformed`, `foreign`, `scope` and
+  `design-bound`).
+- A selected skill is delivered like a linked one; its line in the brief reads `For task need …`. A required need
+  without a selection refuses with `OAH_SKILL_MANDATORY_MISSING` before anything is spent. Just before the engine
+  starts, oah checks that the selection is still the lead's current one, or refuses with
+  `OAH_SKILL_NOT_DELIVERABLE(changed)`.
+- After admission, the call itself looks for each need that names a technology or a design check and stores a
+  task discovery record; `skills.json` lists them under `task_discovery`. A reviewed result is only a
+  proposal until you select it, or, with a design, link it in the coverage and accept the design. A line starting
+  with `OAH_SKILL_DISCOVERY` says when a proposal waits, when a technology decision changed under a linked skill,
+  or when the search failed. A technology value only you use is never sent; its record shows the
+  `public-term-required` gap. A need that names no technology and no design check is not stored at all.
+
+**A task with a design follows its design.** `oah skills select` refuses for it with
+`OAH_SKILL_NEEDS_INVALID(design-bound)`, and a required need that the accepted coverage does not link refuses the
+call. What it costs you: a new skill for such a task needs a coverage link and one more design acceptance.
+
+**Selections belong to one need and one lease.** Two subtasks with the same technology have different needs and
+selections, and another version constraint is another need. After the task is started again, its old selections no
+longer apply. What it costs you: you select again for a changed need or a new lease.
+
+**The call may search.** A call whose needs carry public technology words sends up to `max_queries` searches to
+skills.sh after admission, each with a 15-second limit and never under a launch lock. Answers and an unchanged
+need's discovery are reused for `cache_hours`. `[skills.discovery] enabled = false` turns it off. What it costs you:
+the first such call each day can wait for the search. `oah fix` corrections never search and do not carry task
+selections.
+
 ## Native subagents
 
 `oah call ENGINE --stage S --task T --launcher native` hands the brief to the AI you work with instead of starting a
@@ -241,6 +286,9 @@ order before advice.
 - Routes are planned before the run starts. oah does not watch the child's tool startup, and it never reports the
   `direct` route, which would need that.
 - The budgets are fixed byte counts. They do not measure the model's context window.
+- Task selections reach every `oah call` run and native offer, but not `oah fix` corrections, which keep their
+  frozen inputs. A need's requirement is the packet's whole intent section; choosing a range inside it is not
+  offered yet.
 - A native subagent's reads are seen only through `oah skills read`; the host's own file reads are not observed.
   `oah call settle` does not check capability relays again.
 - Jev's capability-needs question, the only one that may read the task's packet intent (and only with

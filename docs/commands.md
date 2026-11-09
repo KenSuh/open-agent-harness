@@ -28,7 +28,7 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 | `oah fix` | Has Codex correct the latest review's findings, then binds the committed correction. |
 | `oah land` | Checks that the exact reviewed head may land, or lands it after you confirm. |
 | `oah rules` | Keeps the shared rules block in `AGENTS.md` in sync. |
-| `oah skills` | Lists, installs and updates bundled and linked skills; finds and reviews specialist skills and plans the skill texts a dispatch carries. |
+| `oah skills` | Lists, installs and updates bundled and linked skills; finds and reviews specialist skills, selects them for a task's own needs and plans the skill texts a dispatch carries. |
 | `oah capabilities` | Shows the child engine's configured tools, plans a task's capability needs and records a lead's relay result. See [Skills and capabilities](skills-and-capabilities.md). |
 | `oah hooks` | Installs or removes the opt-in Claude Code and git hooks. |
 | `oah ci` | Sets up GitHub Actions checks for your project. |
