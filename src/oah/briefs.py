@@ -124,7 +124,7 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
           skills: Sequence[tuple[str, str]] = (), footer: str, has_footer: HasFooter,
           skills_block: str | None = None, skill_ids: Sequence[str] = (), design_block: str | None = None,
           design_line: str | None = None, design_data: str | None = None,
-          skill_texts_block: str | None = None) -> str:
+          skill_texts_block: str | None = None, capability_block: str | None = None) -> str:
     """The brief text, in the fixed layout. `binding` has `.id`, `.revision` and `.digest`.
 
     `skills_block` (from `oah.skillsel.Selection.brief_text`) replaces the one-line skills bullet; the
@@ -182,6 +182,7 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
     parts = [preamble, section if section.endswith("\n") else section + "\n",
              *([design_block if design_block.endswith("\n") else design_block + "\n"] if design_block else []),
              *([skill_texts_block] if skill_texts_block else []),
+             *([capability_block] if capability_block else []),
              "## Round instructions\n" + (round_instructions.rstrip("\n") or "(none)") + "\n",
              VERIFY_FOOTER if VERIFY_FOOTER.endswith("\n") else VERIFY_FOOTER + "\n", footer]
     return _check_delivered("\n".join(parts), footer, marker, has_footer)
@@ -219,6 +220,7 @@ def reusable_content(stored: str, *, stage: str, footer: str, has_footer: HasFoo
     from oah.design.task_context import strip_block
     from oah.design.model import DesignError
 
+    from oah.capabilities.plan import strip_block as strip_capabilities
     from oah.skillpack import strip_block as strip_skill_texts
 
     text = deliver(stored, footer=footer, has_footer=has_footer)
@@ -227,7 +229,7 @@ def reusable_content(stored: str, *, stage: str, footer: str, has_footer: HasFoo
     except DesignError as exc:
         raise BriefError(exc.code, str(exc).partition(": ")[2]) from None
     try:
-        body = strip_skill_texts(body)
+        body = strip_capabilities(strip_skill_texts(body))
     except ValueError as exc:
         raise BriefError("OAH_BRIEF_STALE", str(exc)) from None
     verify = _line_offset(body, VERIFY_MARKER)

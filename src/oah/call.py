@@ -1028,10 +1028,13 @@ def _pack_error(exc) -> EngineError:
 
 
 def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir: pathlib.Path,
-                  env: Mapping[str, str]) -> tuple | None:
-    """Lane E's single skill admission (DESIGN §5.1): local and deterministic; a refusal spends and reserves nothing.
-    (block, bundle) when accepted coverage links deliver skill texts, else None (the brief stays unchanged)."""
+                  env: Mapping[str, str]) -> SkillPack | None:
+    """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
+    A SkillPack when accepted coverage links deliver skill texts or capabilities apply, else None (the brief stays
+    byte-identical)."""
     from oah import skillpack
+    from oah.capabilities import CapabilityRefused, plan as capability_plan
+    from oah.config import load_config
 
     inputs = _CORRECTION_INPUTS.get()
     settings = (inputs.config.section("skills", skillsel.config_defaults()) if inputs is not None
@@ -1046,12 +1049,22 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     except skillpack.PackRefused as exc:
         raise _pack_error(exc) from None
     block, bundle = skillpack.finalize(admitted)
-    if block is None:
+    section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
+               else load_config(root).section("capabilities", capability_plan.DEFAULTS))
+    try:
+        capabilities, capability_block = capability_plan.for_task(
+            holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
+            items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
+            relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc),
+            settings=capability_plan.check_settings(section))
+    except CapabilityRefused as exc:
+        raise _pack_error(exc) from None
+    if block is None and capability_block is None:
         return None
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
-        check(block)
-    return block, bundle
+        check([block, capability_block])
+    return SkillPack(block, bundle, capability_block, capabilities)
 
 
 def _record_refusal(prepared: Prepared, error: EngineError) -> None:
@@ -1298,6 +1311,18 @@ class CallRequest:
     isolated: bool = False  # Codex ignores the user's config.toml and execpolicy rules (oah review)
     output_last_message: str | None = None  # review filters temporary output before retaining it
     retain_worker_text: bool = True  # oah fix streams output without creating logs or a last-message file
+    parent_inventory: str | None = None  # the lead's InventoryV1 file (--parent-inventory)
+    relay_results: tuple[str, ...] = ()  # stored parent relay results (--relay-result)
+
+
+@dataclasses.dataclass(frozen=True)
+class SkillPack:
+    """Lane E's admitted delivery for one dispatch: skill texts and capabilities, each optional."""
+
+    block: str | None = None
+    bundle: dict | None = None
+    capability_block: str | None = None
+    capabilities: dict | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1612,7 +1637,8 @@ def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warn
                         skills_block=chosen.brief_text(rerank=skills_rerank) if chosen is not None else None,
                         skill_ids=[skill.id for skill in chosen.skills] if chosen is not None else (),
                         design_block=design.text if design is not None else None,
-                        skill_texts_block=skill_pack[0] if skill_pack is not None else None,
+                        skill_texts_block=skill_pack.block if skill_pack is not None else None,
+                        capability_block=skill_pack.capability_block if skill_pack is not None else None,
                         design_line=design.preamble if design is not None else None,
                         design_data=(design.transport.relative("").rstrip("/") if design is not None
                                      and design.transport is not None else None))
@@ -1897,7 +1923,7 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str], selection: tuple | None = None, checked_lease=None,
-                    judge: dict | None = None, design=None, skill_pack: tuple | None = None) -> _CallPlan:
+                    judge: dict | None = None, design=None, skill_pack: SkillPack | None = None) -> _CallPlan:
     chosen, skills_rerank = selection if selection is not None else (None, None)
     text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
                        design, skill_pack)
@@ -1943,8 +1969,8 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
     if _CORRECTION_INPUT_CHECK.get() is not None:
         result_fields = runs._correction_record(result_fields, runs.RESULT_FIELDS)
     skills_record = {"rerank": skills_rerank, **chosen.to_record()} if chosen is not None else None
-    if skill_pack is not None and _CORRECTION_INPUT_CHECK.get() is None:
-        skills_record = {**(skills_record or {}), "bundle": skill_pack[1]}
+    if skill_pack is not None and skill_pack.bundle is not None and _CORRECTION_INPUT_CHECK.get() is None:
+        skills_record = {**(skills_record or {}), "bundle": skill_pack.bundle}
     if skills_record is not None and _CORRECTION_INPUT_CHECK.get() is not None:
         skills_record = runs._correction_record(
             {"count": len(chosen.skills), "sha256": hashlib.sha256(
@@ -1964,7 +1990,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str], selection: tuple | None = None, checked_lease=None,
                     plan: _CallPlan | None = None, judge: dict | None = None, design=None,
-                    skill_pack: tuple | None = None) -> Prepared:
+                    skill_pack: SkillPack | None = None) -> Prepared:
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -1982,6 +2008,10 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         from oah.atomic import write_json_atomic
 
         write_json_atomic(run.file_path("skills.json"), plan.skills_record)
+    if skill_pack is not None and skill_pack.capabilities is not None:
+        from oah.atomic import write_json_atomic
+
+        write_json_atomic(run.file_path("capabilities.json"), skill_pack.capabilities)
     if design is not None:
         from oah.atomic import write_json_atomic
 

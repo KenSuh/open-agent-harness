@@ -28,7 +28,8 @@ COMMANDS = ("call", "wait", "worker-run")
 ENVIRONMENT_CODES = ("OAH_ENGINE_MISSING", "OAH_CONFIG_INVALID", "OAH_CODEX_CONFIG_INVALID",
                      "OAH_UNSUPPORTED_BATCH_SHIM", "OAH_PACKET_UNREADABLE", "OAH_INTENT_SOURCE_UNREADABLE",
                      "OAH_RUN_DETACH_FAILED", "OAH_LAUNCHER_UNAVAILABLE", "OAH_LAUNCHER_FAILED",
-                     "OAH_DESIGN_FRESHNESS_UNKNOWN", "OAH_DESIGN_RECOVERY_PENDING", "OAH_DESIGN_ORIGIN_UNKNOWN")
+                     "OAH_DESIGN_FRESHNESS_UNKNOWN", "OAH_DESIGN_RECOVERY_PENDING", "OAH_DESIGN_ORIGIN_UNKNOWN",
+                     "OAH_CAPABILITY_INVENTORY_UNKNOWN")
 
 
 def register(commands: argparse._SubParsersAction) -> None:
@@ -60,6 +61,10 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--refresh-models", action="store_true", help="rebuild the model catalog before launching")
     parser.add_argument("--no-rerank", action="store_true", help="keep the rule order of the selected skills; the "
                         "re-ranker is not asked (recorded as rerank=unused(disabled-by-brief))")
+    parser.add_argument("--parent-inventory", metavar="FILE", help="the lead's InventoryV1 of its own tools, for "
+                        "capability needs only the lead can meet (see oah capabilities plan)")
+    parser.add_argument("--relay-result", metavar="HASH", action="append", default=[],
+                        help="a parent relay result stored with oah capabilities relay (repeatable)")
     parser.add_argument("--json", action="store_true", help="print the run record as JSON")
 
     wait = commands.add_parser("wait", help="wait up to 9 minutes for a background run; call it again if needed")
@@ -217,7 +222,10 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         round_instructions=args.message,
         stored_brief=args.stored_brief_text,
         packet=(root / args.packet) if args.packet else None, timeout_s=args.timeout_seconds,
-        refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False))
+        refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False),
+        parent_inventory=(str(pathlib.Path(args.parent_inventory).resolve())
+                          if getattr(args, "parent_inventory", None) else None),
+        relay_results=tuple(getattr(args, "relay_result", None) or ()))
     try:
         prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
                                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
