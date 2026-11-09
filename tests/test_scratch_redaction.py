@@ -276,6 +276,7 @@ class AliasCredentialTest(unittest.TestCase):
                 with self.subTest(command=argv[0], as_json=as_json), credential_base(self, value):
                     env = dict(os.environ, OAH_STATE_DIR=str(project.state), CODEX_HOME=str(project.home),
                                FAKE_RECORD=str(project.record), FAKE_CLAUDE_ALIASES="sonnet", FAKE_CLAUDE_BARE="real",
+                               PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"),
                                PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
                     if os.name == "nt":
                         env["LOCALAPPDATA"] = str(pathlib.Path("credential-parent") / value)
