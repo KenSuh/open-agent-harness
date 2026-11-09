@@ -1121,7 +1121,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     settings = (inputs.config.section("skills", skillsel.config_defaults()) if inputs is not None
                 else skillsel.settings_for(root))
     roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env,
-                                   kit_cache=skillsel.kit_roots(state_dir, pins=settings["pins"]))
+                                   kit_cache=skillsel.kit_roots(state_dir, pins=settings["pins"]),
+                                   codex_plugin_cache=settings["codex_plugin_cache"])
     basis, needs, found_settings = None, [], None
     if packet is not None and inputs is None:
         try:
@@ -1825,7 +1826,8 @@ def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, b
 
     settings = _CORRECTION_INPUTS.get().config.section("skills", skillsel.config_defaults())
     kit = skillsel.kit_roots(state_dir, pins=settings["pins"])
-    roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env, kit_cache=kit)
+    roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env, kit_cache=kit,
+                                   codex_plugin_cache=settings["codex_plugin_cache"])
     # Corrections omit optional telemetry so even an unsafe attached skill leaves no selection record.
     selection = skillsel.select(kind, stage, risk, scope, roots=roots, settings=settings, state_dir=None,
                                 repo_root=root, now=now)

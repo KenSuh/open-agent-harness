@@ -89,6 +89,9 @@ default_branch = {{DEFAULT_BRANCH}}
 # Your project's skill folders never change on their own: `oah skills update --project` does that.
 auto_update = {{AUTO_UPDATE}}
 update_interval_days = 1
+# Read skills from Codex's plugin cache too. Cached plugins may be turned off, so those copies come last and
+# are shown as "plugin-cache (not proof of enabled)".
+# codex_plugin_cache = false
 
 # Finding specialist skills for a design's needs (oah skills find). Only oah's fixed public words leave the machine.
 # [skills.discovery]

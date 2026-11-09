@@ -486,7 +486,8 @@ def _roots(info: RepoInfo, state: pathlib.Path, settings: Mapping) -> list:
     from oah import skillsel
 
     kit = skillsel.kit_roots(state, pins=settings["pins"])
-    return skillsel.default_roots(info.root, home=skillsel.home_of(os.environ), env=os.environ, kit_cache=kit)
+    return skillsel.default_roots(info.root, home=skillsel.home_of(os.environ), env=os.environ, kit_cache=kit,
+                                  codex_plugin_cache=settings["codex_plugin_cache"])
 
 
 def _find(args: argparse.Namespace) -> int:

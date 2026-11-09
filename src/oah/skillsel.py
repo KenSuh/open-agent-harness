@@ -38,7 +38,11 @@ from typing import Iterable, Mapping, Sequence
 from oah.atomic import StateCorrupt, StorageError, append_jsonl
 from oah.lockfile import LockTimeout, StateLock
 
-ORIGINS = ("project", "kit", "user", "plugin")
+ORIGINS = ("project", "kit", "user", "plugin", "plugin-cache")
+# Codex keeps every downloaded plugin under plugins/cache/<marketplace>/<plugin>/<version>/, enabled or not, in the
+# layout toolkit.locate walks (SKILL.md at most this many parts below the cache).
+PLUGIN_CACHE_DEPTH = 6
+PLUGIN_CACHE_SHOWN = "plugin-cache (not proof of enabled)"
 MAX_SKILL_BYTES = 1024 * 1024
 WALK_LIMIT = 10000
 TELEMETRY_FILE = "skills-telemetry.jsonl"
@@ -96,6 +100,9 @@ DEFAULTS = {
     # `enabled = false` or `provider = "none"` turns it off. An empty license_allow uses [sources] license_allow.
     "discovery": {"enabled": True, "provider": "skills-sh", "cache_hours": 24.0, "max_queries": 4,
                   "license_allow": []},
+    # Read skills from Codex's plugin cache too. A cached plugin may be turned off or an old version, so its skills
+    # lose to every other copy and are shown as "plugin-cache (not proof of enabled)".
+    "codex_plugin_cache": False,
 }
 
 
@@ -285,6 +292,31 @@ def _plugin_roots(claude_home: pathlib.Path, home: pathlib.Path,
     return roots
 
 
+def _codex_cache_roots(codex_home: pathlib.Path, home: pathlib.Path, repo_root: pathlib.Path) -> list[SkillRoot]:
+    """Every `skills` folder in Codex's plugin cache, at most PLUGIN_CACHE_DEPTH parts deep for its SKILL.md files
+    (DESIGN §5.2, R-A5). The cache holds what was downloaded, not what Codex has enabled, so these roots come last."""
+    cache = codex_home / "plugins" / "cache"
+    found: list[tuple[tuple[str, ...], pathlib.Path]] = []
+    pending = [(cache, ())]
+    while pending:
+        folder, parts = pending.pop()
+        try:
+            children = [item for item in folder.iterdir() if not item.name.startswith(".") and item.is_dir()]
+        except OSError:
+            continue  # no cache, or a folder that cannot be listed
+        for child in children:
+            below = (*parts, child.name)
+            if child.name == "skills":
+                found.append((below, child))  # its <name>/SKILL.md files sit two parts further down
+            elif len(below) < PLUGIN_CACHE_DEPTH - 2:
+                pending.append((child, below))
+    roots = []
+    for parts, folder in sorted(found, key=lambda item: tuple(part.casefold() for part in item[0])):
+        plugin = parts[1] if len(parts) >= 3 else parts[0] if len(parts) == 2 else ""
+        roots.append(SkillRoot(folder, "plugin-cache", _label(folder, home, repo_root), plugin=plugin))
+    return roots
+
+
 def kit_roots(state_dir: pathlib.Path, *, pins: Iterable[str] = (), catalog=None) -> list[SkillRoot]:
     """The kit-cache skills A15 may select: published items of the shipped catalog, minus pinned items.
 
@@ -316,10 +348,12 @@ def kit_roots(state_dir: pathlib.Path, *, pins: Iterable[str] = (), catalog=None
 
 
 def default_roots(repo_root: pathlib.Path, *, home: pathlib.Path, env: Mapping[str, str],
-                  kit_cache: pathlib.Path | Sequence[SkillRoot] | None = None) -> list[SkillRoot]:
+                  kit_cache: pathlib.Path | Sequence[SkillRoot] | None = None,
+                  codex_plugin_cache: bool = False) -> list[SkillRoot]:
     """The usual skill folders for this repository and user, in precedence order.
 
-    `kit_cache` is one folder of skill folders, or the roots `kit_roots` returns."""
+    `kit_cache` is one folder of skill folders, or the roots `kit_roots` returns. `codex_plugin_cache` (the
+    `[skills]` setting) adds Codex's plugin cache last."""
     repo_root, home = pathlib.Path(repo_root), pathlib.Path(home)
     claude_home = pathlib.Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else home / ".claude"
     codex_home = pathlib.Path(env["CODEX_HOME"]) if env.get("CODEX_HOME") else home / ".codex"
@@ -334,7 +368,8 @@ def default_roots(repo_root: pathlib.Path, *, home: pathlib.Path, env: Mapping[s
         roots.append(SkillRoot(folder, "kit", folder.as_posix()))
     for folder in (claude_home / "skills", codex_home / "skills", home / ".agents" / "skills"):
         roots.append(SkillRoot(folder, "user", _label(folder, home, repo_root)))
-    return roots + _plugin_roots(claude_home, home, repo_root)
+    return (roots + _plugin_roots(claude_home, home, repo_root)
+            + (_codex_cache_roots(codex_home, home, repo_root) if codex_plugin_cache else []))
 
 
 # Selecting ---------------------------------------------------------------------------------------
@@ -380,7 +415,7 @@ class Selection:
             lines += [f"Skill order: rerank={rerank.removeprefix('rerank=')}", ""]
         if self.skills:
             for skill in self.skills:
-                lines.append(f"- `{skill.id}` ({skill.origin}): `{skill.label}`")
+                lines.append(f"- `{skill.id}` ({_shown(skill.origin)}): `{skill.label}`")
                 for reason in skill.reasons:
                     lines.append(f"  - why: {reason}")
         else:
@@ -409,6 +444,10 @@ class Selection:
             "unavailable": [item.skill for item in self.unavailable],
             "warnings": [warning.partition(":")[0] for warning in self.warnings],
         }
+
+
+def _shown(origin: str) -> str:
+    return PLUGIN_CACHE_SHOWN if origin == "plugin-cache" else origin
 
 
 def _norm_path(entry: str) -> str:
@@ -573,6 +612,13 @@ def select(kind: str, stage: str, risk: str, scope_paths: Sequence[str], *, root
             entry[1].append(reason)
     for name in [name for name in unavailable if name in chosen]:
         del unavailable[name]
+    for skill, _reasons in chosen.values():
+        others = [copy for copy in found.shadowed.get(skill.id, ()) if copy.digest != skill.digest]
+        if others:  # R-A5: the same id with other contents elsewhere is named, never silently hidden
+            notes.append(f"`{skill.id}` is installed in more than one place with different contents; this task "
+                         f"uses `{skill.label}` ({_shown(skill.origin)}, digest {skill.digest}); also "
+                         + "; ".join(f"`{copy.label}` ({_shown(copy.origin)}, digest {copy.digest})"
+                                     for copy in others))
 
     mode = option("mode") if option("mode") in ("reference", "attach") else "reference"
     cap = option("attach_max_bytes")
@@ -670,7 +716,8 @@ def choose(root: pathlib.Path, *, kind: str, stage: str, risk: str, scope: Seque
     root = pathlib.Path(root)
     settings = settings_for(root)
     kit = kit_roots(state_dir, pins=settings["pins"]) if state_dir is not None else None
-    roots = default_roots(root, home=home_of(env), env=env, kit_cache=kit)
+    roots = default_roots(root, home=home_of(env), env=env, kit_cache=kit,
+                          codex_plugin_cache=settings["codex_plugin_cache"])
     selection = select(kind, stage, risk, scope, roots=roots, settings=settings, state_dir=state_dir,
                        repo_root=root, now=now)
     config = load_config(root).section("rerank", rerank.DEFAULTS)

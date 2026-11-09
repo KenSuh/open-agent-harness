@@ -129,6 +129,15 @@ repository and runs only on Claude process runs, and the model spends context re
 required one refuses with `OAH_SKILL_NOT_DELIVERABLE(user-only)`. What it costs you: you run such a skill
 yourself.
 
+**Installed copies are named, not guessed.** oah reads installed skills from the project, its own kit cache, your
+user folders and the Claude plugins you installed, in that order, and the first copy of a name wins. When a skill
+chosen for the brief also exists elsewhere with different contents, the brief's notes name every copy with its
+origin and digest. Codex's plugin cache (`plugins/cache` under `CODEX_HOME`, else `~/.codex`) is read only with
+`[skills] codex_plugin_cache = true`. Its copies come last and are shown as `plugin-cache (not proof of enabled)`,
+because the cache also keeps plugins you turned off and old versions. What it costs you: a skill that lives only in
+Codex's plugin cache is not used until you turn the setting on, and even then oah cannot tell whether Codex has that
+plugin enabled.
+
 ## Skills for a task and its subtasks
 
 Each `oah call` also works out the task's skill needs for its dispatch stage. Without a design, that is one need

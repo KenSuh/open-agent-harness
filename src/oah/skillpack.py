@@ -870,4 +870,5 @@ def environment_roots(root: pathlib.Path, state_dir: pathlib.Path, env: Mapping[
 
     settings = skillsel.settings_for(root)
     kit = skillsel.kit_roots(state_dir, pins=settings["pins"])
-    return skillsel.default_roots(root, home=skillsel.home_of(env), env=env, kit_cache=kit)
+    return skillsel.default_roots(root, home=skillsel.home_of(env), env=env, kit_cache=kit,
+                                  codex_plugin_cache=settings["codex_plugin_cache"])
