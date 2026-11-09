@@ -16,6 +16,61 @@ from tests.test_skill_delivery import DeliveryTask
 
 
 class NativeSelectionTest(task_fixture.TaskRepo, unittest.TestCase):
+    def test_a_late_first_selection_refuses_empty_native_first_and_idempotent_settlement(self):
+        from oah import call, call_cli, init
+        from oah.discovery import policy_digest, providers, tasks
+
+        self.upstream("acme/native-late", task_fixture.mit_repo({"skills/plain": task_fixture.skill_md(
+            "plain", "Check each ledger row.\n")}))
+        self.start_task()
+        agents = self.home / ".claude" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "oah-low.md").write_bytes(init.agent_text("low", "haiku", "low"))
+        reviewed, _ = self.review_json("--github", "acme/native-late", "--path", "skills/plain")
+        assert reviewed is not None
+        tools = call_cli.intent_tools()
+        holder = call.bound_lease(self.state_dir, "t1")
+        packet = call.read_packet(self.repo, self.repo / ".oah/tasks/t1/PACKET.md",
+                                  parse_intent=tools.parse, read_source=tools.read_source)
+        task_design, _ = call._task_design(holder, packet, state_dir=self.state_dir, stage="initial",
+                                           task="t1", engine="claude")
+        basis = call.task_basis(holder, task_design, packet, root=self.repo)
+        (need,) = call.task_needs(basis, stage="initial", policy=policy_digest(providers.settings_of({})),
+                                  needs_file=None)
+        index = tasks._index_path(self.state_dir)
+        reply = self.files / "plain-reply.txt"
+        reply.write_text("Completed the plain task.\n", encoding="utf-8")
+        for settled in (False, True):
+            code, out, err = self.call("--launcher", "native", "--json")
+            self.assertEqual(code, 0, out + err)
+            offered = json.loads(out)
+            run = self.state_dir / "runs" / "t1" / offered["run"]
+            self.assertIsNone(json.loads((run / "skills.json").read_bytes()).get("prepared_e"))
+            command = ("call", "settle", "--run", offered["run"], "--offer-digest", offered["message"]["sha256"],
+                "--host-child-id", "plain-child", "--outcome", "succeeded", "--result-file", str(reply), "--json")
+            if settled:
+                first = self.oah(*command)
+                self.assertEqual(first[0], 0, first[1] + first[2])
+            before = (run / "native-offer.json").read_bytes()
+            receipt = run / "native-settlement.json"
+            old_receipt = receipt.read_bytes() if receipt.is_file() else None
+            old_index = index.read_bytes() if index.is_file() else None
+
+            tasks.select(self.state_dir, need, [reviewed["id"]], basis=basis)
+
+            refused = self.oah(*command)
+            with self.subTest(settled=settled):
+                self.assertEqual(refused[0], 1, refused[1] + refused[2])
+                self.assertIn("OAH_NATIVE_OFFER_STALE", refused[2])
+                self.assertEqual((run / "native-offer.json").read_bytes(), before)
+                self.assertEqual(receipt.read_bytes() if receipt.is_file() else None, old_receipt)
+                self.assertFalse(self.record.exists())
+                self.assertEqual(self.server.requests, [])
+            if old_index is None:
+                index.unlink()
+            else:
+                index.write_bytes(old_index)
+
     def test_unchanged_native_task_selection_settles_once_and_returns_the_same_receipt(self):
         from oah import init
 
@@ -53,6 +108,87 @@ class NativeSelectionTest(task_fixture.TaskRepo, unittest.TestCase):
 
 
 class FrozenCorrectionTest(DeliveryTask, unittest.TestCase):
+    def test_a_late_first_selection_refuses_an_empty_correction_capture(self):
+        from oah import call, call_cli
+        from oah.discovery import policy_digest, providers, tasks
+
+        project = fix_fixture.FixProject(self, config="\n[models]\nfetch_scores = false\n")
+        self.upstream("acme/correction-late", {"LICENSE": delivery_fixture.MIT_LICENSE,
+            "skills/plain/SKILL.md": delivery_fixture.skill_md("plain", "Check each ledger row.\n")})
+        reviewed = self.reviewed(project.state, "acme/correction-late", "skills/plain")
+        project.changes_requested()
+        project.queue_fix({}, {"write": {"src/app.py": "print('corrected')\n"}})
+        old_calls = project.fix_calls()
+        execute, seen, records = call.execute, [], []
+        tools = call_cli.intent_tools()
+
+        def select_after_capture(prepared, **options):
+            self.assertIsNone(getattr(prepared, "e_digest", None))
+            publication = call._CORRECTION_PUBLICATION.get()
+            assert publication is not None
+            before = json.dumps(publication.plan.skills_record, sort_keys=True)
+            holder = publication.holder()
+            packet = call.read_packet(project.repo, project.repo / ".oah/tasks/t1/PACKET.md",
+                                      parse_intent=tools.parse, read_source=tools.read_source)
+            task_design, _ = call._task_design(holder, packet, state_dir=project.state, stage="correction",
+                                               task="t1", engine="codex")
+            basis = call.task_basis(holder, task_design, packet, root=project.repo)
+            (need,) = call.task_needs(basis, stage="correction", policy=policy_digest(providers.settings_of({})),
+                                      needs_file=None)
+
+            tasks.select(project.state, need, [reviewed["id"]], basis=basis)
+
+            try:
+                return execute(prepared, **options)
+            except call.EngineError as exc:
+                seen.append(exc.code)
+                raise
+            finally:
+                records.append((before, json.dumps(publication.plan.skills_record, sort_keys=True)))
+
+        with mock.patch.object(call, "execute", side_effect=select_after_capture), \
+                self.assertRaises(fix_fixture.ReviewError) as caught:
+            project.fix()
+
+        self.assertEqual(caught.exception.code, "OAH_FIX_STATE_CHANGED")
+        self.assertEqual(seen, ["OAH_FIX_STATE_CHANGED"])
+        self.assertEqual(project.fix_calls(), old_calls)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0][0], records[0][1])
+
+    def test_a_late_first_selection_refuses_an_initially_empty_preparation(self):
+        from oah import call, call_cli
+        from oah.discovery import policy_digest, providers, tasks
+        from oah.secrets import NoKeychain
+
+        project = fix_fixture.FixProject(self, config="\n[models]\nfetch_scores = false\n")
+        self.upstream("acme/late-selection", {"LICENSE": delivery_fixture.MIT_LICENSE,
+            "skills/plain/SKILL.md": delivery_fixture.skill_md("plain", "Check each ledger row.\n")})
+        reviewed = self.reviewed(project.state, "acme/late-selection", "skills/plain")
+        tools = call_cli.intent_tools()
+        with mock.patch.dict(os.environ, project.env, clear=True), contextlib.chdir(project.repo):
+            prepared = call.prepare(call.CallRequest(engine="codex", stage="initial", task="t1", tier="high",
+                override_stage=True, no_rerank=True), call_cli.load_settings(project.repo), root=project.repo,
+                state_dir=project.state, env=project.env, footer=tools.footer, has_footer=tools.has_footer,
+                keychain=NoKeychain())
+            self.assertIsNone(getattr(prepared, "e_digest", None))
+            before = prepared.run.file_path("skills.json").read_bytes()
+            packet = call.read_packet(project.repo, project.repo / ".oah/tasks/t1/PACKET.md",
+                                      parse_intent=tools.parse, read_source=tools.read_source)
+            task_design, _ = call._task_design(project.lease, packet, state_dir=project.state, stage="initial",
+                                               task="t1", engine="codex")
+            basis = call.task_basis(project.lease, task_design, packet, root=project.repo)
+            (need,) = call.task_needs(basis, stage="initial", policy=policy_digest(providers.settings_of({})),
+                                      needs_file=None)
+            self.assertFalse(tasks.answerable(need))
+
+            tasks.select(project.state, need, [reviewed["id"]], basis=basis)
+
+            with self.assertRaisesRegex(call.EngineError, "OAH_SKILL_NOT_DELIVERABLE\\(changed\\)"):
+                call.check_prepared(prepared)
+            self.assertEqual(prepared.run.file_path("skills.json").read_bytes(), before)
+            self.assertEqual(project.fix_calls(), [])
+
     def test_ordinary_non_design_selection_reaches_fix_only_as_closed_saved_evidence(self):
         from oah import call, call_cli
         from oah.discovery import policy_digest, providers, tasks

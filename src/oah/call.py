@@ -950,7 +950,11 @@ def dispatch_guard(prepared: Prepared, *, env=None):
         if publication.plan.design_record is None:
             holder = publication.holder()
             if publication.e_prepared is None:
-                yield holder
+                from oah.lockfile import StateLock
+
+                with StateLock(Store(publication.state).lock_path, timeout=0):
+                    _check_e(prepared, holder, publication=publication, env=env)
+                    yield holder
                 return
             try:
                 with Store(publication.state).checked(task=holder.task, lease_id=holder.id,
@@ -1085,10 +1089,27 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
 
     state_dir, root = prepared.run.path.parents[2], pathlib.Path(prepared.cwd)
     env = os.environ if env is None else env
+
+    def check_absence(skills):
+        if holder is None or holder.binding() is None:
+            return
+        request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task,
+                              retain_worker_text=prepared.retain_worker_text)
+        packet = read_packet(root, root / holder.binding().source, parse_intent=oah_intent.parse,
+                              read_source=oah_intent.read_source)
+        _check_lease_source(holder.binding(), packet, prepared.task)
+        task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=prepared.stage,
+                                           task=prepared.task, engine=prepared.engine)
+        _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env,
+                      native=native_record is not None,
+                      brief_disabled=(skills or {}).get("rerank") == "unused(disabled-by-brief)",
+                      packet=packet, design=design, advise=False, expected=False)
+
     try:
         if publication is not None:
             live = publication.e_prepared
             if prepared.e_digest is None and live is None:
+                check_absence(publication.plan.skills_record)
                 return
             if live is None:
                 raise ValueError("the correction's E preparation was not captured")
@@ -1103,6 +1124,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             if prepared.e_digest is None and raw is None:
                 if (saved or {}).get("bundle") or prepared.run.file_path("capabilities.json").is_file():
                     raise ValueError("managed content needs a complete PreparedE record; prepare again")
+                check_absence(saved)
                 return
             record = preparation.parse(raw)
             if dt.datetime.now(dt.timezone.utc) >= budget.moment(record["expires_at"]):
@@ -1124,7 +1146,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                 native=refs["route"] == "native", brief_disabled=True, packet=packet, frozen_needs=refs["needs"],
                 target_check=lambda: _e_target(request, refs["tier"], root=root, state_dir=state_dir,
                                                env=env, native=refs["route"] == "native"),
-                design=design, advise=False)
+                design=design, advise=False, expected=True)
             if current is None or current.admitted is None or current.admitted.prepared is None \
                     or current.admitted.prepared.record()["facts"] != facts:
                 raise ValueError("the complete current local E identity changed")
@@ -1155,7 +1177,8 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             raise ValueError("the exact final render changed")
     except (ValueError, KeyError, TypeError, OSError, budget.BudgetRefused, skillpack.PackRefused,
             EngineError) as exc:
-        raise EngineError(f"{skillpack.NOT_DELIVERABLE_CODE}(changed)",
+        code = "OAH_FIX_STATE_CHANGED" if publication is not None else f"{skillpack.NOT_DELIVERABLE_CODE}(changed)"
+        raise EngineError(code,
                           f"{exc}; nothing was sent and the earlier E record is kept; prepare again") from None
 
 
@@ -1317,7 +1340,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                   env: Mapping[str, str], native: bool = False, keychain=None,
                   brief_disabled: bool = False, packet: Packet | None = None,
                   design_text: str | None = None, target=None, target_check=None, preview=None,
-                  design=None, frozen_needs=None, advise: bool = True) -> SkillPack | None:
+                  design=None, frozen_needs=None, advise: bool = True,
+                  expected: bool | None = None) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links or task selections deliver skill texts, capabilities apply or task
     discovery ran, else None (the brief stays byte-identical). The skill admission, the capability plan's required
@@ -1326,14 +1350,15 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     advice, with its class needs, and the exact brief is checked at the end, as finalization's recheck. Task
     discovery runs only after admission, within the call's [skills.discovery] request budget and never for a
     correction (frozen inputs). Only an ordinary run that keeps its output takes a file by reference (execute
-    observes the reads) and asks skill-fit advice, after admission; a native offer or a correction never does."""
+    observes the reads) and asks skill-fit advice, after admission; a native offer or a correction never does.
+    `expected` compares a boundary's recorded E presence; None is initial preparation, without a prior record."""
     from oah import discovery, skillpack
     from oah.capabilities import CapabilityRefused, inventory, plan as capability_plan
     from oah.config import ConfigError, load_config
     from oah.discovery import budget, preparation, providers, tasks
     from oah.discovery.store import digest
 
-    inputs = _CORRECTION_INPUTS.get()
+    inputs = _CORRECTION_INPUTS.get() if expected is not False else None
     settings = (inputs.config.section("skills", skillsel.config_defaults()) if inputs is not None
                 else skillsel.settings_for(root))
     roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env,
@@ -1420,7 +1445,9 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
             relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings)
-        if advise and not value.items and not value.not_delivered and not answerable and capabilities is None:
+        needed = bool(value.items or value.not_delivered or answerable or capabilities is not None
+                      or request.skill_needs is not None or request.parent_inventory or request.relay_results)
+        if expected is not True and not needed:
             if not (needs and not native and request.stage != "review" and request.retain_worker_text
                     and not brief_disabled):
                 return None
@@ -1434,6 +1461,9 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             if not (config.get("enabled") is True and isinstance(judgement, Mapping)
                     and judgement.get("enabled") is True):
                 return None
+        if expected is False:
+            raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed",
+                                       "current managed E inputs need a new preparation")
         target = target_check() if target_check is not None else target
         profile = budget.qualify(target or {}, now=dt.datetime.now(dt.timezone.utc))
         block, _bundle = skillpack.finalize(value)
@@ -3021,17 +3051,18 @@ def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.P
     description = f"oah {request.task} {request.stage} {run.id}"
     params = native.host_params(request.engine, profile_id=target["profile_id"], description=description,
                                 message=message)
-    from contextlib import nullcontext
     from oah.lease import Store
 
-    guard = (Store(state_dir).checked(task=request.task, lease_id=basis.holder.id, generation=basis.holder.generation)
-             if e_record is not None else nullcontext())
-    with guard:
+    with Store(state_dir).checked(task=request.task, lease_id=basis.holder.id, generation=basis.holder.generation):
         if e_record is not None:
             try:
                 live.recheck()
             except skillpack.PackRefused as exc:
                 raise _pack_error(exc) from None
+        else:
+            _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env,
+                          native=True, brief_disabled=True, packet=basis.packet, design=basis.design,
+                          advise=False, expected=False)
         runs._create_run(run, record)
         try:
             run.write_prompt(message)
@@ -3052,16 +3083,10 @@ def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.P
                           tier=tier, tier_source=tier_source, tier_reasons=reasons, override_stage=request.override_stage,
                           warnings=warnings, launcher={"name": "native", "offer": native.OFFER_NAME},
                           jev_status="unused(native)")
-            if e_record is not None:
-                run._write_result(dict(run.read(), **fields))
-            else:
-                run.result(**fields)
+            run._write_result(dict(run.read(), **fields))
             offer = native.publish_offer(run.path, offer)
         except (EngineError, briefs.BriefError, runs.RunError) as exc:
-            if e_record is not None:
-                run._write_result(dict(run.read(), status="refused", error=_recorded_error(exc, True), warnings=warnings))
-            else:
-                run.result(status="refused", error=_recorded_error(exc, True), warnings=warnings)
+            run._write_result(dict(run.read(), status="refused", error=_recorded_error(exc, True), warnings=warnings))
             raise
     host = {"tool": "Agent" if request.engine == "claude" else "native-subagent", "params": params}
     return NativeOffer(run.id, str(run.path), offer, message, host, tier, tier_source, tuple(warnings))
@@ -3155,12 +3180,11 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
         bundle = skillpack.bundle_of(run.path)
         if e_record is None and (bundle is not None or run.file_path("capabilities.json").is_file()):
             raise EngineError(native.STALE_CODE, "managed content needs a complete PreparedE record; offer again")
-        if e_record is not None:
-            prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=run.task, engine=request.engine,
-                                stage=request.stage, argv=(), cwd=str(root), timeout_s=300, env_additions={},
-                                model=offer["target"]["model"], launch_effort=offer["target"]["effort"],
-                                cli_version=None, warnings=(), e_digest=e_record["digest"])
-            _check_e(prepared, basis.holder, native_record=offer, env=env)
+        prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=run.task, engine=request.engine,
+                            stage=request.stage, argv=(), cwd=str(root), timeout_s=300, env_additions={},
+                            model=offer["target"]["model"], launch_effort=offer["target"]["effort"],
+                            cli_version=None, warnings=(), e_digest=e_record["digest"] if e_record else None)
+        _check_e(prepared, basis.holder, native_record=offer, env=env)
         target = _native_target(request.engine, request.tier, settings, root=root, env=env)
         current = _native_identities(request, basis, bundle, target, e_record)
         problems.extend(f"the {label} changed" for label in _native_differences(offer, current))

@@ -112,7 +112,9 @@ engine and stage. An excluded mandatory skill refuses; an omitted optional skill
 Search, review, refresh and skill advice require this live admission, including disabled, cached and retry paths.
 A direct API call without admission refuses before transport. `PreparedE` binds these facts to the qualified
 target profile and final render digests. Every launch and native settlement checks the current facts again under
-the final guard. A changed or expired identity refuses and preserves the earlier record. An unchanged native
+the final guard. This includes a run prepared without managed content: adding its first task skill selection
+requires preparation again. A changed or expired identity refuses and preserves the earlier record. Corrections
+report `OAH_FIX_STATE_CHANGED` through their existing correction interface. An unchanged native
 selection settles once; an identical retry returns that same receipt. Corrections freeze the verified needs,
 selections and authorized relays and save only their closed digest/count/enum projection; worker text is resolved
 in memory. What it costs you: queued work, a correction or a settlement must be prepared again after a relevant
@@ -401,20 +403,20 @@ should compare; one missing link keeps the first entry for that class.
 - The live check is observation, not a barrier: a child can act before its first line, and oah stops it only
   after that. It runs only where oah itself turned on stream-json for skill references. Runs with a design
   transport, Codex runs, native subagents and `oah fix` corrections are not read live.
-- `oah fix` correction runs carry the skill texts but record no bundle in `skills.json` and do not hash installed
-  copies again at launch. `oah fix` takes no relay inputs, so a correction whose skill needs a lead-only tool
-  refuses.
+- `oah fix` correction runs carry verified skill texts in memory and save a closed E projection in `skills.json`.
+  Launch rechecks the current copies and frozen authorized relays. The command accepts no new relay inputs; a
+  required relay must already belong to the verified ordinary preparation and still be current.
 - Routes are planned before the run starts. The init event names tools only, so no tool use is checked against a
   schema (`schema_digest` stays null), and oah never reports the `direct` route, which would need a host that
   waits before any work until oah approves.
 - Real target qualification is still pending. The empty packaged registry refuses managed delivery until a
   measured profile with evidence and expiry is reviewed; catalog context sizes cannot substitute for it.
-- Task selections reach every `oah call` run and native offer, but not `oah fix` corrections, which keep their
+- Task selections reach every `oah call` run and native offer; `oah fix` carries verified ordinary selections as
   frozen inputs. A need that oah derives, or that `oah skills find --task` writes, covers the packet's whole intent
   section. A lead may narrow it to a byte range in the needs file, and oah checks that range against the packet
   again; the command offers no way to choose one.
 - A native subagent's reads are seen only through `oah skills read`; the host's own file reads are not observed.
-  `oah call settle` does not check capability relays again.
+  `oah call settle` rechecks capability relay identity and expiry before first settlement and receipt reuse.
 - Capability classes come only from Jev and from the tools a skill names. A dispatch's stage and kind add no
   class, packet lines that name a capability ID are not read, and an entry chosen for a class does not bring its
   own dependencies.
