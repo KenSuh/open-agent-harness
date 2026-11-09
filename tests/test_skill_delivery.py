@@ -108,6 +108,21 @@ class DeliveryTask(DesignTask):
         self.upstreams: dict[str, pathlib.Path] = {}
         self.planned: list = []
         self.enterContext(mock.patch.object(review, "TRANSPORT", Transport(git_url=self.git_url, getter=self.no_api)))
+        from tests.e_qualification import patches
+
+        for patch in patches():
+            self.enterContext(patch)
+
+    def oah(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        bootstrap = ("import runpy,sys; sys.dont_write_bytecode=True; "
+                     f"runpy.run_path({str(root / 'tests' / 'e_qualification.py')!r})['install'](); "
+                     "runpy.run_module('oah',run_name='__main__')")
+        child_env = dict(self.env, **(env or {}))
+        child_env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        child_env["PYTHONPATH"] = str(root / "src")
+        return subprocess.run([sys.executable, "-B", "-c", bootstrap, *args], cwd=self.repo, capture_output=True,
+                              text=True, encoding="utf-8", env=child_env, timeout=300)
 
     def git_url(self, locator: str) -> str:
         return str(self.upstreams[locator.split("github.com/", 1)[1].removesuffix(".git").strip("/")])
@@ -125,10 +140,12 @@ class DeliveryTask(DesignTask):
         return self.upstreams[name]
 
     def reviewed(self, state: pathlib.Path, repo: str, path: str) -> dict:
+        from oah import skillpack
         from oah.design.sources import DEFAULTS
         from oah.discovery import review
 
         record, _ = review.review(state, repo=repo, path=path, allow=list(DEFAULTS["license_allow"]),
+                                  admitted=skillpack.explore(1),
                                   candidate={"provider": "github", "query_id": None, "hit": None, "seed": None})
         self.assertEqual((record["status"], record["license"]["eligibility"]), ("reviewed", "eligible"))
         return record
@@ -237,7 +254,10 @@ class InlineDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertLess(prompt.index(END), prompt.index("## Round instructions"))
         self.assertEqual((bundle["engine"], bundle["stage"], bundle["operation"]["kind"], bundle["operation"]["task"]),
                          ("claude", "initial", "dispatch", "t1"))
-        self.assertEqual(bundle["budget"]["target_capacity"], "unverified: byte budgets only")
+        self.assertEqual(bundle["budget"]["target_capacity"], "qualification: PreparedE required at dispatch")
+        prepared_e = json.loads((run / "skills.json").read_text(encoding="utf-8"))["prepared_e"]
+        self.assertEqual(prepared_e["profile"]["source"], "qualified-profile")
+        self.assertLessEqual(prepared_e["envelope"]["upper_tokens"], prepared_e["envelope"]["available_tokens"])
         self.assertFalse((run / "capabilities-receiving.json").exists())  # json mode: no live check (DESIGN §7.4)
 
         # The dry run admits exactly the same bundle and writes nothing.
@@ -519,6 +539,21 @@ NO_WINDOWS_REFERENCE = ("native Windows takes no skill file by reference until i
                         "(DESIGN §5.3); test_native_windows_refuses_a_required_reference covers it there")
 
 
+def build_reference_guide(case: DeliveryTask, *, place: str = "project") -> None:
+    case.build_skills(GUIDE)
+    copy = {f".claude/skills/guide/{name.split('skills/guide/', 1)[1]}": text.encode("utf-8")
+            for name, text in GUIDE_FILES.items() if name.startswith("skills/guide/")}
+    if place == "project":
+        git_commit(case.repo, copy, "install the guide skill")
+    else:
+        for name, data in copy.items():
+            path = case.work / "home" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+    (case.work / "fake_stream_claude.py").write_text(
+        STREAM_LAUNCHER.format(path=str(FAKES / "fake_claude_stream.py")), encoding="utf-8")
+
+
 class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
     """E-T11 (a required file too large to inline goes by reference; the stream read is paired, or never happens),
     E-T12 (Codex and the native route refuse a required reference before launch), E-T14 (a copy outside the working
@@ -526,18 +561,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
     process profile is qualified (DESIGN §5.3), so the tests that need one skip there."""
 
     def build_guide(self, *, place: str = "project") -> None:
-        self.build_skills(GUIDE)
-        copy = {f".claude/skills/guide/{name.split('skills/guide/', 1)[1]}": text.encode("utf-8")
-                for name, text in GUIDE_FILES.items() if name.startswith("skills/guide/")}
-        if place == "project":
-            git_commit(self.repo, copy, "install the guide skill")
-        else:
-            for name, data in copy.items():
-                path = self.work / "home" / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-        (self.work / "fake_stream_claude.py").write_text(  # the config runs this file: hand over to the fake
-            STREAM_LAUNCHER.format(path=str(FAKES / "fake_claude_stream.py")), encoding="utf-8")
+        build_reference_guide(self, place=place)
 
     def receiving(self, run: pathlib.Path) -> dict:
         return json.loads((run / "skills-receiving.json").read_text(encoding="utf-8"))
@@ -713,7 +737,12 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertIn("references/rules.md", result.stderr)
 
     def test_a_native_offer_refuses_a_required_reference(self):
+        from oah import init
+
         self.build_guide()
+        agents = self.work / "home" / ".claude" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "oah-low.md").write_bytes(init.agent_text("low", "haiku", "low"))
         result = self.call("claude", "initial", "--launcher", "native")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertTrue(result.stderr.startswith("OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)"),
@@ -1025,9 +1054,10 @@ class PackUnitTest(unittest.TestCase):
         sent = []
         with mock.patch.object(providers, "GETTER", side_effect=lambda *a, **k: sent.append(a)):
             for admitted in (None, skillpack.Admitted(skillpack.Operation("dispatch", task="t1", lease=("l", 1)))):
-                with self.subTest(admitted=admitted), self.assertRaises(ValueError):
+                with self.subTest(admitted=admitted), self.assertRaises(skillpack.PackRefused) as caught:
                     providers.search("postgresql", state_dir=pathlib.Path("unused"), settings=settings,
                                      now=dt.datetime.now(dt.timezone.utc), admitted=admitted)
+                self.assertEqual(caught.exception.reason, "admission")
         self.assertEqual(sent, [])
 
     def test_the_fence_outgrows_every_backtick_run_and_the_budget_check(self):
@@ -1064,15 +1094,18 @@ class PackUnitTest(unittest.TestCase):
             asked.append([each["skill"] for each in group])
             return {"status": "used", "applied": True, "reason": None, "scores": [0.1, 0.9]}
 
-        ranked, record = skillpack.rank(admitted, advise=advise)
+        with self.assertRaises(skillpack.PackRefused) as caught:
+            skillpack.rank(admitted, advise=lambda group: self.fail("no advice without live admission"))
+        self.assertEqual(caught.exception.reason, "admission")
+        ranked, record = skillpack._rank(admitted, advise=advise)
         self.assertEqual(asked, [["a", "b"]])  # the lone optional item of another check is never ranked
         self.assertEqual([each["skill"] for each in ranked.items], ["req", "b", "a", "c"])
         self.assertEqual((record["status"], record["applied"]), ("used", True))
-        kept, record = skillpack.rank(admitted, advise=lambda group: {"status": "used", "applied": False,
+        kept, record = skillpack._rank(admitted, advise=lambda group: {"status": "used", "applied": False,
                                                                        "reason": "uncertain", "scores": None})
         self.assertEqual((kept.items, record["applied"], record["reason"]), (admitted.items, False, "uncertain"))
         single = skillpack.Admitted(operation, (admitted.items[0], admitted.items[3]))
-        same, record = skillpack.rank(single, advise=lambda group: self.fail("nothing to rank"))
+        same, record = skillpack._rank(single, advise=lambda group: self.fail("nothing to rank"))
         self.assertEqual((same.items, record["status"]), (single.items, "unused(single-option)"))
 
     def test_a_path_on_another_drive_is_outside_the_receiving_root(self):

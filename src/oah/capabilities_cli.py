@@ -101,7 +101,8 @@ def _plan(args: argparse.Namespace) -> int:
                             needs_file=args.skill_needs)
     admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation)),
                                task_design=judged, state_dir=state, engine=args.engine, stage=args.stage,
-                               roots=skills_cli._roots(info, state, settings), needs=needs)
+                               roots=skills_cli._roots(info, state, settings), needs=needs, policy=settings,
+                               scope=basis.scope)
     try:
         found, _block = plan.for_task(holder=holder, task=args.task, task_design=judged, engine=args.engine,
                                       stage=args.stage, items=admitted.items, root=info.root, env=os.environ,

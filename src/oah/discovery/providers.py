@@ -154,8 +154,11 @@ def _fresh(record: Mapping, now: dt.datetime, hours: float) -> bool:
 
 
 def cached(query: str, *, state_dir, settings: Mapping, now: dt.datetime, origin: str = "template",
-           choice: str | None = None) -> Search | None:
+           choice: str | None = None, admitted=None) -> Search | None:
     """The fresh stored success for this exact query, when the external search is on; it sends nothing."""
+    from oah import skillpack
+
+    skillpack.require(admitted)
     if not settings["enabled"] or settings["provider"] != PROVIDER:
         return None
     query_id = store.query_id(PROVIDER, query, PARSER)
@@ -166,7 +169,7 @@ def cached(query: str, *, state_dir, settings: Mapping, now: dt.datetime, origin
                   record["checked_at"], cached=True, origin=origin, choice=choice)
 
 
-def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitted, origin: str = "template",
+def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitted=None, origin: str = "template",
            choice: str | None = None, notify: Callable[[str], None] | None = None,
            purpose: Mapping | None = None) -> Search:
     """One search through the external provider (or its fresh cache); never raises for a provider failure.
@@ -176,8 +179,7 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitt
     call refuses before the cache, the notice or the transport."""
     from oah import skillpack
 
-    if not isinstance(admitted, skillpack.Admitted):
-        raise ValueError("providers.search runs only under skillpack's admission (inspect, explore or a dispatch)")
+    skillpack.require(admitted)
     query_id = store.query_id(PROVIDER, query, PARSER)
     at = now.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
     if not settings["enabled"] or settings["provider"] != PROVIDER:
@@ -186,7 +188,8 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitt
     if origin == "template" and not is_public(query):
         return Search(PROVIDER, query, query_id, "blocked", "policy: the query holds a word that is not a catalogued "
                       "public term", [], at, origin=origin, choice=choice)
-    fresh = cached(query, state_dir=state_dir, settings=settings, now=now, origin=origin, choice=choice)
+    fresh = cached(query, state_dir=state_dir, settings=settings, now=now, origin=origin, choice=choice,
+                   admitted=admitted)
     if fresh is not None:
         return fresh
     url = ENDPOINT + urllib.parse.quote(query, safe="")
@@ -194,14 +197,20 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitt
     if problem is not None:
         return Search(PROVIDER, query, query_id, "blocked", f"policy: the request would carry {problem}", [], at,
                       origin=origin, choice=choice)
-    if admitted.allows_requests() < 1:
-        raise ValueError("this operation was admitted with no request budget; nothing is sent")
+    admitted.reserve_query()
     if not store.notice_shown(state_dir):
         (notify or (lambda text: print(text, file=sys.stderr)))(NOTICE)
         store.record_notice(state_dir, PROVIDER, at)
     try:
-        result = GETTER(url, policy=POLICY, headers={"Accept": "application/json"})
-        outcome, hits = parse(result.body)
+        from oah.discovery import attempts
+
+        skillpack.require(admitted)
+        with attempts.request("skill-search", store.digest({"url": url}), state=state_dir,
+                              preparation=str(admitted.prepared.record()["digest"])) as fact:
+            result = GETTER(url, policy=POLICY, headers={"Accept": "application/json"})
+            outcome, hits = parse(result.body)
+            if fact is not None:
+                fact["outcome_digest"] = store.digest(outcome)
         detail = f"{len(hits)} result(s)" if outcome == "ok" else ("no results" if outcome == "zero-results"
                                                                    else "the answer did not match " + PARSER)
     except web.WebFailure as exc:

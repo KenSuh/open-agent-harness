@@ -230,7 +230,7 @@ class NeedsUnitTest(unittest.TestCase):
     def test_a_cached_query_is_served_after_the_request_budget_is_spent(self):
         import datetime as dt
 
-        from oah import skillpack
+        from oah import call, intent, skillpack
         from oah.design.sources import web
         from oah.discovery import providers, store, tasks
 
@@ -248,12 +248,32 @@ class NeedsUnitTest(unittest.TestCase):
             sent.append(urllib.parse.unquote(url.rsplit("=", 1)[1]))
             return web.WebResult(200, url, {"Content-Type": "application/json"}, b'{"skills": []}')
 
-        item = tasks.need(basis(), dispatch_stage="initial", policy=POLICY, tech=[("database", "mysql")])
-        admitted = skillpack.Admitted(skillpack.Operation("dispatch", task="t1", lease=("lease-1", 2), max_queries=1))
         settings = dict(providers.DEFAULTS)
-        with mock.patch.object(providers, "GETTER", getter), contextlib.redirect_stderr(io.StringIO()):
-            (found,) = tasks.prepare_task(admitted, [item], state_dir=state, settings=settings, now=now,
-                                          basis=basis())
+        class CachedTask(TaskRepo, unittest.TestCase):
+            pass
+
+        fixture = CachedTask()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.start_task()
+        from oah.discovery import policy_digest
+
+        with contextlib.chdir(fixture.repo):
+            holder = call.bound_lease(fixture.state_dir, "t1")
+            packet = call.read_packet(fixture.repo, fixture.repo / ".oah/tasks/t1/PACKET.md",
+                                     parse_intent=intent.parse, read_source=intent.read_source)
+            task_design, _ = call._task_design(holder, packet, state_dir=fixture.state_dir, stage="initial",
+                                              task="t1", engine="claude")
+            current = call.task_basis(holder, task_design, packet, root=fixture.repo)
+            item = tasks.need(current, dispatch_stage="initial", policy=policy_digest(settings),
+                              tech=[("database", "mysql")])
+            admitted = skillpack.admit(skillpack.Operation("dispatch", task="t1",
+                lease=(holder.id, holder.generation), max_queries=1), task_design=task_design,
+                state_dir=fixture.state_dir, engine="claude", stage="initial", query_needs=[item],
+                scope=current.scope)
+            with mock.patch.object(providers, "GETTER", getter), contextlib.redirect_stderr(io.StringIO()):
+                (found,) = tasks.prepare_task(admitted, [item], state_dir=state, settings=settings, now=now,
+                                              basis=current)
         self.assertEqual(sent, ["mysql schema design"])  # one request: the budget
         self.assertEqual([item["query"] for item in found["deferred"]], ["mysql migrations constraints"])
         self.assertEqual([(search["query"], search["cached"]) for search in found["searches"]],
@@ -296,18 +316,23 @@ class NeedsUnitTest(unittest.TestCase):
         now = dt.datetime.now(dt.timezone.utc)
         sent = []
         with mock.patch.object(providers, "GETTER", side_effect=lambda *a, **k: sent.append(a)):
-            for admitted in (None, skillpack.explore(4),
+            for admitted in (None,
                              skillpack.Admitted(skillpack.Operation("dispatch", task="t2", lease=("lease-1", 2),
                                                                     max_queries=4))):
-                with self.subTest(admitted=admitted), self.assertRaises(ValueError):
+                with self.subTest(admitted=admitted), self.assertRaises(skillpack.PackRefused) as caught:
                     tasks.prepare_task(admitted, [item], state_dir=pathlib.Path("unused"),
                                        settings=dict(providers.DEFAULTS), now=now, basis=basis())
-            # A dispatch admitted with no request budget (a plan or a correction) sends nothing either.
+                self.assertEqual(caught.exception.reason, "admission")
             with self.assertRaises(ValueError):
+                tasks.prepare_task(skillpack.explore(4), [item], state_dir=pathlib.Path("unused"),
+                                   settings=dict(providers.DEFAULTS), now=now, basis=basis())
+            # A dispatch admitted with no request budget (a plan or a correction) sends nothing either.
+            with self.assertRaises(skillpack.PackRefused) as caught:
                 providers.search("mysql schema design", state_dir=pathlib.Path("unused"),
                                  settings=dict(providers.DEFAULTS), now=now,
                                  admitted=skillpack.Admitted(skillpack.Operation("dispatch", task="t1",
                                                                                  lease=("lease-1", 2))))
+            self.assertEqual(caught.exception.reason, "admission")
         self.assertEqual(sent, [])
 
 
@@ -692,6 +717,7 @@ class DesignBoundTaskTest(DeliveryTask, unittest.TestCase):
             return super().reviewed(state, repo, path)
         from oah.design.sources import DEFAULTS
         from oah.discovery import providers, review, store
+        from oah import skillpack
 
         hit = {"name": path.rsplit("/", 1)[1], "source": repo, "id": f"{repo}/{path.rsplit('/', 1)[1]}",
                "installs": 1}
@@ -700,7 +726,8 @@ class DesignBoundTaskTest(DeliveryTask, unittest.TestCase):
                                 "checked_at": "2026-11-09T00:00:00+00:00", "outcome": "ok", "detail": "1 result(s)",
                                 "count": 1, "hits": [hit], "origin": "template", "choice": None, "purpose": {}})
         record, _ = review.review(state, repo=repo, path=path, allow=list(DEFAULTS["license_allow"]),
-                                  candidate={"provider": providers.PROVIDER, "query_id": old, "hit": hit, "seed": None})
+                                  candidate={"provider": providers.PROVIDER, "query_id": old, "hit": hit, "seed": None},
+                                  admitted=skillpack.explore(1))
         self.assertEqual((record["status"], record["license"]["eligibility"]), ("reviewed", "eligible"))
         return record
 

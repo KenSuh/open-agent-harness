@@ -17,12 +17,15 @@ A task without accepted skill links gets no bundle, so its brief is byte-identic
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import hashlib
 import json
 import os
 import pathlib
 import re
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
+
+from oah.discovery.preparation import PreparedE
 
 OPERATIONS = ("dispatch", "design-inspect", "public-explore")
 TASKLESS = ("design-inspect", "public-explore")  # lead-only exploration: a request budget, never delivery
@@ -38,10 +41,11 @@ BUDGET_CODE = "OAH_SKILLS_BUDGET_EXCEEDED"
 UNMANAGED_RUN_CODE = "OAH_SKILL_UNMANAGED_RUN"
 READS_NAME = "skills-reads.jsonl"
 RECEIVING_NAME = "skills-receiving.json"
+_ISSUER = object()
 
 
 class PackRefused(Exception):
-    """A typed admission refusal: nothing was spent, reserved or created."""
+    """A typed local refusal; a later recheck may follow earlier requests."""
 
     def __init__(self, code: str, reason: str, detail: str, *, plan: Sequence[str] = ()) -> None:
         self.code, self.reason, self.plan = code, reason, tuple(plan)
@@ -106,12 +110,47 @@ class Admitted:
     design: dict | None = None
     engine: str | None = None
     stage: str | None = None
+    prepared: PreparedE | None = dataclasses.field(default=None, compare=False, repr=False)
+    _issuer: object | None = dataclasses.field(default=None, compare=False, repr=False)
+    _seal: str | None = dataclasses.field(default=None, compare=False, repr=False)
+    _queries: list[int] = dataclasses.field(default_factory=lambda: [0], compare=False, repr=False)
 
     def allows_requests(self) -> int:
         """The operation's explicit external request budget: a taskless exploration's, or the one a lead call
         (process, Orca or native offer) grants its task discovery (DESIGN §4.1); a plan or a correction grants
         none. A native offer still asks no model for advice (§5.1)."""
         return self.operation.max_queries
+
+    def require(self) -> None:
+        if self._issuer is not _ISSUER or self.prepared is None:
+            raise PackRefused(NOT_DELIVERABLE_CODE, "admission", "a live local admission is required before advice "
+                              "or reuse; prepare the operation again")
+        if self._seal != _local_identity(self):
+            raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the admitted operation or payload changed; prepare again")
+        self.prepared.recheck()
+
+    def reserve_query(self) -> None:
+        self.require()
+        if self._queries[0] >= self.operation.max_queries:
+            raise PackRefused(NOT_DELIVERABLE_CODE, "admission", "the admitted search/collector request budget is "
+                              "spent; nothing was sent")
+        self._queries[0] += 1
+
+
+def require(admitted) -> Admitted:
+    if not isinstance(admitted, Admitted):
+        raise PackRefused(NOT_DELIVERABLE_CODE, "admission", "a live local admission is required; nothing was sent")
+    admitted.require()
+    return admitted
+
+
+def _local_identity(value: Admitted) -> str:
+    from oah.discovery.store import digest
+
+    return digest({"operation": value.operation.to_json(), "max_queries": value.operation.max_queries,
+                   "prepared": id(value.prepared),
+                   "items": sorted(value.items, key=digest), "not_delivered": list(value.not_delivered),
+                   "design": value.design, "engine": value.engine, "stage": value.stage})
 
 
 def _sha(data: bytes) -> str:
@@ -129,13 +168,15 @@ def _marker_line(text: str) -> bool:
 
 def explore(max_queries: int) -> Admitted:
     """Admission for a taskless public exploration: only the explicit request budget is granted (E-DR3-F01)."""
-    return Admitted(Operation("public-explore", max_queries=max(0, int(max_queries))))
+    return admit(Operation("public-explore", max_queries=max(0, int(max_queries))), task_design=None,
+                 state_dir=pathlib.Path(), engine="", stage="")
 
 
 def inspect(snapshot: tuple[str, str, int, str], *, max_queries: int) -> Admitted:
     """Admission for a lead reading one verified design snapshot, accepted or not, with no task (E-DR3-F01). It
     grants the explicit request budget only: no task authority and no delivery."""
-    return Admitted(Operation("design-inspect", design=tuple(snapshot), max_queries=max(0, int(max_queries))))
+    return admit(Operation("design-inspect", design=snapshot, max_queries=max(0, int(max_queries))),
+                 task_design=None, state_dir=pathlib.Path(), engine="", stage="")
 
 
 def _installed_copy(name: str, roots) -> tuple[bytes, str, pathlib.Path] | None:
@@ -152,7 +193,125 @@ def _installed_copy(name: str, roots) -> tuple[bytes, str, pathlib.Path] | None:
 
 
 def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine: str, stage: str,
-          roots=(), receiving_root: pathlib.Path | None = None, needs: Sequence[Mapping] = ()) -> Admitted:
+          roots=(), receiving_root: pathlib.Path | None = None, needs: Sequence[Mapping] = (),
+          policy: Mapping | None = None, scope: Sequence[str] = (), prepare: Callable | None = None,
+          query_needs: Sequence[Mapping] = ()) -> Admitted:
+    from oah.discovery import preparation
+    from oah.discovery.store import digest
+
+    value = _admit(operation, task_design=task_design, state_dir=state_dir, engine=engine, stage=stage,
+                   roots=roots, receiving_root=receiving_root, needs=needs, policy=policy or {}, scope=scope)
+    if prepare is not None:
+        prepared = prepare(value)
+    else:
+        root = pathlib.Path.cwd()
+        config = root / ".oah" / "config.toml"
+        original = _sha(config.read_bytes()) if config.is_file() else None
+        required_needs = tuple(dict(item) for item in (*needs, *query_needs))
+
+        def local_task():
+            if operation.kind != "dispatch":
+                return None
+            from oah import call, intent
+            from oah.discovery import policy_digest, providers, tasks
+
+            assert operation.task is not None
+            holder = call.bound_lease(state_dir, operation.task)
+            if holder is None or (holder.id, holder.generation) != operation.lease:
+                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the task or lease generation changed")
+            binding = holder.binding()
+            if binding is None:
+                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the task intent binding is missing")
+            packet = call.read_packet(root, root / binding.source, parse_intent=intent.parse,
+                                      read_source=intent.read_source)
+            call._check_dispatch_lease(holder, root, stage=stage)
+            task_design, _block = call._task_design(holder, packet, state_dir=state_dir, stage=stage,
+                                                   task=operation.task, engine=engine)
+            basis = call.task_basis(holder, task_design, packet, root=root)
+            from oah import skillsel
+
+            current_policy = skillsel.settings_for(root)
+            current_needs = [tasks.verify(item, basis, policy=policy_digest(providers.settings_of(current_policy)))
+                             for item in required_needs]
+            return {"lease": digest(holder.to_json()), "basis": digest(dataclasses.asdict(basis)),
+                    "needs": current_needs, "selections": [tasks.selection_for(state_dir, item, lease_id=holder.id)
+                                                             for item in current_needs]}
+
+        task = local_task() if operation.kind == "dispatch" else None
+        expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
+
+        def verify_local():
+            if pathlib.Path.cwd().resolve() != root.resolve():
+                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the local admission root changed; prepare again")
+            if dt.datetime.now(dt.timezone.utc) >= expires:
+                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the local admission expired; prepare again")
+            current = _sha(config.read_bytes()) if config.is_file() else None
+            if current != original:
+                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the local policy changed; prepare again")
+            if operation.kind == "dispatch" and local_task() != task:
+                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the task needs, selection or lease changed")
+            _block, bundle = finalize(value)
+            if bundle:
+                problems = recheck(bundle, state_dir=state_dir) + recheck_installed(bundle, roots)
+                if problems:
+                    raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "; ".join(problems))
+
+        facts = {"operation": operation.to_json(), "policy": {"digest": digest(dict(policy or {})), "config": original},
+                 "needs": list(needs) + list(query_needs), "engine": engine or None, "stage": stage or None,
+                 "payloads": [{"review": item["review"], "sha256": item["sha256"], "bytes": item["bytes"],
+                                "auxiliary": [{key: aux[key] for key in ("sha256", "bytes", "required", "mode")}
+                                              for aux in item["aux"]]} for item in value.items],
+                 "selections": (task or {}).get("selections", []), "task": task, "lease": operation.lease,
+                 "not_delivered": list(value.not_delivered), "route": "lead", "inventory": None,
+                 "relay_results": [], "target": None, "request_budget": operation.max_queries,
+                 "references": None, "profile": None, "selectors": None, "access": None}
+        refs = {"needs": list(needs) + list(query_needs), "skill_needs": None, "parent_inventory": None,
+                "relay_results": [], "tier": None, "route": "lead"}
+        prepared = preparation.PreparedE(json.dumps(facts, sort_keys=True), json.dumps(refs), "{}", "{}",
+                                         expires.isoformat(), verify_local)
+    if prepared is not None:
+        guard = prepared.recheck
+
+        def checked():
+            from oah.capabilities import CapabilityRefused
+            from oah.discovery.budget import BudgetRefused
+            from oah.discovery.tasks import NeedsInvalid
+            from oah.engines.effort import EngineError
+
+            try:
+                guard()
+            except (PackRefused, CapabilityRefused, BudgetRefused, NeedsInvalid, EngineError, OSError, ValueError) as exc:
+                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", f"{exc}; prepare again") from None
+
+        prepared = dataclasses.replace(prepared, recheck=checked)
+        from oah.discovery import attempts
+
+        attempt = attempts.CURRENT.get()
+        if attempt is not None:
+            attempt.preparation = str(prepared.record()["digest"])
+    value = dataclasses.replace(value, prepared=prepared, _issuer=_ISSUER)
+    return dataclasses.replace(value, _seal=_local_identity(value))
+
+
+def finish(admitted: Admitted, text: str, *, deferred: Sequence[bytes], design_bytes: int,
+           capabilities: Mapping | None, read_paths: Sequence[str] = ()) -> PreparedE:
+    from oah.discovery import budget
+    from oah.discovery.store import digest
+
+    require(admitted)
+    assert admitted.prepared is not None
+    block, bundle = finalize(admitted)
+    measurement = budget.measure(json.loads(admitted.prepared.profile), text, deferred=deferred,
+                                  skill_bytes=len((block or "").encode("utf-8")), design_bytes=design_bytes,
+                                  read_paths=read_paths)
+    return admitted.prepared.finish({"bundle_digest": bundle["digest"] if bundle else None,
+                                     "capability_plan_digest": digest(capabilities) if capabilities is not None else None,
+                                     "render_digest": _sha(text.encode("utf-8"))}, measurement)
+
+
+def _admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine: str, stage: str,
+           roots=(), receiving_root: pathlib.Path | None = None, needs: Sequence[Mapping] = (),
+           policy: Mapping, scope: Sequence[str]) -> Admitted:
     """Check every mandatory skill obligation of a dispatch, locally; PackRefused before anything is spent.
     `receiving_root` is the working directory of a target whose file reads oah observes (a Claude process run);
     without it no file goes by reference. `needs` are the task's verified TaskSkillNeedV1 for this dispatch stage:
@@ -165,7 +324,7 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
     if record is None:
         bound = task_design is not None and getattr(task_design, "task", None) is not None
         return _admit_selected(operation, task_needs, bound=bound, state_dir=state_dir, engine=engine, stage=stage,
-                               roots=roots, receiving_root=receiving_root)
+                               roots=roots, receiving_root=receiving_root, policy=policy, scope=scope)
     from oah.design import coverage
     from oah.discovery import review as review_module, store
 
@@ -186,6 +345,7 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
             continue
         holds = _holds(need["condition"], record)
         if holds is False:
+            skipped.append({"need_id": need_id, "skill": None, "reason": "condition-false"})
             continue
         linked = [link for link in links if link["need_id"] == need_id]
         live = [link for link in linked if link["status"] == "linked"]
@@ -198,6 +358,13 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
             skipped.append({"need_id": need_id, "skill": linked[0]["skill"] if linked else None, "reason": why})
             continue
         for link in live:
+            restriction = _restriction(link["skill"], need, policy, engine, scope, roots)
+            if restriction:
+                if need["required"]:
+                    raise PackRefused(NOT_DELIVERABLE_CODE, restriction, f"{where}: the mandatory skill "
+                                      f"{link['skill']} does not meet the current local {restriction} policy")
+                skipped.append({"need_id": need_id, "skill": link["skill"], "reason": restriction})
+                continue
             item = _deliverable(link, need, evidence, review_module, state_dir, engine, roots)
             if isinstance(item, dict):
                 items.append(item)
@@ -236,7 +403,7 @@ def _sealed(operation: Operation, items: list[dict], skipped: list[dict], design
 
 
 def _admit_selected(operation: Operation, needs: Sequence[Mapping], *, bound: bool, state_dir: pathlib.Path,
-                    engine: str, stage: str, roots, receiving_root) -> Admitted:
+                    engine: str, stage: str, roots, receiving_root, policy: Mapping, scope: Sequence[str]) -> Admitted:
     """Candidate route 4 (DESIGN §5.2, §4.8): a task without a design delivers the reviews its lead selected for each
     need (TaskSkillSelectionV1, rechecked under this lease); a required need without one refuses. A task bound to a
     design without an accepted coverage part has no task selections: a required need there refuses too."""
@@ -258,6 +425,8 @@ def _admit_selected(operation: Operation, needs: Sequence[Mapping], *, bound: bo
                 raise PackRefused(MANDATORY_MISSING_CODE, "", f"task need {short} is required and has no "
                                   f"{'accepted coverage link' if bound else 'task selection under this lease'}; "
                                   f"nothing was launched. {action}, then call again")
+            if tasks.answerable(need):
+                skipped.append({"need_id": need["id"], "skill": None, "reason": "no-current-selection"})
             continue
         for review_id in selection["review_ids"]:
             if review_id in seen:
@@ -265,6 +434,13 @@ def _admit_selected(operation: Operation, needs: Sequence[Mapping], *, bound: bo
             review = evidence.review(review_id) or {}
             link = {"review": review_id, "skill": (review.get("frontmatter") or {}).get("name") or review_id,
                     "pin": coverage.review_pin(review) if review else {}, "seed": None}
+            restriction = _restriction(link["skill"], need, policy, engine, scope, roots)
+            if restriction:
+                if need["required"]:
+                    raise PackRefused(NOT_DELIVERABLE_CODE, restriction, f"the mandatory skill {link['skill']} "
+                                      f"does not meet the current local {restriction} policy")
+                skipped.append({"need_id": need["id"], "skill": link["skill"], "reason": restriction})
+                continue
             item = _deliverable(link, {"id": need["id"], "stage": None, "check": None, "required": need["required"],
                                        "invocation": "model", "auxiliary": []},
                                 evidence, review_module, state_dir, engine, roots)
@@ -280,11 +456,34 @@ def _admit_selected(operation: Operation, needs: Sequence[Mapping], *, bound: bo
     return _sealed(operation, items, skipped, None, engine, stage, receiving_root)
 
 
+def _restriction(name: str, need: Mapping, policy: Mapping, engine: str, scope: Sequence[str], roots) -> str | None:
+    from oah import skillsel
+
+    excluded = {str(item).casefold() for item in policy.get("exclude", ())}
+    installed = skillsel.installed(roots).skills if excluded else {}
+    actual = installed.get(name) or next((item for item in installed.values() if item.name == name), None)
+    if name.casefold() in excluded or actual is not None and actual.id.casefold() in excluded:
+        return "excluded"
+    if need.get("host") and engine not in need["host"]:
+        return "host"
+    allowed = need.get("scope") or ()
+    if allowed and (not scope or any(not any(entry == "repo" or path == entry
+                                             or path.startswith(entry.rstrip("/") + "/") for entry in allowed)
+                                    for path in scope)):
+        return "scope"
+    return None
+
+
 def rank(admitted: Admitted, *, advise) -> tuple[Admitted, dict]:
     """Advice reorders only optional items, and only among the optional items of one need's stage and check (DESIGN
     §5.1, §7.1): no advice adds, drops or moves a mandatory item. `advise(items)` gets two or more such items and
     returns {status, applied, reason, scores}; a group whose advice is not applied keeps the deterministic order,
     so the bundle stays exactly what admission chose."""
+    require(admitted)
+    return _rank(admitted, advise=advise)
+
+
+def _rank(admitted: Admitted, *, advise) -> tuple[Admitted, dict]:
     groups: dict[tuple, list[int]] = {}
     for index, item in enumerate(admitted.items):
         if not item["required"]:
@@ -515,7 +714,7 @@ def finalize(admitted: Admitted) -> tuple[str | None, dict | None]:
                          "reference_bytes": sum(aux["bytes"] for item in admitted.items for aux in item["aux"]
                                                 if aux["mode"] == "reference"),
                          "skill_budget": SKILL_BUDGET, "brief_budget": BRIEF_BUDGET,
-                         "target_capacity": "unverified: byte budgets only"},
+                         "target_capacity": "qualification: PreparedE required at dispatch"},
               "block_sha256": _sha(block.encode("utf-8"))}
     bundle["digest"] = _sha(json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return block, bundle

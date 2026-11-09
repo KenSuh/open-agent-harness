@@ -492,7 +492,7 @@ def _roots(info: RepoInfo, state: pathlib.Path, settings: Mapping) -> list:
                                   codex_plugin_cache=settings["codex_plugin_cache"])
 
 
-def _search_advisor(info: RepoInfo, state: pathlib.Path):
+def _search_advisor(info: RepoInfo, state: pathlib.Path, admitted):
     """skill-search/v1 for `oah skills find` (DESIGN §4.5, §7.1): each option is an opaque `oN` with only its provider
     and public technology labels, so nothing authored leaves the machine. A choice applies only after the judge's
     recheck; otherwise the template order stands."""
@@ -520,11 +520,12 @@ def _search_advisor(info: RepoInfo, state: pathlib.Path):
         input_ref = "sha256:" + hashlib.sha256(json.dumps(request["options"], sort_keys=True)
                                                .encode("utf-8")).hexdigest()
         req = judge.Request("search-path", "skill-search/v1", tuple(fields), tuple(keys), input_ref=input_ref)
-        result = judge.judge(req, config=config, policy=policy, sources=sources, env=os.environ, state_dir=state)
+        result = judge.judge(req, config=config, policy=policy, sources=sources, env=os.environ, state_dir=state,
+                             admitted=admitted)
         if not result.status.startswith("used"):
             return {"status": result.status, "applied": False, "choice": None, "reason": None}
         applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, request=req,
-                              policy=policy)
+                              policy=policy, admitted=admitted)
         chosen = applied.applied and applied.outcomes.get("outcome") == "chosen"
         return {"status": result.status, "applied": chosen, "choice": applied.outcomes.get("choice") if chosen else None,
                 "reason": None if chosen else (applied.outcomes.get("outcome") if applied.applied else applied.reason)}
@@ -575,7 +576,7 @@ def _find(args: argparse.Namespace) -> int:
                             provider=provider, view=view, admitted=admitted,
                             roots=_roots(info, state, settings), choice=choice,
                             notify=lambda notice: print(notice, file=sys.stderr),
-                            advise=_search_advisor(info, state))
+                            advise=_search_advisor(info, state, admitted))
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
@@ -670,7 +671,7 @@ def _find_task(args: argparse.Namespace, info: RepoInfo, state: pathlib.Path, se
     admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation),
                                                    max_queries=found_settings["max_queries"]),
                                task_design=judged, state_dir=state, engine=args.engine, stage=args.dispatch_stage,
-                               roots=roots)
+                               roots=roots, policy=settings, scope=basis.scope, query_needs=needs)
     found = tasks.prepare_task(admitted, needs, state_dir=state, settings=found_settings,
                                now=dt.datetime.now(dt.timezone.utc), basis=basis,
                                notify=lambda notice: print(notice, file=sys.stderr))
@@ -759,6 +760,7 @@ def _print_review(record: Mapping, word: str, as_json: bool) -> None:
 
 
 def _review(args: argparse.Namespace) -> int:
+    from oah import discovery, skillpack
     from oah.design import stages
     from oah.discovery import review, store
 
@@ -766,6 +768,7 @@ def _review(args: argparse.Namespace) -> int:
     info, state, _home = _context()
     _settings, found_settings = _discovery_settings(info)
     allow = _license_allow(info, found_settings)
+    admitted = skillpack.explore(discovery.LINK_REFRESH_LIMIT)
     if args.path and not args.github:
         raise Refused("OAH_SKILLS_USAGE", "--path goes with --github OWNER/REPO")
     if args.links:
@@ -773,13 +776,13 @@ def _review(args: argparse.Namespace) -> int:
     if args.github:
         if not args.path:
             raise Refused("OAH_SKILLS_USAGE", "--github needs --path, the skill folder inside the repository")
-        record, word = review.review(state, repo=args.github, path=args.path, allow=allow,
+        record, word = review.review(state, repo=args.github, path=args.path, allow=allow, admitted=admitted,
                                      candidate={"provider": "github", "query_id": None, "hit": None, "seed": None})
     elif args.seed:
         seed = stages.SEED_BY_ID.get(args.seed)
         if seed is None:
             raise Refused("OAH_SKILLS_USAGE", f"unknown seed {args.seed!r}; oah skills find --provider seed lists them")
-        record, word = review.review(state, repo=seed.repo, path=seed.path, allow=allow,
+        record, word = review.review(state, repo=seed.repo, path=seed.path, allow=allow, admitted=admitted,
                                      candidate={"provider": "seed", "query_id": None, "hit": None, "seed": seed.id})
     elif args.hit:
         query_id, sep, number = args.hit.rpartition(":")
@@ -788,14 +791,14 @@ def _review(args: argparse.Namespace) -> int:
             raise Refused("OAH_SKILLS_USAGE", f"{args.hit} is not a stored search result; use QUERY_ID:N from "
                           "oah skills find --json")
         hit = found["hits"][int(number)]
-        record, word = review.review_hit(state, hit=hit, allow=allow, candidate={
+        record, word = review.review_hit(state, hit=hit, allow=allow, admitted=admitted, candidate={
             "provider": found["provider"], "query_id": query_id, "hit": hit, "seed": None})
     else:
         old = store.get_review(state, args.update)
         if old is None:
             raise Refused("OAH_SKILLS_USAGE", f"{args.update} is not a stored review")
         record, word = review.review(state, repo=review.repo_of(old["source"]["locator"]), path=old["source"]["path"],
-                                     allow=allow, candidate=old["candidate"])
+                                     allow=allow, candidate=old["candidate"], admitted=admitted)
     _print_review(record, word, args.json)
     if record["status"] != "reviewed":
         print(f"{review.ReviewFailed.code}({record['reason']}): the review is kept as evidence and cannot be linked",
@@ -948,7 +951,8 @@ def _plan(args: argparse.Namespace) -> int:
                             needs_file=args.skill_needs)
     admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation)),
                                task_design=judged, state_dir=state, engine=args.engine, stage=args.stage, roots=roots,
-                               receiving_root=info.root, needs=needs)  # as an ordinary run there
+                               receiving_root=info.root, needs=needs, policy=settings,
+                               scope=basis.scope)  # as an ordinary run there
     _block, bundle = skillpack.finalize(admitted)
     data = {"task": args.task, "stage": args.stage, "engine": args.engine, "bundle": bundle}
     if args.json:

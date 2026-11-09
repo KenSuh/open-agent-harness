@@ -11,6 +11,7 @@ undeliverable inline. Nothing is installed, executed or delivered here.
 from __future__ import annotations
 
 import datetime as dt
+import dataclasses
 import hashlib
 import re
 from typing import Mapping
@@ -130,24 +131,47 @@ FETCHED = ("unchanged", "changed", "recovered")  # collector results that reache
 
 def review(state_dir, *, repo: str, path: str, candidate: Mapping, allow: list[str],
            now: dt.datetime | None = None, sources: Sources | None = None,
-           require_fresh: bool = False) -> tuple[dict, str]:
+           require_fresh: bool = False, admitted=None) -> tuple[dict, str]:
     """Pin, read and classify one skill folder; (ReviewedSkillV1, 'stored' | 'unchanged').
 
     A review whose snapshot, candidate, classification and policy equal a stored one returns that record unchanged,
     so repeating a review (or `--update` with no upstream change) adds nothing. With `require_fresh`, a check that
     did not reach the upstream now (the collector kept its last verified commit) is ReviewFailed, never a review."""
+    from oah import skillpack
+    from oah.discovery import attempts
+
+    skillpack.require(admitted)
     short, full, fields = identity(repo, path)
     try:
         store.remember_identity(state_dir, short, full, fields)
     except store.StoreProblem as exc:
         raise ReviewFailed("identity-collision", str(exc)) from None
     sources = sources or skill_sources(state_dir, allow)
+    original_transport, original_observer = sources.transport, sources.observer.transport
+
+    def getter(url, **options):
+        admitted.reserve_query()
+        with attempts.request("skill-review", store.digest({"url": url}), state=state_dir,
+                              preparation=str(admitted.prepared.record()["digest"])):
+            return original_observer.getter(url, **options)
+
+    def git_url(locator):
+        admitted.reserve_query()
+        with attempts.request("skill-review", store.digest({"locator": locator}), state=state_dir, known=False,
+                              preparation=str(admitted.prepared.record()["digest"])):
+            return original_observer.git_url(locator)
+
+    guarded = dataclasses.replace(original_observer, getter=getter, git_url=git_url)
+    sources.transport = sources.observer.transport = guarded
     try:
         _word, spec = sources.register(build_spec(url=f"https://github.com/{repo}", source_id=short, track="commit",
                                                   paths=[path]))
+        skillpack.require(admitted)
         result = sources.check_one(spec)
     except SourceError as exc:
         raise ReviewFailed("collector", str(exc), environment=True) from None
+    finally:
+        sources.transport, sources.observer.transport = original_transport, original_observer
     if "path-missing" in result.problems:
         sources.remove(short)
         raise ReviewFailed("path-unresolved", f"{repo} has no folder {path} at its current commit")
@@ -227,14 +251,17 @@ def hit_paths(name: str) -> list[str]:
     return [f"skills/{name}", name]
 
 
-def review_hit(state_dir, *, hit: Mapping, candidate: Mapping, allow: list[str]) -> tuple[dict, str]:
+def review_hit(state_dir, *, hit: Mapping, candidate: Mapping, allow: list[str], admitted=None) -> tuple[dict, str]:
     """Review a search hit: an owner/repo source and at most the literal guesses of `hit_paths`."""
+    from oah import skillpack
+
+    skillpack.require(admitted)
     source = hit.get("source")
     if not isinstance(source, str) or not _REPO.fullmatch(source):
         raise SourceUnsupported(f"the hit's source {source!r} is not an owner/repo GitHub name")
     for path in hit_paths(hit.get("name")):
         try:
-            return review(state_dir, repo=source, path=path, candidate=candidate, allow=allow)
+            return review(state_dir, repo=source, path=path, candidate=candidate, allow=allow, admitted=admitted)
         except ReviewFailed as exc:
             if exc.reason != "path-unresolved":
                 raise

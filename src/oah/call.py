@@ -70,7 +70,11 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from typing import Callable, Collection, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Collection, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from oah.discovery.preparation import PreparedE
+    from oah.skillpack import Admitted as SkillAdmission
 
 import oah.intent as oah_intent
 import oah.packet as oah_packet
@@ -524,7 +528,7 @@ def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: st
 def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes: routing.Axes, pinned: bool,
                  freshness: models.Freshness, root: pathlib.Path, env: Mapping[str, str], floor_tier: str,
                  brief_disabled: bool = False, keychain=None,
-                 state_dir: pathlib.Path | None = None) -> tuple[Resolution, dict]:
+                 state_dir: pathlib.Path | None = None, admitted=None) -> tuple[Resolution, dict]:
     """The call's model and effort after the re-ranker's judgement, and the `model_judge`/`model_choice` record.
 
     The deterministic resolution is kept unless the judged pair passes `CandidateSet.reject_reason`.
@@ -545,6 +549,11 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         return chosen, {"model_judge": status, "model_judge_confidence": confidence, "model_choice": choice}
 
     section = settings.engines[engine]
+    if admitted is not None:
+        from oah import skillpack
+
+        skillpack.require(admitted)
+        return record("unused(target-profile)")
     if pinned:
         return record("unused(pinned)")
     try:
@@ -930,7 +939,7 @@ def _task_dispatch_gate(state, task, root, *, stage, record=False, run_id=None, 
 
 
 @contextmanager
-def dispatch_guard(prepared: Prepared):
+def dispatch_guard(prepared: Prepared, *, env=None):
     """Revalidate the prepared lease and source under the state lock, through a short launch only."""
     from oah.lease import LeaseError, Store
 
@@ -939,12 +948,25 @@ def dispatch_guard(prepared: Prepared):
     if publication is not None and publication.plan.prepared == prepared:
         publication.budget_check()
         if publication.plan.design_record is None:
-            yield publication.holder()
+            holder = publication.holder()
+            if publication.e_prepared is None:
+                yield holder
+                return
+            try:
+                with Store(publication.state).checked(task=holder.task, lease_id=holder.id,
+                                                      generation=holder.generation) as live:
+                    _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
+                    _check_e(prepared, live, publication=publication, env=env)
+                    yield live
+            except LeaseError as exc:
+                raise EngineError("OAH_SKILL_NOT_DELIVERABLE(changed)",
+                                  "the correction's current task lease changed; prepare again") from exc
             return
         if publication.launch_guard is None:
             raise EngineError("OAH_RUN_LAUNCH_INVALID", "the correction has no current target comparison")
         with publication.launch_guard() as live:
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
+            _check_e(prepared, live, publication=publication, env=env)
             sealed = publication.plan.design_record
             try:
                 _check_design_unchanged(prepared, live, json.loads(sealed) if sealed else None)
@@ -988,7 +1010,8 @@ def dispatch_guard(prepared: Prepared):
                     raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record cannot be read; run oah "
                                       "call again to prepare it from the current design") from None
                 _check_design_unchanged(prepared, live, design_saved)
-            _check_skill_bundle(prepared, run, live.id)
+            _check_skill_bundle(prepared, run, live.id, env=env)
+            _check_e(prepared, live, env=env)
             reference = _REFERENCE_RUN.get()
             if reference is not None and reference.run_id == prepared.run_id:
                 from oah.design.model import DesignError
@@ -1010,7 +1033,7 @@ def dispatch_guard(prepared: Prepared):
         raise error from None
 
 
-def _check_skill_bundle(prepared: Prepared, run, lease_id: str) -> None:
+def _check_skill_bundle(prepared: Prepared, run, lease_id: str, *, env=None) -> None:
     """Local only, under the launch lock: every delivered skill text still has its recorded bytes, and a task
     selection's item is still the lead's current selection for its need under this lease (DESIGN §4.1)."""
     from oah import skillpack
@@ -1023,7 +1046,7 @@ def _check_skill_bundle(prepared: Prepared, run, lease_id: str) -> None:
     if bundle is None:
         return
     state_dir = run.path.parents[2]
-    roots = skillpack.environment_roots(pathlib.Path(prepared.cwd), state_dir, os.environ)
+    roots = skillpack.environment_roots(pathlib.Path(prepared.cwd), state_dir, env if env is not None else os.environ)
     problems = (skillpack.recheck(bundle, state_dir=state_dir) + skillpack.recheck_installed(bundle, roots)
                 + skillpack.recheck_references(bundle, pathlib.Path(prepared.cwd)))
     problems += [f"{item['skill']}: the lead's task selection for need {item['need_id'][7:19]} changed since prepare"
@@ -1037,6 +1060,193 @@ def _check_skill_bundle(prepared: Prepared, run, lease_id: str) -> None:
 def _pack_error(exc) -> EngineError:
     """A skill admission refusal as the CLI prints it: `CODE(reason): detail`, the code first."""
     return EngineError(f"{exc.code}({exc.reason})" if exc.reason else exc.code, exc.message)
+
+
+def prepared_e_digest(run) -> str | None:
+    from oah.discovery import preparation
+
+    saved = run._read_json("skills.json") if run.file_path("skills.json").is_file() else None
+    if saved is None and run.file_path("capabilities.json").is_file():
+        raise EngineError("OAH_RUN_LAUNCH_INVALID", "managed capabilities need a complete PreparedE record")
+    if saved is None or isinstance(saved, dict) and saved.get("prepared_e") is None and not saved.get("bundle"):
+        return None
+    try:
+        return preparation.parse(saved["prepared_e"])["digest"]
+    except (ValueError, KeyError, TypeError):
+        raise EngineError("OAH_RUN_LAUNCH_INVALID", "the complete prepared E record cannot be verified; "
+                          "the earlier record is kept; prepare again") from None
+
+
+def _check_e(prepared, holder, *, publication=None, native_record=None, env=None):
+    from oah import skillpack
+    from oah.call_cli import load_settings
+    from oah.discovery import budget, preparation
+    from oah.discovery.store import digest
+
+    state_dir, root = prepared.run.path.parents[2], pathlib.Path(prepared.cwd)
+    env = os.environ if env is None else env
+    try:
+        if publication is not None:
+            live = publication.e_prepared
+            if prepared.e_digest is None and live is None:
+                return
+            if live is None:
+                raise ValueError("the correction's E preparation was not captured")
+            live.recheck()
+            record = live.record()
+            if publication.plan.skills_record.get("prepared_e") != preparation.projection(record):
+                raise ValueError("the correction's closed E record changed")
+        else:
+            saved = (prepared.run._read_json("skills.json")
+                     if prepared.run.file_path("skills.json").is_file() else None)
+            raw = (saved or {}).get("prepared_e")
+            if prepared.e_digest is None and raw is None:
+                if (saved or {}).get("bundle") or prepared.run.file_path("capabilities.json").is_file():
+                    raise ValueError("managed content needs a complete PreparedE record; prepare again")
+                return
+            record = preparation.parse(raw)
+            if dt.datetime.now(dt.timezone.utc) >= budget.moment(record["expires_at"]):
+                raise ValueError("the original preparation evidence expired")
+            refs, facts = record["references"], record["facts"]
+            if not isinstance(refs, dict) or not isinstance(facts, dict):
+                raise ValueError("the preparation references are malformed")
+            request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task,
+                                  tier=refs["tier"], skill_needs=refs["skill_needs"],
+                                  parent_inventory=refs["parent_inventory"], relay_results=tuple(refs["relay_results"]),
+                                  route=refs["route"], retain_worker_text=prepared.retain_worker_text)
+            packet = read_packet(root, root / holder.binding().source, parse_intent=oah_intent.parse,
+                                  read_source=oah_intent.read_source)
+            _check_lease_source(holder.binding(), packet, prepared.task)
+            task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=prepared.stage,
+                                               task=prepared.task, engine=prepared.engine)
+            current = _admit_skills(
+                request, holder, task_design, root=root, state_dir=state_dir, env=env,
+                native=refs["route"] == "native", brief_disabled=True, packet=packet, frozen_needs=refs["needs"],
+                target_check=lambda: _e_target(request, refs["tier"], root=root, state_dir=state_dir,
+                                               env=env, native=refs["route"] == "native"),
+                design=design, advise=False)
+            if current is None or current.admitted is None or current.admitted.prepared is None \
+                    or current.admitted.prepared.record()["facts"] != facts:
+                raise ValueError("the complete current local E identity changed")
+            bundle = (saved or {}).get("bundle")
+            if record["final"]["bundle_digest"] != (bundle or {}).get("digest"):
+                raise ValueError("the delivered bundle changed its task, lease, engine, stage or payloads")
+            caps = (prepared.run._read_json("capabilities.json")
+                    if prepared.run.file_path("capabilities.json").is_file() else None)
+            if record["final"]["capability_plan_digest"] != (digest(caps) if caps is not None else None):
+                raise ValueError("the capability record changed")
+        if prepared.e_digest != record["digest"]:
+            raise ValueError("the complete prepared E record changed")
+        facts = record["facts"]
+        if facts["selectors"] != _e_selectors(env):
+            raise ValueError("the actual child configuration selectors changed")
+        if facts["engine"] != prepared.engine or facts["stage"] != prepared.stage \
+                or facts["operation"]["task"] != prepared.task \
+                or facts["operation"]["lease"] != [holder.id, holder.generation]:
+            raise ValueError("the task, lease generation, engine or stage changed")
+        if any(facts["target"][key] != value for key, value in (
+                ("model", prepared.model), ("effort", prepared.launch_effort), ("cli_version", prepared.cli_version))):
+            raise ValueError("the final launch model, effort or CLI identity changed")
+        if publication is not None:
+            text = publication.plan.prompt
+        else:
+            text = prepared.run.prompt_path.read_bytes().decode("utf-8")
+        if record["final"]["render_digest"] != skillpack._sha(text.encode("utf-8")):
+            raise ValueError("the exact final render changed")
+    except (ValueError, KeyError, TypeError, OSError, budget.BudgetRefused, skillpack.PackRefused,
+            EngineError) as exc:
+        raise EngineError(f"{skillpack.NOT_DELIVERABLE_CODE}(changed)",
+                          f"{exc}; nothing was sent and the earlier E record is kept; prepare again") from None
+
+
+def _e_target(request, tier, *, root, state_dir, env, native=False):
+    import platform
+
+    from oah.call_cli import load_settings
+    from oah.discovery.store import digest
+
+    settings = load_settings(root)
+    if native:
+        return _native_target(request.engine, tier, settings, root=root, env=env)
+    checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, persist=False)
+    resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, checked=checked,
+                                floor_tier=tier, stage=request.stage, record=False)
+    path = pathlib.Path(resolution.base[0]).resolve()
+    with path.open("rb") as handle:
+        executable = "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
+    driver = None
+    if len(resolution.base) > 1 and pathlib.Path(resolution.base[1]).suffix == ".py":
+        with pathlib.Path(resolution.base[1]).open("rb") as handle:
+            driver = "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
+    return {"engine": request.engine, "route": request.route, "cli_version": resolution.cli_version,
+            "profile_id": f"oah-{tier}", "model": resolution.model, "effort": resolution.launch_effort,
+            "platform": sys.platform, "architecture": platform.machine() or "unknown",
+            "root_digest": digest(str(root.resolve())),
+            "config_digest": digest({"settings": dataclasses.asdict(settings), "base": resolution.base,
+                                      "executable": executable, "driver": driver})}
+
+
+def _e_selectors(env):
+    from oah.discovery.store import digest
+
+    return digest({key: env.get(key) for key in ("HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR", "CODEX_HOME")})
+
+
+def _e_design_bytes(design):
+    if design is None:
+        return 0
+    if design.transport is not None:
+        return sum(len(item.data) for item in design.transport.files) + len(design.transport.manifest_bytes)
+    return len(design.text.encode("utf-8"))
+
+
+def _e_deferred(admitted, design, *, state_dir, root):
+    from oah import skillpack
+
+    payloads = []
+    if design is not None and design.transport is not None:
+        payloads.extend(item.data for item in design.transport.files)
+        payloads.append(design.transport.manifest_bytes)
+    _block, bundle = skillpack.finalize(admitted)
+    for _item, aux in skillpack.references(bundle) if bundle else ():
+        _real, data = skillpack._referenced(root, aux)
+        if data is None or skillpack._sha(data) != aux["sha256"]:
+            raise skillpack.PackRefused(skillpack.REFERENCE_UNAVAILABLE_CODE, "changed",
+                                       "the required referenced bytes cannot be read here")
+        payloads.append(data)
+    return tuple(payloads)
+
+
+def _e_reference_access(request, *, root, env, target, paths):
+    from oah import skillpack
+    from oah.call_cli import load_settings
+    from oah.design import task_context
+    from oah.engines.claude import READ_ONLY_TOOLS
+
+    settings = load_settings(root)
+    base = models.resolve_base(request.engine, settings.engines[request.engine]["command"])
+    tools = READ_ONLY_TOOLS if request.stage == "review" else tuple(settings.engines["claude"]["tools"])
+    operation = "inspect" if request.stage == "review" else "work"
+    problem = task_context.qualify_profile(request.engine, operation, executable=base[0],
+                                           cli_version=target["cli_version"], tools=tools)
+    if problem:
+        raise skillpack.PackRefused(skillpack.REFERENCE_UNAVAILABLE_CODE, "profile", problem)
+    access = task_context.collect_process_policy(root, env, operation=operation, data_paths=paths,
+                                                 argv=tuple(base), cli_version=target["cli_version"])
+    if not access["launch_eligible"]:
+        raise skillpack.PackRefused(skillpack.REFERENCE_UNAVAILABLE_CODE, "access",
+                                   "the current local read/access policy is not verified")
+    return access["policy_sha256"]
+
+
+def _e_reference_paths(bundle, design, root):
+    from oah import skillpack
+
+    paths = [str(root / aux["reference"]["path"]) for _item, aux in skillpack.references(bundle)] if bundle else []
+    if design is not None and design.transport is not None:
+        paths.extend(str(root / design.transport.relative(item.name)) for item in design.transport.files)
+        paths.append(str(root / design.transport.relative(design.transport.manifest)))
+    return paths
 
 
 def task_basis(holder, task_design, packet: Packet, *, root: pathlib.Path):
@@ -1106,7 +1316,8 @@ def _discovery_notices(task: str, found: Sequence[Mapping], *, bound: Collection
 def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir: pathlib.Path,
                   env: Mapping[str, str], native: bool = False, keychain=None,
                   brief_disabled: bool = False, packet: Packet | None = None,
-                  design_text: str | None = None) -> SkillPack | None:
+                  design_text: str | None = None, target=None, target_check=None, preview=None,
+                  design=None, frozen_needs=None, advise: bool = True) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links or task selections deliver skill texts, capabilities apply or task
     discovery ran, else None (the brief stays byte-identical). The skill admission, the capability plan's required
@@ -1119,7 +1330,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     from oah import discovery, skillpack
     from oah.capabilities import CapabilityRefused, plan as capability_plan
     from oah.config import load_config
-    from oah.discovery import providers, tasks
+    from oah.discovery import budget, preparation, providers, tasks
+    from oah.discovery.store import digest
 
     inputs = _CORRECTION_INPUTS.get()
     settings = (inputs.config.section("skills", skillsel.config_defaults()) if inputs is not None
@@ -1128,19 +1340,140 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                                    kit_cache=skillsel.kit_roots(state_dir, pins=settings["pins"]),
                                    codex_plugin_cache=settings["codex_plugin_cache"])
     basis, needs, found_settings = None, [], None
-    if packet is not None and inputs is None:
+    if packet is not None:
         try:
             found_settings = providers.settings_of(settings)
         except ValueError as exc:
             raise EngineError("OAH_CONFIG_INVALID", f"{exc}; nothing was launched") from None
         try:
             basis = task_basis(holder, task_design, packet, root=root)
-            needs = task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings),
-                               needs_file=request.skill_needs)
+            if frozen_needs is None and inputs is not None:
+                frozen_needs = inputs.e_needs
+            needs = ([tasks.verify(item, basis, policy=discovery.policy_digest(found_settings))
+                      for item in frozen_needs] if frozen_needs is not None else
+                     task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings),
+                                needs_file=request.skill_needs))
         except tasks.NeedsInvalid as exc:
             raise EngineError(f"{exc.code}({exc.reason})", f"{str(exc).split(': ', 1)[1]}; nothing was "
                               "launched") from None
     answerable = [item for item in needs if tasks.answerable(item)]
+    section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
+               else load_config(root).section("capabilities", capability_plan.DEFAULTS))
+    capability_settings = capability_plan.check_settings(section)
+
+    def capture(value):
+        from oah.capabilities import inventory
+
+        current = dt.datetime.now(dt.timezone.utc)
+        current_target = target_check() if target_check is not None else target
+        live = bound_lease(state_dir, request.task)
+        if live is None or (live.id, live.generation) != (holder.id, holder.generation):
+            raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed", "the task lease changed; "
+                                       "prepare again")
+        live_packet = read_packet(root, root / packet.source, parse_intent=oah_intent.parse,
+                                  read_source=oah_intent.read_source)
+        _check_lease_source(live.binding(), live_packet, request.task)
+        live_design, _block = _task_design(live, live_packet, state_dir=state_dir, stage=request.stage,
+                                           task=request.task, engine=request.engine)
+        live_basis = task_basis(live, live_design, live_packet, root=root)
+        current_policy = skillsel.settings_for(root)
+        current_found = providers.settings_of(current_policy)
+        current_needs = ([tasks.verify(item, live_basis, policy=discovery.policy_digest(current_found))
+                          for item in frozen_needs] if frozen_needs is not None else
+                         task_needs(live_basis, stage=request.stage, policy=discovery.policy_digest(current_found),
+                                    needs_file=request.skill_needs))
+        selections = [tasks.selection_for(state_dir, item, lease_id=live.id) for item in current_needs]
+        child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env), now=current,
+                                classes=capability_settings["classes"])
+        parent = inventory.read_parent(request.parent_inventory, now=current) if request.parent_inventory else None
+        relays = [capability_plan.load(state_dir, ref, now=current)[0] for ref in sorted(set(request.relay_results))]
+        bodies = []
+        for item in value.items:
+            bodies.append({"kind": "body", "required": item["required"], "bytes": item["bytes"],
+                           "sha256": item["sha256"], "mode": "inline", "review": item["review"]})
+            bodies.extend({"kind": "auxiliary", "required": aux["required"], "bytes": aux["bytes"],
+                           "sha256": aux["sha256"], "mode": aux["mode"], "review": item["review"]}
+                          for aux in item["aux"])
+        bodies.extend({"kind": "relay", "required": True, "bytes": row["payload"]["bytes"],
+                       "sha256": row["payload"]["sha256"], "mode": "inline"} for row in relays)
+        config = root / ".oah" / "config.toml"
+        paths = _e_reference_paths(skillpack.finalize(value)[1], design, root)
+        access = (_e_reference_access(request, root=root, env=env, target=current_target, paths=paths)
+                  if paths else None)
+        return {"operation": value.operation.to_json(), "task": digest(dataclasses.asdict(live_basis)),
+                "lease": {"digest": digest(live.to_json()), "expires_at": live.expires_at},
+                "engine": request.engine, "stage": request.stage, "route": "native" if native else request.route,
+                "needs": current_needs, "selections": selections, "payloads": sorted(bodies, key=digest),
+                "not_delivered": list(value.not_delivered),
+                "policy": digest({"skills": current_policy, "capabilities": load_config(root).section(
+                    "capabilities", capability_plan.DEFAULTS),
+                    "config": skillpack._sha(config.read_bytes()) if config.is_file() else None}),
+                "selectors": _e_selectors(env),
+                "access": access,
+                "inventory": {"child": inventory.stable_digest(child), "parent": parent}, "relay_results": relays,
+                "target": current_target,
+                "request_budget": value.operation.max_queries,
+                "references": digest({"parent": request.parent_inventory, "relay": list(request.relay_results),
+                                       "needs": request.skill_needs})}
+
+    def prepare_e(value):
+        nonlocal target
+        capabilities, capability_block = capability_plan.for_task(
+            holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
+            items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
+            relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings)
+        if not value.items and not value.not_delivered and not answerable and capabilities is None:
+            from oah.rerank import DEFAULTS as RERANK_DEFAULTS
+
+            config = (inputs.config if inputs is not None else load_config(root)).section("rerank", RERANK_DEFAULTS)
+            judgement = config.get("judgement")
+            if not (needs and not native and request.stage != "review" and request.retain_worker_text
+                    and not brief_disabled and config.get("enabled") is True and isinstance(judgement, Mapping)
+                    and judgement.get("enabled") is True):
+                return None
+        target = target_check() if target_check is not None else target
+        profile = budget.qualify(target or {}, now=dt.datetime.now(dt.timezone.utc))
+        block, _bundle = skillpack.finalize(value)
+        deferred = _e_deferred(value, design, state_dir=state_dir, root=root)
+        paths = _e_reference_paths(_bundle, design, root)
+        if paths:
+            _e_reference_access(request, root=root, env=env, target=target, paths=paths)
+        text = preview(SkillPack(block, _bundle, capability_block, capabilities)) if preview is not None else ""
+        measurement = budget.measure(profile, text, deferred=deferred, skill_bytes=len((block or "").encode("utf-8")),
+                                     design_bytes=_e_design_bytes(design), optional_bytes=budget.OPTIONAL_RENDER_LIMIT,
+                                     read_paths=paths)
+        facts = capture(value)
+        facts["profile"] = digest(profile)
+        expires = min(profile["expires_at"], facts["lease"]["expires_at"],
+                      _iso(dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=300)),
+                      *(([facts["inventory"]["parent"]["expires_at"]] if facts["inventory"]["parent"] else [])),
+                      *[row["expires_at"] for row in facts["relay_results"]], key=budget.moment)
+        original = digest(facts)
+
+        def recheck():
+            if dt.datetime.now(dt.timezone.utc) >= budget.moment(expires):
+                raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed", "the preparation evidence "
+                                           "expired; prepare again")
+            current = capture(value)
+            current["profile"] = digest(budget.qualify(current["target"], now=dt.datetime.now(dt.timezone.utc)))
+            if digest(current) != original:
+                raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed", "the complete local E "
+                                           "identity changed; prepare again")
+            problems = skillpack.recheck(_bundle, state_dir=state_dir) if _bundle else []
+            if _bundle:
+                problems += skillpack.recheck_installed(_bundle, roots) + skillpack.recheck_references(_bundle, root)
+            if problems:
+                raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed", "; ".join(problems))
+
+        references = {"needs": needs, "skill_needs": request.skill_needs, "parent_inventory": request.parent_inventory,
+                      "relay_results": list(request.relay_results), "tier": target["profile_id"].removeprefix("oah-"),
+                      "route": "native" if native else request.route}
+        return preparation.PreparedE(json.dumps(facts, sort_keys=True), json.dumps(references), json.dumps(profile),
+                                     json.dumps(measurement), expires, recheck, json.dumps({
+                                         "bundle_digest": _bundle["digest"] if _bundle else None,
+                                         "capability_plan_digest": digest(capabilities) if capabilities else None,
+                                         "render_digest": skillpack._sha(text.encode("utf-8"))}))
+
     try:
         admitted = skillpack.admit(skillpack.Operation("dispatch", task=request.task,
                                                        lease=(holder.id, holder.generation),
@@ -1148,12 +1481,15 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                                    task_design=task_design, state_dir=state_dir, engine=request.engine,
                                    stage=request.stage, roots=roots,
                                    receiving_root=root if not native and request.retain_worker_text else None,
-                                   needs=needs)
-    except skillpack.PackRefused as exc:
+                                   needs=needs, policy=settings, scope=packet.scope or holder.scope,
+                                   prepare=prepare_e)
+    except budget.BudgetRefused as exc:
+        raise EngineError(f"{skillpack.BUDGET_CODE}({exc.reason})", exc.detail) from None
+    except (skillpack.PackRefused, CapabilityRefused) as exc:
         raise _pack_error(exc) from None
-    section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
-               else load_config(root).section("capabilities", capability_plan.DEFAULTS))
-    capability_settings = capability_plan.check_settings(section)
+
+    if admitted.prepared is None:
+        return None
 
     def plan_capabilities(class_needs=(), class_status=None, advise=None):
         try:
@@ -1173,7 +1509,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         except skillpack.PackRefused as exc:
             raise _pack_error(exc) from None
     found = []
-    if answerable:
+    if answerable and advise:
         found = tasks.prepare_task(admitted, answerable, state_dir=state_dir, settings=found_settings,
                                    now=dt.datetime.now(dt.timezone.utc), basis=basis,
                                    notify=lambda text: print(text, file=sys.stderr), reuse=True)
@@ -1182,31 +1518,32 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     discovered = tuple({key: value for key, value in entry.items()
                         if key not in ("searches", "deferred", "local", "public", "reused")} for entry in found)
     advice = None
-    if admitted.items and not native and request.retain_worker_text:
+    if admitted.items and not native and request.retain_worker_text and advise:
         admitted, advice = skillpack.rank(admitted, advise=_skill_fit_advisor(
-            root=root, state_dir=state_dir, env=env, keychain=keychain, brief_disabled=brief_disabled))
+            root=root, state_dir=state_dir, env=env, keychain=keychain, brief_disabled=brief_disabled,
+            admitted=admitted))
     block, bundle = skillpack.finalize(admitted)
     class_needs, capability_advise = (), None
     class_status = ("unused(native)" if native else "unused(review-isolated)" if request.stage == "review"
                     else None)
-    if needs and class_status is None and request.retain_worker_text:
+    if needs and class_status is None and request.retain_worker_text and advise:
         class_needs, class_status, capability_advise = _capability_advice(
             root=root, state_dir=state_dir, env=env, keychain=keychain, brief_disabled=brief_disabled, basis=basis,
-            packet=packet, task=request.task, needs=needs)
+            packet=packet, task=request.task, needs=needs, admitted=admitted)
     capabilities, capability_block = plan_capabilities(class_needs, class_status, capability_advise)
-    if block is None and capability_block is None and not discovered:
+    if block is None and capability_block is None and not discovered and admitted.prepared is None:
         return None
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
         check([block, capability_block])
-    return SkillPack(block, bundle, capability_block, capabilities, advice, discovered)
+    return SkillPack(block, bundle, capability_block, capabilities, advice, discovered, admitted)
 
 
 SKILL_EXCERPT_BYTES = 4000  # the start of each reviewed SKILL.md a skill-fit judgement may read
 
 
 def _skill_fit_advisor(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapping[str, str], keychain,
-                       brief_disabled: bool):
+                       brief_disabled: bool, admitted):
     """The advise callable of skillpack.rank: one skill-fit/v1 judgement over two or more optional items of one
     check, each with a verified public excerpt of its reviewed SKILL.md (DESIGN §7.1). A score is applied only after
     the judge's own recheck passes; every other outcome keeps the deterministic order. Nothing is read until rank
@@ -1242,11 +1579,11 @@ def _skill_fit_advisor(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
                                                .encode("utf-8")).hexdigest()
         request = judge.Request("skill-fit", "skill-fit/v1", tuple(fields), tuple(options), input_ref=input_ref)
         result = judge.judge(request, config=config, policy=policy, sources=sources, brief_disabled=brief_disabled,
-                             env=env, keychain=keychain, state_dir=state_dir)
+                              env=env, keychain=keychain, state_dir=state_dir, admitted=admitted)
         if not result.status.startswith("used"):
             return unapplied(result.status)
         applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, request=request,
-                              policy=policy)
+                              policy=policy, admitted=admitted)
         if not applied.applied:
             return unapplied(result.status, applied.reason)
         return {"status": result.status, "applied": True, "reason": None,
@@ -1256,7 +1593,7 @@ def _skill_fit_advisor(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
 
 
 def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapping[str, str], keychain,
-                       brief_disabled: bool, basis, packet: Packet, task: str, needs: Sequence[Mapping]):
+                       brief_disabled: bool, basis, packet: Packet, task: str, needs: Sequence[Mapping], admitted):
     """(class needs, class status, entry advise) for the capability plan (DESIGN §6.3.4, §7.1.1). One
     capability-needs/v1 judgement per task need without a design, over that need's own slice of the packet's intent
     section, infers its optional capability classes; a class counts only after the judge's recheck. Choosing an entry
@@ -1279,11 +1616,11 @@ def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
 
     def ask(request, input_ref: str):
         result = judge.judge(request, config=config, policy=policy, sources=sources, brief_disabled=brief_disabled,
-                             env=env, keychain=keychain, state_dir=state_dir, task_view=task_view)
+                             env=env, keychain=keychain, state_dir=state_dir, task_view=task_view, admitted=admitted)
         if not result.status.startswith("used"):
             return result, None
         return result, judge.apply(result, current_input_ref=input_ref, config=config, sources=sources,
-                                   request=request, policy=policy, task_view=task_view)
+                                   request=request, policy=policy, task_view=task_view, admitted=admitted)
 
     class_needs, statuses = [], []
     for item in eligible:
@@ -1576,6 +1913,7 @@ class CallRequest:
     parent_inventory: str | None = None  # the lead's InventoryV1 file (--parent-inventory)
     relay_results: tuple[str, ...] = ()  # stored parent relay results (--relay-result)
     skill_needs: str | None = None  # the lead's TaskSkillNeedV1 file (--skill-needs), re-resolved before use
+    route: str = "process"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1588,6 +1926,7 @@ class SkillPack:
     capabilities: dict | None = None
     advice: dict | None = None  # skill-fit advice: kept in skills.json beside the bundle, never inside it
     discovery: tuple[dict, ...] = ()  # TaskDiscoveryV1 records of this call's task needs: proposals, never items
+    admitted: SkillAdmission | None = dataclasses.field(default=None, compare=False, repr=False)
 
     @property
     def delivers(self) -> bool:
@@ -1610,6 +1949,7 @@ class Prepared:
     cli_version: str | None
     warnings: tuple[str, ...]
     retain_worker_text: bool = dataclasses.field(default=True, kw_only=True)
+    e_digest: str | None = dataclasses.field(default=None, kw_only=True)
 
     @property
     def run(self) -> runs.Run:
@@ -1622,6 +1962,8 @@ class Prepared:
         data = dataclasses.asdict(self)
         if self.retain_worker_text:
             data.pop("retain_worker_text")  # Preserve the landed launch schema for ordinary calls and Orca.
+        if self.e_digest is None:
+            data.pop("e_digest")
         data["argv"] = list(self.argv)
         data["warnings"] = list(self.warnings)
         return data
@@ -1639,6 +1981,7 @@ class _CallPlan:
     prompt: str
     result_fields: dict
     skills_record: dict | None
+    stored_prompt: str | None = None
     initial_record: dict | None = None
     model_writes: tuple[tuple[pathlib.Path, str], ...] = ()
     binding_record: str | None = None
@@ -1699,6 +2042,9 @@ class _CorrectionInputs:
     artifacts: dict = dataclasses.field(default_factory=dict)
     difficulty: object | None = None  # Jev's answer, asked once: the correction decides its tier on it
     notice_pending: bool = False  # published only after the correction's durable start
+    e_needs: list | None = None
+    e_prepared: PreparedE | None = None
+    e_source: dict | None = None
 
     def notice(self, text: str) -> None:
         from oah.rerank import _print_notice
@@ -1743,7 +2089,7 @@ class _CorrectionInputs:
         for path, text in plan.model_writes:
             write_text_atomic(path, text)
         runs._create_run(self.run, plan.initial_record)
-        self.run.write_prompt(plan.prompt)
+        self.run.write_prompt(plan.stored_prompt if plan.stored_prompt is not None else plan.prompt)
         if plan.skills_record is not None:
             write_json_atomic(self.run.file_path("skills.json"), plan.skills_record)
         self.run.result(**plan.result_fields)
@@ -1818,13 +2164,18 @@ def secret_warning(note: str | None, where: str) -> str:
 def judge_difficulty(axes: routing.Axes, *, section: str | None, request_text: str | None = None,
                      scope: Sequence[str], rule_tier: str, floor_tier: str, root: pathlib.Path,
                      state_dir: pathlib.Path, brief_disabled: bool = False, env: Mapping[str, str] | None = None,
-                     keychain=None) -> Difficulty:
+                     keychain=None, admitted=None) -> Difficulty:
     """Jev's tier for this work (the accepted Intent section, or a request before one exists, then the Scope paths).
 
     Never blocked by Jev: a failure is a status and the rule tier runs. An invalid `[rerank]` table refuses with
     `OAH_CONFIG_INVALID` before anything is sent. A correction asks once and keeps the answer with its inputs."""
     from oah.config import ConfigError, load_config
 
+    if admitted is not None:
+        from oah import skillpack
+
+        skillpack.require(admitted)
+        return Difficulty(rule_tier, rule_tier, False, "unused(target-profile)")
     try:
         rerank = importlib.import_module("oah.rerank")
         defaults = rerank.DEFAULTS
@@ -1887,6 +2238,42 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
         _CORRECTION_INPUT_CHECK.reset(token)
 
 
+def _freeze_e(inputs, *, env):
+    from oah.atomic import read_json
+    from oah.discovery import preparation
+
+    holder = inputs.holder()
+    folder = runs.task_directory(inputs.state, holder.task)
+    candidates = sorted(folder.iterdir(), reverse=True) if folder.is_dir() else []
+    if len(candidates) > 1024:
+        raise EngineError("OAH_SKILL_NOT_DELIVERABLE(changed)", "too many preparation references to resolve; "
+                          "prepare the task selection again")
+    for path in candidates:
+        record_path = path / "skills.json"
+        if record_path.is_file() and record_path.stat().st_size > 2097152:
+            raise EngineError("OAH_SKILL_NOT_DELIVERABLE(changed)", "the preparation reference exceeds its bounded "
+                              "record size; prepare the task selection again")
+        saved = read_json(path / "skills.json", None) if path.is_dir() else None
+        raw = saved.get("prepared_e") if isinstance(saved, dict) else None
+        if not isinstance(raw, dict) or "facts" not in raw:
+            continue
+        record = preparation.parse(raw)
+        facts, refs = record["facts"], record["references"]
+        if not any(facts.get("selections", [])) or not (saved or {}).get("bundle"):
+            continue
+        result = read_json(path / "result.json", {})
+        if result.get("status") not in ("running", "finished", "failed"):
+            continue
+        source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
+                          stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
+                          model=facts["target"]["model"], launch_effort=facts["target"]["effort"],
+                          cli_version=facts["target"]["cli_version"], warnings=(), e_digest=record["digest"])
+        _check_e(source, holder, env=env)
+        inputs.e_needs = json.loads(json.dumps(refs["needs"]))
+        inputs.e_source = json.loads(json.dumps(refs))
+        return
+
+
 def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
                 design=None, skill_pack=None, native_canary=None):
     intent = packet.intent if packet else None
@@ -1943,6 +2330,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     """Serialize task authorization and all optional paid preparation, before handing off a reserved run."""
     from oah.lockfile import LockTimeout, StateLock
     from oah.review import receipts, rounds
+    from oah.discovery import attempts
 
     managed_review = rounds._MANAGED_DISPATCH.get()
     managed = (_CORRECTION_INPUTS.get() is not None
@@ -1955,9 +2343,10 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             raise EngineError("OAH_REVIEW_SERIES_BUSY", "another review or paid preparation owns this task; wait "
                               "for it to finish, then retry oah call") from None
     try:
-        return _prepare(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
-                        has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now,
-                        keychain=keychain)
+        with attempts.scope(state_dir):
+            return _prepare(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
+                            has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now,
+                            keychain=keychain)
     finally:
         if lock is not None:
             lock.__exit__(None, None, None)
@@ -1982,6 +2371,11 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     if same:
         warnings.append(same)
     inputs = _CORRECTION_INPUTS.get()
+    if inputs is not None:
+        _freeze_e(inputs, env=env)
+    if inputs is not None and inputs.e_source is not None:
+        request = dataclasses.replace(request, parent_inventory=inputs.e_source["parent_inventory"],
+                                      relay_results=tuple(inputs.e_source["relay_results"]))
     holder = inputs.holder() if inputs is not None else bound_lease(state_dir, request.task)
     if holder is None:
         raise EngineError("OAH_INTENT_NOT_CURRENT", f"task {request.task} has no active lease with an intent binding. "
@@ -2002,10 +2396,6 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     # binding, its state and the accepted texts) for its stage and decision based selection.
     task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=request.stage, task=request.task,
                                        engine=request.engine)
-    # Lane E: the single deterministic skill admission, before any budget gate, judge, round or reservation.
-    skill_pack = _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env,
-                               keychain=keychain, brief_disabled=request.no_rerank or packet.rerank_disabled,
-                               packet=packet, design_text=design.text if design is not None else None)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -2026,6 +2416,26 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     if design is not None and not design.delivered:
         design = _reference_design(task_design, design, request, root=root, run_id=planned_run[0].id
                                    if planned_run is not None else None)
+    planned_tier = (request.tier or (packet.plan[request.stage][1] if request.stage in packet.plan else
+                                    routing.recommend(scored.axes).tier))
+    if request.stage == "review" and routing.TIERS.index(planned_tier) < routing.TIERS.index(floor_tier):
+        planned_tier = floor_tier
+
+    def preview(pack):
+        current_settings = skillsel.settings_for(root)
+        roots = skillpack.environment_roots(root, state_dir, env)
+        chosen = skillsel.select(scored.axes.kind, request.stage, scored.axes.risk, scope, roots=roots,
+                                 settings=current_settings, state_dir=None, repo_root=root, now=now)
+        return _brief_text(request, planned_run[0].id if planned_run else "run-00000000-000000000000",
+                            packet, scope, stored, footer, has_footer, [], (chosen, None), holder, design, pack)
+
+    from oah import skillpack
+
+    skill_pack = _admit_skills(
+        request, holder, task_design, root=root, state_dir=state_dir, env=env, keychain=keychain,
+        brief_disabled=disabled, packet=packet, design_text=design.text if design is not None else None,
+        target_check=lambda: _e_target(request, planned_tier, root=root, state_dir=state_dir, env=env),
+        preview=preview, design=design)
     axes = scored.axes if recorded is not None else None
     # `oah review` passed its own gate under the task lock, with its decision and extra round, which only a
     # logged start carries. Until that start, the gate below would not know them.
@@ -2077,7 +2487,8 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         check_budget()
         difficulty = judge_difficulty(scored.axes, section=getattr(packet.intent, "section", "") or "", scope=scope,
                                       rule_tier=tier, floor_tier=floor_tier, root=root, state_dir=state_dir,
-                                      brief_disabled=disabled, env=env, keychain=keychain)
+                                      brief_disabled=disabled, env=env, keychain=keychain,
+                                      **({"admitted": skill_pack.admitted} if skill_pack is not None else {}))
         if difficulty.status == "unused(not-enabled)":  # a disabled re-ranker reads as before at this seam
             difficulty = dataclasses.replace(difficulty, status="unused(not-configured)")
         if difficulty.used:
@@ -2118,7 +2529,8 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
                                      freshness=checked[1], root=root, env=env, floor_tier=floor_tier,
                                      brief_disabled=disabled, keychain=keychain,
-                                     state_dir=state_dir if inputs is None else None)
+                                     state_dir=state_dir if inputs is None else None,
+                                     **({"admitted": skill_pack.admitted} if skill_pack is not None else {}))
     admitted = admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
     warnings.extend(admitted.warnings)
     judge = {**judge, "admission": admitted.to_json(), **difficulty.record(), "tier_floor_raised": floor_raised}
@@ -2259,12 +2671,40 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
             {"count": len(chosen.skills), "sha256": hashlib.sha256(
                 json.dumps(skills_record, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
              "advisory": skills_rerank}, ("count", "sha256", "advisory"))
+    e_record, stored_prompt = None, None
+    if skill_pack is not None and skill_pack.admitted is not None and skill_pack.admitted.prepared is not None:
+        from oah.discovery import budget, preparation
+        from oah.discovery.store import digest
+
+        live = skill_pack.admitted.prepared
+        try:
+            from oah import skillpack
+
+            live = skillpack.finish(skill_pack.admitted, text,
+                deferred=_e_deferred(skill_pack.admitted, design, state_dir=state_dir, root=root),
+                design_bytes=_e_design_bytes(design), capabilities=skill_pack.capabilities,
+                read_paths=_e_reference_paths(skill_pack.bundle, design, root))
+        except budget.BudgetRefused as exc:
+            raise EngineError(f"OAH_SKILLS_BUDGET_EXCEEDED({exc.reason})", exc.detail) from None
+        except skillpack.PackRefused as exc:
+            raise _pack_error(exc) from None
+        e_record = live.record()
+        inputs = _CORRECTION_INPUTS.get()
+        published = e_record
+        if inputs is not None:
+            inputs.e_prepared = live
+            published = preparation.projection(e_record)
+            stored_prompt = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, [], selection,
+                                         checked_lease, design, None)
+            stored_prompt += "\n## Managed preparation\n" + json.dumps(published, sort_keys=True) + "\n"
+        skills_record = {**(skills_record or {}), "prepared_e": published}
     prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=request.task, engine=request.engine,
                     stage=request.stage, argv=tuple(argv), cwd=str(root), timeout_s=timeout_s,
                     env_additions=additions, model=resolution.model, launch_effort=resolution.launch_effort,
                     cli_version=resolution.cli_version, warnings=tuple(warnings),
-                    retain_worker_text=request.retain_worker_text)
-    return _CallPlan(prepared, text, result_fields, skills_record)
+                    retain_worker_text=request.retain_worker_text,
+                    e_digest=e_record["digest"] if e_record is not None else None)
+    return _CallPlan(prepared, text, result_fields, skills_record, stored_prompt=stored_prompt)
 
 
 def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, root: pathlib.Path,
@@ -2437,7 +2877,8 @@ def _native_target(engine: str, tier: str, settings: Settings, *, root: pathlib.
                                             "agent": native.sha(agent_bytes) if agent_bytes is not None else None})}
 
 
-def _native_identities(request: CallRequest, basis: _NativeBasis, bundle: Mapping | None, target: Mapping) -> dict:
+def _native_identities(request: CallRequest, basis: _NativeBasis, bundle: Mapping | None, target: Mapping,
+                       prepared_e=None) -> dict:
     """The task, design, target and budget identities an offer is made under and a settlement re-resolves."""
     from oah import skillpack
     from oah.launchers import native
@@ -2467,14 +2908,29 @@ def _native_identities(request: CallRequest, basis: _NativeBasis, bundle: Mappin
                   "coverage_basis": native.sha((coverage or "").encode("utf-8"))}
     budget = native.digest({"skill_budget": skillpack.SKILL_BUDGET, "brief_budget": skillpack.BRIEF_BUDGET,
                             "items": skillpack.ITEM_LIMIT})
+    if prepared_e is not None:
+        budget = native.digest(prepared_e["profile"])
     bundle_id = bundle["digest"] if bundle is not None else None
     prep_id = native.digest({"operation": "dispatch", "task": task, "design": design, "target": dict(target),
-                             "budget_profile": budget, "bundle": bundle_id})
+                             "budget_profile": budget, "bundle": bundle_id,
+                             **({"prepared_e": prepared_e["digest"]} if prepared_e is not None else {})})
     return {"task": task, "design": design, "target": dict(target), "budget_profile": budget, "bundle_id": bundle_id,
             "prep_id": prep_id}
 
 
 def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+                   env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
+                   parse_intent: Callable[[str], object] | None = None,
+                   read_source: Callable[[pathlib.Path], str] | None = None,
+                   now: dt.datetime | None = None) -> NativeOffer:
+    from oah.discovery import attempts
+
+    with attempts.scope(state_dir):
+        return _prepare_native(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
+                                has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now)
+
+
+def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
                    env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
                    parse_intent: Callable[[str], object] | None = None,
                    read_source: Callable[[pathlib.Path], str] | None = None,
@@ -2493,9 +2949,6 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     briefs.check_footer(footer, has_footer)
     basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                           read_source=read_source)
-    skill_pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env,
-                               native=True, packet=basis.packet,
-                               design_text=basis.design.text if basis.design is not None else None)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -2505,9 +2958,20 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     selection = _brief_skills(root, kind=basis.scored.axes.kind, stage=request.stage, risk=basis.scored.axes.risk,
                               scope=basis.scope, state_dir=state_dir, env=env, keychain=None, brief_disabled=True,
                               now=now)
+    run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
+
+    def preview(pack):
+        token = native.canary(run.id, pack.bundle["digest"] if pack.bundle else None)
+        return _brief_text(request, run.id, basis.packet, basis.scope, stored, footer, has_footer, [], selection,
+                            basis.holder, basis.design, pack, native_canary=token)
+
+    skill_pack = _admit_skills(
+        request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env, native=True,
+        packet=basis.packet, design_text=basis.design.text if basis.design is not None else None,
+        target=target, target_check=lambda: _e_target(request, tier, root=root, state_dir=state_dir, env=env,
+                                                      native=True), preview=preview, design=basis.design)
     bundle = skill_pack.bundle if skill_pack is not None else None
     identities = _native_identities(request, basis, bundle, target)
-    run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
     token = native.canary(run.id, identities["bundle_id"])
     warnings = basis.warnings
     message = _brief_text(request, run.id, basis.packet, basis.scope, stored, footer, has_footer, warnings, selection,
@@ -2517,6 +2981,22 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
             skillpack.check_brief(message)
         except skillpack.PackRefused as exc:
             raise _pack_error(exc) from None
+    e_record = None
+    if skill_pack is not None and skill_pack.admitted is not None and skill_pack.admitted.prepared is not None:
+        from oah.discovery import budget
+
+        live = skill_pack.admitted.prepared
+        try:
+            live = skillpack.finish(skill_pack.admitted, message,
+                deferred=_e_deferred(skill_pack.admitted, basis.design, state_dir=state_dir, root=root),
+                design_bytes=_e_design_bytes(basis.design), capabilities=skill_pack.capabilities,
+                read_paths=_e_reference_paths(skill_pack.bundle, basis.design, root))
+            e_record = live.record()
+        except budget.BudgetRefused as exc:
+            raise EngineError(f"OAH_SKILLS_BUDGET_EXCEEDED({exc.reason})", exc.detail) from None
+        except skillpack.PackRefused as exc:
+            raise _pack_error(exc) from None
+        identities = _native_identities(request, basis, bundle, target, e_record)
     pack_id = native.digest({"prep_id": identities["prep_id"], "bundle": identities["bundle_id"],
                              "capabilities": (native.digest(skill_pack.capabilities)
                                               if skill_pack is not None and skill_pack.capabilities is not None
@@ -2529,27 +3009,48 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     description = f"oah {request.task} {request.stage} {run.id}"
     params = native.host_params(request.engine, profile_id=target["profile_id"], description=description,
                                 message=message)
-    runs._create_run(run, record)
-    try:
-        run.write_prompt(message)
-        chosen, skills_rerank = selection
-        skills_record = {"rerank": skills_rerank, **chosen.to_record()}
-        if bundle is not None:
-            skills_record["bundle"] = bundle
-        if skill_pack is not None and skill_pack.discovery:
-            skills_record["task_discovery"] = list(skill_pack.discovery)
-        write_json_atomic(run.file_path("skills.json"), skills_record)
-        if skill_pack is not None and skill_pack.capabilities is not None:
-            write_json_atomic(run.file_path("capabilities.json"), skill_pack.capabilities)
-        if basis.design is not None:
-            write_json_atomic(run.file_path(DESIGN_NAME), dict(basis.design.record, worktree=basis.holder.worktree))
-        run.result(status="prepared", read_only=request.stage == "review", axes=axes.to_json() if axes else None,
-                   tier=tier, tier_source=tier_source, tier_reasons=reasons, override_stage=request.override_stage,
-                   warnings=warnings, launcher={"name": "native", "offer": native.OFFER_NAME}, jev_status="unused(native)")
-        offer = native.publish_offer(run.path, offer)
-    except (EngineError, briefs.BriefError, runs.RunError) as exc:
-        run.result(status="refused", error=_recorded_error(exc, True), warnings=warnings)
-        raise
+    from contextlib import nullcontext
+    from oah.lease import Store
+
+    guard = (Store(state_dir).checked(task=request.task, lease_id=basis.holder.id, generation=basis.holder.generation)
+             if e_record is not None else nullcontext())
+    with guard:
+        if e_record is not None:
+            try:
+                live.recheck()
+            except skillpack.PackRefused as exc:
+                raise _pack_error(exc) from None
+        runs._create_run(run, record)
+        try:
+            run.write_prompt(message)
+            chosen, skills_rerank = selection
+            skills_record = {"rerank": skills_rerank, **chosen.to_record()}
+            if bundle is not None:
+                skills_record["bundle"] = bundle
+            if e_record is not None:
+                skills_record["prepared_e"] = e_record
+            if skill_pack is not None and skill_pack.discovery:
+                skills_record["task_discovery"] = list(skill_pack.discovery)
+            write_json_atomic(run.file_path("skills.json"), skills_record)
+            if skill_pack is not None and skill_pack.capabilities is not None:
+                write_json_atomic(run.file_path("capabilities.json"), skill_pack.capabilities)
+            if basis.design is not None:
+                write_json_atomic(run.file_path(DESIGN_NAME), dict(basis.design.record, worktree=basis.holder.worktree))
+            fields = dict(status="prepared", read_only=request.stage == "review", axes=axes.to_json() if axes else None,
+                          tier=tier, tier_source=tier_source, tier_reasons=reasons, override_stage=request.override_stage,
+                          warnings=warnings, launcher={"name": "native", "offer": native.OFFER_NAME},
+                          jev_status="unused(native)")
+            if e_record is not None:
+                run._write_result(dict(run.read(), **fields))
+            else:
+                run.result(**fields)
+            offer = native.publish_offer(run.path, offer)
+        except (EngineError, briefs.BriefError, runs.RunError) as exc:
+            if e_record is not None:
+                run._write_result(dict(run.read(), status="refused", error=_recorded_error(exc, True), warnings=warnings))
+            else:
+                run.result(status="refused", error=_recorded_error(exc, True), warnings=warnings)
+            raise
     host = {"tool": "Agent" if request.engine == "claude" else "native-subagent", "params": params}
     return NativeOffer(run.id, str(run.path), offer, message, host, tier, tier_source, tuple(warnings))
 
@@ -2571,6 +3072,35 @@ def _native_differences(offer: Mapping, current: Mapping) -> list[str]:
 
 
 def settle_native(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[str, str], settings: Settings,
+                  run_id: str, offer_digest: str, host_child_id: str, outcome: str, result_path: pathlib.Path,
+                  token: str | None, parse_intent=None, read_source=None,
+                  now: dt.datetime | None = None) -> NativeSettlement:
+    from oah.launchers import native
+    from oah.lease import LeaseError, Store
+
+    try:
+        run = runs.find_run(state_dir, run_id)
+    except runs.RunError as exc:
+        if exc.code != "OAH_RUN_NOT_FOUND":
+            raise
+        raise EngineError(native.UNMANAGED_RUN_CODE,
+                          f"{run_id} has no native offer in this state folder; offer a native run first") from None
+    offer = native.read_offer(run.path)
+    if offer is None:
+        raise EngineError(native.UNMANAGED_RUN_CODE, "this run has no native offer")
+    current = bound_lease(state_dir, run.task)
+    if current is None:
+        raise EngineError(native.STALE_CODE, "the task lease is no longer current; the earlier offer is kept")
+    try:
+        with Store(state_dir).checked(task=run.task, lease_id=current.id, generation=current.generation):
+            return _settle_native_checked(state_dir=state_dir, root=root, env=env, settings=settings, run_id=run_id,
+                offer_digest=offer_digest, host_child_id=host_child_id, outcome=outcome, result_path=result_path,
+                token=token, parse_intent=parse_intent, read_source=read_source, now=now)
+    except LeaseError as exc:
+        raise EngineError(native.STALE_CODE, f"{exc}; the earlier offer is kept; prepare again") from None
+
+
+def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[str, str], settings: Settings,
                   run_id: str, offer_digest: str, host_child_id: str, outcome: str, result_path: pathlib.Path,
                   token: str | None, parse_intent=None, read_source=None,
                   now: dt.datetime | None = None) -> NativeSettlement:
@@ -2608,22 +3138,25 @@ def settle_native(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[s
     try:
         basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                               read_source=read_source)
-        roots = skillpack.environment_roots(root, state_dir, env)
-        admitted = skillpack.admit(skillpack.Operation("dispatch", task=request.task,
-                                                       lease=(basis.holder.id, basis.holder.generation)),
-                                   task_design=basis.task_design, state_dir=state_dir, engine=request.engine,
-                                   stage=request.stage, roots=roots)
-        _block, bundle = skillpack.finalize(admitted)
+        saved = run._read_json("skills.json") or {}
+        e_record = saved.get("prepared_e")
+        bundle = skillpack.bundle_of(run.path)
+        if e_record is None and (bundle is not None or run.file_path("capabilities.json").is_file()):
+            raise EngineError(native.STALE_CODE, "managed content needs a complete PreparedE record; offer again")
+        if e_record is not None:
+            prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=run.task, engine=request.engine,
+                                stage=request.stage, argv=(), cwd=str(root), timeout_s=300, env_additions={},
+                                model=offer["target"]["model"], launch_effort=offer["target"]["effort"],
+                                cli_version=None, warnings=(), e_digest=e_record["digest"])
+            _check_e(prepared, basis.holder, native_record=offer, env=env)
         target = _native_target(request.engine, request.tier, settings, root=root, env=env)
-        current = _native_identities(request, basis, bundle, target)
+        current = _native_identities(request, basis, bundle, target, e_record)
         problems.extend(f"the {label} changed" for label in _native_differences(offer, current))
     except skillpack.PackRefused as exc:
         problems.append(str(_pack_error(exc)))
     except EngineError as exc:
         problems.append(str(exc))
     if problems or offer["state"] == "stale":
-        if offer["state"] == "offered":
-            offer = native.set_state(run.path, offer, "stale", None)
         reasons = "; ".join(problems) or "it was marked stale by an earlier settle"
         raise EngineError(native.STALE_CODE, f"run {run_id}'s native offer is stale: {reasons}. Its record is kept as "
                           "evidence of the old offer; offer again with oah call --launcher native")
@@ -2796,10 +3329,10 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         if not concluded:
             return run.read()
     skill_warnings, skill_failure = [], None
+    observation_failure = _conclude_observation(prepared, sink)
     if skill_bundle is not None:
         result, skill_warnings, skill_failure = _conclude_skill_reads(prepared, skill_bundle, raw_stdout, result,
                                                                       normalize=reference is None)
-    observation_failure = _conclude_observation(prepared, sink)
     finished = dt.datetime.now(dt.timezone.utc)
     if prepared.retain_worker_text:
         run.write_logs(clean(result.stdout), clean(result.stderr))
@@ -3419,7 +3952,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str, *, si
     # P5-F: what the owning runner actually established, appended before the tree/Job below are released.
     outcome = {"kind": "aborted", "returncode": None, "timed_out": False, "quiescent": False}
     try:
-        with _paid_dispatch(prepared), dispatch_guard(prepared) as live:
+        with _paid_dispatch(prepared), dispatch_guard(prepared, env=env) as live:
             if design_run and reference is None:
                 from oah.design import task_context
 

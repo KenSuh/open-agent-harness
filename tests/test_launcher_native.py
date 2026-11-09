@@ -300,9 +300,7 @@ class SettleTest(NativeTask, unittest.TestCase):
                 self.assertIn("design", stale.stderr)
         self.assertFalse((run / "native-settlement.json").exists())
         after = self.read(run, "native-offer.json")
-        self.assertEqual(after["state"], "stale")
-        self.assertEqual({key: value for key, value in after.items() if key != "state"},
-                         {key: value for key, value in offer.items() if key != "state"})  # evidence kept
+        self.assertEqual(after, offer)
 
     def test_an_unknown_or_unmanaged_run_refuses(self):
         unknown = self.oah("call", "settle", "--run", UNKNOWN_RUN, "--offer-digest", "sha256:" + "0" * 64,

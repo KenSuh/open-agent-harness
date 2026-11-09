@@ -90,9 +90,14 @@ class JudgementCase(SourceCase):
         self.spec = self.register(self.store)
         self.first = self.store.check_one(self.spec).snapshot
         self.provider = FakeJudge()
+        from oah import skillpack
+
+        self.admitted = skillpack.explore(64)
 
     def run_judge(self, request: judge.Request, cfg: dict | None = None, **options) -> judge.Judgement:
         options.setdefault("sources", self.store)
+        if request.rubric in judge.E_RUBRICS:
+            options.setdefault("admitted", self.admitted)
         return judge.judge(request, config=cfg or config(), policy=POLICY, env={"FAKE_JUDGE_KEY": "k"},
                            providers={"fake": self.provider}, **options)
 
@@ -367,17 +372,17 @@ class SkillFitAndTaskTextTest(JudgementCase):
         result = self.run_judge(request, cfg, task_view=task)
         self.assertEqual("used", result.status)
         applied = judge.apply(result, current_input_ref=request.input_ref, config=cfg, request=request, policy=POLICY,
-                              task_view=task)
+                              task_view=task, admitted=self.admitted)
         self.assertEqual((True, "current"), (applied.applied, applied.reason))
         revised = judge.TaskView.of("t1", packet(INTENT.replace("환불", "취소"), revision=2))
         model = result.identity["requested_model"]
         self.assertEqual(["task-changed:task_need"], judge.recheck(result, sources=self.store, policy=POLICY,
                                                                    provider="fake", model=model, config=cfg,
-                                                                   task_view=revised))
+                                                                   task_view=revised, admitted=self.admitted))
         for current in (revised, None):
             with self.subTest(task_view=current and current.ref["intent"]):
                 stale = judge.apply(result, current_input_ref=request.input_ref, config=cfg, request=request,
-                                    policy=POLICY, task_view=current)
+                                    policy=POLICY, task_view=current, admitted=self.admitted)
                 self.assertEqual((False, "task-changed:task_need"), (stale.applied, stale.reason))
 
     def test_a_reply_that_leaves_an_option_out_is_dropped(self) -> None:
@@ -402,7 +407,7 @@ class SkillFitAndTaskTextTest(JudgementCase):
 
         def reasons(changed: dict) -> list[str]:
             return judge.recheck(changed, sources=self.store, policy=POLICY, provider="fake", model=model,
-                                 config=config())
+                                 config=config(), admitted=self.admitted)
 
         self.assertEqual([], reasons(record))
         unknown = copy.deepcopy(record)

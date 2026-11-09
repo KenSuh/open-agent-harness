@@ -106,23 +106,50 @@ judges, the round and the reservation. The links in the task's accepted coverage
   run's bundle.
 - A task whose coverage links no skill gets exactly the brief it got before.
 
-**One admission, before anything is spent.** A required skill that cannot be delivered refuses the call with a
+**One prepared identity.** Local admission checks `[skills] exclude`, each need's host and scope, mandatory
+selections, current capability approval and schema, relay eligibility and expiry, the task and lease generation,
+engine and stage. An excluded mandatory skill refuses; an omitted optional skill records its exact reason.
+Search, review, refresh and skill advice require this live admission, including disabled, cached and retry paths.
+A direct API call without admission refuses before transport. `PreparedE` binds these facts to the qualified
+target profile and final render digests. Every launch and native settlement checks the current facts again under
+the final guard. A changed or expired identity refuses and preserves the earlier record. An unchanged native
+selection settles once; an identical retry returns that same receipt. Corrections freeze the verified needs,
+selections and authorized relays and save only their closed digest/count/enum projection; worker text is resolved
+in memory. What it costs you: queued work, a correction or a settlement must be prepared again after a relevant
+local change or expiry; a direct API call cannot skip admission.
+
+A required skill that cannot be delivered initially refuses the call with a
 typed code: `OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE` (`inaccessible` or
-`unsupported-engine`) or `OAH_SKILL_NOT_DELIVERABLE` with its reason (`user-only`, `license`, `host`, `marker` or `pin-mismatch`). There is no retry and no fallback,
+`unsupported-engine`, `profile` or `access`) or `OAH_SKILL_NOT_DELIVERABLE` with its reason (`excluded`, `scope`,
+`user-only`, `license`, `host`, `marker` or `pin-mismatch`). There is no retry and no fallback,
 and no run folder is created. An optional skill that cannot be delivered is skipped and listed. What it costs
 you: a missing review or a moved pin blocks the dispatch until you review again or unlink the skill.
 
-**Fixed byte budgets.** Skill texts may take up to 196,608 bytes and the whole brief up to 524,288 bytes, with at
+**One qualified target route.** Required managed delivery needs an exact, current `TargetBudgetProfileV1` for the
+host, CLI, model, effort and route. A configured token count or model catalog is insufficient. The packaged
+qualification registry currently contains **no real qualified profiles**, so managed routes refuse before advice
+with `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)`. Test qualification fixtures do not qualify a real host.
+A profile must pin evidence and expiry, finite input capacity, output/host/existing-context reserves, and render
+and tool-schema overheads. Before advice, oah bounds the complete reachable brief, deferred design ReadPlan
+payloads, required references and every planned read/tool envelope against the remaining input capacity. It
+checks the exact final render locally again. What it costs you: required managed content works on a qualified
+route; elsewhere use inline or smaller material outside managed delivery, or split the task; unknown capacity
+is visible before any request.
+
+**Independent byte budgets.** Serialized inline skill texts may take up to 196,608 bytes; the whole reachable
+brief, including full referenced payload renders and read envelopes, may take up to 524,288 bytes. Deferred design
+content also keeps its independent 262,144-byte limit. There are at
 most 128 payloads, counting every skill body and auxiliary file. Every inline file is included once, including
-packs with more than 26 auxiliary files. Over a budget, the call refuses with `OAH_SKILLS_BUDGET_EXCEEDED` and lists each skill's size, so
-you can split the task or unlink optional skills. When the design context, skill texts and capability results
-already pass the brief budget together, the call refuses before any search, Jev question or budget gate; the exact
-brief is checked again at the end. What it costs you: a large skill set has to be split across tasks, and a brief
-that passes the budget only through its other sections still refuses at the end, after the judges ran.
+packs with more than 26 auxiliary files, using numeric labels. Over a budget, the call refuses with
+`OAH_SKILLS_BUDGET_EXCEEDED` and measured totals. References bypass neither the total render limit nor target
+capacity. What it costs you: a genuinely oversized pack must be split or optional material dropped; a valid
+27-file pack receives every file. A later local change can still refuse after earlier requests were made.
 
 **Large files by reference.** When the skill texts do not fit the skill budget, oah takes a skill's auxiliary
 files out of the brief, largest first, and names each one instead: "Read `<path>` in full with your Read tool
-before you start", with its line count and digest. The skill text itself always stays inline. This works only for
+before you start", with its line count and digest. The skill text itself always stays inline. Reference admission
+also requires the actual executable, CLI version, tools and read/access policy to pass the shared task-context
+qualification on every platform, and rechecks their identity at launch. This works only for
 a Claude process run (`oah call claude` in the foreground, in the background or as an Orca worker) whose working
 directory holds an installed copy of the skill with the pinned bytes, for example under `.claude/skills/<name>/`.
 For that run oah asks Claude for `--output-format stream-json --verbose` (no other argument changes), pairs each
@@ -380,7 +407,8 @@ should compare; one missing link keeps the first entry for that class.
 - Routes are planned before the run starts. The init event names tools only, so no tool use is checked against a
   schema (`schema_digest` stays null), and oah never reports the `direct` route, which would need a host that
   waits before any work until oah approves.
-- The budgets are fixed byte counts. They do not measure the model's context window.
+- Real target qualification is still pending. The empty packaged registry refuses managed delivery until a
+  measured profile with evidence and expiry is reviewed; catalog context sizes cannot substitute for it.
 - Task selections reach every `oah call` run and native offer, but not `oah fix` corrections, which keep their
   frozen inputs. A need that oah derives, or that `oah skills find --task` writes, covers the packet's whole intent
   section. A lead may narrow it to a byte range in the needs file, and oah checks that range against the packet

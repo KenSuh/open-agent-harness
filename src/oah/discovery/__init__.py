@@ -192,7 +192,8 @@ def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.date
     terms asks skill-search/v1 which goes first (`search_path`); the budget then reaches that one first."""
     from oah import skillpack
 
-    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind not in skillpack.TASKLESS:
+    skillpack.require(admitted)
+    if admitted.operation.kind not in skillpack.TASKLESS:
         raise ValueError("discovery.find runs only under a taskless admission (skillpack.inspect or explore)")
     budget, requests = admitted.allows_requests(), 0
     entries = []
@@ -203,7 +204,7 @@ def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.date
         if choice is not None and choice["need_id"] == need["id"]:
             wanted.append((choice["exact_query"], "choice", choice["id"]))
         for text, origin, choice_id in (wanted if provider == "skills-sh" else ()):
-            cached = providers.cached(text, state_dir=state_dir, settings=settings, now=now)
+            cached = providers.cached(text, state_dir=state_dir, settings=settings, now=now, admitted=admitted)
             if cached is None and settings["enabled"] and settings["provider"] == "skills-sh" and requests >= budget:
                 deferred.append({"query": text, "origin": origin, "outcome": "deferred", "reason": "budget"})
                 continue
@@ -322,7 +323,8 @@ def refresh_links(admitted, record: Mapping, *, state_dir, allow: list[str], now
     from oah.design import coverage
     from oah.discovery import review as reviews
 
-    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind not in ("design-inspect", "dispatch"):
+    skillpack.require(admitted)
+    if admitted.operation.kind not in ("design-inspect", "dispatch"):
         raise ValueError("refresh_links runs only under skillpack's admission of a design or a task")
     budget, spent, out = min(admitted.allows_requests(), LINK_REFRESH_LIMIT), 0, []
     for link in linked_reviews(record, state_dir):
@@ -338,7 +340,7 @@ def refresh_links(admitted, record: Mapping, *, state_dir, allow: list[str], now
         try:
             fresh, _word = reviews.review(state_dir, repo=reviews.repo_of(old["source"]["locator"]),
                                           path=old["source"]["path"], allow=allow, candidate=old["candidate"],
-                                          now=now, sources=sources, require_fresh=True)
+                                          now=now, sources=sources, require_fresh=True, admitted=admitted)
         except reviews.ReviewFailed as exc:
             row.update(outcome="failed", detail=str(exc), environment=exc.environment)
             continue

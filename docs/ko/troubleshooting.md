@@ -179,8 +179,11 @@
 
 ## 설계 coverage, 스킬, 능력
 
-이 단계들은 [스킬과 능력](skills-and-capabilities.md)에서 설명한다. 아래 거절은 모두 run 폴더가 생기거나
-무엇이든 쓰기 전에 일어난다.
+이 단계들은 [스킬과 능력](skills-and-capabilities.md)에서 설명한다. 최초의 결정적 입장·용량 거절은 run 폴더나
+비용 전에 일어난다. 뒤의 준비·수신·정산 거절은 요청이나 자식 프로세스를 시작한 뒤에도 생긴다. 재시도 전에
+`state/skills/attempts/*.json`의 제한된 시도별 요청 사실과 run의 `capabilities-receiving.json`에 남긴 사용량을
+확인한다. 모르는 합계는 0이 아닌 미확인으로 기록하고, 관찰한 부분 수치를 전체로 표시하지 않는다.
+사용자가 치르는 비용: 실패한 시도도 요청·토큰을 썼을 수 있으며, 재시도 전에 그 사실을 확인할 수 있다.
 
 | 코드 | 뜻 | 다음에 할 일 |
 |---|---|---|
@@ -200,7 +203,7 @@
 | `OAH_SKILL_RECEIVING_FAILED` | 스킬 참조를 읽은 Claude run이 끝났지만 oah가 run 폴더에 `skills-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
 | `OAH_CAPABILITY_RECEIVING_FAILED` | oah가 도는 동안 스트림을 확인한 Claude run이 끝났지만 run 폴더에 `capabilities-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
 | `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유는 괄호 안에 있다. `user-only`, `license`, `host`, `marker`, `pin-mismatch`, 그리고 시작 직전에 설치본, 참조 파일, 리드의 작업 선택이 바뀌면 `changed`다. 아무것도 시작하지 않았다. | `changed`나 `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 나머지는 다른 스킬을 연결하거나 필요에서 그 발주 단계를 뺀다. |
-| `OAH_SKILLS_BUDGET_EXCEEDED` | 스킬 본문이나 브리프 전체가 바이트 예산을 넘었거나 항목이 128개를 넘었다. 메시지가 스킬마다 크기를 보여 준다. | 작업을 나누거나 선택 스킬의 연결을 끊은 뒤 다시 호출한다. |
+| `OAH_SKILLS_BUDGET_EXCEEDED` | `(target-capacity-unknown)`: 정확한 경로에 근거·만료를 고정한 현재 용량 프로필이 없으며, 패키지에는 실제 검증 프로필이 아직 없다. 그 밖에는 inline 스킬, 필수 읽기를 포함한 전체 렌더, 설계 바이트, 대상 토큰의 독립 한도나 payload 128개를 넘었다. 측정 거절은 합계를 보여 준다. | 관리 전달 밖의 inline·작은 자료를 쓰거나 작업을 나누고 선택 자료를 뺀다. 관리 전달은 근거·만료가 있는 측정 프로필의 검토가 필요하며, 설정한 문맥 수만으로는 부족하다. |
 | `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run`이 스킬 묶음이 없는 run을 가리켰거나, `oah call settle`이 네이티브 제안이 없는 run을 가리켰다. | run id를 확인한다. 연결된 스킬이 없는 run에는 읽을 것이 없고, `oah call --launcher native`로 만든 run만 정산할 수 있다. |
 | `OAH_SKILL_HOST_UNSUPPORTED` | Claude용 `oah call --launcher native`가 저장소에서도 Claude 폴더에서도 `.claude/agents/oah-<tier>.md`를 찾지 못해, 호스트가 띄울 서브에이전트가 없다. | `oah init`으로 단 에이전트 파일을 쓴 뒤 다시 제안한다. |
 | `OAH_NATIVE_OFFER_STALE` | `oah call settle`이 제안 뒤에 무언가 바뀐 것을 찾았다. 작업, 의도, 패킷, 범위, 리스, 설계, 전달한 스킬 본문, 호스트 대상, 브리프 가운데 하나가 바뀌었거나 제안이 24시간을 넘었다. 옛 제안은 증거로 남는다. | `oah call --launcher native`로 다시 제안하고 새 run을 정산한다. |

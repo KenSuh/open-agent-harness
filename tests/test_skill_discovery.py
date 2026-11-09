@@ -108,6 +108,10 @@ class DiscoveryRepo(CoverageRepo):
 
         transport = Transport(git_url=self.git_url, getter=no_api)
         self.enterContext(mock.patch.object(review, "TRANSPORT", transport))
+        from tests.e_qualification import patches
+
+        for patch in patches():
+            self.enterContext(patch)
         self.skills_state = self.state(self.repo) / "skills"
 
     def git_url(self, locator: str) -> str:
@@ -752,8 +756,9 @@ class CoverageLinkTest(DiscoveryRepo, unittest.TestCase):
         with self.assertRaises(ValueError):  # only skillpack's admission of a design or a task runs it
             discovery.refresh_links(skillpack.explore(4), {"stages": []}, state_dir=self.state(self.repo),
                                     allow=["MIT"])
-        with self.assertRaises(ValueError):
+        with self.assertRaises(skillpack.PackRefused) as caught:
             discovery.refresh_links(None, {"stages": []}, state_dir=self.state(self.repo), allow=["MIT"])
+        self.assertEqual(caught.exception.reason, "admission")
 
     def test_refresh_links_defers_what_the_budget_does_not_cover(self):
         from oah import discovery, skillpack

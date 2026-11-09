@@ -384,6 +384,7 @@ def prepare_task(admitted, needs: Sequence[Mapping], *, state_dir, settings: Map
     from oah import skillpack
     from oah.atomic import write_text_atomic
 
+    skillpack.require(admitted)
     if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind != "dispatch" \
             or admitted.operation.task != basis.task:
         raise ValueError("prepare_task runs only under this task's dispatch admission")
@@ -392,6 +393,7 @@ def prepare_task(admitted, needs: Sequence[Mapping], *, state_dir, settings: Map
     expires = checked + dt.timedelta(hours=float(settings["cache_hours"]))
     out = []
     for item in needs:
+        skillpack.require(admitted)
         public, local = queries(item)
         if reuse:
             current = selection_for(state_dir, item, lease_id=basis.lease[0]) if item["design"] is None else None
@@ -403,7 +405,8 @@ def prepare_task(admitted, needs: Sequence[Mapping], *, state_dir, settings: Map
         for query in public:
             if not settings["enabled"] or settings["provider"] != providers.PROVIDER:
                 break
-            cached = providers.cached(query["text"], state_dir=state_dir, settings=settings, now=now)
+            cached = providers.cached(query["text"], state_dir=state_dir, settings=settings, now=now,
+                                      admitted=admitted)
             if cached is None and requests >= budget:
                 deferred.append({"query": query["text"], "outcome": "deferred", "reason": "budget"})
                 continue

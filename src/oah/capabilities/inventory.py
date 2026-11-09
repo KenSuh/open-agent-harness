@@ -410,6 +410,9 @@ class EventSink:
         self.closed: dict[str, dict] = {}
         self.records: list[dict] = []
         self.observation = None
+        from oah.capabilities.usage import AvailableUsage
+
+        self.usage = AvailableUsage()
 
     def _stop(self, reason: str, detail: str) -> str:
         if self.reason is None:
@@ -511,6 +514,7 @@ class EventSink:
         session = event.get("session_id")
         if session is not None and session != self.session:
             return self._stop("other-session", "a stream event belongs to another session")
+        self.usage.event(event)
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         parts = [part for part in content if isinstance(part, dict)] if isinstance(content, list) else []
@@ -587,7 +591,8 @@ class EventSink:
                        "init": self.summary, "invocations": self.records, "omitted": self.omitted,
                        "inspected_bytes": self.inspected, "uninspected_events": self.uninspected,
                        "inspection": "truncated" if self.truncated else "complete",
-                       "returncode": returncode, "quiescent": bool(quiescent)}
+                       "returncode": returncode, "quiescent": bool(quiescent),
+                       "available_usage": self.usage.record()}
         observation["digest"] = digest(observation)
         self.observation = observation
         return observation

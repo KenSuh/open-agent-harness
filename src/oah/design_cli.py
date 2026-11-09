@@ -382,6 +382,11 @@ def _stage_advisor(store, view, snapshot):
     the design's own text is the one authored field, so nothing is sent unless send_design_text is on. The answer is
     applied only after the judge's recheck against the same frontier, revision and text."""
 
+    from oah import skillpack
+
+    admitted = skillpack.inspect((snapshot.project, snapshot.design, snapshot.revision, snapshot.digest),
+                                 max_queries=1)
+
     def advise(options: dict) -> dict:
         import hashlib
 
@@ -407,11 +412,11 @@ def _stage_advisor(store, view, snapshot):
             sort_keys=True).encode("utf-8")).hexdigest()
         request = judge.Request("design-stage", "design-stage/v1", tuple(fields), tuple(options), input_ref=input_ref)
         result = judge.judge(request, config=config, policy=policy, sources=sources, view=view, env=os.environ,
-                             state_dir=store.state, budget=judge.Budget(1))
+                             state_dir=store.state, budget=judge.Budget(1), admitted=admitted)
         if not result.status.startswith("used"):
             return {"status": result.status, "applied": False, "choice": None, "reason": None}
         applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, view=view,
-                              request=request, policy=policy)
+                              request=request, policy=policy, admitted=admitted)
         chosen = applied.applied and applied.outcomes.get("outcome") == "chosen"
         return {"status": result.status, "applied": chosen, "choice": applied.outcomes.get("choice") if chosen else None,
                 "reason": None if chosen else (applied.outcomes.get("outcome") if applied.applied else applied.reason)}

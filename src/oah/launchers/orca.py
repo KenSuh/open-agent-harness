@@ -273,6 +273,9 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings, 
                 "model": data.get("resolved_model"), "launch_effort": data.get("launch_effort"),
                 "cli_version": data.get("cli_version"), "warnings": data.get("warnings"),
                 "timeout_s": launcher.get("timeout_s")}
+    e_digest = call.prepared_e_digest(run)
+    if e_digest is not None:
+        expected["e_digest"] = e_digest
     if (not isinstance(saved, dict) or set(saved) != set(expected) or
             any(saved[key] != value for key, value in expected.items()) or
             data.get("run_id") != run.id or data.get("task") != run.task or

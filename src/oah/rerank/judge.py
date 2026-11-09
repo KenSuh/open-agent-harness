@@ -702,17 +702,35 @@ def _notice(state_dir: pathlib.Path | None, kind: str, notify: Callable[[str], N
         return
 
 
+E_RUBRICS = frozenset({"skill-fit/v1", "skill-search/v1", "design-stage/v1", "capability-needs/v1",
+                      "capability-select/v1"})
+
+
+def _admitted(rubric, admitted) -> bool:
+    if rubric not in E_RUBRICS:
+        return True
+    from oah import skillpack
+
+    try:
+        skillpack.require(admitted)
+        return True
+    except skillpack.PackRefused:
+        return False
+
+
 def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=None, brief_disabled: bool = False,
           env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
           providers: Mapping[str, Provider] | None = None, state_dir: pathlib.Path | None = None,
           budget: Budget | None = None, notify: Callable[[str], None] | None = None,
-          task_view: TaskView | None = None) -> Judgement:
+          task_view: TaskView | None = None, admitted=None) -> Judgement:
     """One advisory outcome for a closed purpose, or `unused(<reason>)` with nothing sent.
 
     With `sources` (and `view` for design text, `task_view` for task text) every slice is read again from its
     verified origin before sending."""
     provider = key = None
     try:
+        if not _admitted(request.rubric, admitted):
+            return Judgement(unused("admission"), request.purpose, None)
         if request.purpose not in PURPOSES or request.rubric not in RUBRICS \
                 or RUBRICS[request.rubric].purpose != request.purpose:
             return Judgement(unused("scope"), str(request.purpose), None)
@@ -772,7 +790,7 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         cached = judgement_cache.load(state_dir, key_id, identity, moment, float(settings["cache_hours"]))
         if cached is not None and not recheck(cached, sources=sources, view=view, policy=policy,
                                               provider=identity["provider"], model=model, config=config,
-                                              task_view=task_view):
+                                              task_view=task_view, admitted=admitted):
             try:
                 answers = _valid_answers(cached["answers"], questions)
                 outcome, choice, labels, level = _read(RUBRICS[request.rubric], answers, identity["thresholds"])
@@ -791,7 +809,18 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
             _notice(state_dir, "design", notify)
         if has_task:
             _notice(state_dir, "task", notify)
-        raw, status = _call(lambda: provider.judge(state, questions, key=key, config=config))
+        if not _admitted(request.rubric, admitted):
+            return Judgement(unused("admission"), request.purpose, None)
+        if request.rubric in E_RUBRICS:
+            from oah.discovery import attempts
+
+            with attempts.request("skill-judge", key_id, state=state_dir,
+                                  preparation=str(admitted.prepared.record()["digest"])) as fact:
+                raw, status = _call(lambda: provider.judge(state, questions, key=key, config=config))
+                if fact is not None:
+                    fact["outcome_digest"] = cache_key({"status": status})
+        else:
+            raw, status = _call(lambda: provider.judge(state, questions, key=key, config=config))
         if status == USED and isinstance(RUBRICS[request.rubric], OptionNoulRubric) and isinstance(raw, Mapping) \
                 and set(raw) < set(questions):
             status = unused("error:dropped")  # the reply leaves a candidate out: no rank from a partial answer
@@ -906,12 +935,15 @@ def _read(rubric, answers: Mapping[str, Mapping], thresholds: Mapping = THRESHOL
 
 
 def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, provider: str | None,
-            model: str | None, config: Mapping | None = None, task_view: TaskView | None = None) -> list[str]:
+            model: str | None, config: Mapping | None = None, task_view: TaskView | None = None,
+            admitted=None) -> list[str]:
     """Why a result or cached record may not be applied now ([] when every identity still holds)."""
     from oah.design.sources.state import StateProblem
 
     record = judgement.to_record() if isinstance(judgement, Judgement) else dict(judgement)
     identity = record.get("identity")
+    if isinstance(identity, Mapping) and not _admitted(identity.get("rubric"), admitted):
+        return ["admission"]
     if record.get("status") not in (USED, "used(cache)") or not isinstance(identity, Mapping):
         return ["not-used"]
     if config is not None and not config.get("enabled", False):
@@ -972,7 +1004,7 @@ class Applied:
 
 def apply(judgement: Judgement | Mapping, *, current_input_ref: str, config: Mapping, sources=None,
           view=None, request: Request | None = None, policy: str | None = None,
-          task_view: TaskView | None = None) -> Applied:
+          task_view: TaskView | None = None, admitted=None) -> Applied:
     record = judgement.to_record() if isinstance(judgement, Judgement) else dict(judgement)
     identity = record.get("identity") or {}
     if record.get("status") not in (USED, "used(cache)"):
@@ -986,7 +1018,7 @@ def apply(judgement: Judgement | Mapping, *, current_input_ref: str, config: Map
     if provider == "typesafe" and not model:
         model = DEFAULT_MODEL
     reasons = recheck(record, sources=sources, view=view, policy=effective_policy, provider=provider,
-                      model=model, config=config, task_view=task_view)
+                      model=model, config=config, task_view=task_view, admitted=admitted)
     if reasons:
         return Applied(False, reasons[0], {}, None)
     if request is not None:

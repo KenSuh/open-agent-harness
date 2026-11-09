@@ -182,8 +182,12 @@ These appear in v0.3.0.
 
 ## Design coverage, skills and capabilities
 
-[Skills and capabilities](skills-and-capabilities.md) explains these steps. Every refusal below happens before a
-run folder exists or anything is spent.
+[Skills and capabilities](skills-and-capabilities.md) explains these steps. Initial deterministic admission and
+capacity refusals happen before a run folder or spend. Later preparation, receiving or settlement refusals can
+follow started requests or a child process. Inspect `state/skills/attempts/*.json` for bounded per-attempt request
+facts and `capabilities-receiving.json` in the run for available usage before retrying. Unknown totals are recorded
+as unknown, never zero; an observed partial count is not a total. What it costs you: a failed attempt may still
+have used requests or tokens, and that remains inspectable before retry.
 
 | Code | What it means | What to do next |
 |---|---|---|
@@ -203,7 +207,7 @@ run folder exists or anything is spent.
 | `OAH_SKILL_RECEIVING_FAILED` | A Claude run that read skill references ended, but oah could not write `skills-receiving.json` in its run folder, so the run does not count. | Check that the run folder is writable (disk space, permissions), then call again. |
 | `OAH_CAPABILITY_RECEIVING_FAILED` | A Claude run whose stream oah checked while it ran ended, but oah could not write `capabilities-receiving.json` in its run folder, so the run does not count. | Check that the run folder is writable (disk space, permissions), then call again. |
 | `OAH_SKILL_NOT_DELIVERABLE` | A required skill cannot be delivered. The reason is in brackets: `user-only`, `license`, `host`, `marker`, `pin-mismatch`, or `changed` when an installed copy, a referenced file or the lead's task selection changed just before launch. Nothing was launched. | For `changed` or `pin-mismatch`, restore the copy or review again and relink. For the others, link another skill or drop that dispatch stage from the need. |
-| `OAH_SKILLS_BUDGET_EXCEEDED` | The skill texts or the whole brief are over their byte budget, or there are more than 128 items. The message lists each skill's size. | Split the task, or unlink optional skills, then call again. |
+| `OAH_SKILLS_BUDGET_EXCEEDED` | `(target-capacity-unknown)`: the exact route has no current evidence-pinned capacity profile; the packaged registry currently has no real qualified profiles. Otherwise inline skills, the whole reachable render including required reads, design bytes or target tokens exceed their independent limit, or payloads exceed 128. Measured refusals show totals. | Use inline or smaller material outside managed delivery, split the task or drop optional material. Managed delivery requires a reviewed measured profile with evidence and expiry; a configured context count is insufficient. |
 | `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run` named a run that has no skill bundle, or `oah call settle` named a run that has no native offer. | Check the run id. A run without linked skills has nothing to read, and only a run from `oah call --launcher native` can be settled. |
 | `OAH_SKILL_HOST_UNSUPPORTED` | `oah call --launcher native` for Claude found no `.claude/agents/oah-<tier>.md` in the repository or your Claude folder, so the host has no subagent to start. | Run `oah init` to write the tier agents, then offer again. |
 | `OAH_NATIVE_OFFER_STALE` | `oah call settle` found that something changed after the offer: the task, intent, packet, scope, lease, design, delivered skill texts, host target or brief, or the offer is older than 24 hours. The old offer is kept as evidence. | Offer again with `oah call --launcher native` and settle the new run. |

@@ -267,7 +267,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False),
         parent_inventory=(str(pathlib.Path(args.parent_inventory).resolve())
                           if getattr(args, "parent_inventory", None) else None),
-        relay_results=tuple(getattr(args, "relay_result", None) or ()),
+        relay_results=tuple(getattr(args, "relay_result", None) or ()), route=launcher,
         skill_needs=(str(pathlib.Path(args.skill_needs).resolve()) if getattr(args, "skill_needs", None) else None))
     try:
         prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
