@@ -1,4 +1,4 @@
-# 설계 명령 — oah design project/new/save/accept/status/show/context/check/reconcile/recover/task/carry 의 인자, 입력 읽기, 출력 형식, 종료 코드를 맡는다.
+# 설계 명령 — oah design project/new/save/accept/status/show/context/check/coverage/reconcile/recover/task/carry 의 인자, 입력 읽기, 출력 형식, 종료 코드를 맡는다.
 from __future__ import annotations
 
 import argparse
@@ -99,6 +99,22 @@ def register(commands: argparse._SubParsersAction) -> None:
     check.add_argument("--revision", type=int, required=True)
     check.add_argument("--digest", required=True)
     check.add_argument("--accepted", action="store_true", help="compare with the accepted revision instead")
+
+    coverage = sub.add_parser("coverage", help="the nine design stages: status, re-checks, skills and gaps "
+                              "(reads only), or `coverage edit` to build a new coverage part",
+                              usage="oah design coverage P D [--revision N | --accepted] [--json] [--check]\n"
+                              "       oah design coverage edit P D --from EDITS.json [--lang en|ko] [--out FILE]",
+                              description="Reads only. `edit` writes nothing to the design: it prints the new coverage "
+                              "part and the exact `oah design save` command that stores it.")
+    coverage.add_argument("words", nargs="+", metavar="[edit] P D", help="the project and design, after `edit` to "
+                          "build a new part")
+    coverage.add_argument("--revision", type=int, help="read this revision instead of the current one")
+    coverage.add_argument("--accepted", action="store_true", help="read the accepted revision")
+    coverage.add_argument("--json", action="store_true")
+    coverage.add_argument("--check", action="store_true", help="exit 1 (OAH_COVERAGE_INCOMPLETE) unless complete")
+    coverage.add_argument("--from", dest="from_file", metavar="EDITS.json", help="edit: a CoverageEditV1 file")
+    coverage.add_argument("--lang", choices=("en", "ko"), help="edit: the language of the human section")
+    coverage.add_argument("--out", help="edit: write the new part to this new file instead of standard output")
 
     reconcile = sub.add_parser("reconcile", help="rewrite the design pages and lists from the records")
     reconcile.add_argument("project", nargs="?")
@@ -342,6 +358,124 @@ def _check(args: argparse.Namespace, store) -> int:
     error = DesignError(CHECK_CODES[state], f"{binding.line()} is {state}: {reason}")
     print(error, file=sys.stderr)
     return error.exit_code
+
+
+def _coverage_evidence(store):
+    from oah.design import coverage
+
+    return coverage.NO_EVIDENCE
+
+
+def _quote(arg: str) -> str:
+    import shlex
+    import subprocess
+
+    return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
+
+
+def _coverage(args: argparse.Namespace, store) -> int:
+    from oah.design import coverage
+    from oah.design.model import check_id
+
+    words = args.words
+    editing = len(words) == 3 and words[0] == "edit"
+    if not editing and len(words) != 2:
+        raise DesignError(INPUT_INVALID_CODE, "use `oah design coverage P D` or `oah design coverage edit P D --from "
+                          "EDITS.json`")
+    project, design = check_id(words[-2]), check_id(words[-1], "design")
+    if editing:
+        if args.revision is not None or args.accepted or args.json or args.check:
+            raise DesignError(INPUT_INVALID_CODE, "coverage edit takes --from, --lang and --out only")
+        return _coverage_edit(args, store, project, design)
+    if args.from_file or args.lang or args.out:
+        raise DesignError(INPUT_INVALID_CODE, "--from, --lang and --out belong to `oah design coverage edit`")
+    if args.revision is not None and args.accepted:
+        raise DesignError(INPUT_INVALID_CODE, "give --revision or --accepted, not both")
+    context = store.context(project, design)
+    if args.accepted:
+        if context.accepted is None:
+            raise DesignError(NOT_FOUND_CODE, f"{project}/{design} has no accepted revision yet")
+        snapshot, source = context.accepted, "accepted"
+    elif args.revision is not None:
+        snapshot, source = store.snapshot(project, design, args.revision), "revision"
+    else:
+        snapshot, source = context.current, "current"
+    record = coverage.read(snapshot.texts)
+    report = coverage.evaluate(record, snapshot.texts, evidence=_coverage_evidence(store))
+    data = {"project": project, "design": design, "revision": snapshot.revision, "digest": snapshot.digest,
+            "source": source, **report}
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        lines = [f"OAH_COVERAGE {project}/{design} r{snapshot.revision} {snapshot.digest} ({source}) "
+                 f"complete={'yes' if report['complete'] else 'no'}"]
+        for stage in report["stages"]:
+            extra = []
+            if stage["recheck"]:
+                extra.append("re-check: " + ", ".join(stage["recheck_reasons"]))
+            if stage["open"]:
+                extra.append("open: " + ", ".join(stage["open"]))
+            lines.append(f"  {stage['id']:<10} {stage['status']:<15} {'; '.join(extra)}".rstrip())
+        lines.append("frontier: " + (", ".join(report["frontier"]) or "-"))
+        if report["blocking"]:
+            lines.append("blocking:")
+            lines.extend(f"  {item}" for item in report["blocking"])
+        _print(lines)
+    if args.check and not report["complete"]:
+        error = coverage.CoverageError(coverage.INCOMPLETE_CODE, f"{project}/{design} r{snapshot.revision} is not "
+                                       "complete:\n  " + "\n  ".join(report["blocking"]))
+        print(error, file=sys.stderr)
+        return EXIT_REFUSED
+    return EXIT_OK
+
+
+def _coverage_edit(args: argparse.Namespace, store, project: str, design: str) -> int:
+    import hashlib
+
+    from oah.design import coverage
+    from oah.design.sources.state import StateProblem, loads
+
+    if not args.from_file:
+        raise DesignError(INPUT_INVALID_CODE, "coverage edit needs --from EDITS.json (a CoverageEditV1 file)")
+    try:
+        raw = (sys.stdin.read(coverage.MAX_EDIT_BYTES + 1) if args.from_file == "-"
+               else read_source(pathlib.Path(args.from_file)))
+    except SourceError as exc:
+        raise coverage.CoverageError(coverage.INVALID_CODE, str(exc)) from None
+    if len(raw.encode("utf-8")) > coverage.MAX_EDIT_BYTES:
+        raise coverage.CoverageError(coverage.INVALID_CODE, f"the edit is over {coverage.MAX_EDIT_BYTES} bytes")
+    try:
+        envelope = loads(raw.encode("utf-8"), "the coverage edit")
+    except StateProblem as exc:
+        raise coverage.CoverageError(coverage.INVALID_CODE, exc.detail) from None
+    coverage.check_envelope(envelope)
+    snapshot = store.context(project, design).current
+    ref = {"project": project, "design": design, "revision": snapshot.revision, "digest": snapshot.digest}
+    record = coverage.read(snapshot.texts, args.lang or "en")
+    if args.lang:
+        record["lang"] = args.lang
+    new = coverage.apply(record, envelope, texts=snapshot.texts, ref=ref, evidence=_coverage_evidence(store))
+    text = coverage.render(new)
+    event = f"coverage-r{snapshot.revision}-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
+    target = os.path.abspath(args.out) if args.out else "FILE"
+    command = ["oah", "design", "save", project, design, "--expect-revision", str(snapshot.revision),
+               "--expect-digest", snapshot.digest, "--part", f"coverage={target}", "--reason",
+               coverage.summary(envelope), "--event", event]
+    line = " ".join(_quote(part) for part in command)
+    if args.out:
+        out = pathlib.Path(target)
+        if os.path.lexists(out):
+            raise coverage.CoverageError(coverage.INVALID_CODE, f"{out} exists; --out takes a new file name")
+        out.write_bytes(text.encode("utf-8"))
+        print(f"OAH_COVERAGE_EDIT {project}/{design} from r{snapshot.revision} {snapshot.digest}: wrote {out} "
+              f"({len(envelope['ops'])} op(s))")
+        print(line)
+    else:
+        sys.stdout.write(text)
+        print(f"OAH_COVERAGE_EDIT {project}/{design} from r{snapshot.revision} {snapshot.digest}: save the part above "
+              "to a file, then run", file=sys.stderr)
+        print(line, file=sys.stderr)
+    return EXIT_OK
 
 
 def _reconcile(args: argparse.Namespace, store) -> int:
@@ -858,5 +992,5 @@ def _carry(args: argparse.Namespace, store) -> int:
 
 
 HANDLERS = {"project": _project, "new": _new, "save": _save, "accept": _accept, "status": _status, "show": _show,
-            "context": _context, "check": _check, "reconcile": _reconcile, "recover": _recover, "task": _task,
-            "carry": _carry}
+            "context": _context, "check": _check, "coverage": _coverage, "reconcile": _reconcile,
+            "recover": _recover, "task": _task, "carry": _carry}
