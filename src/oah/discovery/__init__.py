@@ -151,12 +151,13 @@ def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.date
          notify: Callable[[str], None] | None = None) -> dict:
     """Run the needs' public queries within the admitted budget and gather seeds and installed skills.
 
-    `admitted` is skillpack's Admitted value of a `public-explore` operation (E-DR3-F01): its explicit request budget
-    is the only one, and every external search carries it."""
+    `admitted` is skillpack's Admitted value of a taskless operation (E-DR3-F01): `design-inspect` for a design's
+    needs, `public-explore` for a bare search. Its explicit request budget is the only one, every external search
+    carries it, and the report records the operation."""
     from oah import skillpack
 
-    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind != "public-explore":
-        raise ValueError("discovery.find runs only under a public-explore admission (skillpack.explore)")
+    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind not in skillpack.TASKLESS:
+        raise ValueError("discovery.find runs only under a taskless admission (skillpack.inspect or explore)")
     budget, requests = admitted.allows_requests(), 0
     entries = []
     for need in needs:
@@ -191,8 +192,8 @@ def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.date
         installed = providers.installed_candidates(terms, roots)
     failures = [entry["outcome"] for entry in entries if entry["outcome"] not in
                 ("ok", "zero-results", "deferred", "local-only", "not-searched")]
-    return {"version": FIND_VERSION, "provider": provider, "budget": budget, "requests": requests,
-            "needs": entries, "seeds": seeds, "installed": installed,
+    return {"version": FIND_VERSION, "operation": admitted.operation.to_json(), "provider": provider,
+            "budget": budget, "requests": requests, "needs": entries, "seeds": seeds, "installed": installed,
             "outcome": failures[0] if failures else "ok"}
 
 

@@ -142,14 +142,17 @@ class DeliveryTask(DesignTask):
         start = prompt.index("## Skill texts\n")
         return prompt[start:prompt.index(END) + len(END) + 1]
 
-    def assert_refused_before_any_run(self, result: subprocess.CompletedProcess, code: str) -> None:
+    def assert_refused_before_any_run(self, result: subprocess.CompletedProcess, code: str,
+                                      planner: tuple[str, ...] = ("skills", "plan", "--task", "t1", "--stage",
+                                                                  "initial")) -> None:
+        """Refused before any run, spend or engine start; the read-only planner refuses with the same code."""
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertTrue(result.stderr.startswith(code), result.stderr)
         self.assertIn("nothing was launched", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.record.exists(), "the fake engine was started")
         self.assertEqual(self.runs(), [], "a run folder was created")
-        planned = self.oah("skills", "plan", "--task", "t1", "--stage", "initial")
+        planned = self.oah(*planner)
         self.assertEqual(planned.returncode, 1, planned.stdout + planned.stderr)
         self.assertTrue(planned.stderr.startswith(code), planned.stderr)
         self.assertEqual(self.runs(), [])
@@ -432,6 +435,33 @@ class PackUnitTest(unittest.TestCase):
         self.assertEqual(skillpack.explore(3).allows_requests(), 3)
         self.assertEqual(skillpack.Admitted(skillpack.Operation("dispatch", task="t1", lease=("l", 1)))
                          .allows_requests(), 0)
+
+    def test_taskless_operations_name_their_authority_and_never_deliver(self):
+        """E-DR3-F01: design-inspect names the verified snapshot it reads; neither taskless kind carries task authority."""
+        from oah import skillpack
+
+        snapshot = ("acme", "booking", 1, "sha256:" + "0" * 64)
+        for bad in ({}, {"design": ("acme", "booking")}, {"design": snapshot, "task": "t1"},
+                    {"design": snapshot, "lease": ("l", 1)}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                skillpack.Operation("design-inspect", **bad)
+        with self.assertRaises(ValueError):
+            skillpack.Operation("public-explore", design=snapshot)  # a design read is design-inspect
+        with self.assertRaises(ValueError):
+            skillpack.Operation("dispatch", task="t1", lease=("l", 1), design=snapshot)  # its own task's design
+        inspected = skillpack.inspect(snapshot, max_queries=2)
+        self.assertEqual(inspected.allows_requests(), 2)
+        self.assertEqual(inspected.operation.to_json(), {
+            "kind": "design-inspect", "task": None, "lease": None,
+            "design": {"project": "acme", "design": "booking", "revision": 1, "digest": snapshot[3]}})
+        self.assertEqual(skillpack.explore(1).operation.to_json(),
+                         {"kind": "public-explore", "task": None, "lease": None, "design": None})
+        for admitted in (inspected, skillpack.explore(4)):
+            with self.subTest(kind=admitted.operation.kind):
+                # Admission of a taskless operation never yields deliverable items, whatever design is at hand.
+                again = skillpack.admit(admitted.operation, task_design=object(), state_dir=pathlib.Path("unused"),
+                                        engine="claude", stage="initial")
+                self.assertEqual((again.items, skillpack.finalize(again)), ((), (None, None)))
 
     def test_a_provider_search_without_a_public_explore_admission_sends_nothing(self):
         import datetime as dt

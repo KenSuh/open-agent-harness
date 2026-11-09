@@ -171,12 +171,12 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitt
            purpose: Mapping | None = None) -> Search:
     """One search through the external provider (or its fresh cache); never raises for a provider failure.
 
-    Only a caller holding skillpack's Admitted value of a public exploration with a request budget may search; any
+    Only a caller holding skillpack's Admitted value of a taskless operation with a request budget may search; any
     other call refuses before the cache, the notice or the transport (E-DR3-F01)."""
     from oah import skillpack
 
-    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind != "public-explore":
-        raise ValueError("providers.search runs only under a public-explore admission (skillpack.explore)")
+    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind not in skillpack.TASKLESS:
+        raise ValueError("providers.search runs only under a taskless admission (skillpack.inspect or explore)")
     query_id = store.query_id(PROVIDER, query, PARSER)
     at = now.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
     if not settings["enabled"] or settings["provider"] != PROVIDER:

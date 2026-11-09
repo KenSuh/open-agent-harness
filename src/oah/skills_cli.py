@@ -440,7 +440,8 @@ def _license_allow(info: RepoInfo, discovery_settings: Mapping) -> list[str]:
     return list(check_settings(load_config(info.root).section("sources", SOURCE_DEFAULTS))["license_allow"])
 
 
-def _design_record(info: RepoInfo, ref: str) -> dict:
+def _design_snapshot(info: RepoInfo, ref: str) -> tuple[dict, tuple[str, str, int, str]]:
+    """The current revision's coverage record and the verified snapshot identity it was read from."""
     from oah.design import coverage
     from oah.design.model import check_id
     from oah.design.store import open_store
@@ -450,7 +451,11 @@ def _design_record(info: RepoInfo, ref: str) -> dict:
         raise Refused("OAH_SKILLS_USAGE", "--design is PROJECT/DESIGN, such as acme/booking")
     project, design = check_id(project), check_id(design, "design")
     snapshot = open_store(info.root).context(project, design).current
-    return coverage.read(snapshot.texts)
+    return coverage.read(snapshot.texts), (project, design, snapshot.revision, snapshot.digest)
+
+
+def _design_record(info: RepoInfo, ref: str) -> dict:
+    return _design_snapshot(info, ref)[0]
 
 
 def _roots(info: RepoInfo, state: pathlib.Path, settings: Mapping) -> list:
@@ -466,12 +471,12 @@ def _find(args: argparse.Namespace) -> int:
     _lead_only("find")
     info, state, _home = _context()
     settings, found_settings = _discovery_settings(info)
-    record = None
+    record = snapshot = None
     if args.design:
         if args.tech:
             raise Refused("OAH_SKILLS_USAGE", "--tech describes a need without a design; with --design the "
                           "design's own technology decisions are used")
-        record = _design_record(info, args.design)
+        record, snapshot = _design_snapshot(info, args.design)
     tech = discovery.parse_tech(args.tech)
     needs = discovery.needs_for(stage=args.design_stage, check=args.check, tech=tech, record=record)
     view = record if record is not None else {"tech": tech, "stages": []}
@@ -489,9 +494,13 @@ def _find(args: argparse.Namespace) -> int:
                                          needs=needs, settings=found_settings)
     from oah import skillpack
 
-    # A taskless exploration: its own closed operation with only the configured request budget (E-DR3-F01).
+    # Taskless: a design's needs are a design-inspect of the snapshot read above, a bare search is public-explore;
+    # each is one closed operation with only the configured request budget and no delivery (E-DR3-F01).
+    budget = found_settings["max_queries"]
+    admitted = (skillpack.inspect(snapshot, max_queries=budget) if snapshot is not None
+                else skillpack.explore(budget))
     report = discovery.find(needs, state_dir=state, settings=found_settings, now=dt.datetime.now(dt.timezone.utc),
-                            provider=provider, view=view, admitted=skillpack.explore(found_settings["max_queries"]),
+                            provider=provider, view=view, admitted=admitted,
                             roots=_roots(info, state, settings), choice=choice,
                             notify=lambda notice: print(notice, file=sys.stderr))
     if args.json:

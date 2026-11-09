@@ -504,6 +504,32 @@ class ReviewTest(DiscoveryRepo, unittest.TestCase):
         self.assertEqual(record["source"]["locator"], "https://github.com/mattpocock/skills")
 
 
+class TasklessAdmissionTest(DiscoveryRepo, unittest.TestCase):
+    """E-DR3-F01: a current unaccepted draft with no task, packet, intent or lease, and a bare search, each pass one
+    closed taskless admission that names its own authority; the report round-trips it and grants no delivery."""
+
+    def test_draft_design_and_bare_search_carry_their_own_operation(self):
+        self.new_design({"purpose.users": "People who book lessons."})
+        revision, digest, _text = self.current()
+        context = json.loads(self.oah("design", "context", "acme", "booking")[1])
+        self.assertIsNone(context["accepted"])
+        self.assertFalse((self.state(self.repo) / "runs").exists())  # no task has ever run here
+        report, _ = self.find("--design", "acme/booking")
+        self.assertEqual(report["operation"], {"kind": "design-inspect", "task": None, "lease": None,
+                                               "design": {"project": "acme", "design": "booking",
+                                                          "revision": revision, "digest": digest}})
+        self.assertEqual(report["budget"], 4)
+        self.assertEqual(report["requests"], len(self.server.requests))  # the enabled positive reached the provider
+        self.assertGreater(report["requests"], 0)
+        bare, _ = self.find("--design-stage", "data", "--tech", "database=mysql", "--provider", "seed")
+        self.assertEqual(bare["operation"], {"kind": "public-explore", "task": None, "lease": None, "design": None})
+        self.assertEqual(json.loads(json.dumps(bare["operation"])), bare["operation"])
+        # A taskless record never authorizes worker delivery: planning a dispatch still needs a task's lease.
+        code, _out, err = self.skills("plan", "--task", "t1", "--stage", "initial", expect=None)
+        self.assertNotEqual(code, 0)
+        self.assertFalse((self.state(self.repo) / "runs").exists())
+
+
 class CandidatesTest(DiscoveryRepo, unittest.TestCase):
     """E-T07: PostgreSQL then MySQL — postgres reviews go stale, mysql is found, unchanged needs use the cache."""
 

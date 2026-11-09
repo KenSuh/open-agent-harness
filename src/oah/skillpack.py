@@ -20,6 +20,7 @@ import pathlib
 from typing import Mapping, Sequence
 
 OPERATIONS = ("dispatch", "design-inspect", "public-explore")
+TASKLESS = ("design-inspect", "public-explore")  # lead-only exploration: a request budget, never delivery
 BUNDLE_VERSION = 1
 BRIEF_BUDGET = 524288
 SKILL_BUDGET = 196608
@@ -50,25 +51,41 @@ class PackRefused(Exception):
 
 @dataclasses.dataclass(frozen=True)
 class Operation:
-    """One member of the closed operation union. A dispatch names its task and its checked lease."""
+    """One member of the closed operation union. A dispatch names its task and its checked lease; design-inspect
+    names the verified design snapshot it reads (project, design, revision, digest); public-explore names neither."""
 
     kind: str
     task: str | None = None
     lease: tuple[str, int] | None = None
-    design: tuple[str, str] | None = None
+    design: tuple[str, str, int, str] | None = None
     max_queries: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in OPERATIONS:
             raise ValueError(f"operation is one of {', '.join(OPERATIONS)}")
-        if self.kind == "dispatch" and (not self.task or self.lease is None):
-            raise ValueError("a dispatch operation needs its task and checked lease (TaskIdentity is mandatory)")
-        if self.kind == "public-explore" and self.task is not None:
-            raise ValueError("public exploration has no task; a task's skills come from its own dispatch")
+        if self.kind == "dispatch":
+            if not self.task or self.lease is None:
+                raise ValueError("a dispatch operation needs its task and checked lease (TaskIdentity is mandatory)")
+            if self.design is not None or self.max_queries:
+                raise ValueError("a dispatch reads its own task's design and sends no search")
+            return
+        if self.task is not None or self.lease is not None:
+            raise ValueError("a taskless operation carries no task or lease; a task's skills come from its own "
+                             "dispatch")
+        if self.kind == "public-explore" and self.design is not None:
+            raise ValueError("public exploration names no design; reading a design is design-inspect")
+        if self.kind == "design-inspect" and not (
+                isinstance(self.design, tuple) and len(self.design) == 4 and all(self.design[:2])
+                and isinstance(self.design[2], int) and str(self.design[3]).startswith("sha256:")):
+            raise ValueError("design-inspect names the verified snapshot it reads: project, design, revision and "
+                             "digest")
 
     def to_json(self) -> dict:
+        design = None
+        if self.design is not None:
+            design = dict(zip(("project", "design", "revision", "digest"), self.design))
         return {"kind": self.kind, "task": self.task, "lease": list(self.lease) if self.lease else None,
-                "design": "/".join(self.design) if self.design else None}
+                "design": design}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -83,7 +100,7 @@ class Admitted:
     stage: str | None = None
 
     def allows_requests(self) -> int:
-        return self.operation.max_queries if self.operation.kind == "public-explore" else 0
+        return self.operation.max_queries if self.operation.kind in TASKLESS else 0
 
 
 def _sha(data: bytes) -> str:
@@ -102,6 +119,12 @@ def _marker_line(text: str) -> bool:
 def explore(max_queries: int) -> Admitted:
     """Admission for a taskless public exploration: only the explicit request budget is granted (E-DR3-F01)."""
     return Admitted(Operation("public-explore", max_queries=max(0, int(max_queries))))
+
+
+def inspect(snapshot: tuple[str, str, int, str], *, max_queries: int) -> Admitted:
+    """Admission for a lead reading one verified design snapshot, accepted or not, with no task (E-DR3-F01). It
+    grants the explicit request budget only: no task authority and no delivery."""
+    return Admitted(Operation("design-inspect", design=tuple(snapshot), max_queries=max(0, int(max_queries))))
 
 
 def _installed_copy(name: str, roots) -> tuple[bytes, str] | None:
