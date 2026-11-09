@@ -144,7 +144,8 @@ class FixScratchCliTest(unittest.TestCase):
                 self.assertEqual(err.getvalue().strip(), expected)
                 self.assertIn("OAH_SCRATCH_UNSAFE", expected)
                 if passed_root:
-                    self.assertEqual(errors[0].base, str(root))
+                    assert root is not None
+                    self.assertEqual(errors[0].base, str(root.parent / "[REDACTED]" if credential else root))
                     self.assertIn("not an absolute path" if os.name == "nt" else "0755", errors[0].reason)
                     self.assertEqual(list(folder.iterdir()), [])
                     self.assertEqual(folder.stat().st_mode, recorded_mode)
@@ -153,6 +154,7 @@ class FixScratchCliTest(unittest.TestCase):
                     self.assertEqual(list(shared.iterdir()), [])
                     self.assertTrue(all(path.parent == default_base for path in created))
                 if credential:
+                    self.assertNotIn(marker, errors[0].base)
                     self.assertNotIn(marker, out.getvalue() + err.getvalue())
                     self.assertIn("[REDACTED]", expected)
                 if as_json:
