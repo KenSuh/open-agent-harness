@@ -55,6 +55,10 @@ for a design's needs. `--design-stage`, `--check` and `--tech LABEL=VALUE` narro
   and a screening of instruction-like lines. It installs nothing. Choose the folder with `--hit QUERY_ID:N` (a
   result of a stored search), `--seed ID`, or `--github OWNER/REPO --path PATH`. `--update REVIEW_ID` checks a
   reviewed source again.
+- `oah skills review --links P/D` checks again every reviewed skill that the design's current coverage links, one
+  fetch each, up to 16. A link whose upstream did not move prints nothing. A moved upstream is reviewed at its new
+  commit and printed as a proposal; the link keeps its pin until you link the new review and accept the design. A
+  check that fails says `failed, not checked` and the command exits 69.
 - `oah skills candidates --design P/D` lists stored reviews and search hits against the current decisions, and
   `oah skills read --review ID` prints a reviewed text framed as data. Neither sends anything.
 - Dispatched workers cannot search, review or read reviews (`OAH_SKILLS_WORKER_REFUSED`). Only the lead does.
@@ -79,6 +83,9 @@ it costs you: a technology oah has no public name for is not searched until you 
 
 **Outside text is data.** A skill's text never instructs `oah`, and a review only records what it found. What it
 costs you: a skill you find does nothing until you review it and link it with `coverage edit`.
+
+**A refresh proposes; it never moves a pin.** What it costs you: after an upstream skill changes, its new text
+reaches workers only after you read the proposed review, link it and accept the design again.
 
 ## Delivering skill texts to a worker
 

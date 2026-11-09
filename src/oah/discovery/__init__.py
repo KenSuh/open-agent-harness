@@ -259,6 +259,62 @@ def candidates(state_dir, needs: Sequence[Mapping], view: Mapping) -> list[dict]
     return out
 
 
+LINK_REFRESH_LIMIT = 16  # linked reviewed skills one refresh may check again; the rest are reported deferred
+LINK_OUTCOMES = ("unchanged", "changed", "failed", "deferred")
+
+
+def linked_reviews(record: Mapping, state_dir) -> list[dict]:
+    """The coverage links that stand on a stored, matching review, once per review, in coverage order."""
+    from oah.design import coverage
+
+    out, seen = [], set()
+    for link in coverage.links(record, evidence=store.ReviewEvidence(state_dir)):
+        if link["status"] == "linked" and link.get("review") and link["review"] not in seen:
+            seen.add(link["review"])
+            out.append(link)
+    return out
+
+
+def refresh_links(admitted, record: Mapping, *, state_dir, allow: list[str], now: dt.datetime | None = None,
+                  sources=None) -> list[dict]:
+    """Check again only the reviewed skills the coverage `record` links (DESIGN §4.5, AC5), in coverage order and
+    within the admission's request budget (each check is one collector fetch). An upstream whose pinned commit moved
+    is reviewed at its new commit and returned as a proposal to link that review; the link and its pin never change
+    here. A failed check is `failed`, never `unchanged`, and checks beyond the budget are `deferred`."""
+    from oah import skillpack
+    from oah.design import coverage
+    from oah.discovery import review as reviews
+
+    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind not in ("design-inspect", "dispatch"):
+        raise ValueError("refresh_links runs only under skillpack's admission of a design or a task")
+    budget, spent, out = min(admitted.allows_requests(), LINK_REFRESH_LIMIT), 0, []
+    for link in linked_reviews(record, state_dir):
+        old = store.get_review(state_dir, link["review"])
+        row = {"stage": link["stage"], "need_id": link.get("need_id"), "skill": link.get("skill"),
+               "review": link["review"], "commit": (link.get("pin") or {}).get("commit"), "outcome": "deferred",
+               "proposal": None, "detail": None, "environment": False}
+        out.append(row)
+        if spent >= budget:
+            row["detail"] = f"over this refresh's budget of {budget} checks"
+            continue
+        spent += 1
+        try:
+            fresh, _word = reviews.review(state_dir, repo=reviews.repo_of(old["source"]["locator"]),
+                                          path=old["source"]["path"], allow=allow, candidate=old["candidate"],
+                                          now=now, sources=sources, require_fresh=True)
+        except reviews.ReviewFailed as exc:
+            row.update(outcome="failed", detail=str(exc), environment=exc.environment)
+            continue
+        if coverage.review_pin(fresh) == link.get("pin"):
+            row["outcome"] = "unchanged"
+            continue
+        row.update(outcome="changed", proposal={
+            "review": fresh["id"], "commit": fresh["source"]["commit"], "status": fresh["status"],
+            "eligibility": fresh["license"]["eligibility"],
+            "action": "read the new review, then link it in the coverage and accept the design to move the pin"})
+    return out
+
+
 def record_read(state_dir, *, review: Mapping, at: str) -> dict:
     """An oah-mediated read of a reviewed body by the lead (data only; it grants no invocation authority)."""
     _word, stored = store.put_record(state_dir, READS, {

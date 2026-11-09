@@ -645,6 +645,70 @@ class CoverageLinkTest(DiscoveryRepo, unittest.TestCase):
         return {(link.get("seed") or link["skill"]): link for stage in self.stages(*extra).values()
                 for link in stage["skills"]}
 
+    def test_refresh_links_proposes_a_moved_upstream_and_never_moves_the_link(self):
+        from oah import discovery, skillpack
+
+        s1, w1 = self.paid_design()
+        s1_op, _ = self.link_op("data", "entities", s1, condition="tech:database=postgresql", seed="S1",
+                                mode="conditional", required_by="data.entities")
+        out, _, _ = self.edit([s1_op])
+        self.save_printed(out)
+        before = self.current()
+        unchanged = json.loads(self.skills("review", "--links", "acme/booking", "--json")[1])
+        self.assertEqual([(row["review"], row["outcome"], row["proposal"]) for row in unchanged["links"]],
+                         [(s1["id"], "unchanged", None)])  # w1 is reviewed but not linked: never checked
+        quiet = self.skills("review", "--links", "acme/booking")[1]
+        self.assertNotIn(s1["id"], quiet)  # an unchanged link stays quiet
+        self.assertIn("unchanged 1, changed 0, failed 0, deferred 0", quiet)
+
+        seed_repo = s1["source"]["locator"].split("github.com/", 1)[1].removesuffix(".git")
+        self.upstream(seed_repo, {f"{s1['source']['path']}/SKILL.md":
+                                  skill_md("supabase-postgres-best-practices", "Index every foreign key.\n")})
+        moved = json.loads(self.skills("review", "--links", "acme/booking", "--json")[1])
+        (row,) = moved["links"]
+        self.assertEqual(row["outcome"], "changed")
+        self.assertNotEqual(row["proposal"]["review"], s1["id"])
+        self.assertNotEqual(row["proposal"]["commit"], s1["source"]["commit"])
+        self.assertEqual((row["proposal"]["status"], row["proposal"]["eligibility"]), ("reviewed", "eligible"))
+        self.assertEqual(self.current(), before)  # no design write
+        self.assertEqual(self.skills_of()["S1"]["pin"]["commit"], s1["source"]["commit"])  # the pin stays
+        self.assertEqual(self.skills_of()["S1"]["status"], "linked")
+
+        self.upstreams[seed_repo] = self.repo / "no-such-upstream"
+        code, failed, err = self.skills("review", "--links", "acme/booking", expect=69)
+        self.assertIn("failed, not checked", failed)
+        self.assertIn("failed 1", failed)
+
+        with self.assertRaises(ValueError):  # only skillpack's admission of a design or a task runs it
+            discovery.refresh_links(skillpack.explore(4), {"stages": []}, state_dir=self.state(self.repo),
+                                    allow=["MIT"])
+        with self.assertRaises(ValueError):
+            discovery.refresh_links(None, {"stages": []}, state_dir=self.state(self.repo), allow=["MIT"])
+
+    def test_refresh_links_defers_what_the_budget_does_not_cover(self):
+        from oah import discovery, skillpack
+        from oah.design import coverage
+        from oah.design.store import open_store
+
+        s1, w1 = self.paid_design()
+        s1_op, _ = self.link_op("data", "entities", s1, condition="tech:database=postgresql", seed="S1",
+                                mode="conditional", required_by="data.entities")
+        w1_op, _ = self.link_op("access", "rules", w1, condition="applies:access", seed="W1", mode="conditional",
+                                required_by="access.rules")
+        out, _, _ = self.edit([s1_op, w1_op])
+        self.save_printed(out)
+        snapshot = open_store(self.repo).context("acme", "booking").current
+        record = coverage.read(snapshot.texts)
+        state = self.state(self.repo)
+        self.assertEqual([link["review"] for link in discovery.linked_reviews(record, state)], [s1["id"], w1["id"]])
+        admitted = skillpack.inspect(("acme", "booking", snapshot.revision, snapshot.digest), max_queries=1)
+        rows = discovery.refresh_links(admitted, record, state_dir=state, allow=["MIT"])
+        self.assertEqual([row["outcome"] for row in rows], ["unchanged", "deferred"])
+        self.assertIn("budget of 1", rows[1]["detail"])
+        none = skillpack.inspect(("acme", "booking", snapshot.revision, snapshot.digest), max_queries=0)
+        self.assertEqual([row["outcome"] for row in discovery.refresh_links(none, record, state_dir=state,
+                                                                            allow=["MIT"])], ["deferred", "deferred"])
+
     def test_paid_multi_organization_links_and_gap(self):
         s1, w1 = self.paid_design()
         before = self.skills_of()

@@ -125,6 +125,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     which.add_argument("--seed", metavar="ID", help="a catalog seed such as S1")
     which.add_argument("--github", metavar="OWNER/REPO", help="a GitHub repository (with --path)")
     which.add_argument("--update", metavar="REVIEW_ID", help="check a reviewed source again")
+    which.add_argument("--links", metavar="P/D", help="check again every reviewed skill the design's current "
+                       "coverage links; a moved upstream becomes a proposal, never a pin change")
     review.add_argument("--path", metavar="PATH", help="with --github: the skill folder inside the repository")
     review.add_argument("--json", action="store_true", help="print machine-readable JSON")
 
@@ -720,6 +722,8 @@ def _review(args: argparse.Namespace) -> int:
     allow = _license_allow(info, found_settings)
     if args.path and not args.github:
         raise Refused("OAH_SKILLS_USAGE", "--path goes with --github OWNER/REPO")
+    if args.links:
+        return _refresh_links(args, info, state, allow)
     if args.github:
         if not args.path:
             raise Refused("OAH_SKILLS_USAGE", "--github needs --path, the skill folder inside the repository")
@@ -757,6 +761,34 @@ def _review(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return EXIT_REFUSED
     return EXIT_OK
+
+
+def _refresh_links(args: argparse.Namespace, info, state: pathlib.Path, allow: list[str]) -> int:
+    """`review --links P/D`: the lead names the design, so its admission grants one check per linked skill, up to
+    discovery.LINK_REFRESH_LIMIT. An unchanged link prints nothing; a failed check exits 69."""
+    from oah import discovery, skillpack
+
+    record, snapshot = _design_snapshot(info, args.links)
+    linked = discovery.linked_reviews(record, state)
+    admitted = skillpack.inspect(snapshot, max_queries=min(len(linked), discovery.LINK_REFRESH_LIMIT))
+    rows = discovery.refresh_links(admitted, record, state_dir=state, allow=allow)
+    project, design, revision, digest = snapshot
+    if args.json:
+        print(json.dumps({"version": 1, "design": {"project": project, "design": design, "revision": revision,
+                                                   "digest": digest}, "links": rows}, indent=2, ensure_ascii=False))
+    else:
+        for row in rows:
+            if row["outcome"] == "changed":
+                proposal = row["proposal"]
+                print(f"{row['skill']} ({row['stage']}): upstream moved from {row['commit']} to "
+                      f"{proposal['commit']}; proposed review {proposal['review']} ({proposal['status']}, license "
+                      f"{proposal['eligibility']}): {proposal['action']}")
+            elif row["outcome"] in ("failed", "deferred"):
+                print(f"{row['skill']} ({row['stage']}): {row['outcome']}, not checked: {row['detail']}")
+        counts = {word: sum(row["outcome"] == word for row in rows) for word in discovery.LINK_OUTCOMES}
+        print(f"OAH_SKILL_LINKS {project}/{design} r{revision}: " + ", ".join(f"{word} {count}"
+                                                                        for word, count in counts.items()))
+    return EXIT_ENVIRONMENT if any(row["outcome"] == "failed" for row in rows) else EXIT_OK
 
 
 def _candidates(args: argparse.Namespace) -> int:

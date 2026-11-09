@@ -125,12 +125,17 @@ def references(text: str, folder: str, present: set[str]) -> list[dict]:
     return [{"path": path, "present": ok} for path, ok in sorted(found.items())][:64]
 
 
+FETCHED = ("unchanged", "changed", "recovered")  # collector results that reached the upstream now
+
+
 def review(state_dir, *, repo: str, path: str, candidate: Mapping, allow: list[str],
-           now: dt.datetime | None = None, sources: Sources | None = None) -> tuple[dict, str]:
+           now: dt.datetime | None = None, sources: Sources | None = None,
+           require_fresh: bool = False) -> tuple[dict, str]:
     """Pin, read and classify one skill folder; (ReviewedSkillV1, 'stored' | 'unchanged').
 
     A review whose snapshot, candidate, classification and policy equal a stored one returns that record unchanged,
-    so repeating a review (or `--update` with no upstream change) adds nothing."""
+    so repeating a review (or `--update` with no upstream change) adds nothing. With `require_fresh`, a check that
+    did not reach the upstream now (the collector kept its last verified commit) is ReviewFailed, never a review."""
     short, full, fields = identity(repo, path)
     try:
         store.remember_identity(state_dir, short, full, fields)
@@ -146,6 +151,10 @@ def review(state_dir, *, repo: str, path: str, candidate: Mapping, allow: list[s
     if "path-missing" in result.problems:
         sources.remove(short)
         raise ReviewFailed("path-unresolved", f"{repo} has no folder {path} at its current commit")
+    if require_fresh and result.result not in FETCHED:
+        raise ReviewFailed("collector", f"the collector could not check {repo} now ({result.result}: "
+                           f"{', '.join(result.problems) or 'no detail'}); its last verified commit was not checked "
+                           "again", environment=True)
     head = sources.head(spec)
     if head is None or head.verified is None:
         raise ReviewFailed("collector", f"the collector could not verify {repo} ({result.result}: "
