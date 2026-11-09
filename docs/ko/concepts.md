@@ -347,6 +347,9 @@ Artificial Analysis, https://artificialanalysis.ai/ 를 함께 보여 준다.
   더하거나 빼지는 않는다. 패킷 계획과 지시문, 실행 기록마다 `rerank=used`나 `rerank=unused(<이유>)`가 붙는다.
   [키](keys.md)를 참고한다.
 - 선택 기록은 상태 폴더의 로컬 파일에만 남고 어디로도 보내지 않는다.
+- **설계가 요구한 스킬은 고르지 않고 넘긴다.** 작업이 따르는 승인된 설계가 단계에 검토한 스킬을 연결하면
+  `oah call`이 정해진 규칙에 따라 그 스킬 본문을 브리프에 넣고, 재정렬기는 관여하지 않는다.
+  [스킬과 능력](skills-and-capabilities.md)을 참고한다.
 
 ## 영향 지도
 

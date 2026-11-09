@@ -177,6 +177,36 @@
 | `OAH_UPDATE_OFF` | `oah doctor` 알림이다. `.oah/config.toml`의 `[updates]`에 `after_finish`가 없어서 도구 업데이트가 꺼져 있다. | 켜려면 `after_finish = true`를 두고(그다음 `oah update`가 지금 패스를 돌린다), 계속 끄고 알림을 없애려면 `false`를 둔다. |
 | `OAH_UPDATE_UNSETTLED` | `oah doctor` 알림이다. 마지막 패스가 `updated`나 `current`가 아닌 결과를 남겼다. | 그 줄의 다음 단계를 따른 뒤 `oah update`를 실행한다. |
 
+## 설계 coverage, 스킬, 능력
+
+이 단계들은 [스킬과 능력](skills-and-capabilities.md)에서 설명한다. 아래 거절은 모두 run 폴더가 생기거나
+무엇이든 쓰기 전에 일어난다.
+
+| 코드 | 뜻 | 다음에 할 일 |
+|---|---|---|
+| `OAH_COVERAGE_INVALID` | coverage 부분이나 coverage 편집 파일이 형식을 어겼다. 모르는 키, 잘못된 값, 목록 순서를 벗어난 확인 항목, 256 KiB를 넘는 파일 등이다. | 메시지가 가리키는 필드를 고친다. 편집은 손으로 쓰지 말고 `oah design coverage edit`으로 만든다. |
+| `OAH_COVERAGE_EDITED` | coverage 부분의 사람이 읽는 절이 JSON 블록과 다르다. 대개 손으로 고친 뒤에 생긴다. | 바꾸려던 내용을 `coverage edit` 파일에 넣어 실행하고, 출력된 부분을 저장한다. |
+| `OAH_COVERAGE_INCOMPLETE` | `oah design coverage --check`의 결과다. 열린 단계, 다시 확인할 단계, 사용자 확인을 기다리는 단계, 결과에 영향이 있는 제안이나 미룸이 남아 있다. 메시지가 막는 항목을 모두 보여 준다. | 보여 준 항목을 `coverage edit`으로 하나씩 정리하고 저장한 뒤 다시 확인한다. |
+| `OAH_SKILL_DISCOVERY_FAILED` | skills.sh 검색이 성공하지 못했다. 시간 초과, 요청 제한, HTTP 오류, 예상과 다른 응답, 막히거나 끊긴 네트워크, 꺼진 검색 등이다. 이유는 괄호 안에 있다. 종료 코드는 69다. | seed, 설치된 스킬, 저장된 검토는 그대로 쓸 수 있다. 나중에 다시 하거나 `.oah/config.toml`의 `[skills.discovery]`를 확인한다. |
+| `OAH_SKILL_SOURCE_UNSUPPORTED` | oah가 고정할 수 있는 GitHub 저장소 폴더가 아니다. | `--github OWNER/REPO --path PATH`나 저장된 검색의 결과를 준다. |
+| `OAH_SKILL_REVIEW_FAILED` | 검토가 멈췄다. 라이선스나 `SKILL.md`가 없는 것처럼 스킬 자체의 문제면 1로, git이나 네트워크가 실패하면 69로 끝난다. 이유는 괄호 안에 있다. | 이유를 읽는다. 라이선스는 받아들일 때만 `license_allow`에 더하고, 아니면 다른 스킬을 고른다. |
+| `OAH_SKILL_STATE_CORRUPT` | oah 스킬 상태의 파일을 쓸 수 없다. oah는 그 파일을 고치거나 초기화하지 않는다. | 메시지에 나온 파일을 다른 곳으로 옮긴다. 다음번에 그 부분이 새로 시작한다. |
+| `OAH_SKILLS_WORKER_REFUSED` | 발주된 워커가 검색, 검토, 검토 읽기, 중계 결과 저장을 하려 했거나 다른 run의 묶음을 읽으려 했다. | 리드 세션에서 실행한다. 워커는 `oah skills read --run`으로 자기 run만 읽는다. |
+| `OAH_SKILLS_USAGE` | `oah skills` 옵션이 빠졌거나 다른 옵션과 맞지 않는다. | 메시지를 따른다. `oah skills <subcommand> --help`가 옵션을 보여 준다. |
+| `OAH_SKILL_MANDATORY_MISSING` | 이번 발주 단계의 필수 스킬 필요에 살아 있는 연결이 없거나, 연결된 스킬의 검토가 이 상태 폴더에 없다. 아무것도 시작하지 않았다. | 스킬을 검토하고 `coverage edit`으로 연결하거나 그 필요에 공백을 기록한 뒤 다시 호출한다. `oah skills plan`이 시작하지 않고 같은 답을 보여 준다. |
+| `OAH_SKILL_REFERENCE_UNAVAILABLE` | 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나 `<!-- oah`로 시작하는 줄을 담고 있다. 아무것도 시작하지 않았다. | 그 파일이 고정되도록 스킬을 다시 검토하거나, 연결에서 그 파일을 선택으로 바꾼다. |
+| `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유는 괄호 안에 있다. `user-only`, `license`, `host`, `marker`, `pin-mismatch`, 그리고 시작 직전에 설치본이 바뀌면 `changed`다. 아무것도 시작하지 않았다. | `changed`나 `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 나머지는 다른 스킬을 연결하거나 필요에서 그 발주 단계를 뺀다. |
+| `OAH_SKILLS_BUDGET_EXCEEDED` | 스킬 본문이나 브리프 전체가 바이트 예산을 넘었거나 항목이 128개를 넘었다. 메시지가 스킬마다 크기를 보여 준다. | 작업을 나누거나 선택 스킬의 연결을 끊은 뒤 다시 호출한다. |
+| `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run`이 스킬 묶음이 없는 run을 가리켰다. | run id를 확인한다. 연결된 스킬이 없는 run에는 읽을 것이 없다. |
+| `OAH_RUN_LAUNCH_INVALID` | 준비된 run의 저장 기록(리스 스냅샷, 의도 결속, 설계 기록, 스킬 기록 등)이 시작할 때 없거나 망가졌다. | `oah call`을 다시 실행해 새 run을 준비한다. |
+| `OAH_CAPABILITY_RELAY_REQUIRED` | 리드만 가진 필수 능력에 중계 결과가 필요하거나, 중계 결과가 낡았거나, 만료됐거나, 변조됐거나, 요청과 맞지 않는다. `oah capabilities relay`는 너무 크거나, oah 표시 줄을 담았거나, 비밀처럼 보이는 결과도 거절한다. 괄호 안에 이유가 없으면 리드가 아직 중계하지 않은 것이다. | `oah capabilities plan --task T --stage S --parent-inventory FILE`이 중계 요청을 출력한다. 요청된 도구를 직접 실행해 `oah capabilities relay`로 결과를 저장하고 `--relay-result HASH`로 다시 호출한다. 무엇이든 바뀌면 다시 중계한다. |
+| `OAH_CAPABILITY_UNAVAILABLE` | 필수 능력이 자식에 설정돼 있지 않거나 꺼져 있고, 리드의 목록에도 없다. | `--parent-inventory`로 리드의 목록을 주거나, 도구를 직접 설정한 뒤 다시 계획한다. |
+| `OAH_CAPABILITY_UNSUPPORTED` | 필수 능력에 쓸 수 있는 경로가 없다. 자식 설정에 이름만 있거나(`unknown-schema`, `pending-approval`), 격리된 리뷰 run이다(`review-isolated`). | initial이나 correction run이면 리드를 거쳐 중계한다. 리뷰는 중계를 받지 않으므로 리뷰 단계에서는 그 필요를 선택으로 둔다. |
+| `OAH_CAPABILITY_DEPENDENCY_UNSATISFIED` | 필수 의존이 채워지지 않았다. 설치되지 않았거나 꺼진 플러그인, 순환, 세 번을 넘는 의존 단계 등이다. 메시지가 그 고리를 적는다. | 플러그인을 직접 설치하거나 켜고, 또는 `[capabilities]`의 `requires`를 고친다. oah는 대신 하지 않는다. |
+| `OAH_CAPABILITY_INVENTORY_UNKNOWN` | 리드의 목록 파일이 없거나, 형식이 잘못됐거나, 변조됐거나, 300초보다 오래됐다. 종료 코드는 69다. | 새 목록을 써서 다시 넘긴다. |
+| `OAH_CAPABILITIES_USAGE` | `oah capabilities` 옵션이 빠졌거나, 작업에 살아 있는 리스가 없거나, 요청·호출·결과 파일을 읽을 수 없다. | 메시지를 따른다. `oah capabilities <subcommand> --help`가 옵션을 보여 준다. |
+| `OAH_CAPABILITIES_IO` | 능력 파일을 읽거나 쓰지 못했다. 종료 코드는 69다. | 권한과 남은 디스크 공간을 확인하고 다시 한다. |
+
 ## 그래도 막히면
 
 - `oah status`는 모든 리스와 각 리스가 살아 있는지 만료됐는지 보여 준다.

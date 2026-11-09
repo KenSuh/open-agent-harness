@@ -180,6 +180,36 @@ These appear in v0.3.0.
 | `OAH_UPDATE_OFF` | `oah doctor`: `.oah/config.toml` has no `after_finish` under `[updates]`, so tool updates are off. | Set `after_finish = true` to turn them on (then `oah update` runs a pass now), or `false` to keep them off and stop the notice. |
 | `OAH_UPDATE_UNSETTLED` | `oah doctor`: the last pass left a result that is not `updated` or `current`. | Follow the next step on that line, then run `oah update`. |
 
+## Design coverage, skills and capabilities
+
+[Skills and capabilities](skills-and-capabilities.md) explains these steps. Every refusal below happens before a
+run folder exists or anything is spent.
+
+| Code | What it means | What to do next |
+|---|---|---|
+| `OAH_COVERAGE_INVALID` | A coverage part or a coverage edit file breaks the format: an unknown key, a wrong value, a check out of catalog order, or a file over 256 KiB. | Fix the field the message names. Build edits with `oah design coverage edit`, not by hand. |
+| `OAH_COVERAGE_EDITED` | The readable section of a coverage part differs from its JSON block, usually after a hand edit. | Put the intended change into a `coverage edit` file, run it, and save the part it prints. |
+| `OAH_COVERAGE_INCOMPLETE` | `oah design coverage --check`: a stage is open, needs a re-check, waits for your confirmation, or has a proposal or deferral with outcome impact. The message lists each blocking item. | Settle each listed item with `coverage edit`, save, and check again. |
+| `OAH_SKILL_DISCOVERY_FAILED` | The skills.sh search did not succeed: a timeout, a rate limit, an HTTP error, an unexpected answer, a blocked or offline network, or search turned off. The reason is in brackets. Exit 69. | Seeds, installed skills and stored reviews still work. Retry later, or check `[skills.discovery]` in `.oah/config.toml`. |
+| `OAH_SKILL_SOURCE_UNSUPPORTED` | The source is not a GitHub repository folder oah can pin. | Give `--github OWNER/REPO --path PATH`, or a hit from a stored search. |
+| `OAH_SKILL_REVIEW_FAILED` | The review stopped. Exit 1 for a problem of the skill itself, such as no license or no `SKILL.md`; 69 when git or the network failed. The reason is in brackets. | Read the reason. Add a license to `license_allow` only if you accept it; otherwise choose another skill. |
+| `OAH_SKILL_STATE_CORRUPT` | A file in oah's skill state cannot be used. oah never repairs or resets it. | Move the named file aside; that part starts again next time. |
+| `OAH_SKILLS_WORKER_REFUSED` | A dispatched worker tried to search, review, read reviews or store a relay result, or to read another run's bundle. | Run it from the lead's session. A worker reads only its own run with `oah skills read --run`. |
+| `OAH_SKILLS_USAGE` | An `oah skills` option is missing or does not fit the others. | Follow the message; `oah skills <subcommand> --help` lists the options. |
+| `OAH_SKILL_MANDATORY_MISSING` | A required skill need for this dispatch stage has no live link, or the linked skill has no review in this state folder. Nothing was launched. | Review a skill and link it with `coverage edit`, or record a gap for the need, then call again. `oah skills plan` shows the same answer without launching. |
+| `OAH_SKILL_REFERENCE_UNAVAILABLE` | A required auxiliary file of a linked skill is not in the reviewed snapshot with its pinned digest, or it has a line starting with `<!-- oah`. Nothing was launched. | Review the skill again so the file is pinned, or mark the file optional in the link. |
+| `OAH_SKILL_NOT_DELIVERABLE` | A required skill cannot be delivered. The reason is in brackets: `user-only`, `license`, `host`, `marker`, `pin-mismatch`, or `changed` when an installed copy changed just before launch. Nothing was launched. | For `changed` or `pin-mismatch`, restore the copy or review again and relink. For the others, link another skill or drop that dispatch stage from the need. |
+| `OAH_SKILLS_BUDGET_EXCEEDED` | The skill texts or the whole brief are over their byte budget, or there are more than 128 items. The message lists each skill's size. | Split the task, or unlink optional skills, then call again. |
+| `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run` named a run that has no skill bundle. | Check the run id. A run without linked skills has nothing to read. |
+| `OAH_RUN_LAUNCH_INVALID` | A prepared run's saved records, such as its lease snapshot, intent binding, design record or skill record, are missing or damaged at launch. | Run `oah call` again to prepare a new run. |
+| `OAH_CAPABILITY_RELAY_REQUIRED` | A required capability only the lead has needs a relay result, or a relay result is stale, expired, tampered or does not match the request. `oah capabilities relay` also refuses a result that is too large, holds an oah marker line or looks like a secret. Without a reason in brackets, the lead has not relayed yet. | `oah capabilities plan --task T --stage S --parent-inventory FILE` prints the relay requests. Run each requested tool yourself, store its result with `oah capabilities relay`, and call again with `--relay-result HASH`. Relay again after anything changes. |
+| `OAH_CAPABILITY_UNAVAILABLE` | A required capability is not configured for the child, or it is disabled, and the lead's inventory does not offer it. | Give the lead's inventory with `--parent-inventory`, or configure the tool yourself and plan again. |
+| `OAH_CAPABILITY_UNSUPPORTED` | A required capability has no usable route: it is only named in the child's configuration (`unknown-schema` or `pending-approval`), or the run is an isolated review (`review-isolated`). | Relay it through the lead for an initial or correction run. A review never takes relays; make the need optional for the review stage. |
+| `OAH_CAPABILITY_DEPENDENCY_UNSATISFIED` | A required dependency is missing: a plugin that is not installed or enabled, a cycle, or more than three rounds of dependencies. The message names the chain. | Install or enable the plugin yourself, or fix `requires` under `[capabilities]`; oah never does it for you. |
+| `OAH_CAPABILITY_INVENTORY_UNKNOWN` | The lead's inventory file is missing, malformed, tampered or older than 300 seconds. Exit 69. | Write a fresh inventory and pass it again. |
+| `OAH_CAPABILITIES_USAGE` | An `oah capabilities` option is missing, the task has no active lease, or a request, invocation or result file cannot be read. | Follow the message; `oah capabilities <subcommand> --help` lists the options. |
+| `OAH_CAPABILITIES_IO` | A capability file could not be read or written. Exit 69. | Check permissions and free disk space, then retry. |
+
 ## Still stuck
 
 - `oah status` shows every lease and whether it is active or stale.
