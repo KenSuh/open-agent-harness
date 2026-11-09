@@ -1,5 +1,6 @@
 # 능력 라우팅 시험 — 가짜 홈의 설정에서 목록을 읽고(연결 주장 없음·비밀 미복사), 계획·상위 중계·의존 단계를 실제 oah 명령과 공개 API 로 본다.
-"""G21/AC18 (DESIGN §6): E-T18 inventories and E-T19 plans; E-T20 (live receiving) is outside this release."""
+"""G21/AC18 (DESIGN §6): E-T18 inventories, E-T19 plans and E-T20's stream reader (EventSinkTest; the live stop
+through `oah call` is in tests/test_skill_delivery.py)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -8,7 +9,9 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -670,6 +673,273 @@ class CapabilitySelectFlowTest(TaskRepo, unittest.TestCase):
         (run,) = self.runs()
         self.assertFalse((run / "capabilities.json").exists())
         self.assertNotIn("## Capabilities", self.stdin())
+
+
+
+DROP = object()
+BUNDLE = "sha256:" + "b" * 64
+ENTRY = "sha256:" + "e" * 64
+WALL = dt.datetime(2026, 11, 9, 12, 0, 5, tzinfo=dt.timezone.utc)
+
+
+def stream(*events, crlf: bool = False) -> bytes:
+    """Stream-json lines as Claude Code writes them: one UTF-8 JSON object per line, never ASCII-escaped."""
+    end = b"\r\n" if crlf else b"\n"
+    return b"".join((event if isinstance(event, bytes) else json.dumps(event, ensure_ascii=False).encode("utf-8"))
+                    + end for event in events)
+
+
+def use(tool_use_id: str, name: str, arguments: dict | None = None, *, session: str = "s1") -> dict:
+    return {"type": "assistant", "session_id": session, "parent_tool_use_id": None, "message": {"content": [
+        {"type": "tool_use", "id": tool_use_id, "name": name, "input": arguments or {"q": "x"}}]}}
+
+
+def answer(tool_use_id: str, content="found", *, error=None, session: str = "s1") -> dict:
+    part = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+    if error is not None:
+        part["is_error"] = error
+    return {"type": "user", "session_id": session, "parent_tool_use_id": None, "message": {"content": [part]}}
+
+
+def done(*denied: str) -> dict:
+    return {"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": "s1",
+            "permission_denials": [{"tool_name": "mcp__refdocs__lookup", "tool_use_id": tool_use_id, "tool_input": {}}
+                                   for tool_use_id in denied]}
+
+
+class EventSinkTest(unittest.TestCase):
+    """E-T20 (DESIGN §6.5): EventSinkV1 reads one Claude stream-json stdout incrementally under fixed bounds. The
+    first event must be an init that matches the run; every header problem asks the runner to stop with its type;
+    each capability tool use pairs with its own result by exact id, and only digests are kept."""
+
+    def setUp(self):
+        self.cwd = os.path.realpath(self.enterContext(tempfile.TemporaryDirectory()))
+        self.now = [100.0]
+
+    def sink(self, *, planned: dict | None = None, timeout_s: float = 600.0, **limits):
+        from oah.capabilities import inventory
+
+        return inventory.EventSink(run="r1", cwd=self.cwd, cli_version="2.1.318", permission_mode="acceptEdits",
+                                   planned=planned or {}, bundle_id=BUNDLE, timeout_s=timeout_s,
+                                   clock=lambda: self.now[0], wall=lambda: WALL, **limits)
+
+    def init(self, **changes) -> dict:
+        event = {"type": "system", "subtype": "init", "session_id": "s1", "cwd": self.cwd,
+                 "tools": ["Read", "mcp__refdocs__lookup", "mcp__other__fetch"],
+                 "mcp_servers": [{"name": "refdocs", "status": "connected"}, {"name": "other", "status": "failed"}],
+                 "model": "claude-opus-5-5", "permissionMode": "acceptEdits", "claude_code_version": "2.1.318"}
+        for key, value in changes.items():
+            if value is DROP:
+                event.pop(key)
+            else:
+                event[key] = value
+        return event
+
+    def test_a_matching_init_then_each_tool_use_pairs_with_its_own_result(self):
+        from oah.capabilities import digest
+
+        sink = self.sink(planned={"mcp:refdocs/lookup": {"entry_digest": ENTRY, "schema_digest": None}})
+        data = stream(self.init(), use("t1", "mcp__refdocs__lookup", {"q": "slots"}), answer("t1", "found it"),
+                      use("t2", "mcp__other__fetch"), answer("t2", "Connection closed", error=True),
+                      use("t3", "mcp__refdocs__lookup"),
+                      use("t4", "mcp__refdocs__lookup"), answer("t4", "not allowed", error=True),
+                      use("r1", "Read", {"file_path": "notes.md"}), answer("r1", "text"),
+                      answer("t9", "a result nobody asked for"), done("t4"))
+        self.assertIsNone(sink.feed("stdout", data))
+        self.assertIsNone(sink.feed("stderr", b"not JSON, and never read as events\n"))
+        observed = sink.finish(0, True)
+        self.assertEqual((observed["status"], observed["stopped"], observed["reason"], observed["inspection"]),
+                         ("observed", False, None, "complete"))
+        rows = observed["invocations"]
+        self.assertEqual([(row["capability_id"], row["result"], row["selection"]) for row in rows], [
+            ("mcp:refdocs/lookup", "ok", "planned"), ("mcp:other/fetch", "error", "unplanned"),
+            ("mcp:refdocs/lookup", "denied", "planned"), ("mcp:refdocs/lookup", "unobserved", "planned")])
+        self.assertEqual(set(rows[0]), {"version", "run", "bundle_id", "capability_id", "entry_digest",
+                                        "schema_digest", "session_id_digest", "tool_use_id_digest",
+                                        "arguments_digest", "result", "result_sha256", "selection", "evidence", "at"})
+        first = rows[0]
+        self.assertEqual((first["version"], first["run"], first["bundle_id"], first["entry_digest"],
+                          first["schema_digest"], first["evidence"], first["at"]),
+                         (1, "r1", BUNDLE, ENTRY, None, "host-observed", "2026-11-09T12:00:05+00:00"))
+        self.assertEqual(first["session_id_digest"], "sha256:" + hashlib.sha256(b"s1").hexdigest())
+        self.assertEqual(first["tool_use_id_digest"], "sha256:" + hashlib.sha256(b"t1").hexdigest())
+        self.assertEqual((first["arguments_digest"], first["result_sha256"]), (digest({"q": "slots"}),
+                                                                              digest("found it")))
+        self.assertIsNone(rows[3]["result_sha256"])  # an unanswered use proves nothing
+        self.assertTrue(rows[1]["entry_digest"].startswith("sha256:") and rows[1]["entry_digest"] != ENTRY)
+        text = json.dumps(observed)
+        for plain in ("found it", "slots", "Connection closed", "notes.md"):
+            self.assertNotIn(plain, text)  # digests, IDs and typed words only
+        self.assertEqual(observed["init"]["servers"], {"refdocs": "connected", "other": "failed"})
+        self.assertEqual((observed["init"]["cli_version"], observed["init"]["model"]), ("2.1.318", "claude-opus-5-5"))
+        self.assertEqual(observed["digest"], digest({key: value for key, value in observed.items() if key != "digest"}))
+        self.assertIs(sink.finish(0, True), observed)  # finished once
+
+    def test_an_error_result_stays_an_error_whatever_its_text(self):
+        sink = self.sink()
+        sink.feed("stdout", stream(self.init(), use("t1", "mcp__refdocs__lookup"), answer("t1", "ok", error=True),
+                                   use("t2", "mcp__refdocs__lookup"), answer("t2", "ok", error="true"),
+                                   use("t3", "mcp__refdocs__lookup"), answer("t3", "ok", error=False)))
+        self.assertEqual([row["result"] for row in sink.finish(0, True)["invocations"]], ["error", "error", "ok"])
+
+    def test_chunks_split_anywhere_and_crlf_lines_read_the_same(self):
+        events = (self.init(), use("t1", "mcp__refdocs__lookup", {"q": "예약 ✓"}), answer("t1", "결과 ✓"),
+                  use("t2", "mcp__refdocs__lookup"), done())
+        whole = self.sink()
+        self.assertIsNone(whole.feed("stdout", stream(*events)))
+        expected = whole.finish(0, True)
+        for crlf in (False, True):
+            data = stream(*events, crlf=crlf)
+            for size in (1, 2, 3, 7, 64):
+                with self.subTest(crlf=crlf, size=size):
+                    sink = self.sink()
+                    for start in range(0, len(data), size):
+                        self.assertIsNone(sink.feed("stdout", data[start:start + size]))
+                    self.assertEqual(sink.finish(0, True), expected)
+
+    def test_every_header_problem_asks_to_stop_with_its_type(self):
+        cases = {
+            "the first event is not init": (stream(answer("t1")), "missing-init"),
+            "a result before init": (stream(done()), "missing-init"),
+            "not JSON": (b'{"type": "system", "subtype": "init"\n', "invalid-json"),
+            "not an object": (b'["init"]\n', "invalid-json"),
+            "not UTF-8": (b'{"type": "\xff"}\n', "invalid-json"),
+            "a duplicate key": (b'{"type": "system", "type": "system"}\n', "invalid-json"),
+            "NaN": (b'{"type": NaN}\n', "invalid-json"),
+            "no session id": (stream(self.init(session_id=DROP)), "missing-field"),
+            "an empty session id": (stream(self.init(session_id="")), "missing-field"),
+            "no working directory": (stream(self.init(cwd=DROP)), "missing-field"),
+            "no tool list": (stream(self.init(tools="Read")), "missing-field"),
+            "no Claude Code version": (stream(self.init(claude_code_version=DROP)), "missing-field"),
+            "a server without a name": (stream(self.init(mcp_servers=[{"status": "connected"}])), "missing-field"),
+            "another working directory": (stream(self.init(cwd=os.path.dirname(self.cwd))), "init-mismatch"),
+            "another Claude Code version": (stream(self.init(claude_code_version="2.1.309")), "init-mismatch"),
+            "another permission mode": (stream(self.init(permissionMode="bypassPermissions")), "init-mismatch"),
+        }
+        for name, (data, reason) in cases.items():
+            with self.subTest(case=name):
+                sink = self.sink()
+                self.assertEqual(sink.feed("stdout", data), reason)
+                self.assertEqual(sink.feed("stdout", stream(self.init())), reason)  # the stop stays
+                self.assertEqual(sink.overdue(), reason)
+                observed = sink.finish(-9, True)
+                self.assertEqual((observed["status"], observed["stopped"], observed["reason"], observed["init"]),
+                                 ("failed", True, reason, None))
+                self.assertTrue(observed["detail"])
+
+    def test_the_first_event_is_bounded_before_its_line_ends(self):
+        from oah.capabilities import inventory
+
+        fitting = json.dumps(self.init(pad="")).encode("utf-8")
+        exact = fitting.replace(b'"pad": ""', b'"pad": "' + b"x" * (inventory.STREAM_EVENT_LIMIT - len(fitting)) + b'"')
+        self.assertEqual(len(exact), inventory.STREAM_EVENT_LIMIT)
+        sink = self.sink()
+        self.assertIsNone(sink.feed("stdout", exact + b"\n"))  # exactly at the limit is one event
+        self.assertEqual(sink.finish(0, True)["status"], "observed")
+        sink = self.sink()
+        self.assertIsNone(sink.feed("stdout", exact + b"\r\n"))  # a CRLF ending is not part of the event
+        sink = self.sink()
+        self.assertIsNone(sink.feed("stdout", exact[:-1] + b'x"'))  # one byte over could still end in a CR
+        self.assertEqual(sink.feed("stdout", b"\n"), "oversize")
+        sink = self.sink()
+        self.assertEqual(sink.feed("stdout", exact[:-1] + b'xx"'), "oversize")  # stopped before its newline
+
+    def test_after_init_an_oversize_event_is_skipped_and_its_use_stays_unobserved(self):
+        from oah.capabilities import inventory
+
+        data = stream(self.init(), use("t1", "mcp__refdocs__lookup"),
+                      answer("t1", "x" * inventory.STREAM_EVENT_LIMIT), use("t2", "mcp__refdocs__lookup"),
+                      answer("t2", "fine"))
+        sink = self.sink()
+        for start in range(0, len(data), 4096):
+            self.assertIsNone(sink.feed("stdout", data[start:start + 4096]))
+        observed = sink.finish(0, True)
+        self.assertEqual(([row["result"] for row in observed["invocations"]], observed["uninspected_events"],
+                          observed["status"]), (["ok", "unobserved"], 1, "observed"))
+
+    def test_a_contradictory_init_or_another_session_stops_but_a_repeat_does_not(self):
+        sink = self.sink()
+        self.assertIsNone(sink.feed("stdout", stream(self.init(), self.init())))  # the same init again
+        self.assertEqual(sink.feed("stdout", stream(self.init(session_id="s2"))), "contradictory-init")
+        sink = self.sink()
+        self.assertEqual(sink.feed("stdout", stream(self.init(), use("t1", "mcp__refdocs__lookup", session="s2"))),
+                         "other-session")
+
+    def test_no_init_within_its_deadline_asks_to_stop(self):
+        from oah.capabilities import inventory
+
+        self.assertEqual(inventory.INIT_SECONDS, 10.0)
+        sink = self.sink()
+        self.now[0] += 9.9
+        self.assertIsNone(sink.overdue())
+        self.now[0] += 0.2
+        self.assertEqual(sink.overdue(), "init-deadline")
+        self.assertEqual(sink.finish(None, True)["reason"], "init-deadline")
+        short = self.sink(timeout_s=3.0)  # a shorter run timeout bounds the wait
+        self.now[0] += 3.1
+        self.assertEqual(short.overdue(), "init-deadline")
+        started = self.sink()
+        self.assertIsNone(started.feed("stdout", stream(self.init())))
+        self.now[0] += 3600
+        self.assertIsNone(started.overdue())
+
+    def test_bounds_close_the_oldest_open_use_and_stop_inspecting(self):
+        from oah.capabilities import inventory
+
+        self.assertEqual((inventory.STREAM_EVENT_LIMIT, inventory.STREAM_OPEN_LIMIT, inventory.STREAM_TOTAL_LIMIT),
+                         (256 * 1024, 64, 16 * 1024 * 1024))
+        sink = self.sink()
+        sink.feed("stdout", stream(self.init(), *(use(f"t{n}", "mcp__refdocs__lookup") for n in range(65)),
+                                   answer("t0", "too late")))
+        rows = sink.finish(0, True)["invocations"]
+        self.assertEqual(len(rows), 65)
+        self.assertEqual((rows[0]["tool_use_id_digest"], rows[0]["result"]),
+                         ("sha256:" + hashlib.sha256(b"t0").hexdigest(), "unobserved"))  # closed as the 65th opened
+        small = self.sink(total_limit=2048)
+        events = [use(f"t{n}", "mcp__refdocs__lookup") for n in range(20)]
+        self.assertIsNone(small.feed("stdout", stream(self.init(), *events, self.init(session_id="s9"))))
+        observed = small.finish(0, True)
+        self.assertEqual((observed["inspection"], observed["status"]), ("truncated", "observed"))
+        self.assertLessEqual(observed["inspected_bytes"], 2048)
+        capped = self.sink(record_limit=2)
+        capped.feed("stdout", stream(self.init(), *(event for n in range(3)
+                                                    for event in (use(f"t{n}", "mcp__refdocs__lookup"),
+                                                                  answer(f"t{n}")))))
+        observed = capped.finish(0, True)
+        self.assertEqual((len(observed["invocations"]), observed["omitted"]), (2, 1))
+
+
+
+class CorrectionDrainTest(unittest.TestCase):
+    """DESIGN §6.5: the correction path's byte/digest drain feeds the same EventSinkV1, and a stop request stops the
+    owned tree before the child's delayed write. No correction run turns a sink on in this release (§7.4)."""
+
+    @unittest.skipIf(os.name == "nt", "builds the POSIX tree owner directly; process runs cover the Windows Job")
+    def test_a_stop_request_from_the_sink_stops_the_correction_tree_first(self):
+        from types import SimpleNamespace
+
+        from oah import call
+        from oah.capabilities import inventory
+
+        work = make_tmp_dir(self)
+        sentinel = work / "effect"
+        line = json.dumps({"type": "system", "subtype": "init", "session_id": "s1", "cwd": os.path.dirname(work),
+                           "tools": [], "claude_code_version": "2.1.318"})
+        script = (f"import sys, time\nsys.stdin.read()\nprint({line!r}, flush=True)\ntime.sleep(10)\n"
+                  f"open({str(sentinel)!r}, 'w').write('effect')\n")
+        child = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, cwd=work, start_new_session=True)
+        tree = call._PosixTree(child)
+        self.addCleanup(tree.close)
+        recorded = {}
+        prepared = SimpleNamespace(timeout_s=60.0, run=SimpleNamespace(result=lambda **fields: recorded.update(fields)))
+        sink = inventory.EventSink(run="r1", cwd=str(work), cli_version="2.1.318", permission_mode=None, planned={},
+                                   bundle_id=None, timeout_s=60.0)
+        streamed = call._stream_correction(child, prepared, "brief", sink=sink)
+        self.assertFalse(sentinel.exists(), "the delayed write happened: the tree was not stopped first")
+        self.assertNotEqual(streamed.returncode, 0)
+        self.assertEqual(sink.finish(streamed.returncode, True)["reason"], "init-mismatch")
+        self.assertEqual(recorded["worker_output"]["stdout"]["bytes"], len(line) + 1)  # every byte still hashed
 
 
 if __name__ == "__main__":

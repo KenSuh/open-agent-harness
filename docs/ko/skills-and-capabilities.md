@@ -132,6 +132,18 @@ run을 실패 처리한다. Codex, 네이티브 서브에이전트, `oah fix` �
 참조한 파일의 해시를 다시 잰다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 저장소 안에 설치해야 하고 Claude 프로세스
 run에서만 돌며, 모델은 파일마다 끝까지 읽느라 컨텍스트를 쓴다.
 
+**스트림은 도는 동안 확인한다.** 같은 run에서 oah는 Claude의 스트림을 오는 대로 읽는다. 첫 줄은 이 run의
+Claude Code init 이벤트여야 한다. 세션 ID가 있고, 작업 디렉터리와 oah가 준비한 Claude Code 버전, 권한 모드가 run과
+같아야 한다. 그 줄이 없거나 맞지 않거나 JSON이 아니거나 256 KiB보다 크거나 10초(run 제한 시간이 더 짧으면 그
+시간) 안에 오지 않으면, oah는 run의 프로세스 트리 전체를 곧바로 멈춘다. 그 run은 `OAH_ENGINE_FAILED`로 실패하고
+세지 않는다. init 뒤에도 JSON이 아닌 줄, 다른 세션을 적은 두 번째 init, 다른 세션의 이벤트는 run을 멈추고, 256 KiB보다
+큰 줄은 읽지 않고 건너뛴다. oah는 MCP 도구 사용(`mcp__<서버>__<도구>`)마다 그 결과를 짝지어 run 폴더에
+`capabilities-receiving.json`을 쓴다. 사용마다 능력 ID, `planned` 또는 `unplanned`, 결과 `ok`, `error`, `denied`,
+`unobserved`, 그리고 세션과 사용, 인자, 결과의 digest를 적고, 그 글 자체는 적지 않는다. 이벤트는 16 MiB까지 읽고,
+결과를 기다리는 사용은 64개까지 두며, 사용 기록은 1,024개까지 남긴다. 기록을 쓰지 못하면
+`OAH_CAPABILITY_RECEIVING_FAILED`로 run을 실패 처리한다. 사용자가 치르는 비용은 이렇다. 느린 MCP 서버가 붙는 동안처럼
+시작에 10초보다 오래 걸리는 Claude 세션은 멈추고, 멈춰도 자식이 첫 줄 전에 한 일은 되돌리지 못한다.
+
 **사람이 직접 부르는 스킬은 사람에게 남는다.** 사람만 부를 수 있는 스킬은 넘기지 않는다. 그런 스킬이 필수면
 `OAH_SKILL_NOT_DELIVERABLE(user-only)`로 거절된다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 직접 실행한다.
 
@@ -243,6 +255,9 @@ Claude 제안에는 단 에이전트 파일이 있어야 한다. 없으면 `OAH_
   리드가 도구를 직접 실행하고 `oah capabilities relay --request FILE --capability ID --result-file FILE
   --invocation FILE`로 결과를 저장한다. 그다음 `oah call ... --parent-inventory FILE --relay-result HASH`가
   스킬 본문 뒤의 `## Capabilities` 블록에 결과를 넣어 넘긴다.
+- oah가 도는 동안 스트림을 확인하는 run에서는(위의 **스트림은 도는 동안 확인한다** 참고)
+  `capabilities-receiving.json`이 MCP 도구 사용을 하나씩 적는다. 계획이 고른 도구는 `planned`, 그 밖의 도구는
+  `unplanned`이고, oah는 계획에 없는 도구를 기록할 뿐 막지 않는다.
 - `.oah/config.toml`의 `[capabilities]`에는 서버에 oah의 능력 분류 하나를 붙이는 `classes = {server = "class"}`,
   능력 사이 의존을 더하는 `requires = {"<id>" = ["<id>", ...]}`, 정확한 능력 하나를 Jev가 읽을 수 있는 공개 문서
   파일에 잇는 `docs = {"<id>" = "SOURCE:PATH"}`가 있다([이 단계들에서 Jev](#이-단계들에서-jev) 참고). 플러그인의
@@ -320,12 +335,16 @@ Jev가 비교할 항목마다 문서를 이어야 하며, 하나라도 빠지면
 
 ## 이번 릴리스의 한계
 
-- 참조 읽기는 run이 끝난 뒤 스트림에서 확인한다. 자식이 파일을 읽기 전에 일을 시작해도 oah는 막지 못하고, run을
+- 참조 읽기는 run이 끝난 뒤 스트림 전체에서 짝짓는다. 자식이 파일을 읽기 전에 일을 시작해도 멈추지 않고, run을
   실패시키는 대신 읽지 않은 파일을 기록한다. 자식이 띄운 서브에이전트의 읽기는 세지 않는다.
+- 도는 동안의 확인은 관찰이지 장벽이 아니다. 자식은 첫 줄 전에도 일할 수 있고, oah는 그 뒤에야 멈춘다. 이 확인은
+  oah가 스킬 참조 때문에 직접 stream-json을 켠 run에서만 돈다. 설계 전송이 있는 run, Codex run, 네이티브
+  서브에이전트, `oah fix` 수정은 도는 동안 읽지 않는다.
 - `oah fix`의 수정 run은 스킬 본문을 담지만 `skills.json`에 묶음을 기록하지 않고, 시작할 때 설치본 해시를 다시
   재지 않는다. `oah fix`는 중계 입력을 받지 않으므로, 스킬이 리드만 가진 도구를 필요로 하는 수정은 거절된다.
-- 경로는 run이 시작하기 전에 정한다. oah는 자식의 도구 시작을 지켜보지 않으며, 그것이 있어야 하는 `direct`
-  경로를 보고하지 않는다.
+- 경로는 run이 시작하기 전에 정한다. init 이벤트는 도구 이름만 알려 주므로 어떤 도구 사용도 스키마와 맞춰 보지
+  않고(`schema_digest`는 null), oah가 승인할 때까지 일을 시작하지 않고 기다리는 호스트가 있어야 하는 `direct`
+  경로는 보고하지 않는다.
 - 예산은 고정된 바이트 수다. 모델의 문맥 창을 재지 않는다.
 - 작업 선택은 모든 `oah call` run과 네이티브 제안에 들어가지만, 고정된 입력을 쓰는 `oah fix` 수정에는 들어가지
   않는다. oah가 이끌어 내거나 `oah skills find --task`가 쓰는 필요는 패킷의 의도 절 전체를 덮는다. 리드는 필요

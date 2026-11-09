@@ -7,6 +7,12 @@ the brief a Read tool_use and its tool_result in 2,000-line slices, and finally 
 
 FAKE_SKILL_READS   full (default): read every referenced file; none: read nothing; no-result: read nothing and leave
                    out the result event
+FAKE_STREAM_START  init (default): a matching init first; bad-init: an init naming another working directory;
+                   no-init: a text event first; malformed: a broken JSON line; oversize: an init over 256 KiB;
+                   immediate: write FAKE_SENTINEL before anything, then a bad init. Every mode but init then waits
+                   FAKE_DELAY seconds (default 10), writes FAKE_SENTINEL and goes on as init would: a live reader
+                   must stop the process before that write.
+FAKE_STREAM_TOOLS  1: after the reads, three mcp__refdocs__lookup uses: answered, answered with an error, unanswered
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,16 +50,56 @@ def _reads(prompt: str) -> list[dict]:
     return out
 
 
+def _tools() -> list[dict]:
+    out = []
+    for n, (error, answered) in enumerate(((False, True), (True, True), (False, False)), 1):
+        out.append({"type": "assistant", "session_id": "s1", "parent_tool_use_id": None, "message": {"content": [
+            {"type": "tool_use", "id": f"lookup{n}", "name": "mcp__refdocs__lookup", "input": {"q": f"slot {n}"}}]}})
+        if answered:
+            out.append({"type": "user", "session_id": "s1", "parent_tool_use_id": None, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": f"lookup{n}", "is_error": error,
+                 "content": "MCP error -32000: Connection closed" if error else "three free slots"}]}})
+    return out
+
+
+def _effect() -> None:
+    sentinel = os.environ.get("FAKE_SENTINEL")
+    if sentinel:
+        with open(sentinel, "w", encoding="utf-8") as handle:
+            handle.write("effect\n")
+
+
 def main(argv: list[str]) -> int:
     if "-p" not in argv or "stream-json" not in argv:
         return fake_claude.main(argv)
     prompt = fakelib.read_stdin()
     fakelib.record(argv, prompt)
     mode = os.environ.get("FAKE_SKILL_READS", "full")
-    out = [{"type": "system", "subtype": "init", "session_id": "s1", "cwd": os.getcwd(), "tools": ["Read", "Grep"],
-            "model": "fake"}]
+    start = os.environ.get("FAKE_STREAM_START", "init")
+    init = {"type": "system", "subtype": "init", "session_id": "s1", "cwd": os.getcwd(),
+            "tools": ["Read", "Grep", "mcp__refdocs__lookup"], "mcp_servers": [{"name": "refdocs", "status": "connected"}],
+            "model": "fake", "claude_code_version": os.environ.get("FAKE_CLAUDE_VERSION", "2.1.309")}
+    if "--permission-mode" in argv:
+        init["permissionMode"] = argv[argv.index("--permission-mode") + 1]
+    if start == "immediate":
+        _effect()
+    head = {"init": [],
+            "bad-init": [json.dumps(dict(init, cwd=os.path.dirname(os.getcwd())))],
+            "immediate": [json.dumps(dict(init, cwd=os.path.dirname(os.getcwd())))],
+            "no-init": [json.dumps({"type": "assistant", "session_id": "s1", "parent_tool_use_id": None,
+                                    "message": {"content": [{"type": "text", "text": "starting"}]}})],
+            "malformed": ['{"type": "system", "subtype": "init"'],
+            "oversize": [json.dumps(dict(init, pad="x" * (300 * 1024)))]}[start]
+    for line in head:
+        print(line, flush=True)
+    if start != "init":
+        time.sleep(float(os.environ.get("FAKE_DELAY", "10")))
+        _effect()
+    out = [init]
     if mode == "full":
         out.extend(_reads(prompt))
+    if os.environ.get("FAKE_STREAM_TOOLS"):
+        out.extend(_tools())
     if mode != "no-result":
         out.append({"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": "s1",
                     "modelUsage": {"claude-opus-fake": {"inputTokens": 1, "outputTokens": 1}}})

@@ -2726,9 +2726,10 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     if prepared.retain_worker_text:
         run.file_path("last-message.md")
     reference = _start_reference(prepared, env)
+    sink = _capability_sink(prepared, skill_bundle) if reference is None else None
     tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(_design_bound(prepared)))
     try:
-        result = _run_prepared(prepared, env, prompt)
+        result = _run_prepared(prepared, env, prompt, sink=sink)
     except (OSError, ValueError, subprocess.SubprocessError, RootUnavailable) as exc:
         if prepared.retain_worker_text:
             run.write_logs("", "")
@@ -2782,6 +2783,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     if skill_bundle is not None:
         result, skill_warnings, skill_failure = _conclude_skill_reads(prepared, skill_bundle, raw_stdout, result,
                                                                       normalize=reference is None)
+    observation_failure = _conclude_observation(prepared, sink)
     finished = dt.datetime.now(dt.timezone.utc)
     if prepared.retain_worker_text:
         run.write_logs(clean(result.stdout), clean(result.stderr))
@@ -2797,7 +2799,9 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             fields["header_model"] = runs.UNVERIFIED  # the mismatch stays in header_code
         fields["worker_output"] = result.worker_output
     fields = {name: clean(value) if isinstance(value, str) else value for name, value in fields.items()}
-    if result.timed_out:
+    if observation_failure is not None:
+        status, error = "failed", observation_failure  # the live check stopped it or could not be kept
+    elif result.timed_out:
         status, error = "timed_out", (f"OAH_RUN_TIMEOUT: the engine ran longer than {prepared.timeout_s:g} s and its "
                                       "process tree was stopped; raise the tier's timeout_min or split the task")
     elif result.returncode != 0:
@@ -2830,6 +2834,29 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     if status == "finished" and reference is None:
         _finish_inline_delivery(prepared)
     return completed
+
+
+def _conclude_observation(prepared: "Prepared", sink) -> str | None:
+    """Keep the closed receiving projection of a live-read stream (DESIGN §6.5) and say why the run cannot count: the
+    live check stopped it, its process tree did not go quiet, or the projection could not be written."""
+    if sink is None or sink.observation is None:
+        return None
+    from oah.atomic import write_json_atomic
+    from oah.capabilities import inventory
+
+    observation = sink.observation
+    try:
+        write_json_atomic(prepared.run.file_path(inventory.RECEIVING_NAME), observation)
+    except OSError as exc:
+        return (f"OAH_CAPABILITY_RECEIVING_FAILED: the stream observation of run {prepared.run_id} could not be "
+                f"recorded ({type(exc).__name__}); this run does not count. Check the run folder, then call again")
+    if observation["stopped"]:
+        return (f"OAH_ENGINE_FAILED: claude's stream-json output failed the live check ({observation['reason']}: "
+                f"{observation['detail']}); oah stopped its process tree and this run does not count")
+    if not observation["quiescent"]:
+        return ("OAH_ENGINE_FAILED: claude's process tree did not go quiet after the run; this run does not count. "
+                "Check for leftover processes before calling again")
+    return None
 
 
 def _streamed_skill_bundle(prepared: "Prepared") -> dict | None:
@@ -3188,13 +3215,15 @@ class _StreamedResult:
     worker_output: dict
 
 
-def _stream_correction(child, prepared: Prepared, prompt: str):
-    """Drain and hash exact worker bytes without displaying or retaining worker text."""
+def _stream_correction(child, prepared: Prepared, prompt: str, *, sink=None):
+    """Drain and hash exact worker bytes without displaying or retaining worker text. A `sink` (EventSinkV1, DESIGN
+    §6.5) is fed the same bytes and its stop request stops the owned tree; no correction row turns one on yet."""
     from oah.engines.proc import REAP_SECONDS
 
     streams = {name: {"bytes": 0, "sha256": hashlib.sha256()} for name in ("stdout", "stderr")}
     header = bytearray()
     failed = []
+    lock, stopped = threading.Lock(), threading.Event()
 
     def drain(name, pipe):
         try:
@@ -3203,6 +3232,10 @@ def _stream_correction(child, prepared: Prepared, prompt: str):
                 streams[name]["sha256"].update(data)
                 if name == "stderr":
                     header.extend(data)
+                if sink is not None:
+                    with lock:
+                        if sink.feed(name, data) is not None:
+                            stopped.set()
         except (OSError, ValueError):
             failed.append(True)
         finally:
@@ -3228,6 +3261,12 @@ def _stream_correction(child, prepared: Prepared, prompt: str):
         while child.poll() is None:
             if failed:
                 raise _StreamFailed("OAH_FIX_STREAM_FAILED: output pipe failed; retry the correction")
+            if sink is not None:
+                with lock:
+                    if sink.overdue() is not None:
+                        stopped.set()
+            if stopped.is_set():
+                break  # the finally below stops the owned tree while the child is alive
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
@@ -3251,8 +3290,99 @@ def _stream_correction(child, prepared: Prepared, prompt: str):
                            timed_out, output)
 
 
-def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
-    """Use proc's job/tree handling, holding the lease lock only through process creation and resume."""
+def _capability_sink(prepared: "Prepared", bundle: Mapping | None):
+    """EventSinkV1 for the one row where E itself switched Claude to stream-json: skill references to read and no
+    design transport (DESIGN §6.5, §7.4). Every other row keeps its output unread by E; None there."""
+    if bundle is None or "stream-json" not in prepared.argv:
+        return None
+    from oah.capabilities import inventory
+
+    plan = prepared.run._read_json("capabilities.json")
+    planned = {row["id"]: row for row in plan.get("selected", [])} if isinstance(plan, dict) else {}
+    argv = list(prepared.argv)
+    mode = argv[argv.index("--permission-mode") + 1] if "--permission-mode" in argv[:-1] else None
+    return inventory.EventSink(run=prepared.run_id, cwd=prepared.cwd, cli_version=prepared.cli_version,
+                               permission_mode=mode, planned=planned, bundle_id=bundle.get("digest"),
+                               timeout_s=prepared.timeout_s)
+
+
+def _drain_observed(child, prepared: Prepared, prompt: str, sink):
+    """(RunResult, quiescent) for a run whose stream E reads live (DESIGN §6.5). One byte-drain thread per output pipe
+    and one stdin writer through EOF replace communicate: stdout still reaches the result and header checks whole,
+    and the same bytes feed the run's EventSinkV1. A stop request, a missing init after its deadline or the run
+    timeout stops the owned tree at once, while the child is alive; the sink is finished once, after quiescence."""
+    from oah.engines.proc import REAP_SECONDS, RunResult, decode_output
+
+    chunks = {"stdout": [], "stderr": []}
+    lock, wake, failed = threading.Lock(), threading.Event(), []
+
+    def drain(name, pipe):
+        try:
+            while data := pipe.read1(65536):
+                chunks[name].append(data)
+                with lock:
+                    if sink.feed(name, data) is not None:
+                        wake.set()
+        except (OSError, ValueError):
+            failed.append(name)
+        finally:
+            pipe.close()
+            wake.set()
+
+    def write():
+        try:
+            child.stdin.write(prompt.encode("utf-8"))
+        except (OSError, ValueError):
+            pass  # a child that stops reading keeps its own result, as with communicate
+        finally:
+            try:
+                child.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    readers = [threading.Thread(target=drain, args=(name, getattr(child, name)), daemon=True) for name in chunks]
+    threads = [*readers, threading.Thread(target=write, daemon=True)]
+    started, stop, timed_out, decided = [], None, False, False
+    try:
+        for thread in threads:
+            thread.start()
+            started.append(thread)
+        deadline = time.monotonic() + prepared.timeout_s
+        while True:
+            with lock:
+                stop = sink.overdue()
+            if stop is not None or failed:
+                break
+            if child.poll() is not None and not any(thread.is_alive() for thread in readers):
+                break  # exited, and both pipes reached EOF
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            wake.wait(timeout=min(POLL_SECONDS, remaining))
+            wake.clear()
+        decided = True
+    finally:
+        try:
+            if not decided or stop is not None or failed or timed_out:
+                _kill_owned_tree(child)  # B's tree/Job path, before anything else is concluded
+            child.wait(timeout=REAP_SECONDS)
+        finally:
+            for thread in started:
+                thread.join(timeout=REAP_SECONDS)
+            quiescent = decided and len(started) == len(threads) and not any(t.is_alive() for t in started)
+            returncode = None if timed_out else child.returncode
+            with lock:
+                sink.finish(returncode, quiescent)
+    if failed:
+        raise subprocess.SubprocessError("an output pipe of the engine failed; call the engine again")
+    out, err = b"".join(chunks["stdout"]), b"".join(chunks["stderr"])
+    return RunResult(returncode, decode_output(out), decode_output(err), timed_out), quiescent
+
+
+def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str, *, sink=None):
+    """Use proc's job/tree handling, holding the lease lock only through process creation and resume. A `sink`
+    (EventSinkV1) reads the stream live through `_drain_observed` instead of communicate (DESIGN §6.5)."""
     from oah.engines.proc import (REAP_SECONDS, RunResult, UnsupportedBatchShim, _WindowsJob, decode_output,
                                   is_batch)
 
@@ -3265,6 +3395,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                {"start_new_session": True})
     child = None
     communicator = None
+    draining = False
     reference = _REFERENCE_RUN.get()
     reference = reference if reference is not None and reference.run_id == prepared.run_id else None
     design_run = _DESIGN_RUN.get()
@@ -3303,10 +3434,20 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                 if reference is not None:
                     reference.running(reference.held_store, child)
         if not prepared.retain_worker_text:
-            streamed = _stream_correction(child, prepared, prompt)
-            outcome.update(kind="failed" if streamed.timed_out else "exit-observed",
-                           returncode=streamed.returncode, timed_out=streamed.timed_out, quiescent=True)
+            streamed = _stream_correction(child, prepared, prompt, sink=sink)
+            outcome.update(kind="failed" if streamed.timed_out or (sink is not None and sink.reason) else
+                           "exit-observed", returncode=streamed.returncode, timed_out=streamed.timed_out,
+                           quiescent=True)
             return streamed
+        if sink is not None:
+            draining = True
+            result, quiescent = _drain_observed(child, prepared, prompt, sink)
+            failed = result.timed_out or sink.reason is not None
+            if not failed and (_CORRECTION_CLEANUP.get() or design_run):
+                _kill_owned_tree(child)  # as below: no owned descendant keeps changing the tree after the run
+            outcome.update(kind="failed" if failed else "exit-observed", returncode=result.returncode,
+                           timed_out=result.timed_out, quiescent=quiescent)
+            return result
         output, errors = [], []
         exchanged = threading.Event()
 
@@ -3352,7 +3493,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
             try:
                 if communicator is not None and communicator.ident is not None:
                     communicator.join(timeout=REAP_SECONDS)
-                else:
+                elif not draining:  # _drain_observed joins its own threads
                     child.communicate(timeout=REAP_SECONDS)
             except Exception:
                 pass

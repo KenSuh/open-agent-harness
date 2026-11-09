@@ -7,18 +7,25 @@ because a configuration file cannot prove a running server. Plugins count only w
 plugin folder left in a cache is not an install. Values (commands, URLs, headers, env, args) are never read into a
 record. `parent-reported` inventories are InventoryV1 documents the lead supplies; oah checks their closed keys,
 digests and 300-second evidence window and labels them cooperative attestation, never the child's own connection.
+
+`EventSink` (DESIGN §6.5) reads a running child's own Claude stream-json stdout: its init event and each capability
+tool use paired with its own result. It keeps digests and typed words only, and it is observation, not a barrier: a
+child can act before its first line.
 """
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
+import re
+import time
 import tomllib
-from typing import Mapping
+from typing import Callable, Mapping
 
 from oah.capabilities import (CLASSES, EFFECTS, EVIDENCE_SECONDS, INVENTORY_UNKNOWN_CODE, CapabilityRefused, check_id,
-                              digest)
+                              digest, tool_id)
 
 FILE_LIMIT = 1 << 20
 ENTRY_KEYS = {"version", "id", "kind", "target_digest", "source", "schema", "registered", "installed", "enabled",
@@ -329,3 +336,258 @@ def parent_inventory(entries: list[dict], *, observed: dt.datetime) -> dict:
                  "entries": sorted(entries, key=lambda item: item["id"]), "completeness": "partial"}
     inventory["digest"] = inventory_digest(inventory)
     return inventory
+
+
+
+# Live stream observation (DESIGN §6.5) ---------------------------------------------------------------------------
+
+STREAM_EVENT_LIMIT = 256 * 1024  # bytes in one stream-json line
+STREAM_OPEN_LIMIT = 64  # capability tool uses waiting for their own result
+STREAM_TOTAL_LIMIT = 16 * 1024 * 1024  # bytes of events read per run; the rest stays uninspected
+STREAM_RECORD_LIMIT = 1024  # invocation records kept per run; the rest are counted
+INIT_SECONDS = 10.0  # the init event's deadline, or the run's own timeout when that is shorter
+RECEIVING_NAME = "capabilities-receiving.json"
+_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@\[\]-]{0,127}")  # a model or status kept from the stream
+_SERVER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")  # an MCP server name kept from the stream
+
+
+def _unique_pairs(pairs: list) -> dict:
+    found = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError(f"duplicate key {key!r}")
+        found[key] = value
+    return found
+
+
+def _no_constant(name: str):
+    raise ValueError(f"{name} is not JSON")
+
+
+def _sha(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _word(value: object) -> str | None:
+    return value if isinstance(value, str) and _WORD.fullmatch(value) else None
+
+
+class EventSink:
+    """EventSinkV1 (DESIGN §6.5): the pure, bounded reader of one Claude stream-json stdout.
+
+    `feed(stream, data)` returns None to go on or a typed stop reason; `overdue()` reports a missing init after its
+    deadline; `finish(returncode, quiescent)` closes the reading once and returns the receiving projection. Complete
+    lines are read as strict UTF-8 JSON (a CRLF ending is one line ending) and no more than one event is buffered.
+    Until the init event qualifies, every problem asks the runner to stop the process tree: a first event that is not
+    the init, an init that does not match the run, a line that is not strict JSON or that is larger than
+    STREAM_EVENT_LIMIT. After it, an oversize line is skipped uninspected (a use it answered stays unobserved), and
+    invalid JSON, a contradictory init or another session's event still stop.
+
+    Each `mcp__<server>__<tool>` use is paired with its own result by exact id: `ok`, `error` (whatever its text),
+    `denied` (the result event's permission denials) or `unobserved` (never answered, or not inspected). Records keep
+    digests, capability IDs and typed words; no argument, result or stream text. The sink executes nothing and calls
+    nothing; the runner owns processes, threads and kill, and serializes the calls."""
+
+    def __init__(self, *, run: str, cwd: str, cli_version: str | None, permission_mode: str | None,
+                 planned: Mapping[str, Mapping], bundle_id: str | None, timeout_s: float,
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], dt.datetime] | None = None,
+                 event_limit: int = STREAM_EVENT_LIMIT, open_limit: int = STREAM_OPEN_LIMIT,
+                 total_limit: int = STREAM_TOTAL_LIMIT, record_limit: int = STREAM_RECORD_LIMIT) -> None:
+        self.run, self.bundle_id, self.planned = run, bundle_id, dict(planned)
+        self.cwd, self.cli_version, self.permission_mode = os.path.realpath(cwd), cli_version, permission_mode
+        self.clock, self.wall = clock, wall or (lambda: dt.datetime.now(dt.timezone.utc))
+        self.wait_s = min(INIT_SECONDS, timeout_s)
+        self.deadline = clock() + self.wait_s
+        self.event_limit, self.open_limit = event_limit, open_limit
+        self.total_limit, self.record_limit = total_limit, record_limit
+        self.buffer = bytearray()
+        self.skipping = False  # inside an oversize line after the init: discard through its newline
+        self.inspected = self.uninspected = self.omitted = 0
+        self.truncated = False
+        self.identity = self.summary = self.session = None
+        self.reason = self.detail = None
+        self.open: dict[str, dict] = {}
+        self.closed: dict[str, dict] = {}
+        self.records: list[dict] = []
+        self.observation = None
+
+    def _stop(self, reason: str, detail: str) -> str:
+        if self.reason is None:
+            self.reason, self.detail = reason, detail
+        return self.reason
+
+    def feed(self, stream: str, data: bytes) -> str | None:
+        """None to go on, or the stop reason; only stdout carries events."""
+        if self.reason is not None or self.observation is not None:
+            return self.reason
+        if stream != "stdout":
+            return None
+        start = 0
+        while start < len(data) and not self.truncated:
+            end = data.find(b"\n", start)
+            piece = data[start:] if end < 0 else data[start:end]
+            start = len(data) if end < 0 else end + 1
+            if self.skipping:
+                self.skipping = end < 0
+                continue
+            size = len(self.buffer) + len(piece)
+            if size <= self.event_limit + 1 and end < 0:
+                self.buffer += piece  # at most one event, plus the CR of a CRLF ending
+                continue
+            line = b"" if size > self.event_limit + 1 else bytes(self.buffer) + piece
+            self.buffer = bytearray()
+            line = line[:-1] if line.endswith(b"\r") else line
+            if size > self.event_limit + 1 or len(line) > self.event_limit:
+                if self.identity is None:
+                    return self._stop("oversize", f"a stream event is larger than {self.event_limit} bytes")
+                self.uninspected += 1
+                self.skipping = end < 0
+                continue
+            stop = self._line(line)
+            if stop is not None:
+                return stop
+        return None
+
+    def _line(self, raw: bytes) -> str | None:
+        if not raw.strip():
+            return None
+        if self.inspected + len(raw) > self.total_limit:
+            self.truncated = True  # bounded reading: the rest of the stream stays uninspected
+            return None
+        self.inspected += len(raw)
+        try:
+            event = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_pairs, parse_constant=_no_constant)
+        except (ValueError, RecursionError):
+            return self._stop("invalid-json", "a stream line is not strict UTF-8 JSON")
+        if not isinstance(event, dict):
+            return self._stop("invalid-json", "a stream line is not a JSON object")
+        return self._init(event) if self.identity is None else self._event(event)
+
+    @staticmethod
+    def _identity_of(event: Mapping) -> str:
+        cwd = event.get("cwd")
+        return digest({"session": event.get("session_id"), "version": event.get("claude_code_version"),
+                       "cwd": os.path.realpath(cwd) if isinstance(cwd, str) else None, "model": event.get("model")})
+
+    def _init(self, event: Mapping) -> str | None:
+        if event.get("type") != "system" or event.get("subtype") != "init":
+            return self._stop("missing-init", "the first stream event is not the session's init event")
+        session, cwd, tools = event.get("session_id"), event.get("cwd"), event.get("tools")
+        version, mode = event.get("claude_code_version"), event.get("permissionMode")
+        servers = event.get("mcp_servers", [])
+        if not isinstance(session, str) or not session:
+            return self._stop("missing-field", "the init event has no session id")
+        if not isinstance(cwd, str):
+            return self._stop("missing-field", "the init event has no working directory")
+        if not isinstance(tools, list) or not all(isinstance(name, str) for name in tools):
+            return self._stop("missing-field", "the init event has no tool list")
+        if not isinstance(version, str):
+            return self._stop("missing-field", "the init event has no Claude Code version")
+        if not isinstance(servers, list) or not all(isinstance(item, dict) and isinstance(item.get("name"), str)
+                                                    and isinstance(item.get("status"), str) for item in servers):
+            return self._stop("missing-field", "the init event's MCP servers are not each named with a status")
+        if os.path.realpath(cwd) != self.cwd:
+            return self._stop("init-mismatch", "the session's working directory is not the run's")
+        if self.cli_version is not None and version != self.cli_version:
+            return self._stop("init-mismatch", f"the session's Claude Code version is not the prepared "
+                                               f"{self.cli_version}")
+        if self.permission_mode is not None and mode is not None and mode != self.permission_mode:
+            return self._stop("init-mismatch", f"the session's permission mode is not the prepared "
+                                               f"{self.permission_mode}")
+        self.session, self.identity = session, self._identity_of(event)
+        self.summary = {"session_id_digest": _sha(session),
+                        "cli_version": self.cli_version, "cli_version_check": "matched" if self.cli_version else
+                        "unverified", "model": _word(event.get("model")), "tools_digest": digest(sorted(tools)),
+                        "mcp_tools": sorted({capability for name in tools if (capability := tool_id(name))}),
+                        "servers": {item["name"]: _word(item["status"]) or "unknown" for item in servers
+                                    if _SERVER.fullmatch(item["name"])}}
+        return None
+
+    def _event(self, event: Mapping) -> str | None:
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            return None if self._identity_of(event) == self.identity else self._stop(
+                "contradictory-init", "a second init event names another session, directory, version or model")
+        session = event.get("session_id")
+        if session is not None and session != self.session:
+            return self._stop("other-session", "a stream event belongs to another session")
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        parts = [part for part in content if isinstance(part, dict)] if isinstance(content, list) else []
+        if kind == "assistant":
+            for part in parts:
+                if part.get("type") == "tool_use":
+                    self._use(part)
+        elif kind == "user":
+            for part in parts:
+                if part.get("type") == "tool_result":
+                    self._result(part)
+        elif kind == "result" and isinstance(event.get("permission_denials"), list):
+            for denial in event["permission_denials"]:
+                if isinstance(denial, dict):
+                    self._deny(denial.get("tool_use_id"))
+        return None
+
+    def _use(self, part: Mapping) -> None:
+        capability, use_id = tool_id(part.get("name")), part.get("id")
+        if capability is None or not isinstance(use_id, str) or not use_id or use_id in self.open \
+                or use_id in self.closed:
+            return
+        if len(self.open) >= self.open_limit:
+            self._close(next(iter(self.open)), "unobserved", None)  # the oldest waits no longer
+        row = self.planned.get(capability)
+        session = self.summary["session_id_digest"]
+        self.open[use_id] = {
+            "version": 1, "run": self.run, "bundle_id": self.bundle_id, "capability_id": capability,
+            "entry_digest": (row or {}).get("entry_digest") or digest({"adapter": "effective.claude-init",
+                                                                       "id": capability, "session": session}),
+            "schema_digest": None, "session_id_digest": session, "tool_use_id_digest": _sha(use_id),
+            "arguments_digest": digest(part.get("input")), "result": "unobserved", "result_sha256": None,
+            "selection": "planned" if row is not None else "unplanned", "evidence": "host-observed", "at": None}
+
+    def _result(self, part: Mapping) -> None:
+        use_id = part.get("tool_use_id")
+        if isinstance(use_id, str) and use_id in self.open:
+            error = part.get("is_error")
+            self._close(use_id, "ok" if error is None or error is False else "error", digest(part.get("content")))
+
+    def _deny(self, use_id: object) -> None:
+        if not isinstance(use_id, str):
+            return
+        if use_id in self.open:
+            self._close(use_id, "denied", None)
+        elif use_id in self.closed:
+            self.closed[use_id]["result"] = "denied"
+
+    def _close(self, use_id: str, result: str, result_sha256: str | None) -> None:
+        record = self.open.pop(use_id)
+        record.update(result=result, result_sha256=result_sha256, at=_iso(self.wall()))
+        if len(self.records) < self.record_limit:
+            self.records.append(record)
+            self.closed[use_id] = record
+        else:
+            self.omitted += 1
+
+    def overdue(self) -> str | None:
+        """The stop reason, including a missing init after its deadline; None while the run may go on."""
+        if self.reason is None and self.identity is None and self.observation is None \
+                and self.clock() >= self.deadline:
+            return self._stop("init-deadline", f"the session sent no init event within {self.wait_s:g} s")
+        return self.reason
+
+    def finish(self, returncode: int | None, quiescent: bool) -> dict:
+        """The closed receiving projection, made once: every use still waiting is unobserved."""
+        if self.observation is not None:
+            return self.observation
+        for use_id in list(self.open):
+            self._close(use_id, "unobserved", None)
+        status = "failed" if self.reason is not None else "observed" if self.identity is not None else "unobserved"
+        observation = {"version": 1, "run": self.run, "bundle_id": self.bundle_id, "status": status,
+                       "reason": self.reason, "detail": self.detail, "stopped": self.reason is not None,
+                       "init": self.summary, "invocations": self.records, "omitted": self.omitted,
+                       "inspected_bytes": self.inspected, "uninspected_events": self.uninspected,
+                       "inspection": "truncated" if self.truncated else "complete",
+                       "returncode": returncode, "quiescent": bool(quiescent)}
+        observation["digest"] = digest(observation)
+        self.observation = observation
+        return observation

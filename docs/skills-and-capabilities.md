@@ -133,6 +133,21 @@ outside the working directory refuses with `OAH_SKILL_REFERENCE_UNAVAILABLE(inac
 engine starts, oah hashes each referenced file again. What it costs you: such a skill has to be installed in the
 repository and runs only on Claude process runs, and the model spends context reading each file whole.
 
+**The stream is checked while it runs.** On that same run oah reads Claude's stream as it arrives. The first line
+must be Claude Code's init event for this run: a session id, the run's working directory, the Claude Code version
+oah prepared and the same permission mode. When that line is missing, does not match, is not JSON, is larger than
+256 KiB or has not arrived after 10 seconds (or the run's timeout, when that is shorter), oah stops the run's whole
+process tree at once; the run fails with `OAH_ENGINE_FAILED` and does not count. After the init, a line that is
+not JSON, a second init that names another session and an event of another session stop the run too, while a line
+larger than 256 KiB is skipped unread. oah also pairs each MCP tool use (`mcp__<server>__<tool>`) with its own
+result and writes `capabilities-receiving.json` in the run folder: per use, its capability ID, `planned` or
+`unplanned`, the result `ok`, `error`, `denied` or `unobserved`, and digests of the session, the use, the arguments
+and the result, never their text. It reads at most 16 MiB of events, keeps at most 64 uses waiting for a result
+and records at most 1,024 uses. A record that cannot be written fails the run with
+`OAH_CAPABILITY_RECEIVING_FAILED`. What it costs you: a Claude session that takes more than 10 seconds to start,
+for example while a slow MCP server connects, is stopped, and a stop cannot undo what the child did before its
+first line.
+
 **Skills meant for explicit use stay with you.** A skill that only a person may invoke is never delivered. A
 required one refuses with `OAH_SKILL_NOT_DELIVERABLE(user-only)`. What it costs you: you run such a skill
 yourself.
@@ -252,6 +267,9 @@ named tool into a capability need and routes it.
   lead can meet. The lead runs the tool itself and stores the result with `oah capabilities relay --request FILE
   --capability ID --result-file FILE --invocation FILE`. Then `oah call ... --parent-inventory FILE
   --relay-result HASH` delivers it in a `## Capabilities` block after the skill texts.
+- On a run whose stream oah checks live (see **The stream is checked while it runs** above),
+  `capabilities-receiving.json` records each MCP tool use. A tool the plan selected is `planned` and any other tool
+  `unplanned`; oah records an unplanned tool and does not block it.
 - `[capabilities]` in `.oah/config.toml` holds `classes = {server = "class"}`, which tags a server with one of
   oah's capability classes, `requires = {"<id>" = ["<id>", ...]}`, which adds dependencies between
   capabilities, and `docs = {"<id>" = "SOURCE:PATH"}`, which links one exact capability to a public documentation
@@ -335,14 +353,18 @@ should compare; one missing link keeps the first entry for that class.
 
 ## Limits in this release
 
-- A reference read is observed from the stream after the run. oah cannot stop a child that starts working before it
-  reads the file; it records the unread file instead of failing the run. Reads by the child's own subagents do not
-  count.
+- Reference reads are paired after the run, from the whole stream. A child that starts working before it reads the
+  file is not stopped; oah records the unread file instead of failing the run. Reads by the child's own subagents
+  do not count.
+- The live check is observation, not a barrier: a child can act before its first line, and oah stops it only
+  after that. It runs only where oah itself turned on stream-json for skill references. Runs with a design
+  transport, Codex runs, native subagents and `oah fix` corrections are not read live.
 - `oah fix` correction runs carry the skill texts but record no bundle in `skills.json` and do not hash installed
   copies again at launch. `oah fix` takes no relay inputs, so a correction whose skill needs a lead-only tool
   refuses.
-- Routes are planned before the run starts. oah does not watch the child's tool startup, and it never reports the
-  `direct` route, which would need that.
+- Routes are planned before the run starts. The init event names tools only, so no tool use is checked against a
+  schema (`schema_digest` stays null), and oah never reports the `direct` route, which would need a host that
+  waits before any work until oah approves.
 - The budgets are fixed byte counts. They do not measure the model's context window.
 - Task selections reach every `oah call` run and native offer, but not `oah fix` corrections, which keep their
   frozen inputs. A need that oah derives, or that `oah skills find --task` writes, covers the packet's whole intent

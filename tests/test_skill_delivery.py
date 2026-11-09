@@ -237,6 +237,7 @@ class InlineDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertEqual((bundle["engine"], bundle["stage"], bundle["operation"]["kind"], bundle["operation"]["task"]),
                          ("claude", "initial", "dispatch", "t1"))
         self.assertEqual(bundle["budget"]["target_capacity"], "unverified: byte budgets only")
+        self.assertFalse((run / "capabilities-receiving.json").exists())  # json mode: no live check (DESIGN §7.4)
 
         # The dry run admits exactly the same bundle and writes nothing.
         before = sorted(str(path) for path in self.state_dir.rglob("*"))
@@ -602,6 +603,62 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertTrue(saved["error"].startswith("OAH_ENGINE_FAILED: "), saved["error"])
         self.assertIn("this run does not count", saved["error"])
         self.assertEqual(self.receiving(run)["reference_delivery"], "incomplete")
+
+    def observed(self, run: pathlib.Path) -> dict:
+        return json.loads((run / "capabilities-receiving.json").read_text(encoding="utf-8"))
+
+    def test_a_stream_that_fails_its_live_check_is_stopped_before_its_delayed_effect(self):
+        """E-T20 (DESIGN §6.5): a mismatched, missing, malformed or oversize init stops the owned process tree while
+        the child is alive, before its delayed write and before it exits; the run fails and does not count."""
+        self.build_guide()
+        for start, reason in (("bad-init", "init-mismatch"), ("no-init", "missing-init"),
+                              ("malformed", "invalid-json"), ("oversize", "oversize")):
+            with self.subTest(start=start):
+                before = set(self.runs())
+                sentinel = self.work / f"effect-{start}"
+                result = self.call(env={"FAKE_STREAM_START": start, "FAKE_SENTINEL": str(sentinel)})
+                self.assertFalse(sentinel.exists(), "the delayed write happened: the tree was not stopped first")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                (run,) = set(self.runs()) - before
+                saved = self.saved(run)
+                self.assertEqual(saved["status"], "failed")
+                self.assertTrue(saved["error"].startswith(
+                    f"OAH_ENGINE_FAILED: claude's stream-json output failed the live check ({reason}: "), saved["error"])
+                self.assertIn("this run does not count", saved["error"])
+                self.assertNotEqual(saved["exit_code"], 0)  # stopped, not exited
+                observed = self.observed(run)
+                self.assertEqual((observed["status"], observed["stopped"], observed["reason"], observed["quiescent"]),
+                                 ("failed", True, reason, True))
+
+    def test_an_effect_before_the_first_line_is_recorded_not_prevented(self):
+        """DESIGN §6.5's limit: reading the stream is observation, not a pre-work barrier. A child that acts before
+        its first line has acted; the run still fails and the receiving record says why."""
+        self.build_guide()
+        sentinel = self.work / "effect-immediate"
+        result = self.call(env={"FAKE_STREAM_START": "immediate", "FAKE_SENTINEL": str(sentinel)})
+        self.assertTrue(sentinel.exists())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        (run,) = self.runs()
+        self.assertIn("live check (init-mismatch: ", self.saved(run)["error"])
+        self.assertEqual(self.observed(run)["reason"], "init-mismatch")
+
+    def test_a_checked_stream_records_each_capability_invocation_by_digest(self):
+        self.build_guide()
+        result = self.call(env={"FAKE_STREAM_TOOLS": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (run,) = self.runs()
+        self.assertEqual(self.saved(run)["status"], "finished")
+        self.assertEqual(self.receiving(run)["reference_delivery"], "complete")  # the read observation is unchanged
+        observed = self.observed(run)
+        self.assertEqual((observed["status"], observed["stopped"], observed["bundle_id"], observed["run"]),
+                         ("observed", False, self.bundle(run)["digest"], run.name))
+        self.assertEqual([(row["capability_id"], row["result"], row["selection"], row["evidence"])
+                          for row in observed["invocations"]],
+                         [("mcp:refdocs/lookup", "ok", "unplanned", "host-observed"),
+                          ("mcp:refdocs/lookup", "error", "unplanned", "host-observed"),
+                          ("mcp:refdocs/lookup", "unobserved", "unplanned", "host-observed")])
+        self.assertEqual(observed["uninspected_events"], 2)  # the two full 2,000-line Read results exceed 256 KiB
+        self.assertNotIn("three free slots", json.dumps(observed))
 
     def test_codex_refuses_a_required_reference_before_launch(self):
         self.build_guide()
