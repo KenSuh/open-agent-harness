@@ -1105,13 +1105,17 @@ def _discovery_notices(task: str, found: Sequence[Mapping], *, bound: Collection
 
 def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir: pathlib.Path,
                   env: Mapping[str, str], native: bool = False, keychain=None,
-                  brief_disabled: bool = False, packet: Packet | None = None) -> SkillPack | None:
+                  brief_disabled: bool = False, packet: Packet | None = None,
+                  design_text: str | None = None) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links or task selections deliver skill texts, capabilities apply or task
-    discovery ran, else None (the brief stays byte-identical). Task discovery runs only after admission, within the
-    call's [skills.discovery] request budget and never for a correction (frozen inputs). Only an ordinary run that
-    keeps its output takes a file by reference (execute observes the reads) and asks skill-fit advice, after
-    admission; a native offer or a correction never does."""
+    discovery ran, else None (the brief stays byte-identical). The skill admission, the capability plan's required
+    needs, dependencies and relays, and the brief floor (B's design block, `design_text`, with the skill and
+    capability blocks) are all checked before any task discovery or Jev request; the plan is built again after
+    advice, with its class needs, and the exact brief is checked at the end, as finalization's recheck. Task
+    discovery runs only after admission, within the call's [skills.discovery] request budget and never for a
+    correction (frozen inputs). Only an ordinary run that keeps its output takes a file by reference (execute
+    observes the reads) and asks skill-fit advice, after admission; a native offer or a correction never does."""
     from oah import discovery, skillpack
     from oah.capabilities import CapabilityRefused, plan as capability_plan
     from oah.config import load_config
@@ -1147,6 +1151,27 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                                    needs=needs)
     except skillpack.PackRefused as exc:
         raise _pack_error(exc) from None
+    section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
+               else load_config(root).section("capabilities", capability_plan.DEFAULTS))
+    capability_settings = capability_plan.check_settings(section)
+
+    def plan_capabilities(class_needs=(), class_status=None, advise=None):
+        try:
+            return capability_plan.for_task(
+                holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
+                items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
+                relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
+                class_needs=class_needs, class_status=class_status, advise=advise)
+        except CapabilityRefused as exc:
+            raise _pack_error(exc) from None
+
+    early_capabilities = plan_capabilities()[1]  # required capabilities admit here: a missing relay refuses now
+    early_block = skillpack.finalize(admitted)[0]  # advice only reorders, so these sizes are final
+    if early_block is not None or early_capabilities is not None:
+        try:
+            skillpack.check_parts(design_text, early_block, early_capabilities)
+        except skillpack.PackRefused as exc:
+            raise _pack_error(exc) from None
     found = []
     if answerable:
         found = tasks.prepare_task(admitted, answerable, state_dir=state_dir, settings=found_settings,
@@ -1168,17 +1193,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         class_needs, class_status, capability_advise = _capability_advice(
             root=root, state_dir=state_dir, env=env, keychain=keychain, brief_disabled=brief_disabled, basis=basis,
             packet=packet, task=request.task, needs=needs)
-    section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
-               else load_config(root).section("capabilities", capability_plan.DEFAULTS))
-    try:
-        capabilities, capability_block = capability_plan.for_task(
-            holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
-            items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
-            relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc),
-            settings=capability_plan.check_settings(section), class_needs=class_needs, class_status=class_status,
-            advise=capability_advise)
-    except CapabilityRefused as exc:
-        raise _pack_error(exc) from None
+    capabilities, capability_block = plan_capabilities(class_needs, class_status, capability_advise)
     if block is None and capability_block is None and not discovered:
         return None
     check = _CORRECTION_INPUT_CHECK.get()
@@ -1990,7 +2005,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     # Lane E: the single deterministic skill admission, before any budget gate, judge, round or reservation.
     skill_pack = _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env,
                                keychain=keychain, brief_disabled=request.no_rerank or packet.rerank_disabled,
-                               packet=packet)
+                               packet=packet, design_text=design.text if design is not None else None)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -2479,7 +2494,8 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                           read_source=read_source)
     skill_pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env,
-                               native=True, packet=basis.packet)
+                               native=True, packet=basis.packet,
+                               design_text=basis.design.text if basis.design is not None else None)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)

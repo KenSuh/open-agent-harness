@@ -1,10 +1,14 @@
 # 능력 라우팅 시험 — 가짜 홈의 설정에서 목록을 읽고(연결 주장 없음·비밀 미복사), 계획·상위 중계·의존 단계를 실제 oah 명령과 공개 API 로 본다.
 """G21/AC18 (DESIGN §6): E-T18 inventories, E-T19 plans and E-T20's stream reader (EventSinkTest; the live stop
-through `oah call` is in tests/test_skill_delivery.py)."""
+through `oah call` is in tests/test_skill_delivery.py), and DESIGN §9.8's relay identity and admission class
+oracles (RelayIdentityTest, RelayPrepTest, AdmissionOrderTest)."""
 from __future__ import annotations
 
+import collections
+import contextlib
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -20,9 +24,9 @@ from tests.test_design_context import FAKES
 from tests.test_design_sources import LICENSE as MIT_LICENSE
 from tests.test_intent_wiring import packet_text
 from tests.test_rerank import FakeServer, fake_key
-from tests.test_skill_delivery import DeliveryTask
-from tests.test_skill_discovery import skill_md
-from tests.test_task_discovery import TaskRepo
+from tests.test_skill_delivery import ALPHA, BETA, PLAIN, DeliveryTask
+from tests.test_skill_discovery import mit_repo, skill_md
+from tests.test_task_discovery import MIGRATE_BODY, TEXT, TUNE_BODY, TaskRepo
 
 PLANTED = "planted-value-7c1e9a52b4"  # stands in for a credential in every value field
 NOW = dt.datetime(2026, 11, 9, 12, 0, tzinfo=dt.timezone.utc)
@@ -494,6 +498,526 @@ class RelayFlowTest(DeliveryTask, unittest.TestCase):
         text = self.oah("capabilities", "show", "--engine", "claude")
         self.assertIn("mcp:waiting/*", text.stdout)
         self.assertIn("pending", text.stdout)
+
+
+
+DOCS_TWO = ("acme/docs2", "skills/docs2",
+            {"LICENSE": MIT_LICENSE,
+             "skills/docs2/SKILL.md": skill_md("docs2", "Look the API up, then search the guides.\n",
+                                              extra="allowed-tools: mcp__docs__lookup, mcp__docs__search\n")},
+            {})
+SEARCH_RESULT = "search(): lists the guides that mention a term.\n"
+
+
+class RelayIdentityTest(DeliveryTask, unittest.TestCase):
+    """DESIGN §9.8 relay identity oracle, through the real CLI: two required parent-only needs share one pre-result
+    prep id that no relay result takes part in, so storing one result leaves the other request eligible; both
+    payloads reach the brief in one canonical order; a new result changes the plan, never the preparation; a second
+    result for one need, a denied or failed call, a missing result, a re-observed inventory or a changed payload
+    refuses before any run."""
+
+    def lead_inventory(self, name: str, observed: dt.datetime) -> pathlib.Path:
+        from oah.capabilities import inventory
+
+        entries = [inventory.parent_entry(capability, schema=dict(SCHEMA, name=capability.rsplit("/", 1)[1]),
+                                          observed=observed, effects=["read-network"])
+                   for capability in ("mcp:docs/lookup", "mcp:docs/search")]
+        return write(self.work / name, inventory.parent_inventory(entries, observed=observed))
+
+    def plan(self, lead: pathlib.Path, *relays: str) -> subprocess.CompletedProcess:
+        flags = [part for relay in relays for part in ("--relay-result", relay)]
+        return self.oah("capabilities", "plan", "--task", "t1", "--stage", "initial", "--parent-inventory", str(lead),
+                        *flags, "--json")
+
+    def dispatch(self, lead: pathlib.Path, *relays: str) -> subprocess.CompletedProcess:
+        flags = [part for relay in relays for part in ("--relay-result", relay)]
+        return self.call("claude", "initial", "--parent-inventory", str(lead), *flags)
+
+    def relay(self, request: dict, payload: str, *, name: str, outcome: str = "ok") -> str:
+        files = [write(self.work / f"{name}-request.json", request), write(self.work / f"{name}-result.txt", payload),
+                 write(self.work / f"{name}-invocation.json", {"outcome": outcome, "at": request["created_at"],
+                                                              "arguments_digest": "sha256:" + "3" * 64})]
+        stored = self.oah("capabilities", "relay", "--request", str(files[0]), "--capability",
+                          request["capability_id"], "--result-file", str(files[1]), "--invocation", str(files[2]),
+                          "--json")
+        self.assertEqual(stored.returncode, 0, stored.stderr)
+        return json.loads(stored.stdout)["id"]
+
+    def assert_relay_refused(self, result: subprocess.CompletedProcess, reason: str) -> None:
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(result.stderr.startswith(f"OAH_CAPABILITY_RELAY_REQUIRED({reason})"), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    @staticmethod
+    def capabilities_block(prompt: str) -> str:
+        return prompt[prompt.index("## Capabilities\n"):prompt.index("<!-- OAH_CAPABILITIES:END -->")]
+
+    def test_two_relays_keep_one_pre_result_identity_and_reach_the_brief_together(self):
+        from oah.capabilities import digest
+
+        self.build_skills(DOCS_TWO)
+        now = dt.datetime.now(dt.timezone.utc)
+        lead = self.lead_inventory("lead.json", now - dt.timedelta(seconds=20))
+        first = self.plan(lead)
+        self.assertEqual(first.returncode, 1, first.stdout + first.stderr)
+        requests = {request["capability_id"]: request for request in json.loads(first.stdout)["requests"]}
+        self.assertEqual(sorted(requests), ["mcp:docs/lookup", "mcp:docs/search"])
+        (prep,) = {request["prep_id"] for request in requests.values()}
+        refused = self.dispatch(lead)
+        self.assert_refused_before_any_run(refused, "OAH_CAPABILITY_RELAY_REQUIRED", planner=(
+            "capabilities", "plan", "--task", "t1", "--stage", "initial", "--parent-inventory", str(lead)))
+        self.assertIn("2 required capability need(s)", refused.stderr)
+
+        lookup = self.relay(requests["mcp:docs/lookup"], RESULT, name="lookup")
+        after_one = self.plan(lead, lookup)
+        self.assertEqual(after_one.returncode, 1, after_one.stderr)
+        (left,) = json.loads(after_one.stdout)["requests"]
+        self.assertEqual((left["capability_id"], left["prep_id"]), ("mcp:docs/search", prep))
+        search = self.relay(requests["mcp:docs/search"], SEARCH_RESULT, name="search")  # the first request still holds
+
+        forward, backward = self.plan(lead, lookup, search), self.plan(lead, search, lookup)
+        self.assertEqual((forward.returncode, backward.returncode), (0, 0), forward.stderr + backward.stderr)
+        plan = json.loads(forward.stdout)["plan"]
+        self.assertEqual(plan, json.loads(backward.stdout)["plan"])  # flag order is canonical
+        self.assertEqual((plan["prep_id"], plan["relay_refs"]), (prep, sorted([lookup, search])))
+        # The pre-result JSON, made from exactly the fields the plan records, is the prep id: no relay takes part.
+        pre_result = {"version": 1, "task": plan["task"], "design": plan["design"], "target": plan["target"],
+                      "needs": sorted([need["capability_id"], need["required"]] for need in plan["needs"]),
+                      "child": plan["inventory"]["child"], "parent": plan["inventory"]["parent"],
+                      "policy": plan["policy_digest"]}
+        self.assertEqual(digest(pre_result), prep)
+        for value in (lookup, search, RESULT.strip(), SEARCH_RESULT.strip(), plan["plan_id"],
+                      requests["mcp:docs/lookup"]["id"], requests["mcp:docs/search"]["id"]):
+            self.assertNotIn(value, json.dumps(pre_result))
+
+        for relays in ((search, lookup), (lookup, search)):
+            launched = self.dispatch(lead, *relays)
+            self.assertEqual(launched.returncode, 0, launched.stdout + launched.stderr)
+        runs = self.runs()
+        self.assertEqual(len(runs), 2)
+        prompts = [(run / "prompt.md").read_text(encoding="utf-8") for run in runs]
+        recorded = [json.loads((run / "capabilities.json").read_text(encoding="utf-8")) for run in runs]
+        self.assertEqual(self.capabilities_block(prompts[0]), self.capabilities_block(prompts[1]))
+        self.assertEqual(recorded[0], recorded[1])
+        # The call records the planner's plan; only the Jev status differs, since the planner asks nothing.
+        self.assertEqual((recorded[0]["prep_id"], recorded[0]["jev"]["status"], plan["jev"]["status"]),
+                         (prep, "unused(no-class-need)", "unused(plan-pure)"))
+        self.assertEqual({key: value for key, value in recorded[0].items() if key not in ("jev", "plan_id")},
+                         {key: value for key, value in plan.items() if key not in ("jev", "plan_id")})
+        self.assertEqual({row["id"]: row.get("relay") for row in recorded[0]["selected"]},
+                         {"mcp:docs/lookup": lookup, "mcp:docs/search": search})
+        for capability, relay, payload in (("mcp:docs/lookup", lookup, RESULT),
+                                           ("mcp:docs/search", search, SEARCH_RESULT)):
+            self.assertIn(f"### Relay result for {capability} ({relay})\n````text\n{payload}````\n", prompts[0])
+        self.assertLess(prompts[0].index("mcp:docs/lookup ("), prompts[0].index("mcp:docs/search ("))
+
+        # A new authorized result for the same request changes the plan only; with the old one too, it conflicts.
+        other = self.relay(requests["mcp:docs/lookup"], "lookup(): another page.\n", name="other")
+        renewed = json.loads(self.plan(lead, other, search).stdout)["plan"]
+        self.assertEqual(renewed["prep_id"], prep)
+        self.assertNotEqual(renewed["plan_id"], plan["plan_id"])
+        for relays in ((lookup, other, search), (search, other, lookup)):
+            with self.subTest(conflicting=relays.index(other)):
+                conflicting = self.dispatch(lead, *relays)
+                self.assert_relay_refused(conflicting, "conflicting")
+                self.assertIn(f"{min(lookup, other)} and {max(lookup, other)}", conflicting.stderr)
+                self.assert_relay_refused(self.plan(lead, *relays), "conflicting")
+        failed = {}
+        for outcome in ("denied", "error"):
+            with self.subTest(outcome=outcome):
+                failed[outcome] = self.relay(requests["mcp:docs/lookup"], f"{outcome}\n", name=outcome,
+                                             outcome=outcome)
+                self.assert_relay_refused(self.dispatch(lead, failed[outcome], search), outcome)
+        self.assert_relay_refused(self.dispatch(lead, "sha256:" + "0" * 64, search), "missing")
+
+        newer = self.lead_inventory("newer.json", now)  # the lead read its tools again: a new parent digest
+        self.assert_relay_refused(self.dispatch(newer, lookup, search), "stale")
+        self.assertNotEqual({request["prep_id"] for request in json.loads(self.plan(newer).stdout)["requests"]},
+                            {prep})
+
+        blob = json.loads((self.state_dir / "skills" / "relays" / f"{search.split(':', 1)[1]}.json")
+                          .read_text(encoding="utf-8"))["payload"]["blob_ref"]
+        stored = self.state_dir / "skills" / "relay-payloads" / f"{blob.split(':', 1)[1]}.json"
+        stored.write_text(stored.read_text(encoding="utf-8").replace("guides", "pages"), encoding="utf-8")
+        self.assert_relay_refused(self.dispatch(lead, lookup, search), "tampered")
+        # Two results that each fail to load give the same first refusal in either flag order.
+        answers = {self.dispatch(lead, *relays).stderr.split(":", 1)[0]
+                   for relays in ((failed["denied"], search), (search, failed["denied"]))}
+        self.assertEqual(len(answers), 1, answers)
+        self.assertEqual(len(self.runs()), 2)  # no refusal above left a run
+
+
+class RelayPrepTest(unittest.TestCase):
+    """DESIGN §9.8 relay identity at the plan layer: the task, lease, intent, design, needs, target and the lead's
+    entry (schema, permission, session) make the preparation, so a result made before any of them changed is
+    stale; a result and its request expire; the order of results never changes the answer; two different results
+    for one need refuse and the same one twice counts once."""
+
+    TASK = {"task": "t1", "lease": {"id": "lease-1", "generation": 1},
+            "intent": {"id": "t1", "revision": 1, "digest": "sha256:" + "5" * 64}}
+    CAPABILITIES = ("mcp:docs/lookup", "mcp:docs/search")
+
+    def lead(self, *, description: str = "Look up library docs", effects=("read-network",), session=None) -> dict:
+        from oah.capabilities import inventory
+
+        entries = [inventory.parent_entry(capability, schema=dict(SCHEMA, name=capability.rsplit("/", 1)[1],
+                                                                  description=description),
+                                          observed=NOW, effects=list(effects), session=session)
+                   for capability in self.CAPABILITIES]
+        return inventory.parent_inventory(entries, observed=NOW)
+
+    def assess(self, results=(), *, task=None, design=None, stage="initial", required=True, parent=None) -> dict:
+        from oah.capabilities import plan
+
+        child = {"version": 1, "target": {"engine": "claude"}, "completeness": "complete", "digest": "x",
+                 "entries": []}
+        needs = [{"capability_id": capability, "class": None, "required": required, "origin": "skill",
+                  "by": ["skill:docs2"], "id": "sha256:" + "1" * 64} for capability in self.CAPABILITIES]
+        return plan.assess(task=task or self.TASK, design=design, engine="claude", stage=stage, needs=needs,
+                           child=child, parent=parent or self.lead(), results=list(results), requires={}, now=NOW,
+                           state_dir=".")
+
+    def refusal(self, results=(), **changes):
+        from oah.capabilities import CapabilityRefused
+
+        with self.assertRaises(CapabilityRefused) as caught:
+            self.assess(results, **changes)
+        return caught.exception
+
+    def requests(self) -> dict[str, dict]:
+        refused = self.refusal()
+        self.assertEqual((refused.code, refused.reason), ("OAH_CAPABILITY_RELAY_REQUIRED", ""))
+        return {request["capability_id"]: request for request in refused.requests}
+
+    @staticmethod
+    def result(request: dict, digit: str) -> dict:
+        """A stored RelayResultV1 as assess reads it (its id is the record's own digest in the store)."""
+        return {"id": "sha256:" + digit * 64, "prep_id": request["prep_id"], "need_id": request["need_id"],
+                "capability_id": request["capability_id"], "entry_digest": request["entry_digest"],
+                "schema_digest": request["schema_digest"]}
+
+    def test_a_result_made_before_any_part_of_the_preparation_changed_is_stale(self):
+        requests = self.requests()
+        results = [self.result(requests[capability], digit) for capability, digit in zip(self.CAPABILITIES, "ab")]
+        found = self.assess(results)
+        self.assertEqual((found["prep_id"], found["relay_refs"]),
+                         (requests["mcp:docs/lookup"]["prep_id"], sorted(result["id"] for result in results)))
+        drifts = {"task": {"task": dict(self.TASK, task="t2")},
+                  "lease": {"task": dict(self.TASK, lease={"id": "lease-1", "generation": 2})},
+                  "intent": {"task": dict(self.TASK, intent=dict(self.TASK["intent"], revision=2))},
+                  "design": {"design": {"part": "P", "revision": 3}},
+                  "need": {"required": False},
+                  "target": {"stage": "correction"},
+                  "schema": {"parent": self.lead(description="Look up other docs")},
+                  "permission": {"parent": self.lead(effects=())},
+                  "session": {"parent": self.lead(session="another session")}}
+        for name, change in drifts.items():
+            with self.subTest(drift=name):
+                refused = self.refusal(results, **change)
+                self.assertEqual((refused.code, refused.reason), ("OAH_CAPABILITY_RELAY_REQUIRED", "stale"))
+                self.assertIn("nothing was launched", str(refused))
+
+    def test_a_stored_result_and_its_request_expire(self):
+        from oah.capabilities import CapabilityRefused, plan
+
+        state = make_tmp_dir(self)
+        request = self.requests()["mcp:docs/lookup"]
+        record, _word = plan.ingest(state, request, capability="mcp:docs/lookup", payload=RESULT.encode("utf-8"),
+                                    invocation={"outcome": "ok", "at": request["created_at"],
+                                                "arguments_digest": "sha256:" + "3" * 64}, now=NOW)
+        self.assertEqual(plan.load(state, record["id"], now=NOW)[1], RESULT)
+        expires = dt.datetime.fromisoformat(record["expires_at"])
+        for call in (lambda: plan.load(state, record["id"], now=expires),
+                     lambda: plan.check_request(request, now=expires)):
+            with self.assertRaises(CapabilityRefused) as caught:
+                call()
+            self.assertEqual(caught.exception.reason, "expired")
+
+    def test_the_order_of_results_never_changes_the_answer(self):
+        requests = self.requests()
+        first, second = (self.result(requests["mcp:docs/lookup"], digit) for digit in "ac")
+        search = self.result(requests["mcp:docs/search"], "b")
+        self.assertEqual(self.assess([search, first]), self.assess([first, search]))
+        self.assertEqual(self.assess([first, search, first])["relay_refs"], sorted([first["id"], search["id"]]))
+        for results in ([first, second, search], [search, second, first]):
+            with self.subTest(order=[result["id"][7] for result in results]):
+                refused = self.refusal(results)
+                self.assertEqual((refused.code, refused.reason), ("OAH_CAPABILITY_RELAY_REQUIRED", "conflicting"))
+                self.assertIn(f"{first['id']} and {second['id']} both answer mcp:docs/lookup", str(refused))
+                self.assertIn("nothing was launched", str(refused))
+        stale = dict(second, id="sha256:" + "d" * 64, prep_id="sha256:" + "0" * 64)
+        for results in ([stale, first, second], [first, second, stale]):  # a stale result speaks before a conflict
+            with self.subTest(stale=results.index(stale)):
+                refused = self.refusal(results)
+                self.assertEqual(refused.reason, "stale")
+                self.assertIn(stale["id"], str(refused))
+
+
+INDEX_BODY = "Check the query plan before adding an index.\n"
+
+
+class AdmissionOrderTest(TaskRepo, unittest.TestCase):
+    """DESIGN §5.1 and §9.8's admission class oracle through the real `oah call` in this process. One fixture has a
+    required task need for a skill that needs a parent-only tool, an optional need with two selected skills, both
+    needs searchable, Jev with task text on and an uncached search. Every mandatory negative (no selection; no lead
+    inventory; no, a missing or an expired relay) refuses with each counter at zero: task discovery, the search
+    getter and its loopback server, the collector, every Jev purpose and its loopback server, B's difficulty and
+    engine judges, the budget gate, the reservation, run folders, native offers and the engine. The same fixture
+    admitted reaches each counter, so no zero comes from a disabled branch; a native offer reaches discovery only."""
+
+    def setUp(self):
+        super().setUp()
+        from oah import call
+        from oah.discovery import providers, review, tasks
+        from oah.rerank import judge
+
+        self.counts: collections.Counter = collections.Counter()
+        self.jev: list = []  # every request the loopback Jev server received: the shared provider boundary
+        self.jev_url = FakeServer(self, self.respond).url()
+
+        def counted(name, real):
+            def wrapper(*args, **kwargs):
+                self.counts[name] += 1
+                if name == "judge":
+                    self.counts[f"judge:{args[0].purpose}"] += 1
+                if kwargs.get("reserve"):
+                    self.counts["reserve"] += 1
+                return real(*args, **kwargs)
+            return wrapper
+
+        for owner, name in ((tasks, "prepare_task"), (providers, "GETTER"), (review, "review"), (judge, "judge"),
+                            (call, "judge_difficulty"), (call, "judge_engine"), (call, "_task_dispatch_gate")):
+            self.enterContext(mock.patch.object(owner, name, counted(name, getattr(owner, name))))
+        self.enterContext(mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": fake_key()}))
+
+    def respond(self, path, body):
+        """Every Jev question is counted and answered 400 (which leaves the breaker alone): advice stays unused."""
+        self.jev.append((body.get("state") or {}).get("purpose"))
+        return 400, {"error": "this fixture only counts requests"}, 0, {}
+
+    def build(self) -> dict[str, str]:
+        from oah import init
+        from oah.discovery import tasks
+
+        self.upstream("acme/db", mit_repo({
+            "skills/mysql-migrate": skill_md("mysql-migrate", MIGRATE_BODY, extra="allowed-tools: mcp__docs__lookup\n"),
+            "skills/mysql-tune": skill_md("mysql-tune", TUNE_BODY),
+            "skills/mysql-index": skill_md("mysql-index", INDEX_BODY)}))
+        toml = "[" + ", ".join(json.dumps(part) for part in (sys.executable, str(FAKES / "fake_claude.py"))) + "]"
+        config = ("[models]\nfetch_scores = false\n"
+                  f"[engines.claude]\ncommand = {toml}\nquality_order = [\"opus\", \"sonnet\"]\n"
+                  "[skills.discovery]\ncache_hours = 0\n"
+                  f"[rerank]\nenabled = true\nprovider = \"typesafe\"\n[rerank.typesafe]\nurl = \"{self.jev_url}\"\n"
+                  "[rerank.judgement]\nenabled = true\nsend_task_text = true\n")
+        git_commit(self.repo, {".oah/tasks/t1/PACKET.md": TEXT, "src/app.py": "x = 1\n", ".oah/config.toml": config},
+                   "packet")
+        code, out, err = self.oah("start", "--task", "t1", "--agent", "claude", "--packet", ".oah/tasks/t1/PACKET.md",
+                                  "--scope", "src/")
+        self.assertEqual(code, 0, out + err)
+        agents = self.home / ".claude" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "oah-low.md").write_bytes(init.agent_text("low", "haiku", "low"))
+        (migrate,) = self.find_task("--subtask", "migrate", "--tech", "database=mysql", "--required",
+                                    out="migrate.json")["needs"]
+        (tune,) = self.find_task("--subtask", "tune", "--tech", "database=mysql", out="tune.json")["needs"]
+        write(self.files / "both.json", tasks.needs_file("t1", [migrate, tune]))
+        reviews = {name: self.review_json("--github", "acme/db", "--path", f"skills/{name}")[0]["id"]
+                   for name in ("mysql-migrate", "mysql-tune", "mysql-index")}
+        self.select("tune.json", reviews["mysql-tune"], reviews["mysql-index"])
+        return reviews
+
+    def lead(self) -> pathlib.Path:
+        from oah.capabilities import inventory
+
+        now = dt.datetime.now(dt.timezone.utc)
+        entry = inventory.parent_entry("mcp:docs/lookup", schema=SCHEMA, observed=now, effects=["read-network"])
+        return write(self.work / "lead-inventory.json", inventory.parent_inventory([entry], observed=now))
+
+    def measure(self, *extra: str, native: bool = False) -> tuple[int, str, str, dict]:
+        self.counts.clear()
+        self.jev.clear()
+        del self.server.requests[:]
+        before = set(self.runs())
+        self.record.unlink(missing_ok=True)
+        launcher = ("--launcher", "native", "--tier", "low", "--json") if native else ()
+        code, out, err = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--skill-needs",
+                                  str(self.files / "both.json"), *launcher, *extra)
+        new = set(self.runs()) - before
+        seen = {name: self.counts[name] for name in ("prepare_task", "GETTER", "review", "judge", "judge_difficulty",
+                                                     "judge_engine", "_task_dispatch_gate", "reserve")}
+        seen.update(search=len(self.server.requests), jev=len(self.jev), runs=len(new),
+                    offers=sum((run / "native-offer.json").exists() for run in new), engine=self.record.exists())
+        return code, out, err, seen
+
+    def assert_refused_at_zero(self, code: int, out: str, err: str, seen: dict, refusal: str) -> None:
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith(refusal), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(seen, {name: (False if name == "engine" else 0) for name in seen})
+
+    def test_every_mandatory_negative_refuses_before_any_request_and_the_positive_reaches_each(self):
+        from oah.capabilities import plan as capability_plan
+        from oah.discovery import store
+
+        reviews = self.build()
+        lead = self.lead()
+        cases = [("no selection", (), False, "OAH_SKILL_MANDATORY_MISSING"),
+                 ("no selection, native", (), True, "OAH_SKILL_MANDATORY_MISSING")]
+        for name, extra, native, refusal in cases:
+            with self.subTest(name):
+                self.assert_refused_at_zero(*self.measure(*extra, native=native), refusal)
+        self.select("migrate.json", reviews["mysql-migrate"])
+        cases = [("no lead inventory", (), False, "OAH_CAPABILITY_UNAVAILABLE(not-configured)"),
+                 ("no relay", ("--parent-inventory", str(lead)), False, "OAH_CAPABILITY_RELAY_REQUIRED:"),
+                 ("no relay, native", ("--parent-inventory", str(lead)), True, "OAH_CAPABILITY_RELAY_REQUIRED:"),
+                 ("missing relay", ("--parent-inventory", str(lead), "--relay-result", "sha256:" + "0" * 64), False,
+                  "OAH_CAPABILITY_RELAY_REQUIRED(missing)")]
+        for name, extra, native, refusal in cases:
+            with self.subTest(name):
+                self.assert_refused_at_zero(*self.measure(*extra, native=native), refusal)
+
+        # The lead plans with the same needs file as the call, so the skill it selected gets its relay request.
+        code, out, err = self.oah("capabilities", "plan", "--task", "t1", "--stage", "initial", "--parent-inventory",
+                                  str(lead), "--skill-needs", str(self.files / "both.json"), "--json")
+        self.assertEqual(code, 1, out + err)
+        (request,) = json.loads(out)["requests"]
+        self.assertEqual(request["capability_id"], "mcp:docs/lookup")
+        code, out, err = self.oah("capabilities", "plan", "--task", "t1", "--stage", "initial", "--skill-needs",
+                                  str(self.files / "absent.json"))
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith("OAH_SKILL_NEEDS_INVALID(malformed)"), err)
+        files = [write(self.work / "request.json", request), write(self.work / "result.txt", RESULT),
+                 write(self.work / "invocation.json", {"outcome": "ok", "at": request["created_at"],
+                                                       "arguments_digest": "sha256:" + "3" * 64})]
+        code, out, err = self.oah("capabilities", "relay", "--request", str(files[0]), "--capability",
+                                  "mcp:docs/lookup", "--result-file", str(files[1]), "--invocation", str(files[2]),
+                                  "--json")
+        self.assertEqual(code, 0, out + err)
+        relay = json.loads(out)["id"]
+        record = {key: value for key, value in store.get_record(self.state_dir, capability_plan.RELAYS, relay).items()
+                  if key != "id"}
+        expired = store.put_record(self.state_dir, capability_plan.RELAYS,
+                                   dict(record, expires_at="2026-01-01T00:00:00+00:00"))[1]["id"]
+        for native in (False, True):
+            with self.subTest("expired relay", native=native):
+                self.assert_refused_at_zero(*self.measure("--parent-inventory", str(lead), "--relay-result", expired,
+                                                          native=native), "OAH_CAPABILITY_RELAY_REQUIRED(expired)")
+
+        # Admitted, without --tier: each counter moves (skill-fit needs a design check: DesignAdmissionOrderTest).
+        code, out, err, seen = self.measure("--parent-inventory", str(lead), "--relay-result", relay)
+        self.assertEqual(code, 0, out + err)
+        for name in ("prepare_task", "GETTER", "search", "judge:capability-needs", "judge_difficulty", "judge_engine",
+                     "_task_dispatch_gate", "jev"):
+            self.assertGreater(seen.get(name, self.counts[name]), 0, (name, seen, dict(self.counts)))
+        self.assertEqual((seen["GETTER"], seen["reserve"], seen["runs"], seen["engine"], seen["review"]),
+                         (seen["search"], 1, 1, True, 0))  # preparation never asks the collector
+        self.assertGreaterEqual(seen["jev"], self.counts["judge:capability-needs"])
+        code, out, err, seen = self.measure("--parent-inventory", str(lead), "--relay-result", relay, native=True)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual((seen["offers"], seen["runs"], seen["engine"]), (1, 1, False))
+        self.assertGreater(seen["prepare_task"], 0)  # admitted read-only discovery still runs for an offer
+        self.assertGreater(seen["search"], 0)
+        self.assertEqual({name: seen[name] for name in ("judge", "jev", "judge_difficulty", "judge_engine", "reserve")},
+                         dict.fromkeys(("judge", "jev", "judge_difficulty", "judge_engine", "reserve"), 0))
+
+
+class DesignAdmissionOrderTest(DeliveryTask, unittest.TestCase):
+    """The design half of DESIGN §9.8's admission class oracle, in process: accepted coverage links a required skill
+    that needs a parent-only tool beside two optional skills of one check. Without its relay the preparation refuses
+    before any Jev request (skill-fit or another purpose), B judge, budget gate or run folder; relayed, the same
+    preparation asks skill-fit once, so that zero is not an off branch."""
+
+    def test_a_missing_relay_refuses_before_skill_fit_and_the_relayed_preparation_asks_it(self):
+        from oah import call, call_cli
+        from oah.capabilities import inventory
+        from oah.rerank import judge
+        from oah.secrets import NoKeychain
+
+        self.build_skills(PLAIN, ALPHA, BETA, (*DOCS[:3], {"check": "ownership"}))  # its own need beside plain's
+        purposes: list = []
+
+        def respond(path, body):
+            purposes.append((body.get("state") or {}).get("purpose"))
+            return 400, {"error": "this fixture only counts requests"}, 0, {}
+
+        url = FakeServer(self, respond).url()
+        config = (self.repo / ".oah/config.toml").read_text(encoding="utf-8")
+        git_commit(self.repo, {".oah/config.toml": config + "\n[rerank]\nenabled = true\nprovider = \"typesafe\"\n"
+                               f"[rerank.typesafe]\nurl = \"{url}\"\n[rerank.judgement]\nenabled = true\n"}, "jev")
+        self.env["TYPESAFE_API_KEY"] = fake_key()
+        now = dt.datetime.now(dt.timezone.utc)
+        entry = inventory.parent_entry("mcp:docs/lookup", schema=SCHEMA, observed=now, effects=["read-network"])
+        lead = write(self.work / "lead-inventory.json", inventory.parent_inventory([entry], observed=now))
+        counts: collections.Counter = collections.Counter()
+
+        def counted(name, real):
+            def wrapper(*args, **kwargs):
+                counts[f"judge:{args[0].purpose}" if name == "judge" else name] += 1
+                return real(*args, **kwargs)
+            return wrapper
+
+        for owner, name in ((judge, "judge"), (call, "judge_difficulty"), (call, "judge_engine"),
+                            (call, "_task_dispatch_gate")):
+            self.enterContext(mock.patch.object(owner, name, counted(name, getattr(owner, name))))
+
+        def prepare(*relays: str):
+            tools = call_cli.intent_tools()
+            with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                return call.prepare(call.CallRequest(engine="claude", stage="initial", task="t1", tier="low",
+                                                     parent_inventory=str(lead), relay_results=relays),
+                                    call_cli.load_settings(self.repo), root=self.repo, state_dir=self.state_dir,
+                                    env=self.env, footer=tools.footer, has_footer=tools.has_footer,
+                                    keychain=NoKeychain())
+
+        with self.assertRaises(call.EngineError) as caught:
+            prepare()
+        self.assertTrue(str(caught.exception).startswith("OAH_CAPABILITY_RELAY_REQUIRED"), str(caught.exception))
+        self.assertEqual((dict(counts), purposes, self.runs()), ({}, [], []))
+
+        planned = self.oah("capabilities", "plan", "--task", "t1", "--stage", "initial", "--parent-inventory",
+                           str(lead), "--json")
+        (request,) = json.loads(planned.stdout)["requests"]
+        files = [write(self.work / "request.json", request), write(self.work / "result.txt", RESULT),
+                 write(self.work / "invocation.json", {"outcome": "ok", "at": request["created_at"],
+                                                       "arguments_digest": "sha256:" + "3" * 64})]
+        stored = self.oah("capabilities", "relay", "--request", str(files[0]), "--capability", "mcp:docs/lookup",
+                          "--result-file", str(files[1]), "--invocation", str(files[2]), "--json")
+        self.assertEqual(stored.returncode, 0, stored.stderr)
+        prepare(json.loads(stored.stdout)["id"])
+        self.assertEqual((counts["judge:skill-fit"], purposes.count("skill-fit"), len(self.runs())), (1, 1, 1))
+        self.assertGreater(counts["_task_dispatch_gate"], 0)
+
+    def test_a_brief_the_design_block_overfills_refuses_at_admission(self):
+        """E-T14 with B's design block: the skill texts fit the brief budget alone but not with the design context,
+        so admission refuses before the budget gate, B's engine judge or a run folder (the budget is patched down so a
+        small fixture reaches it; the exact brief is still checked at the end)."""
+        from oah import call, skillpack
+
+        self.build_skills(PLAIN)
+        counts: collections.Counter = collections.Counter()
+
+        def counted(name, real):
+            def wrapper(*args, **kwargs):
+                counts[name] += 1
+                return real(*args, **kwargs)
+            return wrapper
+
+        for name in ("judge_engine", "_task_dispatch_gate"):
+            self.enterContext(mock.patch.object(call, name, counted(name, getattr(call, name))))
+        with contextlib.redirect_stderr(io.StringIO()):
+            run = pathlib.Path(self.prepare().run_dir)
+        design_bytes = json.loads((run / "design.json").read_text(encoding="utf-8"))["block_bytes"]
+        skill_bytes = len(self.block((run / "prompt.md").read_text(encoding="utf-8")).encode("utf-8"))
+        self.assertEqual((counts["judge_engine"], counts["_task_dispatch_gate"] > 0), (1, True))
+        counts.clear()
+        budget = skill_bytes + design_bytes // 2  # the skill texts fit alone; with the design context they do not
+        with mock.patch.object(skillpack, "BRIEF_BUDGET", budget), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(call.EngineError) as caught:
+            self.prepare()
+        self.assertTrue(str(caught.exception).startswith("OAH_SKILLS_BUDGET_EXCEEDED(brief)"), str(caught.exception))
+        self.assertIn("the design context, skill texts and capability results already take", str(caught.exception))
+        self.assertEqual((dict(counts), self.runs()), ({}, [run]))
 
 
 LOOKUP_AC = "look up the parameters and return values of the date parser function"

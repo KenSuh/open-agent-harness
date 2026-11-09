@@ -14,7 +14,8 @@ judgements (DESIGN §6.3.4); packet lines naming capability IDs are not read in 
 
 The prep id hashes the pre-result identity only (task, lease, intent, design, target, skill and rule needs,
 inventories), so storing a result or a changed Jev answer never changes it and two relays never depend on each
-other. Nothing here calls a tool or a model; Jev is asked only through the caller's `advise`, for a class need with
+other. Results are read in id order, so the order of `--relay-result` flags never changes the plan or the refusal,
+and two different results for one need refuse (`OAH_CAPABILITY_RELAY_REQUIRED(conflicting)`): oah never picks one. Nothing here calls a tool or a model; Jev is asked only through the caller's `advise`, for a class need with
 two or more qualified entries that all have linked public documentation (`select`).
 """
 from __future__ import annotations
@@ -147,12 +148,18 @@ def assess(*, task: Mapping, design: Mapping | None, engine: str, stage: str, ne
         raise CapabilityRefused(UNSUPPORTED_CODE, "review-isolated", "a review stays isolated and never takes relay "
                                 "results; drop --relay-result; nothing was launched")
     by_need = {}
-    for result in results:
+    ordered = sorted(results, key=lambda result: result["id"])  # one answer whatever the flag order
+    for result in ordered:
         if result["prep_id"] != prep:
             raise CapabilityRefused(RELAY_REQUIRED_CODE, "stale", f"relay result {result['id']} was made for another "
                                     "preparation (the task, design, needs or inventories changed); plan again and "
                                     "relay again; nothing was launched")
-        by_need[result["need_id"]] = result
+    for result in ordered:
+        held = by_need.setdefault(result["need_id"], result)
+        if held["id"] != result["id"]:
+            raise CapabilityRefused(RELAY_REQUIRED_CODE, "conflicting", f"relay results {held['id']} and "
+                                    f"{result['id']} both answer {result['capability_id']}; pass only the one to "
+                                    "deliver; nothing was launched")
     selected, requests, refusals = [], [], []
     for need in expanded:
         capability, required = need["capability_id"], need["required"]
@@ -305,7 +312,7 @@ def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: 
     child = inventories.child(engine, root=root, env=env, home=skillsel.home_of(env), now=now,
                               classes=settings["classes"])
     parent = inventories.read_parent(parent_path, now=now) if parent_path else None
-    loaded = [load(state_dir, ref, now=now) for ref in dict.fromkeys(relay_refs)]
+    loaded = [load(state_dir, ref, now=now) for ref in sorted(set(relay_refs))]  # the same first refusal in any order
     design = skillpack._accepted_coverage(task_design)[2]
     found = assess(task=task_identity(holder, task), design=design, engine=engine, stage=stage, needs=needs,
                    child=child, parent=parent, results=[record for record, _text in loaded],

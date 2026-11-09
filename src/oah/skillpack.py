@@ -502,6 +502,16 @@ def finalize(admitted: Admitted) -> tuple[str | None, dict | None]:
     return block, bundle
 
 
+def check_parts(*parts: str | None) -> None:
+    """Admission's brief floor (DESIGN §5.1 step 2): each part appears whole in the brief, so a sum over the brief
+    budget refuses before any search, Jev request, budget gate or run; check_brief checks the exact brief at the end."""
+    size = sum(len(part.encode("utf-8")) for part in parts if part)
+    if size > BRIEF_BUDGET:
+        raise PackRefused(BUDGET_CODE, "brief", f"the design context, skill texts and capability results already take "
+                          f"{size} bytes, over the {BRIEF_BUDGET}-byte brief budget; nothing was launched",
+                          plan=["split the task, or unlink optional skills"])
+
+
 def check_brief(text: str) -> None:
     size = len(text.encode("utf-8"))
     if size > BRIEF_BUDGET:

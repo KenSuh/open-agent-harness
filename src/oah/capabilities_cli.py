@@ -40,6 +40,7 @@ def register(commands: argparse._SubParsersAction) -> None:
     plan.add_argument("--parent-inventory", metavar="FILE", help="the lead's InventoryV1 of its own tools")
     plan.add_argument("--relay-result", metavar="HASH", action="append", default=[],
                       help="a stored relay result (repeatable)")
+    plan.add_argument("--skill-needs", metavar="FILE", help="plan with this needs file, as oah call --skill-needs")
     plan.add_argument("--json", action="store_true", help="print machine-readable JSON")
     relay = sub.add_parser("relay", help="store the result of a tool call the lead made for a relay request")
     relay.add_argument("--request", metavar="FILE", required=True, help="the RelayRequestV1 that plan printed")
@@ -81,20 +82,26 @@ def _show(args: argparse.Namespace) -> int:
 
 
 def _plan(args: argparse.Namespace) -> int:
-    from oah import skillpack
+    from oah import call, discovery, skillpack, skills_cli
     from oah.call import bound_lease
     from oah.capabilities import CapabilityRefused, plan
     from oah.lease_cli import lease_design
-    from oah.skills_cli import _roots, settings_for
 
     info, state = _context()
     holder = bound_lease(state, args.task)
     if holder is None:
         raise Refused(USAGE_CODE, f"task {args.task} has no active lease; start it before planning")
     judged = lease_design(holder, state)
+    settings, found_settings = skills_cli._discovery_settings(info)
+    try:
+        basis = skills_cli._task_context(info, state, args.task)[2]  # the task needs the call would admit
+    except skills_cli.Refused as exc:
+        raise Refused(exc.code, str(exc).split(": ", 1)[1]) from None
+    needs = call.task_needs(basis, stage=args.stage, policy=discovery.policy_digest(found_settings),
+                            needs_file=args.skill_needs)
     admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation)),
                                task_design=judged, state_dir=state, engine=args.engine, stage=args.stage,
-                               roots=_roots(info, state, settings_for(info.root)))
+                               roots=skills_cli._roots(info, state, settings), needs=needs)
     try:
         found, _block = plan.for_task(holder=holder, task=args.task, task_design=judged, engine=args.engine,
                                       stage=args.stage, items=admitted.items, root=info.root, env=os.environ,
@@ -154,6 +161,7 @@ def run(args: argparse.Namespace) -> int:
     from oah.capabilities import CapabilityRefused
     from oah.config import ConfigError
     from oah.discovery.store import StoreProblem
+    from oah.discovery.tasks import NeedsInvalid
     from oah.paths import GitMissing, NotARepo
     from oah.review.runner import credential_redactor
     from oah.skillpack import PackRefused
@@ -164,7 +172,7 @@ def run(args: argparse.Namespace) -> int:
     except CapabilityRefused as exc:
         print(redact(str(exc)), file=sys.stderr)
         return exc.exit_code
-    except (Refused, PackRefused) as exc:
+    except (Refused, PackRefused, NeedsInvalid) as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_REFUSED
     except (ConfigError, NotARepo, GitMissing, StoreProblem, StateCorrupt, StorageError) as exc:

@@ -114,8 +114,10 @@ you: a missing review or a moved pin blocks the dispatch until you review again 
 
 **Fixed byte budgets.** Skill texts may take up to 196,608 bytes and the whole brief up to 524,288 bytes, with at
 most 128 items. Over a budget, the call refuses with `OAH_SKILLS_BUDGET_EXCEEDED` and lists each skill's size, so
-you can split the task or unlink optional skills. What it costs you: a large skill set has to be split across
-tasks.
+you can split the task or unlink optional skills. When the design context, skill texts and capability results
+already pass the brief budget together, the call refuses before any search, Jev question or budget gate; the exact
+brief is checked again at the end. What it costs you: a large skill set has to be split across tasks, and a brief
+that passes the budget only through its other sections still refuses at the end, after the judges ran.
 
 **Large files by reference.** When the skill texts do not fit the skill budget, oah takes a skill's auxiliary
 files out of the brief, largest first, and names each one instead: "Read `<path>` in full with your Read tool
@@ -266,7 +268,10 @@ named tool into a capability need and routes it.
 - A relay goes in three steps. `plan --parent-inventory FILE` prints a relay request for each required need the
   lead can meet. The lead runs the tool itself and stores the result with `oah capabilities relay --request FILE
   --capability ID --result-file FILE --invocation FILE`. Then `oah call ... --parent-inventory FILE
-  --relay-result HASH` delivers it in a `## Capabilities` block after the skill texts.
+  --relay-result HASH` delivers it in a `## Capabilities` block after the skill texts. When the call takes
+  `--skill-needs FILE`, give `plan` the same file, so a skill selected for a task need gets its requests too.
+- Pass one stored result per need. The order of `--relay-result` flags never changes the plan or the refusal, and
+  two different results for one need refuse with `OAH_CAPABILITY_RELAY_REQUIRED(conflicting)`.
 - On a run whose stream oah checks live (see **The stream is checked while it runs** above),
   `capabilities-receiving.json` records each MCP tool use. A tool the plan selected is `planned` and any other tool
   `unplanned`; oah records an unplanned tool and does not block it.
@@ -285,6 +290,14 @@ markers and of anything that looks like a secret, and it expires 300 seconds aft
 exact task, design, needs and inventories it was made for. A review run stays isolated and never takes one
 (`OAH_CAPABILITY_UNSUPPORTED(review-isolated)`). What it costs you: you relay close to the dispatch, and again
 after anything changes.
+
+**Capability needs are checked before anything is asked.** A required capability nobody can provide, an unmet
+dependency, and a missing, expired, failed, stale or conflicting relay refuse together with the skill admission,
+before any skill search, Jev question, budget gate or run folder, for an ordinary call and a native offer alike.
+After the searches and Jev advice, the plan is built and checked once more with its optional class needs. What it
+costs you: a refused call shows no skill discovery for that attempt, and when you relayed one tool twice you name
+the result to deliver, since oah never picks one. A relay that expires between the two checks still refuses, after
+the searches and questions already sent.
 
 **oah never installs, enables or connects a tool.** A missing plugin or server refuses with
 `OAH_CAPABILITY_DEPENDENCY_UNSATISFIED` or `OAH_CAPABILITY_UNAVAILABLE`. What it costs you: you install or
