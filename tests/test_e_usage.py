@@ -15,6 +15,24 @@ from tests.test_skill_delivery import DeliveryTask
 
 
 class UsageFactsTest(unittest.TestCase):
+    def test_a_summary_with_a_changed_digest_refuses_and_keeps_the_earlier_record(self):
+        from oah.discovery.attempts import Attempt
+        from oah.discovery.store import digest
+
+        state = make_tmp_dir(self)
+        attempt = Attempt(state)
+        with attempt.request("skill-search", digest("fixture request")):
+            pass
+        (path,) = (state / "skills" / "attempts").glob("*.json")
+        before = path.read_bytes()
+        attempt.rows[0]["outcome_digest"] = "not-a-digest"
+
+        with self.assertRaisesRegex(ValueError, "closed-summary"):
+            attempt.save()
+
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(json.loads(before)["requests"][0]["requests"], 1)
+
     def test_partial_message_updates_keep_prior_fields_and_an_empty_result_has_unknown_usage(self):
         from oah.capabilities.usage import AvailableUsage
 

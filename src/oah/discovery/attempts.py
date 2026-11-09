@@ -6,8 +6,9 @@ import datetime as dt
 import pathlib
 import secrets
 from contextvars import ContextVar
-from typing import Iterator, Literal, TypedDict
+from typing import Iterator, Literal, TypedDict, get_args
 
+from oah.discovery.preparation import _hash
 from oah.discovery.store import digest
 
 Kind = Literal["skill-search", "skill-review", "skill-judge", "difficulty-judge", "engine-judge", "skill-order"]
@@ -46,6 +47,15 @@ class Attempt:
 
         if not self.rows and not self.omitted:
             return
+        valid = (_hash(self.id) and (self.preparation is None or _hash(self.preparation))
+                 and type(self.omitted) is int and 0 <= self.omitted <= 10**9 and len(self.rows) <= 128)
+        for row in self.rows:
+            valid = valid and (set(row) == set(RequestFact.__annotations__) and row["kind"] in get_args(Kind)
+                and row["state"] in get_args(Status) and _hash(row["input_digest"])
+                and (row["requests"] is None or type(row["requests"]) is int and row["requests"] == 1)
+                and (row["outcome_digest"] is None or _hash(row["outcome_digest"])))
+        if not valid:
+            raise ValueError("closed-summary: request evidence needs bounded digests, counts and enums")
         summary: Summary = {"version": 1, "attempt_id": self.id, "preparation_digest": self.preparation,
                             "requests": list(self.rows), "omitted": self.omitted, "usage": "unknown",
                             "at": dt.datetime.now(dt.timezone.utc).isoformat(), "counted": False}
