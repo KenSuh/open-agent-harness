@@ -278,9 +278,11 @@ def _private_directory(folder: pathlib.Path) -> None:
 
 
 def _permission_refused(reason: str) -> UnlazyError:
-    return UnlazyError("OAH_UNLAZY_SNAPSHOT_PERMISSIONS", f"cannot prove the unlazy snapshot is private: {reason}; "
-                       "fix the reported path's ownership and permissions to allow only your account, "
-                       "or set OAH_STATE_DIR to a private local state folder under trusted parents, then retry")
+    error = UnlazyError("OAH_UNLAZY_SNAPSHOT_PERMISSIONS", f"cannot prove the unlazy snapshot is private: {reason}; "
+                        "fix the reported path's ownership and permissions to allow only your account, "
+                        "or set OAH_STATE_DIR to a private local state folder under trusted parents, then retry")
+    error.reason = reason  # "<path>: <why>", for callers that word their own refusal (oah.scratch)
+    return error
 
 
 def _private_makedirs(folder: pathlib.Path) -> None:
@@ -526,10 +528,13 @@ def _verify_state_ancestry(folder: pathlib.Path, *, platform: str | None = None)
                     result = run_command(["/bin/ls", "-lde", str(path)], timeout=STATUS_TIMEOUT,
                                          env=dict(os.environ, LC_ALL="C"))
                     lines = result.stdout.splitlines()
+                    # '+' marks an ACL, but ls shows '@' instead when the folder also has extended attributes
+                    # (a stock ~/Library has both); -e lists every ACL entry either way.
+                    marker = lines[0].split()[0][10:] if lines and lines[0].split() else ""
                     if (result.returncode != 0 or result.timed_out or result.stderr or not lines
                             or not lines[0].split()
                             or not re.fullmatch(r"d[rwxStTs-]{9}[@+]?", lines[0].split()[0])
-                            or ("+" in lines[0].split()[0]) != (len(lines) > 1)
+                            or (marker == "+" and len(lines) == 1) or (marker == "" and len(lines) > 1)
                             or any(not re.fullmatch(r"\s*\d+: \S+(?: inherited)? deny [a-z_,]+", line)
                                    for line in lines[1:])):
                         raise OSError("the directory ACL is unreadable or contains an access grant")

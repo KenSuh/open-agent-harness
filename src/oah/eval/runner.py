@@ -7,7 +7,6 @@ import json
 import pathlib
 import secrets
 import shutil
-import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -21,7 +20,7 @@ from oah.eval.grade import RUN_FILE, normalize_finding
 from oah.eval.plan import Source
 from oah.eval.workspace import (ORACLE_NORMALIZATION, RUNTIME_ENV, Workspace, build_workspace,
                                 check_grader_separation, open_snapshot, remove_tree, scan_workspace,
-                                variant_environment)
+                                scratch_folder, variant_environment)
 
 DEFAULTS = {"timeout_seconds": 1800.0, "test_timeout_seconds": 300.0}
 RESULT_FILE = "result.json"
@@ -185,7 +184,7 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
     try:
         prepared: list[_Prepared] = []
         for entry, case in cases:
-            scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-src-"))
+            scratch = scratch_folder("oah-eval-src-")
             temporary.append(scratch)
             snapshot = open_snapshot(case, scratch)
             try:
@@ -196,7 +195,7 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
             commits = set()
             for variant, command in variants:
                 # Each workspace is its own temporary folder, so no variant sits next to another's work.
-                root = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-ws-"))
+                root = scratch_folder("oah-eval-ws-")
                 temporary.append(root)
                 ws = build_workspace(snapshot, root, config_text=variant.get("config_text"))
                 argv = resolve_argv(command, env, f"variant {variant['name']}", cwd=ws.repo)

@@ -25,7 +25,7 @@ from oah.design.sources import state as state_module
 from oah.design.sources.adapters import Transport
 from oah.design.sources.check import Sources
 from oah.design.sources.model import SourceError, build_spec, freshness
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir, scratch_base, scratch_env
 
 LOCATOR = "https://github.com/acme/lib"
 SRC = str(pathlib.Path(__file__).resolve().parents[1] / "src")
@@ -1884,10 +1884,13 @@ class SourceSafetyTest(SourceCase):
         outer = make_git_repo(self)
         url = self.upstream.as_uri()
         git(outer, "config", f"url.{other.as_uri()}.insteadOf", url)
-        scratch = outer / "scratch"
-        scratch.mkdir()
-        with mock.patch("tempfile.tempdir", str(scratch)):
+        system_temp = outer / "system-temp"
+        system_temp.mkdir()
+        private = scratch_env(outer / "user")  # the scratch base, too, sits inside the enclosing repository
+        with mock.patch.dict(os.environ, private), mock.patch("tempfile.tempdir", str(system_temp)):
             advertisement = gitref.ls_remote(url, tags=True)
+        self.assertTrue(scratch_base(private).is_relative_to(outer))
+        self.assertTrue(scratch_base(private).is_dir())
         self.assertEqual({"refs/tags/v1.0.0", "refs/tags/v1.0.0^{}"}, set(advertisement.refs))
 
     def test_a_fifo_state_file_is_refused_without_waiting_for_a_writer(self) -> None:

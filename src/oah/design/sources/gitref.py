@@ -16,10 +16,10 @@ import os
 import pathlib
 import re
 import subprocess
-import tempfile
 import threading
 from typing import Mapping, Sequence
 
+from oah import scratch as oah_scratch
 from oah.engines.proc import REAP_SECONDS, _WindowsJob, kill_tree
 from oah.paths import git_argv
 from oah.toolkit.catalog import CatalogError, validate_repository
@@ -110,7 +110,7 @@ def ls_remote(repository: str, patterns: Sequence[str] = (), *, tags: bool = Fal
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 0x4  # CREATE_SUSPENDED
     else:
         options["start_new_session"] = True
-    with _git_env() as env, tempfile.TemporaryDirectory(prefix="oah-ls-remote-") as scratch:
+    with _git_env() as env, oah_scratch.directory("oah-ls-remote-") as scratch:
         env["GIT_CEILING_DIRECTORIES"] = str(pathlib.Path(scratch).parent)
         proc = subprocess.Popen([str(part) for part in argv], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, cwd=scratch, env=env, **options)

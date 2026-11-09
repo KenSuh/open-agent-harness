@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Iterable, Mapping, Sequence
 
+from oah import scratch as oah_scratch
 from oah.engines.proc import RunResult, run_command
 from oah.eval.case import Case, file_sha256
 from oah.eval.commands import _ResolvedArgv
@@ -45,6 +46,14 @@ _HEX = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 VARIANT_CHANNELS = ("git-blob", "working-file", "prompt", "argument", "environment", "reference", "config")
 RUNTIME_ENV = frozenset(("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "HOME", "USERPROFILE",
                          "APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ"))
+
+
+def scratch_folder(prefix: str) -> pathlib.Path:
+    """A new owner-only folder in the private scratch base; an unsafe base stops the evaluation (exit 69)."""
+    try:
+        return oah_scratch.make(prefix)
+    except oah_scratch.ScratchError as exc:
+        raise EvalError(exc.code, exc.detail, EXIT_ENVIRONMENT) from exc
 
 
 def variant_environment(env: Mapping[str, str], ws: Workspace | None = None) -> dict[str, str]:

@@ -321,14 +321,18 @@ def reviewer_pin(root: pathlib.Path | None, search_path: str | None = None) -> d
     return {"path": path, "sha256": digest, "error": None}
 
 
+def _printable(text: str) -> str:
+    """A path as one terminal line: control and line-separator characters are shown escaped."""
+    return "".join(ascii(char)[1:-1] if ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" else char
+                   for char in text)
+
+
 def _pin_lines(pin: Mapping | None) -> list[str]:
     if pin is None:
         return []
     lines = ["", "Reviewer pin (read from disk; oah doctor never runs the reviewer CLI):"]
     if pin["error"] is None:
-        path = "".join(ascii(char)[1:-1] if ord(char) < 32 or 127 <= ord(char) <= 159
-                       or char in "\u2028\u2029" else char for char in str(pin["path"]))
-        lines.append(f"  codex entry: {path}")
+        lines.append(f"  codex entry: {_printable(str(pin['path']))}")
         lines.append(f"  sha256: {pin['sha256']} (the value for [review] codex_sha256)")
     else:
         lines.append(f"  the reviewer CLI file could not be read ({pin['error']}); install Codex or fix [engines.codex] "
@@ -430,12 +434,54 @@ def _choice_lines(choices: Sequence[Mapping]) -> list[str]:
     return lines
 
 
+def scratch_leftovers(env: Mapping[str, str]) -> dict:
+    """What stopped runs left in the private scratch base: read only, so nothing is created, proven or removed."""
+    from oah import scratch
+
+    try:
+        return scratch.leftovers(env)
+    except scratch.ScratchError as exc:
+        from oah.review.runner import credential_redactor
+
+        redact = credential_redactor(env)
+        return {"base": redact(exc.base), "error": exc.code, "reason": redact(exc.reason), "unreadable": 1}
+
+
+def _size(count: int) -> str:
+    if count < 1024:
+        return f"{count} bytes"
+    size = count / 1024
+    for unit in ("KiB", "MiB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"
+
+
+def _scratch_lines(report: Mapping | None) -> list[str]:
+    if report is None:
+        return []
+    base = _printable(str(report.get("base")))
+    if report.get("error"):
+        return ["", f"Scratch folder: {base} cannot be used ({report['error']}: {_printable(str(report['reason']))})"]
+    if report["unreadable"]:
+        return ["", f"Scratch folder: {base} cannot be fully read",
+                f"  known: {report['count']} direct entries, {_size(report['bytes'])} of regular files; "
+                f"{report['unreadable']} unreadable paths; totals are unknown; oah deletes nothing here"]
+    if not report["count"]:
+        return ["", f"Scratch folder: {base} (no leftovers)"]
+    count = report["count"]
+    return ["", f"Scratch folder: {base}",
+            f"  {count} leftover{'' if count == 1 else 's'}, {_size(report['bytes'])}, from runs that stopped "
+            "before cleaning up; oah deletes nothing here, so remove them once no oah command is running"]
+
+
 def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = (),
                 model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
                 model_choices: Sequence[Mapping] = (), agent_notices: Sequence[Mapping] = (),
                 agent_notices_error: str | None = None, *, update_notices: Sequence[Mapping] = (),
                 update_notices_error: str | None = None, reviewer_pin: Mapping | None = None,
-                rerank_breaker: Mapping | None = None) -> str:
+                rerank_breaker: Mapping | None = None, scratch: Mapping | None = None) -> str:
     label = PLATFORM_LABELS.get(platform, f"{platform}, not a supported OS")
     rows = [("TOOL", "STATUS", "VERSION", "NOTE")]
     rows += [(s.name, s.status, s.version or "-", s.note) for s in statuses]
@@ -461,6 +507,7 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
     lines += _breaker_lines(rerank_breaker)
     if model_notices_error is not None:
         lines.append(f"Model notices could not be read ({model_notices_error}); run oah models to see why.")
+    lines += _scratch_lines(scratch)
     missing_required = sum(1 for s in statuses if s.requirement == "required" and s.status != "ok")
     lines += ["", "DOCTOR_OK" if missing_required == 0 else f"DOCTOR_MISSING required={missing_required}"]
     return "\n".join(lines)
@@ -470,7 +517,7 @@ def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
                 model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
                 model_choices: Sequence[Mapping] = (), agent_notices: Sequence[Mapping] = (),
                 agent_notices_error: str | None = None, *, update_notices: Sequence[Mapping] = (),
-                update_notices_error: str | None = None) -> str:
+                update_notices_error: str | None = None, scratch: Mapping | None = None) -> str:
     rows = []
     for status in statuses:
         commands, url = _install_texts(status.name, platform)
@@ -489,6 +536,8 @@ def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
         payload["update_notices"] = [dict(notice) for notice in update_notices]
     if update_notices_error is not None:
         payload["update_notices_error"] = update_notices_error
+    if scratch is not None:
+        payload["scratch"] = dict(scratch)
     return json.dumps(payload, indent=2, ensure_ascii=True)
 
 
@@ -543,9 +592,13 @@ def doctor_main(*, json_output: bool) -> int:
         updates = update_notices(root)
     except Exception as exc:  # the same for the tool-update records
         updates, update_error = [], type(exc).__name__
+    try:
+        leftovers = scratch_leftovers(os.environ)
+    except Exception as exc:  # and for the scratch folder count
+        leftovers = {"base": "?", "error": type(exc).__name__, "reason": "the scratch folder could not be listed"}
     if json_output:  # the JSON keeps its landed shape; the reviewer pin and the Jev breaker are text blocks
         print(render_json(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error,
-                          update_notices=updates, update_notices_error=update_error))
+                          update_notices=updates, update_notices_error=update_error, scratch=leftovers))
         return exit_code(statuses)
     try:
         pin = reviewer_pin(root)
@@ -557,5 +610,5 @@ def doctor_main(*, json_output: bool) -> int:
         breaker = {"error": type(exc).__name__}
     print(render_text(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error,
                       update_notices=updates, update_notices_error=update_error, reviewer_pin=pin,
-                      rerank_breaker=breaker))
+                      rerank_breaker=breaker, scratch=leftovers))
     return exit_code(statuses)

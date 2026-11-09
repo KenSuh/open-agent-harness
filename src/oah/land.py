@@ -90,13 +90,13 @@ import json
 import os
 import pathlib
 import re
-import tempfile
 import urllib.parse
 import weakref
 from contextlib import contextmanager
 from typing import Mapping, Sequence
 
 from oah import intent as oah_intent
+from oah import scratch as oah_scratch
 from oah.engines.proc import resolve_command, run_command
 from oah.paths import git_argv, repo_info, run_git, state_dir
 from oah.review import summary as evidence
@@ -206,9 +206,12 @@ class _GitContext:
                               timeout=GH_TIMEOUT, env=self.original)
         if objects.returncode != 0 or objects.timed_out or git_dir.returncode != 0 or git_dir.timed_out:
             raise LandError("OAH_REVIEW_GIT_FAILED", "git could not inspect objects; check the repository and retry")
-        temporary = tempfile.TemporaryDirectory(prefix="oah-land-", ignore_cleanup_errors=True)
+        try:
+            temporary = oah_scratch.directory("oah-land-", ignore_cleanup_errors=True)
+        except oah_scratch.ScratchError as exc:
+            raise LandError(exc.code, exc.detail) from exc
         self.source = pathlib.Path(temporary.name)
-        # The bound cleanup holds the TemporaryDirectory, not this context, so cycles can be collected and
+        # The bound cleanup holds the scratch directory object, not this context, so cycles can be collected and
         # cleanup detaches the directory's own warning finalizer (also when finalizers run at interpreter exit).
         self._cleanup = weakref.finalize(self, temporary.cleanup)
         (self.source / "objects").mkdir()

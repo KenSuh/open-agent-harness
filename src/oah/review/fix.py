@@ -54,7 +54,6 @@ import shutil
 import signal
 import stat
 import sys
-import tempfile
 import threading
 import time
 from importlib import resources
@@ -62,6 +61,7 @@ from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
 from oah import briefs, call, call_cli, runs
 from oah import intent as oah_intent
+from oah import scratch as oah_scratch
 from oah.atomic import StateCorrupt, read_json, write_json_atomic, write_text_atomic
 from oah.config import load_config
 from oah.engines.effort import BEHAVIOUR_CHANGING, ORDINARY, load_rules
@@ -176,6 +176,8 @@ _ERROR_DIAGNOSTICS = {
     "OAH_TASK_INVALID": "the task identifier is invalid; use a simple task name and retry oah fix.",
     "OAH_FIX_STREAM_FAILED": "the output stream failed; restore the terminal and inspect the worktree before retrying.",
     "OAH_STATE_IO": "state storage failed; check storage permissions and available space before retrying.",
+    "OAH_SCRATCH_UNSAFE": "the private scratch folder is not safe to use; run oah doctor to see where it is, make "
+                          "it and its parents writable only by your account, then retry oah fix.",
     "OAH_STATE_CORRUPT": "state storage is invalid; restore the original state records before retrying.",
     "OAH_STATE_PENDING": "a state transaction is pending; recover the state transaction before retrying.",
     "OAH_STATE_LOCK_TIMEOUT": "state storage is busy; wait for the other operation to finish before retrying.",
@@ -296,8 +298,14 @@ _WARNING_DIAGNOSTICS = {
 }
 
 
+class _ScratchRefusal(ReviewError):
+    def __init__(self, error: oah_scratch.ScratchError, redact: Callable[[str], str]) -> None:
+        super().__init__(error.code, redact(error.detail))
+
+
 def _error_diagnostic(exc: BaseException) -> tuple[str, str]:
-    """Never format exception text, paths, class names or unapproved codes, even without exported keys."""
+    if isinstance(exc, _ScratchRefusal):
+        return exc.code, str(exc)
     code = INTERRUPTED if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", None)
     if not isinstance(code, str) or code not in _ERROR_DIAGNOSTICS:
         code = "OAH_STATE_IO" if isinstance(exc, OSError) else "OAH_FIX_FAILED"
@@ -962,6 +970,10 @@ def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]],
             return operation(redact)
         finally:
             runs._CORRECTION_CAPTURE.reset(token)
+    except oah_scratch.ScratchError as exc:
+        raise _ScratchRefusal(exc, redact) from None
+    except _ScratchRefusal:
+        raise
     except BaseException as exc:
         code, diagnostic = _error_diagnostic(exc)
         message = diagnostic[len(code) + 2:]
@@ -1374,7 +1386,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                     findings, classes, instructions, tools.footer, briefs.VERIFY_FOOTER)
         _safe_inputs((config.raw, metadata), redact)
 
-        scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-fix-", dir=temp_root))
+        scratch = oah_scratch.make("oah-fix-", root=temp_root)
         try:
             final = scratch / "last-message.md"
             with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
@@ -1519,11 +1531,15 @@ class _Attempt:
                             exc, interrupted = changed, False
                     except Exception:
                         pass
+                if isinstance(exc, oah_scratch.ScratchError):
+                    exc = _ScratchRefusal(exc, self.redact)
                 code, diagnostic = _error_diagnostic(exc)
                 with _publication(self.t, self.history):
                     self._end("aborted" if interrupted else "failed", diagnostic)
             if interrupted:
                 raise FixInterrupted(diagnostic[len(code) + 2:]) from None
+            if isinstance(exc, _ScratchRefusal):
+                raise exc from None
             raise ReviewError(code, diagnostic[len(code) + 2:]) from None
 
     def _show(self, judged):

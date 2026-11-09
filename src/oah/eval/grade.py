@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
-import tempfile
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -13,7 +12,7 @@ from oah.engines.proc import run_command
 from oah.eval.case import case_digest, file_sha256, is_inside, load_case, read_toml
 from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
-from oah.eval.workspace import build_workspace, open_snapshot, remove_tree, variant_environment
+from oah.eval.workspace import build_workspace, open_snapshot, remove_tree, scratch_folder, variant_environment
 
 GRADE_FILE = "grade.json"
 RUN_FILE = "run.json"
@@ -196,7 +195,7 @@ def _run_test(rule: TestRule, repo: pathlib.Path, env: Mapping[str, str], timeou
 def _snapshot_tests(oracle: Oracle, case_path: pathlib.Path, env: Mapping[str, str], timeout: float) -> list[dict]:
     if not oracle.tests:
         return []
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-grade-"))
+    scratch = scratch_folder("oah-eval-grade-")
     try:
         snapshot = open_snapshot(load_case(case_path), scratch / "source")
         out = []
@@ -221,7 +220,7 @@ def _variant_tests(oracle: Oracle, snapshot_tests: list[dict], workspace: pathli
         if not workspace.is_dir():
             out.append({"id": rule.id, "result": "unknown"})
             continue
-        scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-grade-"))
+        scratch = scratch_folder("oah-eval-grade-")
         try:
             snapshot = open_snapshot(load_case(case_path), scratch / "source")
             ws = build_workspace(snapshot, scratch / "workspace")

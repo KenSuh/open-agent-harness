@@ -16,14 +16,15 @@ environment without any `ANTHROPIC_*` name, `CLAUDE_CODE_OAUTH_TOKEN` or `CLAUDE
 The tag is undocumented, so each check first runs a control alias that cannot exist (`oah-control-<8 hex>`), which
 must print it. An alias is confirmed only when the control printed the tag, the alias run did not, and it printed
 `Not logged in` and exited non-zero. Anything else, a timeout included, leaves it unconfirmed. Each run gets its own
-empty temporary folder, and nothing here can fail a rebuild.
+empty folder in the private scratch base, and nothing here can fail a rebuild except an unsafe scratch base, which
+stops with OAH_SCRATCH_UNSAFE as every other oah command does.
 """
 from __future__ import annotations
 
 import secrets
-import tempfile
 from typing import Mapping, Sequence
 
+from oah import scratch as oah_scratch
 from oah.engines.proc import RunResult, UnsupportedBatchShim, run_command
 
 TAG = "[claude-code:unrecognized_model]"
@@ -45,8 +46,10 @@ def child_env(env: Mapping[str, str]) -> dict[str, str]:
 
 def _run(base: Sequence[str], alias: str, env: Mapping[str, str]) -> RunResult | None:
     try:
-        with tempfile.TemporaryDirectory(prefix="oah-alias-", ignore_cleanup_errors=True) as folder:
+        with oah_scratch.directory("oah-alias-", ignore_cleanup_errors=True) as folder:
             return run_command(argv(base, alias), timeout=TIMEOUT, cwd=folder, env=child_env(env))
+    except oah_scratch.ScratchError:
+        raise  # an unsafe scratch folder stops oah like everywhere else
     except (OSError, ValueError, UnsupportedBatchShim):
         return None
 

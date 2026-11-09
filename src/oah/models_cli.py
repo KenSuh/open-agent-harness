@@ -13,6 +13,7 @@ from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, repo_info, state_dir
+from oah.scratch import ScratchError
 from oah.runs import RunError
 
 EXIT_OK, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 2, 69
@@ -147,7 +148,7 @@ def run(args: argparse.Namespace) -> int:
         session = benchmarks.Session()  # both engines: each stored score file read, and each source fetched, once
         reports = {engine: _engine_report(engine, settings, info.root, state, args.refresh, session)
                    for engine in routing.ENGINES}
-    except (EngineError, ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError) as exc:
+    except (EngineError, ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, ScratchError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
     for engine, report in reports.items():

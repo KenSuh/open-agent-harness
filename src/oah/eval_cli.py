@@ -111,7 +111,9 @@ def run(args: argparse.Namespace) -> int:
     try:
         return handlers[args.eval_command](args)
     except EvalError as exc:
-        print(exc, file=sys.stderr)
+        from oah.review.runner import credential_redactor
+
+        print(credential_redactor(os.environ)(str(exc)), file=sys.stderr)
         return exc.exit_code
     except ConfigError as exc:
         print(exc, file=sys.stderr)

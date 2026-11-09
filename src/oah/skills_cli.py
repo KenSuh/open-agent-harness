@@ -108,17 +108,20 @@ def settings_for(root: pathlib.Path) -> dict:
 
 
 def run(args: argparse.Namespace) -> int:
+    from oah.review.runner import credential_redactor
+
+    redact = credential_redactor(os.environ)
     try:
         return HANDLERS[args.skills_command](args)
     except (Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive) as exc:
-        print(exc, file=sys.stderr)
+        print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT if getattr(exc, "code", "") in ENVIRONMENT_CODES else EXIT_REFUSED
     except (CatalogError, ConfigError, FetchError, SkillError, NotARepo, GitMissing, LockTimeout, StateCorrupt,
             PendingTransaction, StorageError) as exc:
-        print(exc, file=sys.stderr)
+        print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT
     except OSError as exc:
-        print(f"OAH_SKILLS_IO: {exc}. Check permissions and free disk space, then retry.", file=sys.stderr)
+        print(redact(f"OAH_SKILLS_IO: {exc}. Check permissions and free disk space, then retry."), file=sys.stderr)
         return EXIT_ENVIRONMENT
 
 
@@ -178,7 +181,10 @@ def before_mutation(info: RepoInfo, state: pathlib.Path) -> None:
                                             gitleaks=find_gitleaks())
     except (CatalogError, ConfigError, FetchError, StageError, SkillError, LeaseError, GitMissing, NotARepo,
             LockTimeout, StateCorrupt, PendingTransaction, StorageError, OSError, ValueError) as exc:
-        print(f"OAH_SKILLS_AUTO_UPDATE skipped: {exc}; run oah skills update to retry", file=sys.stderr)
+        from oah.review.runner import credential_redactor
+
+        print(credential_redactor(os.environ)(f"OAH_SKILLS_AUTO_UPDATE skipped: {exc}; run oah skills update to retry"),
+              file=sys.stderr)
         return
     _report_scheduled(outcome, results)
 

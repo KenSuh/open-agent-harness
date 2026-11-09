@@ -27,7 +27,7 @@ from oah.paths import repo_info
 from oah.review import ReviewError, authors, fix, receipts, runner
 from oah.secrets import NoKeychain
 from tests.fixtures.gates.support import remove_tree
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir, shipped_defaults
+from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir, private_folder, shipped_defaults
 from tests.test_review_rounds import CLAUDE_TRAILER, LEVELS, PACKET, RULES, bug, git, toml_list
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -95,8 +95,9 @@ class FixProject:
         self.state, self.home = self.work / "state", self.work / "codex-home"
         self.calls_dir, self.fix_dir, self.temp_root = self.work / "calls", self.work / "fix-calls", self.work / "temp"
         self.script, self.fix_script = self.work / "script.json", self.work / "fix-script.json"
-        for folder in (self.home, self.calls_dir, self.fix_dir, self.temp_root):
+        for folder in (self.home, self.calls_dir, self.fix_dir):
             folder.mkdir()
+        private_folder(self.temp_root)  # a temp_root goes through the same proof as the scratch base
         (self.home / "models_cache.json").write_text(json.dumps({"models": [
             {"slug": "gpt-test-a", "is_default": True,
              "supported_reasoning_levels": [{"effort": level} for level in LEVELS]}]}), encoding="utf-8")

@@ -36,6 +36,7 @@ import sys
 import tempfile
 from typing import Iterable, Iterator, Mapping, Sequence
 
+from oah import scratch as oah_scratch
 from oah.engines.proc import run_command
 from oah.paths import git_argv
 from oah.review import ReviewError
@@ -165,16 +166,10 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
     for name, value in (("head", head), ("base", base)):
         if not _SHA.fullmatch(value or ""):
             raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", f"the {name} {value!r} is not a full commit SHA")
-    if dispose is not None:
-        from oah.design import task_context as tc
-
-        try:
-            temp_root = tc._trusted_root(pathlib.Path(temp_root) if temp_root is not None else
-                                         pathlib.Path(tempfile.gettempdir()))
-        except (OSError, ValueError, tc.RootUnavailable) as exc:
-            raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", "the design snapshot temporary base cannot be anchored; "
-                              "check its path, permissions and local filesystem, then retry") from exc
-    parent = pathlib.Path(tempfile.mkdtemp(prefix="oah-review-", dir=temp_root))
+    try:  # the proven private scratch base, or the proven temp_root; resolved, so disposal compares exact paths
+        parent = oah_scratch.make("oah-review-", root=temp_root)
+    except oah_scratch.ScratchError as exc:
+        raise ReviewError(exc.code, exc.detail) from exc
     created = None
     identity_failure = None
     try:

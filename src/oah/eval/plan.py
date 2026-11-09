@@ -7,7 +7,6 @@ import json
 import os
 import pathlib
 import re
-import tempfile
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -18,7 +17,7 @@ from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import load_oracle
 from oah.eval.workspace import (ORACLE_NORMALIZATION, build_workspace, check_grader_separation, content_hashes,
                                 open_snapshot, oracle_block_checks, oracle_path_checks, remove_tree,
-                                scan_workspace, variant_environment)
+                                scan_workspace, scratch_folder, variant_environment)
 
 FORMAT = "oah-eval-prereg/1"
 METRICS = ("matched", "missed", "unmatched", "human_verdicts", "tests_fixed", "exit_code", "timed_out",
@@ -203,7 +202,7 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
     blocks = [block for oracle in oracles.values() for block in oracle_block_checks(oracle.path.read_bytes())]
     channel_files = {variant.name: {} for variant in plan.variants}
     # Check every available launch channel before writing either frozen file.
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-prereg-"))
+    scratch = scratch_folder("oah-eval-prereg-")
     try:
         for index, planned in enumerate(plan.cases):
             case = load_case(planned.path)
