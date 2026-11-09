@@ -53,11 +53,15 @@ class ScratchError(OSError):
     code = CODE
 
     def __init__(self, base: os.PathLike | str, reason: str, platform: str | None = None) -> None:
-        self.base = str(base)
-        self.reason = reason
-        self.detail = (f"cannot use the private scratch folder {self.base}: {reason}; "
-                       f"{_fix(sys.platform if platform is None else platform)}")
-        super().__init__(f"{CODE}: {self.detail}")
+        from oah.review.runner import credential_redactor
+
+        redact = credential_redactor(os.environ)
+        self.base = redact(str(base))
+        self.reason = redact(reason)
+        detail = (f"cannot use the private scratch folder {base}: {reason}; "
+                  f"{_fix(sys.platform if platform is None else platform)}")
+        self.detail = redact(detail)
+        super().__init__(redact(f"{CODE}: {detail}"))
 
 
 def _home(env: Mapping[str, str], platform: str) -> pathlib.Path:

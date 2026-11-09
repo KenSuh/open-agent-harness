@@ -19,6 +19,7 @@ from oah.journal import PendingTransaction
 from oah.lease import LeaseError
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, repo_info, state_dir
+from oah.scratch import ScratchError
 from oah.recommend_cli import add_axis_arguments
 from oah.runs import TERMINAL, RunError
 
@@ -336,7 +337,8 @@ def run(args: argparse.Namespace) -> int:
     except (routing.RoutingError, briefs.BriefError, RunError, LeaseError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
-    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError) as exc:
+    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError,
+            ScratchError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
     except OSError as exc:

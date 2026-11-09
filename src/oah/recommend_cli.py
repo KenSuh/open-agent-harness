@@ -170,6 +170,7 @@ def run(args: argparse.Namespace) -> int:
     from oah.lockfile import LockTimeout
     from oah.paths import GitMissing, NotARepo
     from oah.runs import RunError
+    from oah.scratch import ScratchError
     from oah.scope import ScopeError
 
     problem = _usage(args)
@@ -194,7 +195,7 @@ def run(args: argparse.Namespace) -> int:
         if args.engine or args.stage:
             model, warnings = _model(args, tier)
     except (RoutingError, EngineError, ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt,
-            StorageError, RequestError, RunError, ScopeError) as exc:
+            StorageError, RequestError, RunError, ScopeError, ScratchError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
     for warning in (*(judged["warnings"] if judged else ()), *warnings):

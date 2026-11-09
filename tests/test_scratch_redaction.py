@@ -6,11 +6,13 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
+import types
 import unittest
 from unittest import mock
 
-from oah import eval_cli, land_cli, review_cli, scratch, skills_cli, sources_cli
+from oah import eval_cli, land_cli, review_cli, scratch, skills_cli, sources_cli, unlazy
 from oah.cli import build_parser
 from oah.paths import repo_info
 from oah.review import runner
@@ -21,6 +23,8 @@ from tests import test_design_sources as source_tests
 from tests import test_doctor as doctor_tests
 from tests import test_eval as eval_tests
 from tests import test_review_rounds as review_tests
+from tests.test_call import Project
+from tests.test_models import project_with_fakes
 from tests.helpers import hostile_temp, make_git_repo, make_tmp_dir, scratch_env
 
 
@@ -193,3 +197,102 @@ class CredentialOutputTest(OutputCase):
 
         self.assert_outputs(["review", "--task", "t1"], action, 69)
         self.assertEqual(project.calls(), [])
+
+
+class ScratchConstructionTest(unittest.TestCase):
+    def assert_safe(self, error, values):
+        self.assertEqual(error.code, "OAH_SCRATCH_UNSAFE")
+        self.assertIn("[REDACTED]", error.base)
+        self.assertIn("[REDACTED]", error.reason)
+        for field in (str(error), error.base, error.reason, error.detail, *error.args):
+            for value in values:
+                for normalized in (value, value.replace("\r\n", "\n")):
+                    for form in (normalized, json.dumps(normalized)[1:-1], repr(normalized)[1:-1]):
+                        self.assertNotIn(form, field)
+        self.assertIn("then retry", str(error))
+
+    def test_each_raise_site_redacts_base_reason_message_and_args(self):
+        root = make_tmp_dir(self)
+        value = "fixture-construction-value-c4"
+        folder = root / value
+        deep = folder.joinpath(*["part"] * 70)
+        cases = [
+            ("home lookup", "~", "cannot be read", lambda: scratch._home({}, "darwin"),
+             [mock.patch.dict(sys.modules, {"pwd": types.SimpleNamespace(
+                 getpwuid=mock.Mock(side_effect=OSError("lookup ~ failed")))}),
+              mock.patch.object(os, "getuid", return_value=123, create=True)]),
+            ("localappdata", "LOCALAPPDATA", "absolute folder",
+             lambda: scratch.base_path({"LOCALAPPDATA": "relative"}, "win32"), []),
+            ("relative home", value, "home folder",
+             lambda: scratch.base_path({"HOME": value}, "darwin"), []),
+            ("relative root", value, "absolute path", lambda: scratch.make("oah-test-", root=value), []),
+            ("bounded input", value, "not normalized", lambda: scratch.make("oah-test-", root=deep), []),
+            ("resolve error", value, value, lambda: scratch.make("oah-test-", root=folder),
+             [mock.patch.object(scratch.os.path, "realpath", side_effect=OSError("resolve " + value))]),
+            ("bounded resolved path", value, "not normalized", lambda: scratch.make("oah-test-", root=folder),
+             [mock.patch.object(scratch.os.path, "realpath", return_value=str(deep))]),
+            ("ancestry refusal", value, value, lambda: scratch.make("oah-test-", root=folder),
+             [mock.patch.object(unlazy, "_verify_state_ancestry",
+                                side_effect=unlazy.UnlazyError("OAH_UNLAZY_UNSAFE_STATE", "proof " + value))]),
+            ("filesystem refusal", value, value, lambda: scratch.make("oah-test-", root=folder),
+             [mock.patch.object(unlazy, "_verify_state_ancestry", side_effect=OSError("proof " + value))]),
+        ]
+        for step, base_value, reason_value, action, patches in cases:
+            with self.subTest(step=step), hostile_temp(self) as (shared, created), contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GH_TOKEN": base_value,
+                                                                  "GH_PASSWORD": reason_value}))
+                for patch in patches:
+                    stack.enter_context(patch)
+                with self.assertRaises(scratch.ScratchError) as caught:
+                    action()
+                self.assert_safe(caught.exception, (base_value, reason_value))
+                self.assertEqual((created, list(shared.iterdir())), ([], []))
+            self.assertFalse(folder.exists())
+            self.assertTrue(root.is_dir())
+
+    def test_construction_reads_current_exports_and_normalizes_newlines(self):
+        for value in ("fixture-first-export-c4", "fixture-exported\r\nvalue-c4"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"GH_TOKEN": value}):
+                error = scratch.ScratchError(pathlib.Path("readable-base") / value,
+                                             "readable reason " + value.replace("\r\n", "\n"))
+                self.assert_safe(error, (value,))
+                self.assertIn("readable-base", error.base)
+                self.assertIn("readable reason", error.reason)
+
+
+class AliasCredentialTest(unittest.TestCase):
+    def test_real_catalog_alias_refusals_are_redacted_without_tracebacks_in_both_modes(self):
+        project = Project(self, config="[models]\nfetch_scores = false\n")
+        project.bind()
+        models_repo = project_with_fakes(self, "[models]\nfetch_scores = false\n")
+        commands = [(models_repo, ["models", "--refresh"], 69),
+                    (models_repo, ["recommend", "--engine", "claude", "--stage", "initial", "--kind", "implementation",
+                                   "--intensity", "high", "--reasoning", "high", "--risk", "normal"], 1),
+                    (project.repo, ["call", "claude", "--stage", "initial", "--task", "t1", "--tier", "high",
+                                    "--refresh-models", "--launcher", "process", "--no-rerank"], 69)]
+        value = "LOCALAPPDATA" if os.name == "nt" else "fixture-exported-alias-c4"
+        for repo, argv, expected_exit in commands:
+            for as_json in (False, True):
+                with self.subTest(command=argv[0], as_json=as_json), credential_base(self, value):
+                    env = dict(os.environ, OAH_STATE_DIR=str(project.state), CODEX_HOME=str(project.home),
+                               FAKE_RECORD=str(project.record), FAKE_CLAUDE_ALIASES="sonnet", FAKE_CLAUDE_BARE="real",
+                               PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+                    if os.name == "nt":
+                        env["LOCALAPPDATA"] = str(pathlib.Path("credential-parent") / value)
+                    done = subprocess.run([sys.executable, "-B", "-m", "oah", *argv,
+                                           *(["--json"] if as_json else [])], cwd=repo, env=env,
+                                          capture_output=True, text=True, encoding="utf-8", timeout=30)
+                    rendered = done.stdout + done.stderr
+                    self.assertNotIn(value, rendered)
+                    self.assertNotIn("Traceback", rendered)
+                    self.assertTrue(done.stderr.startswith("OAH_SCRATCH_UNSAFE: "), done.stderr)
+                    self.assertIn("[REDACTED]", done.stderr)
+                    self.assertIn("then retry", done.stderr)
+                    self.assertEqual(done.returncode, expected_exit, done.stderr)
+                    self.assertEqual(done.stdout, "")
+                    if os.name != "nt":
+                        self.assertIn("credential-parent", done.stderr)
+                        self.assertIn("the directory permits group or other accounts", done.stderr)
+                        self.assertIn("chmod 700", done.stderr)
+                    self.assertEqual(project.runs(), [])
+                    self.assertFalse(project.record.exists())
