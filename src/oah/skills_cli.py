@@ -1,4 +1,4 @@
-# 스킬 명령 — oah skills list/install/update/schedule 과 탐색(find/review/candidates/read)의 인자, 동의 확인, 자체 리스, 출력 형식, 종료 코드를 맡는다.
+# 스킬 명령 — oah skills list/install/update/schedule 과 탐색·전달(find/review/candidates/read/plan)의 인자, 동의 확인, 자체 리스, 출력 형식, 종료 코드를 맡는다.
 from __future__ import annotations
 
 import argparse
@@ -120,6 +120,13 @@ def register(commands: argparse._SubParsersAction) -> None:
     read.add_argument("--item", metavar="N", type=int, help="with --run: the bundle item number")
     read.add_argument("--json", action="store_true", help="print machine-readable JSON")
 
+    plan = sub.add_parser("plan", help="show which skill texts a task's next dispatch would carry, or why it would "
+                          "refuse (writes nothing, sends nothing)")
+    plan.add_argument("--task", required=True)
+    plan.add_argument("--stage", choices=("initial", "correction", "review"), required=True)
+    plan.add_argument("--engine", choices=("claude", "codex"), default="claude")
+    plan.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
 
 def _interactive() -> bool:
     return sys.stdin is not None and sys.stdin.isatty()
@@ -155,6 +162,7 @@ def run(args: argparse.Namespace) -> int:
     from oah.discovery import NeedInvalid
     from oah.discovery.review import ReviewFailed, SourceUnsupported
     from oah.discovery.store import StoreProblem
+    from oah.skillpack import PackRefused
     from oah.wiki.base import WikiError
 
     redact = credential_redactor(os.environ)
@@ -175,6 +183,9 @@ def run(args: argparse.Namespace) -> int:
     except StoreProblem as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT
+    except PackRefused as exc:
+        print(redact(str(exc)), file=sys.stderr)
+        return EXIT_REFUSED
     except (CatalogError, ConfigError, FetchError, SkillError, NotARepo, GitMissing, LockTimeout, StateCorrupt,
             PendingTransaction, StorageError) as exc:
         print(redact(str(exc)), file=sys.stderr)
@@ -476,8 +487,12 @@ def _find(args: argparse.Namespace) -> int:
                           "public words, the public page that uses them, and the need id they are for")
         choice = discovery.choose_public(state, need_id=args.need, query=text, source=args.public_source,
                                          needs=needs, settings=found_settings)
+    from oah import skillpack
+
+    # A taskless exploration: its own closed operation with only the configured request budget (E-DR3-F01).
     report = discovery.find(needs, state_dir=state, settings=found_settings, now=dt.datetime.now(dt.timezone.utc),
-                            provider=provider, view=view, roots=_roots(info, state, settings), choice=choice,
+                            provider=provider, view=view, admitted=skillpack.explore(found_settings["max_queries"]),
+                            roots=_roots(info, state, settings), choice=choice,
                             notify=lambda notice: print(notice, file=sys.stderr))
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
@@ -603,8 +618,7 @@ def _read(args: argparse.Namespace) -> int:
     from oah.discovery import review, store
 
     if args.run is not None:
-        raise Refused(UNMANAGED_RUN_CODE, f"{args.run} has no managed skill bundle in this state folder; only a run "
-                      "oah started with skills can be read this way")
+        return _read_run(args)
     if args.item is not None:
         raise Refused("OAH_SKILLS_USAGE", "--item goes with --run")
     _lead_only("read --review/--skill")
@@ -614,7 +628,7 @@ def _read(args: argparse.Namespace) -> int:
         record = store.get_review(state, args.review)
         if record is None:
             raise Refused("OAH_SKILLS_USAGE", f"{args.review} is not a stored review")
-        body = review.body(state, record, _license_allow(info, found_settings))
+        body = review.body(state, record)
         if body is None:
             raise store.StoreProblem(store.root(state) / "sources", f"the reviewed text of {args.review} is missing")
         text = body.decode("utf-8", "replace")
@@ -637,5 +651,66 @@ def _read(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _read_run(args: argparse.Namespace) -> int:
+    """A worker's (or lead's) read of one item of a managed run's bundle; the read is recorded in the run folder."""
+    from oah import runs, skillpack
+
+    if args.item is None:
+        raise Refused("OAH_SKILLS_USAGE", "--run needs --item N, the bundle item number")
+    if os.environ.get("OAH_WORKER") == "1" and os.environ.get("OAH_RUN_ID") != args.run:
+        raise Refused(WORKER_REFUSED_CODE, f"a dispatched worker reads only its own run's bundle "
+                      f"({os.environ.get('OAH_RUN_ID') or 'no run id'}), not {args.run}")
+    _info, state, _home = _context()
+    try:
+        run_dir = runs.find_run(state, args.run).path
+        bundle = skillpack.bundle_of(run_dir)
+    except (runs.RunError, ValueError):
+        run_dir = bundle = None
+    if bundle is None:
+        raise Refused(UNMANAGED_RUN_CODE, f"{args.run} has no managed skill bundle in this state folder; only a run "
+                      "oah prepared with skill texts can be read this way")
+    entry, text = skillpack.oah_read(run_dir, args.item,
+                                     at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    if args.json:
+        print(json.dumps({"run": args.run, "item": args.item, "skill": entry["skill"],
+                          "sha256": entry["delivered_sha256"], "text": text}, indent=2, ensure_ascii=False))
+    else:
+        print(_frame(f"OAH_SKILL_READ run={args.run} item={args.item} skill={entry['skill']} "
+                     f"sha256={entry['delivered_sha256']} (recorded as an oah-mediated read)", text))
+    return EXIT_OK
+
+
+def _plan(args: argparse.Namespace) -> int:
+    """The deterministic admission of a task's next dispatch, without preparing anything."""
+    from oah import skillpack
+    from oah.call import bound_lease
+    from oah.lease_cli import lease_design
+
+    info, state, _home = _context()
+    holder = bound_lease(state, args.task)
+    if holder is None:
+        raise Refused("OAH_SKILLS_USAGE", f"task {args.task} has no active lease; start it before planning")
+    judged = lease_design(holder, state)
+    roots = _roots(info, state, settings_for(info.root))
+    admitted = skillpack.admit(skillpack.Operation("dispatch", task=args.task, lease=(holder.id, holder.generation)),
+                               task_design=judged, state_dir=state, engine=args.engine, stage=args.stage, roots=roots)
+    _block, bundle = skillpack.finalize(admitted)
+    data = {"task": args.task, "stage": args.stage, "engine": args.engine, "bundle": bundle}
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    elif bundle is None:
+        print(f"OAH_SKILL_PLAN {args.task} {args.stage} {args.engine}: no skill texts (no accepted skill links apply)")
+    else:
+        print(f"OAH_SKILL_PLAN {args.task} {args.stage} {args.engine}: {len(bundle['items'])} skill text(s), "
+              f"{bundle['budget']['skill_bytes']}/{bundle['budget']['skill_budget']} bytes")
+        for item in bundle["items"]:
+            print(f"  {item['n']}. {item['skill']:34} {'required' if item['required'] else 'optional':9} "
+                  f"{item['origin']} {item['sha256']}")
+        for item in bundle["not_delivered"]:
+            print(f"  not delivered: {item['skill']} ({item['reason']})")
+    return EXIT_OK
+
+
 HANDLERS: Mapping[str, object] = {"list": _list, "install": _install, "update": _update, "schedule": _schedule,
-                                  "find": _find, "review": _review, "candidates": _candidates, "read": _read}
+                                  "find": _find, "review": _review, "candidates": _candidates, "read": _read,
+                                  "plan": _plan}

@@ -147,10 +147,17 @@ def _need_outcome(searches: list[dict], need: Mapping, deferred: list[dict]) -> 
 
 
 def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.datetime, provider: str,
-         view: Mapping | None, roots=(), choice: Mapping | None = None,
+         view: Mapping | None, admitted, roots=(), choice: Mapping | None = None,
          notify: Callable[[str], None] | None = None) -> dict:
-    """Run the needs' public queries within the budget and gather seeds and installed skills; returns the report."""
-    budget, requests = int(settings["max_queries"]), 0
+    """Run the needs' public queries within the admitted budget and gather seeds and installed skills.
+
+    `admitted` is skillpack's Admitted value of a `public-explore` operation (E-DR3-F01): its explicit request budget
+    is the only one, and every external search carries it."""
+    from oah import skillpack
+
+    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind != "public-explore":
+        raise ValueError("discovery.find runs only under a public-explore admission (skillpack.explore)")
+    budget, requests = admitted.allows_requests(), 0
     entries = []
     for need in needs:
         searches, deferred = [], []
@@ -163,7 +170,7 @@ def find(needs: Sequence[Mapping], *, state_dir, settings: Mapping, now: dt.date
                 deferred.append({"query": text, "origin": origin, "outcome": "deferred", "reason": "budget"})
                 continue
             result = cached or providers.search(text, state_dir=state_dir, settings=settings, now=now, origin=origin,
-                                                choice=choice_id, notify=notify,
+                                                choice=choice_id, notify=notify, admitted=admitted,
                                                 purpose={"design_stage": need["design_stage"], "check": need["check"]})
             requests += int(result.requested)
             searches.append(result.to_json())

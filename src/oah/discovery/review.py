@@ -240,9 +240,13 @@ def repo_of(locator: str) -> str:
     return locator[len(prefix):].removesuffix(".git").strip("/")
 
 
-def body(state_dir, record: Mapping, allow: list[str]) -> bytes | None:
-    """The reviewed SKILL.md bytes from E's immutable snapshot store."""
-    digest = str((record.get("source") or {}).get("skill_sha256", ""))
-    if not digest.startswith("sha256:"):
+def blob(state_dir, digest: str) -> bytes | None:
+    """Bytes from E's immutable snapshot store by `sha256:<hex>` (a read; no license policy applies to it)."""
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
         return None
-    return skill_sources(state_dir, allow).blob(digest.split(":", 1)[1])
+    return Sources(store.root(state_dir), transport=TRANSPORT or Transport()).blob(digest.split(":", 1)[1])
+
+
+def body(state_dir, record: Mapping) -> bytes | None:
+    """The reviewed SKILL.md bytes."""
+    return blob(state_dir, str((record.get("source") or {}).get("skill_sha256", "")))

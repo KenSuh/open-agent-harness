@@ -166,10 +166,17 @@ def cached(query: str, *, state_dir, settings: Mapping, now: dt.datetime, origin
                   record["checked_at"], cached=True, origin=origin, choice=choice)
 
 
-def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, origin: str = "template",
+def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, admitted, origin: str = "template",
            choice: str | None = None, notify: Callable[[str], None] | None = None,
            purpose: Mapping | None = None) -> Search:
-    """One search through the external provider (or its fresh cache); never raises for a provider failure."""
+    """One search through the external provider (or its fresh cache); never raises for a provider failure.
+
+    Only a caller holding skillpack's Admitted value of a public exploration with a request budget may search; any
+    other call refuses before the cache, the notice or the transport (E-DR3-F01)."""
+    from oah import skillpack
+
+    if not isinstance(admitted, skillpack.Admitted) or admitted.operation.kind != "public-explore":
+        raise ValueError("providers.search runs only under a public-explore admission (skillpack.explore)")
     query_id = store.query_id(PROVIDER, query, PARSER)
     at = now.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
     if not settings["enabled"] or settings["provider"] != PROVIDER:
@@ -186,6 +193,8 @@ def search(query: str, *, state_dir, settings: Mapping, now: dt.datetime, origin
     if problem is not None:
         return Search(PROVIDER, query, query_id, "blocked", f"policy: the request would carry {problem}", [], at,
                       origin=origin, choice=choice)
+    if admitted.allows_requests() < 1:
+        raise ValueError("this public exploration was admitted with no request budget; nothing is sent")
     if not store.notice_shown(state_dir):
         (notify or (lambda text: print(text, file=sys.stderr)))(NOTICE)
         store.record_notice(state_dir, PROVIDER, at)
