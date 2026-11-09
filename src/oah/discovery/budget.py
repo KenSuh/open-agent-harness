@@ -18,7 +18,6 @@ PROFILE_KEYS: Final = frozenset({"version", "id", "target", "source", "observed_
                                "existing_context_upper_tokens", "estimator", "transport_budget_bytes",
                                "skill_budget_bytes", "evidence_ref"})
 ESTIMATOR_KEYS: Final = frozenset({"id", "fixed_render_tokens", "tool_schema_upper_tokens"})
-OPTIONAL_RENDER_LIMIT: Final = 65536
 READ_ENVELOPE_BYTES: Final = 2048
 
 

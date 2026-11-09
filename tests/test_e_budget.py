@@ -53,6 +53,24 @@ class TargetBudgetTest(unittest.TestCase):
                     budget.qualify(dict(TARGET, **{key: value}), now=NOW)
                 self.assertEqual(changed.exception.reason, "target-capacity-unknown")
 
+    def test_reachable_optional_rows_use_the_inventory_render_bound(self):
+        from oah.capabilities import CLASSES, plan
+
+        entries = [{"id": "mcp:fixture/" + str(index) + "x" * 240} for index in range(300)]
+        child, parent = {"entries": entries[:200]}, {"entries": entries[100:]}
+        bound = plan.optional_render_bound(child, parent)
+        self.assertGreater(bound, 65536)
+        for route in ("direct", "parent-relay"):
+            for cls in CLASSES:
+                rows = [dict(entry, route=route, required=False, reason=cls + ", chosen by Jev") for entry in entries]
+                text = plan.block({"selected": rows}, {})
+                assert text is not None
+                self.assertLessEqual(len(text.encode("utf-8")), bound)
+        self.assertEqual(plan.optional_render_bound({"entries": []}, None), 0)
+        with self.assertRaises(budget.BudgetRefused) as refused:
+            budget.measure(self.profile(), "x" * 450000, optional_bytes=bound)
+        self.assertEqual(refused.exception.reason, "brief")
+
     def test_profile_expiry_pin_schema_and_empty_capacity_refuse(self):
         original = json.loads(e_qualification.source(TARGET).raw)
         for field, value in (("expires_at", "2020-01-02T00:00:00Z"), ("observed_at", 123),

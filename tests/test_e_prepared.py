@@ -41,22 +41,28 @@ class EntryAdmissionTest(judgement_fixture.JudgementCase):
             ("check", judge.label("design-check", "data.entities"))), ("o0", "o1"))
 
     def test_direct_skill_fit_without_live_admission_sends_nothing_even_when_disabled(self):
+        from oah.rerank import judge
+
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                result = judge.judge(self.request(), config=judgement_fixture.config(enabled=enabled),
+                    policy=judgement_fixture.POLICY, sources=self.store, env={"FAKE_JUDGE_KEY": "k"},
+                    providers={"fake": self.provider})
+                self.assertEqual(result.status, "unused(admission)")
+                self.assertEqual(self.provider.calls, [])
+
+    def test_constructed_skill_fit_admission_sends_nothing_even_when_disabled(self):
         from oah import skillpack
         from oah.rerank import judge
 
-        for admitted in (None, skillpack.Admitted(skillpack.Operation("public-explore", max_queries=1))):
-            for enabled in (True, False):
-                with self.subTest(admitted=admitted, enabled=enabled):
-                    if admitted is None:
-                        result = judge.judge(self.request(), config=judgement_fixture.config(enabled=enabled),
-                            policy=judgement_fixture.POLICY, sources=self.store, env={"FAKE_JUDGE_KEY": "k"},
-                            providers={"fake": self.provider})
-                    else:
-                        result = judge.judge(self.request(), config=judgement_fixture.config(enabled=enabled),
-                            policy=judgement_fixture.POLICY, sources=self.store, env={"FAKE_JUDGE_KEY": "k"},
-                            providers={"fake": self.provider}, admitted=admitted)
-                    self.assertEqual(result.status, "unused(admission)")
-                    self.assertEqual(self.provider.calls, [])
+        admitted = skillpack.Admitted(skillpack.Operation("public-explore", max_queries=1))
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                result = judge.judge(self.request(), config=judgement_fixture.config(enabled=enabled),
+                    policy=judgement_fixture.POLICY, sources=self.store, env={"FAKE_JUDGE_KEY": "k"},
+                    providers={"fake": self.provider}, admitted=admitted)
+                self.assertEqual(result.status, "unused(admission)")
+                self.assertEqual(self.provider.calls, [])
 
     def test_live_admission_still_allows_the_verified_skill_fit(self):
         from oah import skillpack

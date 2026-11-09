@@ -443,6 +443,17 @@ def block(plan: Mapping, texts: Mapping[str, str]) -> str | None:
     return "\n".join(lines) + "\n"
 
 
+def optional_render_bound(child: Mapping, parent: Mapping | None) -> int:
+    """All optional class choices fit in one row per current inventory ID; relay texts are already rendered."""
+    from oah.capabilities import CLASSES
+
+    identities = {entry["id"] for source in (child, parent or {}) for entry in source.get("entries", ())}
+    reason = max(CLASSES, key=lambda value: len(value.encode("utf-8"))) + ", first in configuration order"
+    rows = [{"id": identity, "route": "parent-relay", "reason": reason, "required": False}
+            for identity in sorted(identities)]
+    return len((block({"selected": rows}, {}) or "").encode("utf-8"))
+
+
 def strip_block(text: str) -> str:
     """A reused brief without one whole-line capabilities block; ValueError when it is damaged."""
     lines = text.split("\n")

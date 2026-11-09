@@ -1328,8 +1328,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     correction (frozen inputs). Only an ordinary run that keeps its output takes a file by reference (execute
     observes the reads) and asks skill-fit advice, after admission; a native offer or a correction never does."""
     from oah import discovery, skillpack
-    from oah.capabilities import CapabilityRefused, plan as capability_plan
-    from oah.config import load_config
+    from oah.capabilities import CapabilityRefused, inventory, plan as capability_plan
+    from oah.config import ConfigError, load_config
     from oah.discovery import budget, preparation, providers, tasks
     from oah.discovery.store import digest
 
@@ -1362,8 +1362,6 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     capability_settings = capability_plan.check_settings(section)
 
     def capture(value):
-        from oah.capabilities import inventory
-
         current = dt.datetime.now(dt.timezone.utc)
         current_target = target_check() if target_check is not None else target
         live = bound_lease(state_dir, request.task)
@@ -1422,13 +1420,18 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
             relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings)
-        if not value.items and not value.not_delivered and not answerable and capabilities is None:
-            from oah.rerank import DEFAULTS as RERANK_DEFAULTS
-
-            config = (inputs.config if inputs is not None else load_config(root)).section("rerank", RERANK_DEFAULTS)
-            judgement = config.get("judgement")
+        if advise and not value.items and not value.not_delivered and not answerable and capabilities is None:
             if not (needs and not native and request.stage != "review" and request.retain_worker_text
-                    and not brief_disabled and config.get("enabled") is True and isinstance(judgement, Mapping)
+                    and not brief_disabled):
+                return None
+            try:
+                from oah.rerank import DEFAULTS as RERANK_DEFAULTS
+
+                config = (inputs.config if inputs is not None else load_config(root)).section("rerank", RERANK_DEFAULTS)
+            except (ImportError, AttributeError, ConfigError):
+                return None
+            judgement = config.get("judgement")
+            if not (config.get("enabled") is True and isinstance(judgement, Mapping)
                     and judgement.get("enabled") is True):
                 return None
         target = target_check() if target_check is not None else target
@@ -1439,9 +1442,16 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         if paths:
             _e_reference_access(request, root=root, env=env, target=target, paths=paths)
         text = preview(SkillPack(block, _bundle, capability_block, capabilities)) if preview is not None else ""
-        measurement = budget.measure(profile, text, deferred=deferred, skill_bytes=len((block or "").encode("utf-8")),
-                                     design_bytes=_e_design_bytes(design), optional_bytes=budget.OPTIONAL_RENDER_LIMIT,
-                                     read_paths=paths)
+        skill_growth = sum((len(str(len(value.items))) - len(str(index))) * (1 + len(item["aux"]))
+                           for index, item in enumerate(value.items, 1))
+        child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env),
+                                now=dt.datetime.now(dt.timezone.utc), classes=capability_settings["classes"])
+        parent = inventory.read_parent(request.parent_inventory, now=dt.datetime.now(dt.timezone.utc)) \
+            if request.parent_inventory else None
+        optional_bytes = skill_growth + capability_plan.optional_render_bound(child, parent)
+        measurement = budget.measure(profile, text, deferred=deferred,
+                                     skill_bytes=len((block or "").encode("utf-8")) + skill_growth,
+                                     design_bytes=_e_design_bytes(design), optional_bytes=optional_bytes, read_paths=paths)
         facts = capture(value)
         facts["profile"] = digest(profile)
         expires = min(profile["expires_at"], facts["lease"]["expires_at"],
@@ -2426,8 +2436,10 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         roots = skillpack.environment_roots(root, state_dir, env)
         chosen = skillsel.select(scored.axes.kind, request.stage, scored.axes.risk, scope, roots=roots,
                                  settings=current_settings, state_dir=None, repo_root=root, now=now)
+        # ProviderError codes are bounded to 40 ASCII characters; other selection statuses are shorter.
+        status_bound = "unused(error:" + "x" * 40 + ")"
         return _brief_text(request, planned_run[0].id if planned_run else "run-00000000-000000000000",
-                            packet, scope, stored, footer, has_footer, [], (chosen, None), holder, design, pack)
+                            packet, scope, stored, footer, has_footer, [], (chosen, status_bound), holder, design, pack)
 
     from oah import skillpack
 
