@@ -315,10 +315,11 @@ def _fit(items: list[dict], *, engine: str, receiving_root: pathlib.Path | None)
     oah observes the read). A required file that must move but cannot refuses here."""
     total = sum(_inline_bytes(item) for item in items)
     blocked = []
+    platform_problem = _reference_platform_problem()
     for item, aux in sorted(((item, aux) for item in items for aux in item["aux"]), key=lambda pair: -pair[1]["bytes"]):
         if total <= SKILL_BUDGET:
             break
-        verdict = _reference(aux, engine=engine, receiving_root=receiving_root)
+        verdict = _reference(aux, engine=engine, receiving_root=receiving_root, platform_problem=platform_problem)
         if isinstance(verdict, dict):
             aux.pop("text")
             aux.pop("delivered_sha256")
@@ -330,13 +331,27 @@ def _fit(items: list[dict], *, engine: str, receiving_root: pathlib.Path | None)
         item, aux, (reason, detail) = blocked[0]
         raise PackRefused(REFERENCE_UNAVAILABLE_CODE, reason, f"{item['skill']} needs {aux['path']} "
                           f"({aux['bytes']} bytes), which does not fit inline in the {SKILL_BUDGET}-byte skill "
-                          f"budget, and {detail}; nothing was launched. Split the file in the skill, or dispatch "
-                          "this stage to a Claude process run with the skill installed in the working directory")
+                          f"budget, and {detail}; nothing was launched. Split the file in the skill"
+                          + ("" if platform_problem else ", or dispatch this stage to a Claude process run with the "
+                             "skill installed in the working directory"))
     return total
 
 
-def _reference(aux: Mapping, *, engine: str, receiving_root: pathlib.Path | None) -> dict | tuple[str, str]:
-    """{path, lines} of a readable, observable copy of `aux` inside the receiving root, or (reason, detail)."""
+def _reference_platform_problem(platform: str | None = None) -> str | None:
+    """B's native Windows rule for reference reads (task_context.select, qualify_profile): no file goes by reference
+    there until the Windows process profile is qualified (DESIGN §5.3), whatever the engine."""
+    from oah.design import task_context
+
+    if task_context._windows(platform):
+        return (f"reference reads are unsupported({task_context.WINDOWS_PENDING}) on native Windows until its process "
+                "profile is qualified")
+    return None
+
+
+def _reference(aux: Mapping, *, engine: str, receiving_root: pathlib.Path | None,
+               platform_problem: str | None = None) -> dict | tuple[str, str]:
+    """{path, lines} of a readable, observable copy of `aux` inside the receiving root, or (reason, detail).
+    `platform_problem` is _reference_platform_problem's answer for this machine."""
     from oah.design import task_context
 
     if engine != "claude":
@@ -344,6 +359,8 @@ def _reference(aux: Mapping, *, engine: str, receiving_root: pathlib.Path | None
     if receiving_root is None:
         return "unsupported-engine", ("this route shows oah no file reads, so it cannot take a required file by "
                                       "reference")
+    if platform_problem is not None:
+        return "unsupported-engine", f"{platform_problem}, so it cannot take a required file by reference"
     root = os.path.realpath(receiving_root)
     location = aux.get("location")
     real = os.path.realpath(location) if location else None

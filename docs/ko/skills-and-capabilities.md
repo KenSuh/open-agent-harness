@@ -128,11 +128,12 @@ run 폴더도 만들지 않는다. 넘길 수 없는 선택 스킬은 건너뛰�
 맞춰 보고, run 폴더에 `skills-receiving.json`을 쓴다. 필수 파일을 모두 끝까지 읽었으면 `reference_delivery: complete`, 아니면
 `incomplete`다. 읽지 않은 파일이 있어도 run의 결과는 그대로 두고 경고를 남기며, 기록은 전달이 끝나지 않았다고
 적는다. result 이벤트가 없는 스트림은 `OAH_ENGINE_FAILED`로, 읽기를 기록하지 못하면 `OAH_SKILL_RECEIVING_FAILED`로
-run을 실패 처리한다. Codex, 네이티브 서브에이전트, `oah fix` 수정 run은 oah에 읽기를 보여 주지 않으므로, 그곳에서는
-브리프에 들어가지 않는 필수 파일이 `OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)`으로 거절된다. 작업
+run을 실패 처리한다. Codex, 네이티브 서브에이전트, `oah fix` 수정 run은 oah에 읽기를 보여 주지 않고, 네이티브
+Windows에는 아직 검증된 읽기 프로필이 없으므로, 그곳에서는 브리프에 들어가지 않는 필수 파일이
+`OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)`으로 거절된다. 작업
 디렉터리 밖의 설치본은 `OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)`로 거절된다. 엔진을 시작하기 직전에 oah는
-참조한 파일의 해시를 다시 잰다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 저장소 안에 설치해야 하고 Claude 프로세스
-run에서만 돌며, 모델은 파일마다 끝까지 읽느라 컨텍스트를 쓴다.
+참조한 파일의 해시를 다시 잰다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 저장소 안에 설치해야 하고 네이티브 Windows가
+아닌 Claude 프로세스 run에서만 돌며, 모델은 파일마다 끝까지 읽느라 컨텍스트를 쓴다.
 
 **스트림은 도는 동안 확인한다.** 같은 run에서 oah는 Claude의 스트림을 오는 대로 읽는다. 첫 줄은 이 run의
 Claude Code init 이벤트여야 한다. 세션 ID가 있고, 작업 디렉터리와 oah가 준비한 Claude Code 버전, 권한 모드가 run과

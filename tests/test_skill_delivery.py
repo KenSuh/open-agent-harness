@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -513,10 +514,16 @@ STREAM_LAUNCHER = ("import runpy, sys\n"
                    "runpy.run_path({path!r}, run_name=\"__main__\")\n")
 
 
+NATIVE_WINDOWS = sys.platform.startswith("win")
+NO_WINDOWS_REFERENCE = ("native Windows takes no skill file by reference until its process profile is qualified "
+                        "(DESIGN §5.3); test_native_windows_refuses_a_required_reference covers it there")
+
+
 class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
     """E-T11 (a required file too large to inline goes by reference; the stream read is paired, or never happens),
     E-T12 (Codex and the native route refuse a required reference before launch), E-T14 (a copy outside the working
-    directory) and E-T15 (a referenced file changed before the spawn)."""
+    directory) and E-T15 (a referenced file changed before the spawn). Native Windows takes no reference until its
+    process profile is qualified (DESIGN §5.3), so the tests that need one skip there."""
 
     def build_guide(self, *, place: str = "project") -> None:
         self.build_skills(GUIDE)
@@ -539,6 +546,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
     def saved(run: pathlib.Path) -> dict:
         return json.loads((run / "result.json").read_text(encoding="utf-8"))
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_a_required_file_too_large_to_inline_goes_by_reference_and_its_read_is_paired(self):
         self.build_guide()
         result = self.call()
@@ -579,6 +587,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(planned.returncode, 0, planned.stderr)
         self.assertEqual(json.loads(planned.stdout)["bundle"]["digest"], bundle["digest"])
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_a_child_that_never_reads_the_reference_leaves_delivery_incomplete(self):
         self.build_guide()
         result = self.call(env={"FAKE_SKILL_READS": "none"})
@@ -593,6 +602,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertTrue(any("did not read every required skill reference" in line and REFERENCE_PATH in line
                             for line in warnings), warnings)
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_a_stream_without_a_result_event_does_not_count(self):
         self.build_guide()
         result = self.call(env={"FAKE_SKILL_READS": "no-result"})
@@ -607,6 +617,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
     def observed(self, run: pathlib.Path) -> dict:
         return json.loads((run / "capabilities-receiving.json").read_text(encoding="utf-8"))
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_a_stream_that_fails_its_live_check_is_stopped_before_its_delayed_effect(self):
         """E-T20 (DESIGN §6.5): a mismatched, missing, malformed or oversize init stops the owned process tree while
         the child is alive, before its delayed write and before it exits; the run fails and does not count."""
@@ -630,6 +641,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
                 self.assertEqual((observed["status"], observed["stopped"], observed["reason"], observed["quiescent"]),
                                  ("failed", True, reason, True))
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_an_effect_before_the_first_line_is_recorded_not_prevented(self):
         """DESIGN §6.5's limit: reading the stream is observation, not a pre-work barrier. A child that acts before
         its first line has acted; the run still fails and the receiving record says why."""
@@ -642,6 +654,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertIn("live check (init-mismatch: ", self.saved(run)["error"])
         self.assertEqual(self.observed(run)["reason"], "init-mismatch")
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_a_checked_stream_records_each_capability_invocation_by_digest(self):
         self.build_guide()
         result = self.call(env={"FAKE_STREAM_TOOLS": "1"})
@@ -660,6 +673,37 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(observed["uninspected_events"], 2)  # the two full 2,000-line Read results exceed 256 KiB
         self.assertNotIn("three free slots", json.dumps(observed))
 
+    def test_a_platform_without_a_qualified_read_profile_takes_no_reference(self):
+        """B's native Windows rule (task_context.select) holds for skill references too: until the Windows process
+        profile is qualified, a required file that must move refuses at admission, before any run folder, and the
+        message offers no Claude process run, since none can take the file there (DESIGN §5.3)."""
+        from oah import call, skillpack
+
+        real = skillpack._reference_platform_problem
+
+        def windows(platform=None):
+            return real("win32")
+
+        self.build_guide()
+        with mock.patch.object(skillpack, "_reference_platform_problem", windows), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(call.EngineError) as caught:
+            self.prepare()
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine): "), message)
+        self.assertIn("unsupported(windows-process-profile-pending) on native Windows", message)
+        self.assertIn("references/rules.md", message)
+        self.assertNotIn("dispatch this stage to a Claude process run", message)
+        self.assertEqual((self.runs(), self.record.exists()), ([], False))
+        self.assertEqual([real(platform) for platform in ("darwin", "linux")], [None, None])
+
+    @unittest.skipUnless(NATIVE_WINDOWS, "the refusal itself on native Windows; other platforms check it through the "
+                         "platform seam above")
+    def test_native_windows_refuses_a_required_reference(self):
+        self.build_guide()
+        result = self.call()
+        self.assert_refused_before_any_run(result, "OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)")
+        self.assertIn("windows-process-profile-pending", result.stderr)
+
     def test_codex_refuses_a_required_reference_before_launch(self):
         self.build_guide()
         result = self.call("codex", "correction")
@@ -677,12 +721,14 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual((self.runs(), self.record.exists()), ([], False))
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_a_copy_outside_the_working_directory_refuses(self):
         self.build_guide(place="home")
         result = self.call()
         self.assert_refused_before_any_run(result, "OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)")
         self.assertIn("references/rules.md", result.stderr)
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_a_referenced_file_changed_before_the_spawn_refuses(self):
         from oah import call
 
@@ -697,6 +743,7 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertIn(REFERENCE_PATH, str(caught.exception))
         self.assertFalse(self.record.exists())
 
+    @unittest.skipIf(NATIVE_WINDOWS, NO_WINDOWS_REFERENCE)
     def test_reads_that_cannot_be_recorded_do_not_count(self):
         from oah import call
 

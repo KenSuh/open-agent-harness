@@ -129,11 +129,12 @@ Read in the stream with the file's bytes, and writes `skills-receiving.json` in 
 `reference_delivery: complete` when every required file was read whole, `incomplete` otherwise. An unread file
 leaves the run's result as it is, adds a warning, and the record says the delivery is incomplete. A stream without
 a result event fails the run with `OAH_ENGINE_FAILED`, and reads that cannot be recorded fail it with
-`OAH_SKILL_RECEIVING_FAILED`. Codex, a native subagent and `oah fix` corrections show oah no reads, so there a
-required file that does not fit inline refuses with `OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)`; a copy
-outside the working directory refuses with `OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)`. Just before the
-engine starts, oah hashes each referenced file again. What it costs you: such a skill has to be installed in the
-repository and runs only on Claude process runs, and the model spends context reading each file whole.
+`OAH_SKILL_RECEIVING_FAILED`. Codex, a native subagent and `oah fix` corrections show oah no reads, and native
+Windows has no qualified read profile yet, so there a required file that does not fit inline refuses with
+`OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)`; a copy outside the working directory refuses with
+`OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)`. Just before the engine starts, oah hashes each referenced file
+again. What it costs you: such a skill has to be installed in the repository and runs only on Claude process runs
+outside native Windows, and the model spends context reading each file whole.
 
 **The stream is checked while it runs.** On that same run oah reads Claude's stream as it arrives. The first line
 must be Claude Code's init event for this run: a session id, the run's working directory, the Claude Code version
