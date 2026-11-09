@@ -38,6 +38,33 @@ def sha(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+WIRE = pathlib.Path(__file__).resolve().parent / "fixtures" / "skillpack-v1.json"
+
+
+def reseal(bundle: dict) -> dict:
+    """The bundle with its digest recomputed over every other field, written out here (sorted compact JSON)."""
+    body = {key: value for key, value in bundle.items() if key != "digest"}
+    return dict(body, digest=sha(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")))
+
+
+def mutated(bundle: dict, ops: list[dict]) -> dict:
+    data = json.loads(json.dumps(bundle))
+    for op in ops:
+        *parents, last = op["path"]
+        node = data
+        for key in parents:
+            node = node[key]
+        if op["op"] == "delete":
+            del node[last]
+        elif op["op"] == "add":
+            assert last not in node, op
+            node[last] = op["value"]
+        else:
+            assert isinstance(node, list) or last in node, op
+            node[last] = op["value"]
+    return data
+
+
 def coverage_text(state: pathlib.Path, ops: list[dict], *, record: dict | None = None, revision: int = 1) -> str:
     """The rendered coverage part after `ops`, applied by the real coverage editor against this state's reviews."""
     from oah.design import coverage
@@ -367,6 +394,15 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(read.returncode, 1)
         self.assertIn("OAH_SKILL_UNMANAGED_RUN", read.stderr)
         self.assertNotIn("Traceback", read.stderr)
+        # A re-sealed record that breaks one wire rule (a body moved to a reference) is refused just the same.
+        bundle = json.loads(json.dumps(data["bundle"]))
+        bundle["items"][0]["mode"] = "reference"
+        record.write_text(json.dumps(dict(data, bundle=reseal(bundle))), encoding="utf-8")
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
+            with self.assertRaises(call.EngineError) as caught:
+                call.check_prepared(prepared)
+        self.assertEqual(caught.exception.code, "OAH_RUN_LAUNCH_INVALID")
+        self.assertIn("inline", str(caught.exception))
 
     def test_a_different_installed_copy_falls_back_to_the_reviewed_body_or_refuses_without_it(self):
         self.build_skills(PLAIN)
@@ -472,46 +508,8 @@ GUIDE_FILES = {"LICENSE": MIT_LICENSE,
 GUIDE = ("acme/guide", "skills/guide", GUIDE_FILES,
          {"aux": ({"path": "references/rules.md", "required": True, "sha256": sha(GUIDE_REFERENCE.encode())},)})
 REFERENCE_PATH = ".claude/skills/guide/references/rules.md"
-SKILL_STREAM = '''# 스킬 참조 스트림 가짜 Claude — 브리프가 가리키는 스킬 참조 파일을 Read 도구 이벤트로 읽은 것처럼 stream-json 을 낸다.
-import json, os, re, sys
-sys.path.insert(0, {fakes!r})
-import fake_claude, fakelib
-
-def main(argv):
-    if "-p" not in argv or "stream-json" not in argv:
-        return fake_claude.main(argv)
-    prompt = fakelib.read_stdin()
-    fakelib.record(argv, prompt)
-    mode = os.environ.get("FAKE_SKILL_READS", "full")
-    out = [{{"type": "system", "subtype": "init", "session_id": "s1", "cwd": os.getcwd(), "tools": ["Read", "Grep"],
-            "model": "fake"}}]
-    n = 0
-    for path in re.findall(r"^Read `([^`]+)` in full with your Read tool", prompt, re.M):
-        if mode != "full":
-            break
-        path = os.path.abspath(path)
-        lines = open(path, "rb").read().decode("utf-8").split("\\n")
-        if lines and lines[-1] == "":
-            lines.pop()
-        for start in range(1, len(lines) + 1, 2000):
-            chunk = lines[start - 1:start + 1999]
-            n += 1
-            out.append({{"type": "assistant", "session_id": "s1", "parent_tool_use_id": None, "message": {{"content": [
-                {{"type": "tool_use", "id": f"t{{n}}", "name": "Read", "input": {{"file_path": path}}}}]}}}})
-            out.append({{"type": "user", "session_id": "s1", "parent_tool_use_id": None, "message": {{"content": [
-                {{"type": "tool_result", "tool_use_id": f"t{{n}}",
-                  "content": "\\n".join(f"{{i:6d}}\\u2192{{line}}" for i, line in enumerate(chunk, start))}}]}},
-                "tool_use_result": {{"type": "text", "file": {{"filePath": path, "content": "\\n".join(chunk),
-                                    "numLines": len(chunk), "startLine": start, "totalLines": len(lines)}}}}}})
-    if mode != "no-result":
-        out.append({{"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": "s1",
-                    "modelUsage": {{"claude-opus-fake": {{"inputTokens": 1, "outputTokens": 1}}}}}})
-    for event in out:
-        print(json.dumps(event))
-    return fakelib.exit_code()
-
-sys.exit(main(sys.argv[1:]))
-'''
+STREAM_LAUNCHER = ("import runpy, sys\n"
+                   "runpy.run_path({path!r}, run_name=\"__main__\")\n")
 
 
 class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
@@ -530,7 +528,8 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
                 path = self.work / "home" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
-        (self.work / "fake_stream_claude.py").write_text(SKILL_STREAM.format(fakes=str(FAKES)), encoding="utf-8")
+        (self.work / "fake_stream_claude.py").write_text(  # the config runs this file: hand over to the fake
+            STREAM_LAUNCHER.format(path=str(FAKES / "fake_claude_stream.py")), encoding="utf-8")
 
     def receiving(self, run: pathlib.Path) -> dict:
         return json.loads((run / "skills-receiving.json").read_text(encoding="utf-8"))
@@ -823,6 +822,50 @@ class DraftAndLegacyTest(DeliveryTask, unittest.TestCase):
                 self.assertNotIn("## Skill texts", prompt)
                 self.assertNotIn(BEGIN, prompt)
                 self.assertIsNone(self.bundle(run))
+
+
+class BundleWireTest(unittest.TestCase):
+    """DESIGN §9.7: hand-written SkillBundleV1 examples parse, and each one-rule mutation is refused by that rule."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wire = json.loads(WIRE.read_text(encoding="utf-8"))
+        cls.examples = {item["name"]: item["bundle"] for item in cls.wire["valid"]}
+
+    def test_the_hand_written_examples_parse(self):
+        from oah import skillpack
+
+        self.assertEqual(self.wire["version"], 1)
+        self.assertGreaterEqual(len(self.examples), 2)
+        for name, bundle in self.examples.items():
+            with self.subTest(name):
+                self.assertEqual(skillpack.parse_bundle(json.loads(json.dumps(bundle))), bundle)
+
+    def test_each_mutation_is_refused_by_its_own_rule(self):
+        from oah import skillpack
+
+        self.assertGreaterEqual(len(self.wire["invalid"]), 30)
+        for case in self.wire["invalid"]:
+            with self.subTest(case["name"]):
+                bundle = mutated(self.examples[case["from"]], case["ops"])
+                if case["reseal"]:
+                    bundle = reseal(bundle)
+                with self.assertRaises(ValueError) as caught:
+                    skillpack.parse_bundle(bundle)
+                self.assertIn(case["expect"], str(caught.exception))
+
+    def test_a_record_that_is_not_an_object_or_has_too_many_items_is_refused(self):
+        from oah import skillpack
+
+        for data in ([], "bundle", None, 1):
+            with self.subTest(data), self.assertRaises(ValueError):
+                skillpack.parse_bundle(data)
+        base = self.examples["codex-review-without-design"]
+        items = [dict(base["items"][0], n=n) for n in range(1, skillpack.ITEM_LIMIT + 2)]
+        many = reseal(dict(base, items=items, budget=dict(base["budget"], skill_bytes=64 * len(items))))
+        with self.assertRaises(ValueError) as caught:
+            skillpack.parse_bundle(many)
+        self.assertIn("items", str(caught.exception))
 
 
 class PackUnitTest(unittest.TestCase):

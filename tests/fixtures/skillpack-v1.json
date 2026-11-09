@@ -1,0 +1,784 @@
+{
+ "version": 1,
+ "about": "Hand-written SkillBundleV1 wire examples (the `bundle` of a run's skills.json) and one-rule negative mutations for skillpack.parse_bundle. The values are authored here, not produced by skillpack.finalize; only each example's digest is arithmetic over the other fields. A mutation re-seals the digest unless `reseal` is false, so each negative trips its own rule; `expect` is a word the refusal names.",
+ "valid": [
+  {
+   "name": "inline-and-reference",
+   "bundle": {
+    "version": 1,
+    "operation": {
+     "kind": "dispatch",
+     "task": "t1",
+     "lease": [
+      "lease-1",
+      3
+     ],
+     "design": null
+    },
+    "design": {
+     "project": "acme",
+     "design": "booking",
+     "revision": 2,
+     "digest": "sha256:ab1b3e63cd35ddb1208672dc56f3c8c5602d05aad00fa4918ae95181e08a0e71"
+    },
+    "engine": "claude",
+    "stage": "initial",
+    "items": [
+     {
+      "skill": "pg-schema",
+      "need_id": "sha256:9a71222c59e1ca3b51e1fea00e848129a6e79b8acf521ac4de3c7b2e1cbfb5ef",
+      "stage": "data",
+      "check": "entities",
+      "required": true,
+      "mode": "inline",
+      "origin": "reviewed",
+      "review": "sha256:3e41cc2221f4cd3a48ff653b73940d54c0ea79d95cad16c3d04eff0fce29ac4f",
+      "seed": "S1",
+      "pin": {
+       "locator": "github:acme/db",
+       "commit": "4ae2317000000000000000000000000000000000",
+       "path": "skills/pg-schema",
+       "sha256": "sha256:9d10a2b2e738f3397fb008dd4147ec42b1d6249110ea24870083e50e3782879a",
+       "lf_sha256": "sha256:491b3e2fa6313e9111bcfda132c1b2564bf82c5f37310b2bcddbcbf6566ba5dd"
+      },
+      "license": "MIT",
+      "sha256": "sha256:9d10a2b2e738f3397fb008dd4147ec42b1d6249110ea24870083e50e3782879a",
+      "lf_sha256": "sha256:491b3e2fa6313e9111bcfda132c1b2564bf82c5f37310b2bcddbcbf6566ba5dd",
+      "bytes": 1200,
+      "delivered_sha256": "sha256:03e2b8efd91a2c4fb4f7f1c78b85588f466c79f5ed2e3436836c144eadd5a472",
+      "note": null,
+      "n": 1,
+      "aux": [
+       {
+        "path": "references/naming.md",
+        "required": false,
+        "mode": "inline",
+        "sha256": "sha256:3bd49af71779608f291e9f2b1b357a08605053c6d1d27d9ea45aa61000c74c88",
+        "bytes": 300,
+        "delivered_sha256": "sha256:e9e27d7bedd46fc6a0c0715c30b02bd763dbfb37910cbbe8ee995c3ca142f0b3"
+       },
+       {
+        "path": "references/rules.md",
+        "required": true,
+        "mode": "reference",
+        "sha256": "sha256:6c621d1a05138a7888d37d9269a9da8e2e11e4aced2f6cfd24b05ab1b9e61bb0",
+        "bytes": 250000,
+        "reference": {
+         "path": ".claude/skills/pg-schema/references/rules.md",
+         "lines": 4100
+        }
+       }
+      ]
+     },
+     {
+      "skill": "a11y-audit",
+      "need_id": "sha256:a3cfb906d728ab9611b699975f0bd66673402e7a6d1fac13d4f78b1e6d0ed1d7",
+      "stage": "quality",
+      "check": "accessibility",
+      "required": false,
+      "mode": "inline",
+      "origin": "installed .claude/skills/a11y-audit/SKILL.md",
+      "review": "sha256:322c9e563c80bd9fd2a7e6fc271567d566eca54ae5d58d465cbffcdbe2c8d89b",
+      "seed": null,
+      "pin": {
+       "locator": "github:acme/ux",
+       "commit": "1b2c3d4000000000000000000000000000000000",
+       "path": "skills/a11y-audit",
+       "sha256": "sha256:a840f63df048bf984a283df239dd162c6cc1d782cdcc3bb9fe171def941e10dd",
+       "lf_sha256": "sha256:8b133ce0a1f58baaa063c92946c9d94a851bbdf5954826cd95856c3acf572a55"
+      },
+      "license": "Apache-2.0",
+      "sha256": "sha256:a840f63df048bf984a283df239dd162c6cc1d782cdcc3bb9fe171def941e10dd",
+      "lf_sha256": "sha256:8b133ce0a1f58baaa063c92946c9d94a851bbdf5954826cd95856c3acf572a55",
+      "bytes": 900,
+      "delivered_sha256": "sha256:eb76d934c6f9f04c955bca2a02a1556ea3faf44da14ed95a32c6f9507719a35b",
+      "note": "installed copy differs: sha256:cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4",
+      "n": 2,
+      "aux": []
+     }
+    ],
+    "not_delivered": [
+     {
+      "need_id": "sha256:961675fcf09abdf977b6b756635604c8b2dc5b4127d145e742559c9d3fc3843b",
+      "skill": null,
+      "reason": "no linked skill"
+     }
+    ],
+    "budget": {
+     "skill_bytes": 2400,
+     "reference_bytes": 250000,
+     "skill_budget": 196608,
+     "brief_budget": 524288,
+     "target_capacity": "unverified: byte budgets only"
+    },
+    "block_sha256": "sha256:4ef6a38a35e0c21e7aa7a1dc4f64407b6fc006d6bed3dce4c802cd9111d6178c",
+    "digest": "sha256:5fa32189b21b9a731a827fde620aa18059cb5d3935ea36191683fa599b86a4ca"
+   }
+  },
+  {
+   "name": "codex-review-without-design",
+   "bundle": {
+    "version": 1,
+    "operation": {
+     "kind": "dispatch",
+     "task": "t7",
+     "lease": [
+      "lease-9",
+      0
+     ],
+     "design": null
+    },
+    "design": null,
+    "engine": "codex",
+    "stage": "review",
+    "items": [
+     {
+      "skill": "review-checklist",
+      "need_id": "sha256:4d577e24ab20c5848e223a31ea535e39f2610d51097390c8c754f38e5d34a4d9",
+      "stage": "confirm",
+      "check": null,
+      "required": false,
+      "mode": "inline",
+      "origin": "reviewed",
+      "review": "sha256:8529e70363b6f72b6005d3bcd4c97b8926debd726ca640df13787048f03082a8",
+      "seed": null,
+      "pin": {
+       "locator": "github:acme/qa",
+       "commit": "9999999999999999999999999999999999999999",
+       "path": "skills/review-checklist",
+       "sha256": "sha256:6da624dba5235ba1f3901c904a78ea41debbfb0d8a488aeba7063dba508d9211",
+       "lf_sha256": "sha256:6da624dba5235ba1f3901c904a78ea41debbfb0d8a488aeba7063dba508d9211"
+      },
+      "license": null,
+      "sha256": "sha256:6da624dba5235ba1f3901c904a78ea41debbfb0d8a488aeba7063dba508d9211",
+      "lf_sha256": "sha256:6da624dba5235ba1f3901c904a78ea41debbfb0d8a488aeba7063dba508d9211",
+      "bytes": 64,
+      "delivered_sha256": "sha256:61850fea457380cdba93c0ab368d9f876e3472f46cda9670e0a446c9b7ce667f",
+      "note": null,
+      "n": 1,
+      "aux": []
+     }
+    ],
+    "not_delivered": [],
+    "budget": {
+     "skill_bytes": 64,
+     "reference_bytes": 0,
+     "skill_budget": 196608,
+     "brief_budget": 524288,
+     "target_capacity": "unverified: byte budgets only"
+    },
+    "block_sha256": "sha256:5c91447ddccea0e3c935e4b41ce2d0a8f2535432478df5380507628bbe5e0525",
+    "digest": "sha256:6b3bdfa895a1eb8b412728456e3839a6348922e8f60f19fcb2c9da7f80e5b51e"
+   }
+  }
+ ],
+ "invalid": [
+  {
+   "name": "unknown top-level key",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "add",
+     "path": [
+      "extra"
+     ],
+     "value": 1
+    }
+   ],
+   "expect": "fields",
+   "reseal": true
+  },
+  {
+   "name": "missing top-level key",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "delete",
+     "path": [
+      "budget"
+     ]
+    }
+   ],
+   "expect": "fields",
+   "reseal": true
+  },
+  {
+   "name": "version 2",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "version"
+     ],
+     "value": 2
+    }
+   ],
+   "expect": "version",
+   "reseal": true
+  },
+  {
+   "name": "taskless operation",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "operation",
+      "kind"
+     ],
+     "value": "public-explore"
+    }
+   ],
+   "expect": "dispatch",
+   "reseal": true
+  },
+  {
+   "name": "negative lease generation",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "operation",
+      "lease",
+      1
+     ],
+     "value": -1
+    }
+   ],
+   "expect": "lease",
+   "reseal": true
+  },
+  {
+   "name": "boolean lease generation",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "operation",
+      "lease",
+      1
+     ],
+     "value": true
+    }
+   ],
+   "expect": "lease",
+   "reseal": true
+  },
+  {
+   "name": "operation names a design",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "operation",
+      "design"
+     ],
+     "value": {
+      "project": "acme"
+     }
+    }
+   ],
+   "expect": "operation",
+   "reseal": true
+  },
+  {
+   "name": "design digest malformed",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "design",
+      "digest"
+     ],
+     "value": "sha256:xyz"
+    }
+   ],
+   "expect": "design",
+   "reseal": true
+  },
+  {
+   "name": "design revision zero",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "design",
+      "revision"
+     ],
+     "value": 0
+    }
+   ],
+   "expect": "design",
+   "reseal": true
+  },
+  {
+   "name": "unknown engine",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "engine"
+     ],
+     "value": "gemini"
+    }
+   ],
+   "expect": "engine",
+   "reseal": true
+  },
+  {
+   "name": "unknown stage",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "stage"
+     ],
+     "value": "landing"
+    }
+   ],
+   "expect": "stage",
+   "reseal": true
+  },
+  {
+   "name": "no items",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items"
+     ],
+     "value": []
+    }
+   ],
+   "expect": "items",
+   "reseal": true
+  },
+  {
+   "name": "items out of order",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "n"
+     ],
+     "value": 2
+    }
+   ],
+   "expect": "item 1",
+   "reseal": true
+  },
+  {
+   "name": "item unknown key",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "add",
+     "path": [
+      "items",
+      1,
+      "score"
+     ],
+     "value": 0.9
+    }
+   ],
+   "expect": "item 2",
+   "reseal": true
+  },
+  {
+   "name": "item missing key",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "delete",
+     "path": [
+      "items",
+      1,
+      "license"
+     ]
+    }
+   ],
+   "expect": "item 2",
+   "reseal": true
+  },
+  {
+   "name": "body by reference",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "mode"
+     ],
+     "value": "reference"
+    }
+   ],
+   "expect": "inline",
+   "reseal": true
+  },
+  {
+   "name": "required not boolean",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "required"
+     ],
+     "value": "yes"
+    }
+   ],
+   "expect": "required",
+   "reseal": true
+  },
+  {
+   "name": "unknown design stage",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "stage"
+     ],
+     "value": "ops"
+    }
+   ],
+   "expect": "stage",
+   "reseal": true
+  },
+  {
+   "name": "item digest malformed",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "sha256"
+     ],
+     "value": "abc"
+    }
+   ],
+   "expect": "sha256",
+   "reseal": true
+  },
+  {
+   "name": "negative bytes",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "bytes"
+     ],
+     "value": -5
+    }
+   ],
+   "expect": "bytes",
+   "reseal": true
+  },
+  {
+   "name": "boolean bytes",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      1,
+      "bytes"
+     ],
+     "value": true
+    }
+   ],
+   "expect": "bytes",
+   "reseal": true
+  },
+  {
+   "name": "unknown origin",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "origin"
+     ],
+     "value": "downloaded"
+    }
+   ],
+   "expect": "origin",
+   "reseal": true
+  },
+  {
+   "name": "pin without lf digest",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "delete",
+     "path": [
+      "items",
+      0,
+      "pin",
+      "lf_sha256"
+     ]
+    }
+   ],
+   "expect": "pin",
+   "reseal": true
+  },
+  {
+   "name": "inline file with a reference",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "add",
+     "path": [
+      "items",
+      0,
+      "aux",
+      0,
+      "reference"
+     ],
+     "value": {
+      "path": "x.md",
+      "lines": 1
+     }
+    }
+   ],
+   "expect": "file",
+   "reseal": true
+  },
+  {
+   "name": "reference without its place",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "delete",
+     "path": [
+      "items",
+      0,
+      "aux",
+      1,
+      "reference"
+     ]
+    }
+   ],
+   "expect": "file",
+   "reseal": true
+  },
+  {
+   "name": "reference with a delivered digest",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "add",
+     "path": [
+      "items",
+      0,
+      "aux",
+      1,
+      "delivered_sha256"
+     ],
+     "value": "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    }
+   ],
+   "expect": "file",
+   "reseal": true
+  },
+  {
+   "name": "absolute reference path",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "aux",
+      1,
+      "reference",
+      "path"
+     ],
+     "value": "/etc/passwd"
+    }
+   ],
+   "expect": "relative",
+   "reseal": true
+  },
+  {
+   "name": "reference path climbs out",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "aux",
+      1,
+      "reference",
+      "path"
+     ],
+     "value": "../outside/rules.md"
+    }
+   ],
+   "expect": "relative",
+   "reseal": true
+  },
+  {
+   "name": "unknown file mode",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "aux",
+      0,
+      "mode"
+     ],
+     "value": "zip"
+    }
+   ],
+   "expect": "mode",
+   "reseal": true
+  },
+  {
+   "name": "duplicate file path",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "items",
+      0,
+      "aux",
+      1,
+      "path"
+     ],
+     "value": "references/naming.md"
+    }
+   ],
+   "expect": "twice",
+   "reseal": true
+  },
+  {
+   "name": "not-delivered unknown key",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "add",
+     "path": [
+      "not_delivered",
+      0,
+      "why"
+     ],
+     "value": "x"
+    }
+   ],
+   "expect": "not-delivered",
+   "reseal": true
+  },
+  {
+   "name": "skill bytes disagree",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "budget",
+      "skill_bytes"
+     ],
+     "value": 2399
+    }
+   ],
+   "expect": "skill_bytes",
+   "reseal": true
+  },
+  {
+   "name": "reference bytes disagree",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "budget",
+      "reference_bytes"
+     ],
+     "value": 1
+    }
+   ],
+   "expect": "reference_bytes",
+   "reseal": true
+  },
+  {
+   "name": "another skill budget",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "budget",
+      "skill_budget"
+     ],
+     "value": 999999
+    }
+   ],
+   "expect": "budget",
+   "reseal": true
+  },
+  {
+   "name": "block digest malformed",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "block_sha256"
+     ],
+     "value": "sha1:abc"
+    }
+   ],
+   "expect": "block_sha256",
+   "reseal": true
+  },
+  {
+   "name": "digest does not match",
+   "from": "inline-and-reference",
+   "ops": [
+    {
+     "op": "set",
+     "path": [
+      "engine"
+     ],
+     "value": "codex"
+    }
+   ],
+   "expect": "digest",
+   "reseal": false
+  }
+ ]
+}

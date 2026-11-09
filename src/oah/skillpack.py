@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 from typing import Mapping, Sequence
 
 OPERATIONS = ("dispatch", "design-inspect", "public-explore")
@@ -592,6 +593,152 @@ def stream_receiving(run_id: str, bundle: Mapping, observed: Mapping, *, target:
     return {key: record[key] for key in native.RECEIVING_KEYS}
 
 
+BUNDLE_KEYS = {"version", "operation", "design", "engine", "stage", "items", "not_delivered", "budget", "block_sha256",
+               "digest"}
+ITEM_KEYS = {"skill", "need_id", "stage", "check", "required", "mode", "origin", "review", "seed", "pin", "license",
+             "sha256", "lf_sha256", "bytes", "delivered_sha256", "note", "n", "aux"}
+AUX_KEYS = {"inline": {"path", "required", "mode", "sha256", "bytes", "delivered_sha256"},
+            "reference": {"path", "required", "mode", "sha256", "bytes", "reference"}}
+PIN_KEYS = {"locator", "commit", "path", "sha256", "lf_sha256"}
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+TEXT_LIMIT = 4096
+
+
+def _wire(ok: bool, detail: str) -> None:
+    if not ok:
+        raise ValueError(f"the run's skill bundle record is malformed: {detail}")
+
+
+def _digest_ok(value) -> bool:
+    return isinstance(value, str) and _DIGEST.fullmatch(value) is not None
+
+
+def _count(value) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _text(value, *, optional: bool = False) -> bool:
+    if value is None:
+        return optional
+    return isinstance(value, str) and 0 < len(value) <= TEXT_LIMIT and "\n" not in value and "\r" not in value
+
+
+def _relative(path) -> bool:
+    if not _text(path) or "\\" in path:
+        return False
+    pure = pathlib.PurePosixPath(path)
+    return not pure.is_absolute() and ".." not in pure.parts and not re.match(r"[A-Za-z]:", path)
+
+
+def parse_bundle(data) -> dict:
+    """SkillBundleV1 as a run's skills.json stores it, checked field by field (DESIGN §5.3, §9.7). A record that
+    breaks any rule raises ValueError: the launch check, a native settle and an oah-mediated read then refuse
+    instead of trusting it. The digest is SHA-256 of the sorted compact JSON of every other field."""
+    from oah.design import coverage, stages
+
+    _wire(isinstance(data, dict), "it is not a JSON object")
+    _wire(set(data) == BUNDLE_KEYS, f"its fields are {sorted(data)}, not {sorted(BUNDLE_KEYS)}")
+    _wire(data["version"] == BUNDLE_VERSION and type(data["version"]) is int,
+          f"bundle version {data['version']!r} is not {BUNDLE_VERSION}")
+    operation = data["operation"]
+    _wire(isinstance(operation, dict) and set(operation) == {"kind", "task", "lease", "design"},
+          "the operation has unexpected or missing fields")
+    _wire(operation["kind"] == "dispatch", "a skill bundle belongs to a dispatch operation; taskless operations never "
+          "deliver")
+    _wire(_text(operation["task"]), "the dispatch operation names no task")
+    lease = operation["lease"]
+    _wire(isinstance(lease, list) and len(lease) == 2 and _text(lease[0]) and _count(lease[1]),
+          "the operation lease is [lease id, generation]")
+    _wire(operation["design"] is None, "a dispatch operation names no design snapshot; its design is the task's own")
+    design = data["design"]
+    _wire(design is None or (isinstance(design, dict) and set(design) == {"project", "design", "revision", "digest"}
+                             and _text(design["project"]) and _text(design["design"])
+                             and type(design["revision"]) is int and design["revision"] >= 1
+                             and _digest_ok(design["digest"])),
+          "the bundle design is null or {project, design, revision, digest} of an accepted revision")
+    _wire(data["engine"] in ("claude", "codex"), f"engine {data['engine']!r} is claude or codex")
+    _wire(data["stage"] in coverage.DISPATCH_STAGES, f"stage {data['stage']!r} is one of "
+          f"{', '.join(coverage.DISPATCH_STAGES)}")
+    items = data["items"]
+    _wire(isinstance(items, list) and 0 < len(items) <= ITEM_LIMIT,
+          f"items is a list of 1 to {ITEM_LIMIT} delivered skills")
+    inline_total = reference_total = 0
+    for index, item in enumerate(items, 1):
+        where = f"item {index}"
+        _wire(isinstance(item, dict) and set(item) == ITEM_KEYS, f"{where} has unexpected or missing fields")
+        _wire(item["n"] == index and type(item["n"]) is int, f"{where} is numbered {item['n']!r}; items are numbered "
+              "1, 2, … in delivery order")
+        _wire(_text(item["skill"]), f"{where} names no skill")
+        for key in ("need_id", "review", "sha256", "lf_sha256", "delivered_sha256"):
+            _wire(_digest_ok(item[key]), f"{where} {key} is not a sha256 digest")
+        _wire(item["stage"] in stages.STAGE_IDS, f"{where} stage {item['stage']!r} is not a design stage")
+        _wire(item["check"] is None or (_text(item["check"]) and item["check"] in stages.all_checks(item["stage"])),
+              f"{where} check {item['check']!r} is not a check of stage {item['stage']}")
+        _wire(type(item["required"]) is bool, f"{where} required is true or false")
+        _wire(item["mode"] == "inline", f"{where}: a skill body is always inline; only its files go by reference")
+        origin = item["origin"]
+        _wire(origin == "reviewed" or (_text(origin) and origin.startswith("installed ") and len(origin) > 10),
+              f"{where} origin is reviewed or installed <copy>")
+        _wire(_text(item["seed"], optional=True) and _text(item["license"], optional=True)
+              and _text(item["note"], optional=True), f"{where} seed, license and note are short text or null")
+        pin = item["pin"]
+        _wire(isinstance(pin, dict) and set(pin) == PIN_KEYS and all(_text(pin[key]) for key in ("locator", "commit",
+                                                                                                   "path"))
+              and _digest_ok(pin["sha256"]) and _digest_ok(pin["lf_sha256"]),
+              f"{where} pin has unexpected or missing fields")
+        _wire(_count(item["bytes"]), f"{where} bytes is a whole number of bytes")
+        inline_total += item["bytes"]
+        _wire(isinstance(item["aux"], list), f"{where} files are a list")
+        paths = set()
+        for number, aux in enumerate(item["aux"], 1):
+            label = f"{where} file {number}"
+            _wire(isinstance(aux, dict) and aux.get("mode") in AUX_KEYS, f"{label} mode is inline or reference")
+            _wire(set(aux) == AUX_KEYS[aux["mode"]], f"{label} has the wrong fields for a {aux['mode']} file")
+            _wire(_relative(aux["path"]), f"{label} path is a relative path inside the skill folder")
+            _wire(aux["path"] not in paths, f"{where} names file {aux['path']} twice")
+            paths.add(aux["path"])
+            _wire(type(aux["required"]) is bool and _digest_ok(aux["sha256"]) and _count(aux["bytes"]),
+                  f"{label} required, sha256 and bytes are malformed")
+            if aux["mode"] == "inline":
+                _wire(_digest_ok(aux["delivered_sha256"]), f"{label} delivered_sha256 is not a sha256 digest")
+                inline_total += aux["bytes"]
+                continue
+            place = aux["reference"]
+            _wire(isinstance(place, dict) and set(place) == {"path", "lines"} and _count(place["lines"]),
+                  f"{label} reference is {{path, lines}}")
+            _wire(_relative(place["path"]), f"{label} reference path is a relative path inside the working directory")
+            reference_total += aux["bytes"]
+    missing = data["not_delivered"]
+    _wire(isinstance(missing, list), "not_delivered is a list")
+    for index, entry in enumerate(missing, 1):
+        _wire(isinstance(entry, dict) and set(entry) == {"need_id", "skill", "reason"} and _digest_ok(entry["need_id"])
+              and _text(entry["skill"], optional=True) and _text(entry["reason"]),
+              f"not-delivered entry {index} has unexpected or missing fields")
+    budget = data["budget"]
+    _wire(isinstance(budget, dict) and set(budget) == {"skill_bytes", "reference_bytes", "skill_budget",
+                                                       "brief_budget", "target_capacity"},
+          "the budget has unexpected or missing fields")
+    _wire(budget["skill_budget"] == SKILL_BUDGET and budget["brief_budget"] == BRIEF_BUDGET
+          and type(budget["skill_budget"]) is int and type(budget["brief_budget"]) is int
+          and _text(budget["target_capacity"]), f"the budget is the {SKILL_BUDGET}-byte skill budget and the "
+          f"{BRIEF_BUDGET}-byte brief budget")
+    _wire(budget["skill_bytes"] == inline_total and type(budget["skill_bytes"]) is int,
+          f"budget skill_bytes {budget['skill_bytes']!r} is not the inline total {inline_total}")
+    _wire(budget["reference_bytes"] == reference_total and type(budget["reference_bytes"]) is int,
+          f"budget reference_bytes {budget['reference_bytes']!r} is not the reference total {reference_total}")
+    _wire(inline_total <= SKILL_BUDGET, f"the inline texts take {inline_total} bytes, over the skill budget")
+    _wire(_digest_ok(data["block_sha256"]), "block_sha256 is not a sha256 digest")
+    _wire(_digest_ok(data["digest"]), "the bundle digest is not a sha256 digest")
+    body = {key: value for key, value in data.items() if key != "digest"}
+    try:
+        canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        canonical = None
+    _wire(canonical is not None and _sha(canonical.encode("utf-8")) == data["digest"],
+          "the bundle digest does not match its fields")
+    return data
+
+
 def bundle_of(run_dir: pathlib.Path) -> dict | None:
     """The run's SkillBundleV1, or None for a run without one; ValueError when the record cannot be trusted."""
     path = pathlib.Path(run_dir) / "skills.json"
@@ -599,16 +746,12 @@ def bundle_of(run_dir: pathlib.Path) -> dict | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    except (OSError, UnicodeDecodeError, RecursionError) as exc:
+    except (OSError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         raise ValueError(f"the run's skills record cannot be read ({type(exc).__name__})") from None
     bundle = data.get("bundle") if isinstance(data, dict) else None
     if bundle is None:
         return None
-    if not (isinstance(bundle, dict) and bundle.get("version") == BUNDLE_VERSION and isinstance(bundle.get("items"), list)
-            and all(isinstance(item, dict) and isinstance(item.get("n"), int) and isinstance(item.get("skill"), str)
-                    and isinstance(item.get("sha256"), str) for item in bundle["items"])):
-        raise ValueError("the run's skill bundle record is malformed")
-    return bundle
+    return parse_bundle(bundle)
 
 
 def oah_read(run_dir: pathlib.Path, item: int, *, at: str) -> tuple[dict, str]:
