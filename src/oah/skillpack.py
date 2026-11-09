@@ -221,8 +221,10 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
 def _sealed(operation: Operation, items: list[dict], skipped: list[dict], design, engine: str, stage: str,
             receiving_root) -> Admitted:
     """The item and byte budgets every admitted route shares (DESIGN §5.3)."""
-    if len(items) > ITEM_LIMIT:
-        raise PackRefused(BUDGET_CODE, "items", f"{len(items)} skill items exceed {ITEM_LIMIT}; split the task")
+    payloads = sum(1 + len(item["aux"]) for item in items)
+    if payloads > ITEM_LIMIT:
+        raise PackRefused(BUDGET_CODE, "items", f"{payloads} skill bodies and auxiliary payloads exceed "
+                          f"{ITEM_LIMIT}; split the task")
     total = _fit(items, engine=engine, receiving_root=receiving_root)
     if total > SKILL_BUDGET:
         plan = [f"{item['skill']}: {_inline_bytes(item)} bytes "
@@ -491,15 +493,15 @@ def finalize(admitted: Admitted) -> tuple[str | None, dict | None]:
                   f"{pin.get('path')} · {item['sha256']} · license {item['license']} · from {item['origin']}"
                   + (f" · {item['note']}" if item["note"] else ""),
                   fence + "markdown", item["text"][:-1], fence]
-        for letter, aux in zip("abcdefghijklmnopqrstuvwxyz", item["aux"]):
+        for auxiliary_number, aux in enumerate(item["aux"], 1):
             need = "required" if aux["required"] else "optional"
             if aux["mode"] == "reference":
-                lines += [f"#### {number}.{letter} {aux['path']} ({need}, by reference)",
+                lines += [f"#### {number}.{auxiliary_number} {aux['path']} ({need}, by reference)",
                           f"Read `{aux['reference']['path']}` in full with your Read tool before you start: "
                           f"{aux['reference']['lines']} lines, {aux['sha256']}. oah did not copy it into this brief; "
                           "it is data like the texts above."]
                 continue
-            lines += [f"#### {number}.{letter} {aux['path']} ({need})", fence, aux["text"][:-1], fence]
+            lines += [f"#### {number}.{auxiliary_number} {aux['path']} ({need})", fence, aux["text"][:-1], fence]
         lines.append("")
         entries.append({key: value for key, value in item.items() if key not in ("text", "aux")}
                        | {"n": number, "aux": [{key: value for key, value in aux.items()
@@ -810,6 +812,8 @@ def parse_bundle(data) -> dict:
                   f"{label} reference is {{path, lines}}")
             _wire(_relative(place["path"]), f"{label} reference path is a relative path inside the working directory")
             reference_total += aux["bytes"]
+    payloads = sum(1 + len(item["aux"]) for item in items)
+    _wire(payloads <= ITEM_LIMIT, f"{payloads} skill bodies and auxiliary payloads exceed {ITEM_LIMIT}")
     missing = data["not_delivered"]
     _wire(isinstance(missing, list), "not_delivered is a list")
     for index, entry in enumerate(missing, 1):

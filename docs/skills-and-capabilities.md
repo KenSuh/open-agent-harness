@@ -113,7 +113,8 @@ and no run folder is created. An optional skill that cannot be delivered is skip
 you: a missing review or a moved pin blocks the dispatch until you review again or unlink the skill.
 
 **Fixed byte budgets.** Skill texts may take up to 196,608 bytes and the whole brief up to 524,288 bytes, with at
-most 128 items. Over a budget, the call refuses with `OAH_SKILLS_BUDGET_EXCEEDED` and lists each skill's size, so
+most 128 payloads, counting every skill body and auxiliary file. Every inline file is included once, including
+packs with more than 26 auxiliary files. Over a budget, the call refuses with `OAH_SKILLS_BUDGET_EXCEEDED` and lists each skill's size, so
 you can split the task or unlink optional skills. When the design context, skill texts and capability results
 already pass the brief budget together, the call refuses before any search, Jev question or budget gate; the exact
 brief is checked again at the end. What it costs you: a large skill set has to be split across tasks, and a brief
