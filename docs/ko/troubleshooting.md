@@ -181,7 +181,7 @@
 
 이 단계들은 [스킬과 능력](skills-and-capabilities.md)에서 설명한다. 최초의 결정적 입장·용량 거절은 run 폴더나
 비용 전에 일어난다. 뒤의 준비·수신·정산 거절은 요청이나 자식 프로세스를 시작한 뒤에도 생긴다. 재시도 전에
-`state/skills/attempts/*.json`의 제한된 시도별 요청 사실과 run의 `capabilities-receiving.json`에 남긴 사용량을
+상태 폴더의 `skills/attempts/*.json`에 있는 제한된 시도별 요청 사실과 run의 `capabilities-receiving.json`에 남긴 사용량을
 확인한다. 모르는 합계는 0이 아닌 미확인으로 기록하고, 관찰한 부분 수치를 전체로 표시하지 않는다.
 사용자가 치르는 비용: 실패한 시도도 요청·토큰을 썼을 수 있으며, 재시도 전에 그 사실을 확인할 수 있다.
 
@@ -199,14 +199,14 @@
 | `OAH_SKILL_MANDATORY_MISSING` | 이번 발주 단계의 필수 스킬 필요에 살아 있는 연결이 없거나, 연결된 스킬의 검토가 이 상태 폴더에 없거나, 필수 작업 필요에 지금 lease 아래의 작업 선택이 없다. 아무것도 시작하지 않았다. | 스킬을 검토하고 `coverage edit`으로 연결하거나 그 필요에 공백을 기록한 뒤 다시 호출한다. 설계 없는 작업이면 `oah skills find --task T --out FILE`로 스킬을 찾아 검토하고 `oah skills select --needs FILE --review ID`로 고른다. `oah skills plan`이 시작하지 않고 같은 답을 보여 준다. |
 | `OAH_SKILL_NEEDS_INVALID` | 필요 파일이나 oah가 정한 필요가 지금의 작업과 맞지 않는다. `(stale)`: 필요를 적은 뒤 패킷, 그 의도, 종류, 위험도, 범위, 플랫폼, 설계 coverage, 탐색 설정이 바뀌었다. `(malformed)`: 파일이나 필요가 문서의 형태가 아니거나, 선택에 적은 검토가 저장된 검토가 아니다. `(foreign)`: 다른 작업의 필요다. `(scope)`: 패킷 범위 밖의 경로다. `(design-bound)`: 설계를 따르는 작업에 `oah skills select`를 했다. 아무것도 시작하거나 저장하지 않았다. | `oah skills find --task T --out FILE`로 필요를 다시 적는다. 설계가 있는 작업이면 고르는 대신 coverage에 스킬을 링크하고 설계를 수락한다. |
 | `OAH_SKILL_DISCOVERY` | 거절이 아니라 알림이다. 작업 필요에 찾은 검토된 스킬이 사용자의 선택을 기다리거나, 링크한 스킬 아래의 기술 결정이 바뀌었거나, 호출의 스킬 검색이 실패했다. run은 이미 승인된 것으로 진행했다. | `oah skills select`로 고르거나, 설계 coverage에 스킬을 링크하고 설계를 수락한다. 검색 실패에는 할 일이 없다. 링크된 스킬과 설치된 스킬은 그대로 쓰인다. |
-| `OAH_SKILL_REFERENCE_UNAVAILABLE` | `(inaccessible)`: 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나, `<!-- oah`로 시작하는 줄을 담고 있거나, 브리프에 들어가지 않는데 작업 디렉터리 안에 고정된 바이트 그대로인 설치본이 없다. `(unsupported-engine)`: 파일이 브리프에 들어가지 않는데 대상이 oah에 읽기를 보여 주지 않거나(Codex, 네이티브 서브에이전트, `oah fix` 수정 run), 네이티브 Windows에 아직 검증된 읽기 프로필이 없거나, Claude의 Read 도구가 그 파일을 그대로 돌려줄 수 없다. 아무것도 시작하지 않았다. | 그 파일이 고정되도록 스킬을 다시 검토하거나, 연결에서 그 파일을 선택으로 바꿔 빼낸다. 큰 파일이면 스킬을 저장소 안(예: `.claude/skills/<이름>/`)에 설치하고 그 단계를 `oah call claude`로 발주하거나, 스킬 안에서 파일을 나눈다. 선택 파일도 스킬 예산에는 그대로 들어간다. 네이티브 Windows에서는 스킬 안에서 파일을 나눈다. |
+| `OAH_SKILL_REFERENCE_UNAVAILABLE` | `(inaccessible)`: 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나, `<!-- oah`로 시작하는 줄을 담고 있거나, 브리프에 들어가지 않는데 작업 디렉터리 안에 고정된 바이트 그대로인 설치본이 없다. `(unsupported-engine)`: Codex, 네이티브, 수정 run, 네이티브 Windows처럼 지원되는 읽기 관찰 경로가 없거나 Read가 파일을 그대로 돌려줄 수 없다. `(profile)`: 실제 실행 파일, CLI 버전 또는 도구가 공통 프로필 검증을 통과하지 못했다. `(access)`: 현재 읽기·접근 정책이 검증되지 않았다. 아무것도 시작하지 않았다. | 파일을 다시 검토하거나 선택으로 바꾸거나 인라인에 맞게 나눈다. 참조에는 검증된 용량 경로, 받는 저장소 안의 고정된 설치본, 검증된 실행 파일·버전·도구와 읽기 정책이 모두 필요하다. 파일 설치만으로는 충분하지 않다. 네이티브 Windows에서는 인라인에 맞게 나눈다. |
 | `OAH_SKILL_RECEIVING_FAILED` | 스킬 참조를 읽은 Claude run이 끝났지만 oah가 run 폴더에 `skills-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
 | `OAH_CAPABILITY_RECEIVING_FAILED` | oah가 도는 동안 스트림을 확인한 Claude run이 끝났지만 run 폴더에 `capabilities-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
-| `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유는 괄호 안에 있다. `user-only`, `license`, `host`, `marker`, `pin-mismatch`, 그리고 시작 직전에 설치본, 참조 파일, 리드의 작업 선택이 바뀌면 `changed`다. 아무것도 시작하지 않았다. | `changed`나 `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 나머지는 다른 스킬을 연결하거나 필요에서 그 발주 단계를 뺀다. |
+| `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유에는 `excluded`, `scope`, `user-only`, `license`, `host`, `marker`, `pin-mismatch`가 있다. `changed`는 정책, 목록의 승인·스키마·세션, 부모 권한, 중계, 작업·리스, 대상, 필요 또는 선택 등 준비한 전체 로컬 신원이 바뀌거나 만료됐다는 뜻이다. 아무것도 시작하지 않았고 앞선 E 기록은 보존한다. | `changed`면 현재 로컬 사실로 다시 준비한다. `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 제외·호스트·범위 제한이면 현재 작업의 호스트와 범위 안에서 허용된 스킬·필요를 고른다. 명령이 로컬 정책을 덮어쓰지 않는다. |
 | `OAH_SKILLS_BUDGET_EXCEEDED` | `(target-capacity-unknown)`: 정확한 경로에 근거·만료를 고정한 현재 용량 프로필이 없으며, 패키지에는 실제 검증 프로필이 아직 없다. 그 밖에는 inline 스킬, 필수 읽기를 포함한 전체 렌더, 설계 바이트, 대상 토큰의 독립 한도나 payload 128개를 넘었다. 측정 거절은 합계를 보여 준다. | 관리 전달 밖의 inline·작은 자료를 쓰거나 작업을 나누고 선택 자료를 뺀다. 관리 전달은 근거·만료가 있는 측정 프로필의 검토가 필요하며, 설정한 문맥 수만으로는 부족하다. |
 | `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run`이 스킬 묶음이 없는 run을 가리켰거나, `oah call settle`이 네이티브 제안이 없는 run을 가리켰다. | run id를 확인한다. 연결된 스킬이 없는 run에는 읽을 것이 없고, `oah call --launcher native`로 만든 run만 정산할 수 있다. |
 | `OAH_SKILL_HOST_UNSUPPORTED` | Claude용 `oah call --launcher native`가 저장소에서도 Claude 폴더에서도 `.claude/agents/oah-<tier>.md`를 찾지 못해, 호스트가 띄울 서브에이전트가 없다. | `oah init`으로 단 에이전트 파일을 쓴 뒤 다시 제안한다. |
-| `OAH_NATIVE_OFFER_STALE` | `oah call settle`이 제안 뒤에 무언가 바뀐 것을 찾았다. 작업, 의도, 패킷, 범위, 리스, 설계, 전달한 스킬 본문, 호스트 대상, 브리프 가운데 하나가 바뀌었거나 제안이 24시간을 넘었다. 옛 제안은 증거로 남는다. | `oah call --launcher native`로 다시 제안하고 새 run을 정산한다. |
+| `OAH_NATIVE_OFFER_STALE` | `oah call settle`이 작업, 의도, 패킷, 범위, 리스, 설계, 스킬 선택, 정책, 능력 목록·권한, 중계, 호스트 대상 또는 브리프의 변경을 찾았거나 준비·프로필·목록·중계의 유효 기간이 끝났거나 제안이 24시간을 넘었다. 같은 정산 재시도 전에도 이 검사를 한다. 옛 제안과 앞선 영수증은 보존한다. | `oah call --launcher native`로 새 제안을 준비하고 그 run을 정산한다. |
 | `OAH_NATIVE_SETTLE_CONFLICT` | `oah call settle`이 다른 제안 digest를 받았거나, 이미 다른 결과·호스트 자식·결과 파일·카나리로 정산된 run이다. 처음 영수증이 그대로 남는다. | 제안이 출력한 digest를 넘긴다. 다른 결과를 남기려면 다시 제안한다. |
 | `OAH_NATIVE_RESULT_INVALID` | 정산 결과 파일이 65,536바이트를 넘었거나(`too-large`), UTF-8이 아니거나(`not-utf8`), `<!-- oah`로 시작하는 줄이 있다(`marker`). | 그 줄을 뺀 짧은 UTF-8 답을 저장한 뒤 다시 정산한다. |
 | `OAH_RUN_LAUNCH_INVALID` | 준비된 run의 저장 기록(리스 스냅샷, 의도 결속, 설계 기록, 스킬 기록 등)이 시작할 때 없거나 망가졌다. | `oah call`을 다시 실행해 새 run을 준비한다. |

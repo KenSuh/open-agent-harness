@@ -451,7 +451,8 @@ def optional_render_bound(child: Mapping, parent: Mapping | None) -> int:
     reason = max(CLASSES, key=lambda value: len(value.encode("utf-8"))) + ", first in configuration order"
     rows = [{"id": identity, "route": "parent-relay", "reason": reason, "required": False}
             for identity in sorted(identities)]
-    return len((block({"selected": rows}, {}) or "").encode("utf-8"))
+    text = block({"selected": rows}, {})
+    return len(("\n" + text).encode("utf-8")) if text else 0
 
 
 def strip_block(text: str) -> str:

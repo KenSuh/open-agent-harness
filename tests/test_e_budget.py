@@ -62,10 +62,11 @@ class TargetBudgetTest(unittest.TestCase):
         self.assertGreater(bound, 65536)
         for route in ("direct", "parent-relay"):
             for cls in CLASSES:
-                rows = [dict(entry, route=route, required=False, reason=cls + ", chosen by Jev") for entry in entries]
-                text = plan.block({"selected": rows}, {})
-                assert text is not None
-                self.assertLessEqual(len(text.encode("utf-8")), bound)
+                for choice in ("chosen by Jev", "first in configuration order"):
+                    rows = [dict(entry, route=route, required=False, reason=cls + ", " + choice) for entry in entries]
+                    text = plan.block({"selected": rows}, {})
+                    assert text is not None
+                    self.assertLessEqual(len(("\n" + text).encode("utf-8")), bound)
         self.assertEqual(plan.optional_render_bound({"entries": []}, None), 0)
         with self.assertRaises(budget.BudgetRefused) as refused:
             budget.measure(self.profile(), "x" * 450000, optional_bytes=bound)
