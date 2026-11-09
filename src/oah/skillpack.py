@@ -207,6 +207,32 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
     return Admitted(operation, tuple(items), tuple(skipped), design, engine, stage)
 
 
+def rank(admitted: Admitted, *, advise) -> tuple[Admitted, dict]:
+    """Advice reorders only optional items, and only among the optional items of one need's stage and check (DESIGN
+    §5.1, §7.1): no advice adds, drops or moves a mandatory item. `advise(items)` gets two or more such items and
+    returns {status, applied, reason, scores}; a group whose advice is not applied keeps the deterministic order,
+    so the bundle stays exactly what admission chose."""
+    groups: dict[tuple, list[int]] = {}
+    for index, item in enumerate(admitted.items):
+        if not item["required"]:
+            groups.setdefault((item["stage"], item["check"]), []).append(index)
+    groups = {key: indexes for key, indexes in groups.items() if len(indexes) >= 2}
+    if not groups:
+        return admitted, {"purpose": "skill-fit", "status": "unused(single-option)", "applied": False, "reason": None}
+    items, outcomes = list(admitted.items), []
+    for indexes in groups.values():
+        outcome = advise([admitted.items[index] for index in indexes])
+        outcomes.append(outcome)
+        if outcome["applied"]:
+            ranked = sorted(range(len(indexes)), key=lambda k: -outcome["scores"][k])  # ties keep admission order
+            for slot, k in zip(indexes, ranked):
+                items[slot] = admitted.items[indexes[k]]
+    first = next((outcome for outcome in outcomes if not outcome["applied"]), outcomes[0])
+    record = {"purpose": "skill-fit", "status": first["status"], "applied": all(item["applied"] for item in outcomes),
+              "reason": first["reason"], "order": [item["skill"] for item in items]}
+    return dataclasses.replace(admitted, items=tuple(items)), record
+
+
 def _inline_bytes(item: Mapping) -> int:
     return item["bytes"] + sum(aux["bytes"] for aux in item["aux"] if aux["mode"] == "inline")
 

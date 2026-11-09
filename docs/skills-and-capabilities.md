@@ -211,11 +211,24 @@ enable it yourself and plan again.
 
 ## Jev in these steps
 
-Jev chooses nothing on this page in this release. Coverage, discovery, delivery and capability routing follow
-fixed rules, and the capability plan records `jev: unused(not-implemented)`. A native offer asks no judge at all and
-records `jev_status: unused(native)`. The skill re-ranker described in
+Jev chooses no skill and no tool on this page in this release. Coverage, discovery, admission and capability
+routing follow fixed rules, and the capability plan records `jev: unused(not-implemented)`. A native offer asks no
+judge at all and records `jev_status: unused(native)`. The skill re-ranker described in
 [Skill selection](concepts.md#skill-selection) reorders installed skills for the brief; it never changes which
 skill texts are delivered.
+
+**Jev may only reorder the optional skills of one check.** When an ordinary run delivers two or more optional
+skills for the same design check and Jev is on (`[rerank] enabled`, `[rerank.judgement] enabled` and a key), oah
+asks Jev once for that check whether each skill's text gives concrete guidance for it, and puts those skills in
+that order. Required skills keep their place, no skill is added or dropped, and every text stays the same.
+`skills.json` records the outcome as `skill_fit` beside the bundle. Every Jev-off state (`unused(judgement-off)`,
+`unused(not-enabled)`, `unused(no key)`, `unused(disabled-by-brief)` for `--no-rerank`) and every answer oah cannot
+apply, such as an uncertain one, keeps the bundle exactly as admitted. TypeSafe checks the answered ids strictly,
+so a reply that leaves a skill out reads `unused(error:bad-response)`; `unused(error:dropped)` is the code for a
+judge provider that returns a partial ranking. Only the first 4,000 bytes of each reviewed `SKILL.md`, read from
+its verified public snapshot, and the fixed stage and check names are sent, never your design or task text. What
+it costs you: one judge request per such check on each run, and `oah skills plan`, which asks no judge, shows the
+order before advice.
 
 ## Limits in this release
 
@@ -230,3 +243,6 @@ skill texts are delivered.
 - The budgets are fixed byte counts. They do not measure the model's context window.
 - A native subagent's reads are seen only through `oah skills read`; the host's own file reads are not observed.
   `oah call settle` does not check capability relays again.
+- Jev's capability-needs question, the only one that may read the task's packet intent (and only with
+  `[rerank.judgement] send_task_text = true`, off by default), is not asked by any step yet. The capability plan
+  keeps its fixed rules.

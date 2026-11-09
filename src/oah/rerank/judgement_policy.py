@@ -6,8 +6,8 @@ from typing import Mapping
 
 from oah.config import ConfigError
 
-DEFAULTS = {"enabled": False, "send_design_text": False, "yes": 0.7, "no": 0.3, "choice_min": 0.6,
-            "level_min": 0.5, "cache_hours": 24.0, "max_questions": 32, "max_state_chars": 16000}
+DEFAULTS = {"enabled": False, "send_design_text": False, "send_task_text": False, "yes": 0.7, "no": 0.3,
+            "choice_min": 0.6, "level_min": 0.5, "cache_hours": 24.0, "max_questions": 32, "max_state_chars": 16000}
 
 
 def settings(config: Mapping[str, object]) -> dict[str, bool | float | int]:

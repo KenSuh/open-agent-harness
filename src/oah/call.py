@@ -1035,11 +1035,12 @@ def _pack_error(exc) -> EngineError:
 
 
 def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir: pathlib.Path,
-                  env: Mapping[str, str], references: bool = True) -> SkillPack | None:
+                  env: Mapping[str, str], native: bool = False, keychain=None,
+                  brief_disabled: bool = False) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links deliver skill texts or capabilities apply, else None (the brief stays
-    byte-identical). A file goes by reference only to an ordinary run that keeps its output, where execute observes
-    the reads (`references=False` for the native route)."""
+    byte-identical). Only an ordinary run that keeps its output takes a file by reference (execute observes the
+    reads) and asks skill-fit advice, after admission; a native offer or a correction never does."""
     from oah import skillpack
     from oah.capabilities import CapabilityRefused, plan as capability_plan
     from oah.config import load_config
@@ -1054,9 +1055,13 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                                                        lease=(holder.id, holder.generation)),
                                    task_design=task_design, state_dir=state_dir, engine=request.engine,
                                    stage=request.stage, roots=roots,
-                                   receiving_root=root if references and request.retain_worker_text else None)
+                                   receiving_root=root if not native and request.retain_worker_text else None)
     except skillpack.PackRefused as exc:
         raise _pack_error(exc) from None
+    advice = None
+    if admitted.items and not native and request.retain_worker_text:
+        admitted, advice = skillpack.rank(admitted, advise=_skill_fit_advisor(
+            root=root, state_dir=state_dir, env=env, keychain=keychain, brief_disabled=brief_disabled))
     block, bundle = skillpack.finalize(admitted)
     section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
                else load_config(root).section("capabilities", capability_plan.DEFAULTS))
@@ -1073,7 +1078,60 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
         check([block, capability_block])
-    return SkillPack(block, bundle, capability_block, capabilities)
+    return SkillPack(block, bundle, capability_block, capabilities, advice)
+
+
+SKILL_EXCERPT_BYTES = 4000  # the start of each reviewed SKILL.md a skill-fit judgement may read
+
+
+def _skill_fit_advisor(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapping[str, str], keychain,
+                       brief_disabled: bool):
+    """The advise callable of skillpack.rank: one skill-fit/v1 judgement over two or more optional items of one
+    check, each with a verified public excerpt of its reviewed SKILL.md (DESIGN §7.1). A score is applied only after
+    the judge's own recheck passes; every other outcome keeps the deterministic order. Nothing is read until rank
+    finds such a group."""
+
+    def advise(items: list[dict]) -> dict:
+        from oah.config import load_config
+        from oah.design.sources.state import StateProblem
+        from oah.discovery import review as reviews, store
+        from oah.rerank import DEFAULTS as RERANK_DEFAULTS, judge
+
+        def unapplied(status: str, reason: str | None = None) -> dict:
+            return {"status": status, "applied": False, "reason": reason, "scores": None}
+
+        stage, check = items[0]["stage"], items[0]["check"]
+        if not check:
+            return unapplied("unused(insufficient-input)")
+        config = load_config(root).section("rerank", RERANK_DEFAULTS)
+        sources = reviews.skill_sources(state_dir, [])  # excerpts come from verified snapshots; nothing is reviewed
+        policy = sources.policy_digest()
+        fields, options = [], []
+        try:
+            for index, item in enumerate(items):
+                source = (store.get_review(state_dir, item["review"]) or {}).get("source") or {}
+                fields.append((f"o{index}:skill_excerpt", judge.public_prefix(
+                    sources, str(source.get("snapshot")), f"{source.get('path')}/SKILL.md", SKILL_EXCERPT_BYTES)))
+                options.append(f"o{index}")
+            fields += [("design_stage", judge.label("design-stage", stage)),
+                       ("check", judge.label("design-check", f"{stage}.{check}"))]
+        except (judge.JudgeError, StateProblem, KeyError, TypeError, AttributeError):
+            return unapplied("unused(scope)")  # an excerpt that cannot be read from a verified snapshot is not sent
+        input_ref = "sha256:" + hashlib.sha256(json.dumps([stage, check, [item["sha256"] for item in items]])
+                                               .encode("utf-8")).hexdigest()
+        request = judge.Request("skill-fit", "skill-fit/v1", tuple(fields), tuple(options), input_ref=input_ref)
+        result = judge.judge(request, config=config, policy=policy, sources=sources, brief_disabled=brief_disabled,
+                             env=env, keychain=keychain, state_dir=state_dir)
+        if not result.status.startswith("used"):
+            return unapplied(result.status)
+        applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, request=request,
+                              policy=policy)
+        if not applied.applied:
+            return unapplied(result.status, applied.reason)
+        return {"status": result.status, "applied": True, "reason": None,
+                "scores": [result.answers[key]["noul"] for key in options]}
+
+    return advise
 
 
 def _record_refusal(prepared: Prepared, error: EngineError) -> None:
@@ -1332,6 +1390,7 @@ class SkillPack:
     bundle: dict | None = None
     capability_block: str | None = None
     capabilities: dict | None = None
+    advice: dict | None = None  # skill-fit advice: kept in skills.json beside the bundle, never inside it
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1742,7 +1801,8 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=request.stage, task=request.task,
                                        engine=request.engine)
     # Lane E: the single deterministic skill admission, before any budget gate, judge, round or reservation.
-    skill_pack = _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env)
+    skill_pack = _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env,
+                               keychain=keychain, brief_disabled=request.no_rerank or packet.rerank_disabled)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
@@ -1987,6 +2047,8 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
     skills_record = {"rerank": skills_rerank, **chosen.to_record()} if chosen is not None else None
     if skill_pack is not None and skill_pack.bundle is not None and _CORRECTION_INPUT_CHECK.get() is None:
         skills_record = {**(skills_record or {}), "bundle": skill_pack.bundle}
+        if skill_pack.advice is not None:
+            skills_record["skill_fit"] = skill_pack.advice
     if skills_record is not None and _CORRECTION_INPUT_CHECK.get() is not None:
         skills_record = runs._correction_record(
             {"count": len(chosen.skills), "sha256": hashlib.sha256(
@@ -2227,7 +2289,7 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
     basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                           read_source=read_source)
     skill_pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env,
-                               references=False)
+                               native=True)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)

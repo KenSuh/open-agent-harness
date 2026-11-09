@@ -206,10 +206,22 @@ run은 격리된 채로 남아 중계를 받지 않는다(`OAH_CAPABILITY_UNSUPP
 
 ## 이 단계들에서 Jev
 
-이번 릴리스에서 Jev는 이 문서의 어떤 것도 고르지 않는다. coverage, 탐색, 전달, 능력 경로는 정해진 규칙을 따르고,
-능력 계획은 `jev: unused(not-implemented)`를 기록한다. 네이티브 제안은 어떤 판정도 묻지 않고
+이번 릴리스에서 Jev는 이 문서의 어떤 스킬이나 도구도 고르지 않는다. coverage, 탐색, 받아들임, 능력 경로는 정해진
+규칙을 따르고, 능력 계획은 `jev: unused(not-implemented)`를 기록한다. 네이티브 제안은 어떤 판정도 묻지 않고
 `jev_status: unused(native)`를 기록한다. [스킬 선택](concepts.md#스킬-선택)에서 설명하는 스킬
 재정렬기는 브리프에 넣을 설치된 스킬의 순서를 바꿀 뿐이고, 어떤 스킬 본문을 넘길지는 바꾸지 않는다.
+
+**Jev는 한 확인 항목의 선택 스킬 순서만 바꿀 수 있다.** 일반 run이 같은 설계 확인 항목에 선택 스킬을 둘 이상
+넘기고 Jev가 켜져 있으면(`[rerank] enabled`, `[rerank.judgement] enabled`, 키), oah는 그 확인 항목마다 한 번 각
+스킬 본문이 그 항목에 구체적인 지침을 주는지 Jev에게 묻고, 그 순서로 스킬을 놓는다. 필수 스킬은 자리를 지키고,
+스킬을 더하거나 빼지 않으며, 본문도 그대로다. 결과는 `skills.json`의 묶음 옆 `skill_fit`에 남는다. Jev가 꺼진
+모든 상태(`unused(judgement-off)`, `unused(not-enabled)`, `unused(no key)`, `--no-rerank`의
+`unused(disabled-by-brief)`)와 확실하지 않은 답처럼 oah가 적용할 수 없는 답은 받아들인 묶음을 그대로 둔다.
+TypeSafe는 답한 id를 엄격하게 확인하므로 스킬 하나를 빠뜨린 답은 `unused(error:bad-response)`가 되고,
+`unused(error:dropped)`는 일부만 순위를 매겨 돌려주는 판정 제공자의 코드다. 보내는 것은 검토한 각 `SKILL.md`의
+검증된 공개 스냅샷에서 읽은 앞 4,000바이트와 정해진 단계·확인 항목 이름뿐이고, 설계 글이나 작업 글은 보내지
+않는다. 사용자가 치르는 비용은 이렇다. run마다 그런 확인 항목 하나에 판정 요청이 한 번 가고, 판정을 묻지 않는
+`oah skills plan`은 조언 전의 순서를 보여 준다.
 
 ## 이번 릴리스의 한계
 
@@ -222,3 +234,5 @@ run은 격리된 채로 남아 중계를 받지 않는다(`OAH_CAPABILITY_UNSUPP
 - 예산은 고정된 바이트 수다. 모델의 문맥 창을 재지 않는다.
 - 네이티브 서브에이전트의 읽기는 `oah skills read`로만 보인다. 호스트가 직접 읽은 파일은 관찰하지 않는다.
   `oah call settle`은 능력 중계를 다시 확인하지 않는다.
+- 작업 패킷의 의도 글을 읽을 수 있는 유일한 Jev 질문인 능력 필요 질문은(그것도 기본으로 꺼진
+  `[rerank.judgement] send_task_text = true`일 때만) 아직 어떤 단계도 묻지 않는다. 능력 계획은 정해진 규칙을 따른다.

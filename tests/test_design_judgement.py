@@ -1,4 +1,4 @@
-# 출처·재료 판정 시험 — 비밀 패턴이 없는 사적 요구 문장도 허락 없이는 보내지 않고, 검증한 공개 조각과 허락한 설계 원문만 보내며, 게이트 순서·전체 문자열 검사·신원 재확인, 맞는 선택지 없음·여러 라벨 결과, 한영 혼합 조각·외부 원문 속 지시·시간 초과 대체, 엄격한 응답 해석과 바뀐 릴리스 노트의 캐시 거부, 판정이 자격·재료 판단의 입력이 아님을 본다.
+# 출처·재료 판정 시험 — 비밀 패턴이 없는 사적 요구 문장도 허락 없이는 보내지 않고, 검증한 공개 조각과 허락한 설계 원문만 보내며, 게이트 순서·전체 문자열 검사·신원 재확인, 맞는 선택지 없음·여러 라벨 결과, 한영 혼합 조각·외부 원문 속 지시·시간 초과 대체, 엄격한 응답 해석과 바뀐 릴리스 노트의 캐시 거부, 판정이 자격·재료 판단의 입력이 아님을, 스킬 적합 선택지별 판정과 작업 의도 글의 별도 허락·재확인을 본다.
 from __future__ import annotations
 
 import copy
@@ -7,10 +7,12 @@ import datetime as dt
 import hashlib
 import json
 import pathlib
+import types
 import unittest
 from unittest import mock
 
 from oah import rerank
+from oah.capabilities import CLASSES as CAPABILITY_CLASSES
 from oah.config import Config, ConfigError
 from oah.design.sources.view import DesignRef, DesignView, SnapshotView
 from oah.rerank import base, judge, typesafe
@@ -54,11 +56,21 @@ class FakeJudge:
         return answers
 
 
-def config(*, enabled: bool = True, design_text: bool = False, rerank_on: bool = True) -> dict:
+def config(*, enabled: bool = True, design_text: bool = False, rerank_on: bool = True, task_text: bool = False) -> dict:
     data = copy.deepcopy(rerank.DEFAULTS)
     data.update(enabled=rerank_on, provider="fake")
-    data["judgement"] = {"enabled": enabled, "send_design_text": design_text}
+    data["judgement"] = {"enabled": enabled, "send_design_text": design_text, "send_task_text": task_text}
     return data
+
+
+INTENT = "예약 화면의 결제 문서를 읽고 환불 흐름을 고친다. Read the payment provider docs first.\n"
+
+
+def packet(section: str = INTENT, revision: int = 1, task_source: str = ".oah/tasks/t1/PACKET.md"):
+    """A checked packet as TaskView.of reads it: its source, its intent id, revision and digest, and the section."""
+    digest = "sha256:" + hashlib.sha256(section.encode("utf-8")).hexdigest()
+    return types.SimpleNamespace(source=task_source, section=section,
+                                 intent=types.SimpleNamespace(id="booking", revision=revision, digest=digest))
 
 
 def view(texts: dict, revision: int = 2) -> DesignView:
@@ -230,6 +242,175 @@ class ProvenanceTest(JudgementCase):
                                 (("release_note_excerpt", forged),))
         self.assertEqual("unused(scope)", self.run_judge(request, sources=self.store).status)
         self.assertEqual([], self.provider.calls)
+
+
+class SkillFitAndTaskTextTest(JudgementCase):
+    """AC13 (DESIGN §7.1): skill-fit asks one Noul per opaque option over verified public excerpts and fixed labels;
+    capability-needs asks one Noul per closed class over the task's own intent, which needs its own permission and
+    is checked against the verified task view before it is sent and again before any result is applied."""
+
+    def stage_and_check(self) -> tuple[tuple[str, object], tuple[str, object]]:
+        return ("design_stage", judge.label("design-stage", "data")), ("check", judge.label("design-check",
+                                                                                          "data.entities"))
+
+    def skill_fit(self, *fields, options: tuple[str, ...] = ("o0", "o1")) -> judge.Request:
+        return judge.Request("skill-fit", "skill-fit/v1", tuple(fields), options)
+
+    def excerpts(self) -> tuple[tuple[str, object], ...]:
+        return ("o0:skill_excerpt", self.notes()), ("o1:skill_excerpt", self.notes())
+
+    @staticmethod
+    def needs(field, *, input_ref: str | None = None) -> judge.Request:
+        return judge.Request("capability-needs", "capability-needs/v1", (("task_need", field),), input_ref=input_ref)
+
+    @staticmethod
+    def first_sentence() -> tuple[int, int]:
+        return 0, len(INTENT.split(". ")[0].encode("utf-8")) + 1
+
+    def test_skill_fit_and_capability_needs_take_only_their_allowed_tags(self) -> None:
+        task = judge.TaskView.of("t1", packet())
+        need = judge.task_field(task, "intent", *self.first_sentence())
+        design = judge.design_field(view({"design": "Bookings and lessons.\n"}), "part:design", 0, 8)
+        stage, check = self.stage_and_check()
+        cases = {"task text as a skill excerpt": self.skill_fit(("o0:skill_excerpt", need), self.excerpts()[1], stage,
+                                                               check),
+                 "task text as skill-fit's authored need": self.skill_fit(*self.excerpts(), stage, check,
+                                                                          ("need", need)),
+                 "a stage label as the check": self.skill_fit(*self.excerpts(), stage,
+                                                              ("check", judge.label("design-stage", "data"))),
+                 "a check that is not a fixed label": self.skill_fit(*self.excerpts(), stage,
+                                                                     ("check", judge.PublicLabel("design-check",
+                                                                                                 "data.nope"))),
+                 "an option that was not offered": self.skill_fit(*self.excerpts(), ("o2:skill_excerpt", self.notes()),
+                                                                  stage, check),
+                 "design text as the task need": self.needs(design),
+                 "a stage label as a capability class": judge.Request(
+                     "capability-needs", "capability-needs/v1",
+                     (("task_need", need), ("capability_class", judge.label("design-stage", "data")))),
+                 "task text as a capability excerpt": judge.Request(
+                     "capability-needs", "capability-needs/v1", (("task_need", need), ("capability_excerpt", need)))}
+        for name, request in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual("unused(scope)", self.run_judge(request, config(design_text=True, task_text=True),
+                                                                 view=None, task_view=task).status)
+        self.assertEqual([], self.provider.calls)
+
+    def test_missing_required_roles_send_nothing(self) -> None:
+        stage, check = self.stage_and_check()
+        cases = {"no check": self.skill_fit(*self.excerpts(), stage),
+                 "no design stage": self.skill_fit(*self.excerpts(), check),
+                 "an option without its excerpt": self.skill_fit(self.excerpts()[0], stage, check),
+                 "no task need": judge.Request("capability-needs", "capability-needs/v1",
+                                               (("capability_class", judge.label("capability-class", "web-search")),))}
+        for name, request in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual("unused(insufficient-input)", self.run_judge(request, config(task_text=True)).status)
+        self.assertEqual([], self.provider.calls)
+
+    def test_task_text_needs_its_own_permission_and_the_verified_task_view(self) -> None:
+        task = judge.TaskView.of("t1", packet())
+        request = self.needs(judge.task_field(task, "intent", *self.first_sentence()))
+        self.assertEqual("unused(task-text-off)", self.run_judge(request, task_view=task).status)
+        self.assertEqual("unused(task-text-off)", self.run_judge(request, config(design_text=True),
+                                                                task_view=task).status)
+        self.assertEqual("unused(scope)", self.run_judge(request, config(task_text=True)).status)  # no task view
+        other = judge.TaskView.of("t2", packet())  # the same words, but another task's packet
+        self.assertEqual("unused(scope)", self.run_judge(
+            self.needs(judge.task_field(other, "intent", *self.first_sentence())), config(task_text=True),
+            task_view=task).status)
+        self.assertEqual([], self.provider.calls)
+        self.provider.labels = {"payment-docs": 0.9}
+        notices: list[str] = []
+        result = self.run_judge(request, config(task_text=True), task_view=task, state_dir=make_tmp_dir(self),
+                                notify=notices.append)
+        self.assertEqual(("used", "matched"), (result.status, result.outcome))
+        self.assertEqual({"payment-docs"}, {label for label, reading in result.labels.items() if reading == "yes"})
+        state, questions = self.provider.calls[-1]
+        self.assertEqual({"task_need": INTENT.split(". ")[0] + "."}, state["fields"])
+        self.assertEqual(set(CAPABILITY_CLASSES), set(questions))  # one yes/no question per closed class
+        self.assertTrue(any(note.startswith("OAH_RERANK_JUDGEMENT_TASK_NOTICE:") for note in notices), notices)
+
+    def test_mixed_korean_and_english_task_text_is_sliced_only_at_whole_characters(self) -> None:
+        task = judge.TaskView.of("t1", packet())
+        english = "Read the payment provider docs first."
+        offset = len(INTENT[:INTENT.index(english)].encode("utf-8"))
+        self.assertEqual(english, judge.task_field(task, "intent", offset, len(english.encode("utf-8"))).text)
+        self.assertEqual("예약", judge.task_field(task, "intent", 0, 6).text)
+        for start, length in ((0, 4), (1, 5)):  # ends inside, or starts inside, a three-byte character
+            with self.subTest(start=start, length=length), self.assertRaises(judge.JudgeError):
+                judge.task_field(task, "intent", start, length)
+        with self.assertRaises(judge.JudgeError):
+            judge.task_field(task, "design", 0, 6)  # only the packet's intent section is task text
+        with self.assertRaises(judge.JudgeError):
+            judge.task_field(types.SimpleNamespace(ref={}, texts={"intent": INTENT}), "intent", 0, 6)
+
+    def test_a_skill_excerpt_is_the_longest_whole_character_prefix_of_verified_public_bytes(self) -> None:
+        self.clock.advance(60)
+        self.commit({"src/lib.rs": "pub fn a() {}\npub fn b() {}\n"})
+        self.tag("v1.0.1")
+        self.github.add("v1.0.1", body="예약 오류를 고쳤다. Fixes booking.")
+        second = self.store.check_one(self.spec).snapshot
+        whole = "예약 오류를 고쳤다. Fixes booking."
+        self.assertEqual("예", judge.public_prefix(self.store, second, "release-notes", 5).text)  # not 2 bytes of 약
+        self.assertEqual("예약", judge.public_prefix(self.store, second, "release-notes", 6).text)
+        field = judge.public_prefix(self.store, second, "release-notes", 4000)
+        self.assertEqual((whole, 0, len(whole.encode("utf-8"))), (field.text, field.offset, field.length))
+        self.assertEqual(field, judge.public_field(self.store, second, "release-notes", 0, field.length))
+        with self.assertRaises(judge.JudgeError):
+            judge.public_prefix(self.store, "sha256:" + "0" * 64, "release-notes", 100)  # not a verified snapshot
+
+    def test_a_judgement_on_old_task_text_is_used_but_never_applied(self) -> None:
+        task = judge.TaskView.of("t1", packet())
+        request = self.needs(judge.task_field(task, "intent", *self.first_sentence()), input_ref="sha256:" + "4" * 64)
+        self.provider.labels = {"payment-docs": 0.9}
+        cfg = config(task_text=True)
+        result = self.run_judge(request, cfg, task_view=task)
+        self.assertEqual("used", result.status)
+        applied = judge.apply(result, current_input_ref=request.input_ref, config=cfg, request=request, policy=POLICY,
+                              task_view=task)
+        self.assertEqual((True, "current"), (applied.applied, applied.reason))
+        revised = judge.TaskView.of("t1", packet(INTENT.replace("환불", "취소"), revision=2))
+        model = result.identity["requested_model"]
+        self.assertEqual(["task-changed:task_need"], judge.recheck(result, sources=self.store, policy=POLICY,
+                                                                   provider="fake", model=model, config=cfg,
+                                                                   task_view=revised))
+        for current in (revised, None):
+            with self.subTest(task_view=current and current.ref["intent"]):
+                stale = judge.apply(result, current_input_ref=request.input_ref, config=cfg, request=request,
+                                    policy=POLICY, task_view=current)
+                self.assertEqual((False, "task-changed:task_need"), (stale.applied, stale.reason))
+
+    def test_a_reply_that_leaves_an_option_out_is_dropped(self) -> None:
+        request = self.skill_fit(*self.excerpts(), *self.stage_and_check())
+        self.provider.raw = {"o0": {"type": "noul", "noul": 0.9}}
+        dropped = self.run_judge(request)
+        self.assertEqual(("unused(error:dropped)", None, None), (dropped.status, dropped.outcome, dropped.answers))
+        self.provider.raw = {key: {"type": "noul", "noul": 0.9} for key in ("o0", "o1", "o2")}
+        self.assertEqual("unused(error:bad-response)", self.run_judge(request).status)  # extra is malformed
+        self.provider.raw = None
+        self.provider.labels = {"o1": 0.9}
+        used = self.run_judge(request)
+        self.assertEqual(("used", "matched", {"o0": "no", "o1": "yes"}), (used.status, used.outcome, used.labels))
+        state, questions = self.provider.calls[-1]
+        self.assertEqual(["o0", "o1"], sorted(questions))
+        self.assertEqual({"o0:skill_excerpt", "o1:skill_excerpt", "design_stage", "check"}, set(state["fields"]))
+        self.assertEqual(("data", "data.entities"), (state["fields"]["design_stage"], state["fields"]["check"]))
+
+    def test_recheck_never_skips_a_field_it_cannot_check(self) -> None:
+        record = self.run_judge(self.skill_fit(*self.excerpts(), *self.stage_and_check())).to_record()
+        model = record["identity"]["requested_model"]
+
+        def reasons(changed: dict) -> list[str]:
+            return judge.recheck(changed, sources=self.store, policy=POLICY, provider="fake", model=model,
+                                 config=config())
+
+        self.assertEqual([], reasons(record))
+        unknown = copy.deepcopy(record)
+        unknown["identity"]["fields"].append({"role": "o0:extra", "tag": "private-text"})
+        self.assertIn("field-unknown:o0:extra", reasons(unknown))
+        retired = copy.deepcopy(record)
+        next(field for field in retired["identity"]["fields"] if field["role"] == "check")["value"] = "data.retired"
+        self.assertIn("label-changed:check", reasons(retired))
 
 
 class RecheckTest(JudgementCase):

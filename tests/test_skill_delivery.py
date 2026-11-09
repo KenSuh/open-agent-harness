@@ -4,12 +4,14 @@
 A real repository holds an accepted design whose coverage part links skills reviewed from local upstream
 repositories into the task's own state folder; fake engines record what they were given. Nothing reaches the
 network or a real engine. A required file too large to inline goes by reference to a Claude process run, whose
-stream-json reads a fake pairs. Jev skill-fit ordering and native offers are tested in their own files.
+stream-json reads a fake pairs; Jev skill-fit advice comes from a loopback TypeSafe server. Native offers are
+tested in test_launcher_native.py.
 """
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -22,6 +24,7 @@ from tests.test_design_context import FAKES, DesignTask
 from tests.test_design_sources import LICENSE as MIT_LICENSE
 from tests.test_design_store import TODAY
 from tests.test_intent_wiring import packet_text
+from tests.test_rerank import FakeServer, fake_key
 from tests.test_skill_discovery import obligation_id, skill_md
 
 DESIGN = "# Booking\n\nPeople book a lesson.\n"
@@ -137,7 +140,7 @@ class DeliveryTask(DesignTask):
         return json.loads((run / "skills.json").read_text(encoding="utf-8")).get("bundle") \
             if (run / "skills.json").exists() else None
 
-    def prepare(self):
+    def prepare(self, *, no_rerank: bool = True):
         """An in-process Claude prepare of t1, as the launchers hand it on."""
         from oah import call, call_cli
         from oah.secrets import NoKeychain
@@ -145,7 +148,7 @@ class DeliveryTask(DesignTask):
         tools = call_cli.intent_tools()
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
             return call.prepare(call.CallRequest(engine="claude", stage="initial", task="t1", tier="low",
-                                                 no_rerank=True),
+                                                 no_rerank=no_rerank),
                                 call_cli.load_settings(self.repo), root=self.repo, state_dir=self.state_dir,
                                 env=self.env, footer=tools.footer, has_footer=tools.has_footer, keychain=NoKeychain())
 
@@ -575,6 +578,140 @@ class ReferenceDeliveryTest(DeliveryTask, unittest.TestCase):
         self.assertIn("this run does not count", data["error"])
 
 
+ALPHA = ("acme/alpha", "skills/alpha",
+         {"LICENSE": MIT_LICENSE, "skills/alpha/SKILL.md": skill_md("alpha", "Name the entities first.\n")},
+         {"required": False})
+BETA = ("acme/beta", "skills/beta",  # its own need: the same check, offered to fewer dispatch stages
+        {"LICENSE": MIT_LICENSE, "skills/beta/SKILL.md": skill_md("beta", "List each entity with its owner.\n")},
+        {"required": False, "dispatch": ("initial", "correction")})
+
+
+class SkillFitAdviceTest(DeliveryTask, unittest.TestCase):
+    """E-T13: skill-fit advice from a loopback TypeSafe server may reorder only the optional items of one check;
+    every Jev-off state, and a reply that drops a skill, keeps exactly the bundle admission chose. TypeSafe checks
+    the answered ids strictly, so its dropped skill is `unused(error:bad-response)`; `unused(error:dropped)` is the
+    judge's code for a provider that returns a partial ranking (test_design_judgement.py)."""
+
+    def jev(self, *, url: str = "https://jev.invalid/v1/systemone", rerank_on: bool = True,
+            judgement: bool = True) -> None:
+        flag = {True: "true", False: "false"}
+        current = (self.repo / ".oah/config.toml").read_text(encoding="utf-8")
+        config = current.split("\n[rerank]\n", 1)[0]
+        config += (f"\n[rerank]\nenabled = {flag[rerank_on]}\nprovider = \"typesafe\"\n[rerank.typesafe]\n"
+                   f"url = \"{url}\"\n[rerank.judgement]\nenabled = {flag[judgement]}\n")
+        if config != current:
+            git_commit(self.repo, {".oah/config.toml": config}, "jev settings")
+
+    def advised(self, *, no_rerank: bool = False) -> tuple[dict, dict]:
+        advice, bundle, _block = self.advised_run(no_rerank=no_rerank)
+        return advice, bundle
+
+    def advised_run(self, *, no_rerank: bool = False) -> tuple[dict, dict, bytes]:
+        """skills.json's advice and bundle, and the skill block bytes of the brief the run would send."""
+        with contextlib.redirect_stderr(io.StringIO()):
+            prepared = self.prepare(no_rerank=no_rerank)
+        run = pathlib.Path(prepared.run_dir)
+        data = json.loads((run / "skills.json").read_text(encoding="utf-8"))
+        return data["skill_fit"], data["bundle"], self.block((run / "prompt.md").read_text(encoding="utf-8")).encode()
+
+    def plan_bundle(self) -> dict:
+        result = self.oah("skills", "plan", "--task", "t1", "--stage", "initial", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bundle = json.loads(result.stdout)["bundle"]
+        self.assertEqual([item["skill"] for item in bundle["items"]][0], "plain")  # the mandatory item leads
+        self.assertEqual(sorted(item["skill"] for item in bundle["items"]), ["alpha", "beta", "plain"])
+        return bundle
+
+    @staticmethod
+    def order(bundle: dict) -> list[str]:
+        return [item["skill"] for item in bundle["items"]]
+
+    @staticmethod
+    def skill_fit_requests(server: FakeServer) -> list[dict]:
+        """The skill-fit bodies the server got (a call with rerank on also asks its other, existing questions)."""
+        return [request["body"] for request in server.requests
+                if (request["body"].get("state") or {}).get("purpose") == "skill-fit"]
+
+    @staticmethod
+    def answers(favored: str, *, drop: bool = False, fit: float = 0.9, miss: float = 0.2):
+        """The `favored` skill's excerpt reads `fit`, the others `miss`; `drop` leaves the last candidate out of a
+        skill-fit reply."""
+        def respond(path, body):
+            fields = (body.get("state") or {}).get("fields") or {}
+            answers = {qid: {"type": "noul",
+                             "noul": fit if f"name: {favored}" in fields.get(f"{qid}:skill_excerpt", "") else miss}
+                       for qid in body["questions"]}
+            if drop and (body.get("state") or {}).get("purpose") == "skill-fit":
+                answers.pop(sorted(answers)[-1])
+            usage = {"input_tokens": 10, "output_tokens": 1}
+            return 200, {"model": "jev-test", "answers": answers, "usage": usage}, 0, {}
+        return respond
+
+    def test_every_jev_off_state_keeps_the_admitted_bundle(self):
+        self.build_skills(PLAIN, ALPHA, BETA)
+        planned = self.plan_bundle()
+        key = fake_key()
+        states = (("judgement disabled", {"judgement": False}, key, False, "unused(judgement-off)"),
+                  ("re-ranker off", {"rerank_on": False}, key, False, "unused(not-enabled)"),
+                  ("no key", {}, None, False, "unused(no key)"),
+                  ("--no-rerank", {}, key, True, "unused(disabled-by-brief)"))
+        for name, settings, secret, no_rerank, status in states:
+            with self.subTest(state=name):
+                self.jev(**settings)
+                self.env.pop("TYPESAFE_API_KEY", None)
+                if secret is not None:
+                    self.env["TYPESAFE_API_KEY"] = secret
+                advice, bundle = self.advised(no_rerank=no_rerank)
+                self.assertEqual((advice["status"], advice["applied"]), (status, False))
+                self.assertEqual((bundle["digest"], self.order(bundle)), (planned["digest"], self.order(planned)))
+
+    def test_loopback_jev_reorders_only_the_optional_items_of_one_check(self):
+        self.build_skills(PLAIN, ALPHA, BETA)
+        planned = self.plan_bundle()
+        first, second = self.order(planned)[1:]
+        server = FakeServer(self, self.answers(second))  # advice moves the second optional item ahead of the first
+        self.jev(url=server.url())
+        self.env["TYPESAFE_API_KEY"] = fake_key()
+        advice, bundle = self.advised()
+        self.assertEqual((advice["status"], advice["applied"], advice["order"]),
+                         ("used", True, ["plain", second, first]))
+        self.assertEqual(self.order(bundle), ["plain", second, first])  # the mandatory item keeps its place
+        self.assertNotEqual(bundle["digest"], planned["digest"])
+        self.assertEqual(sorted(item["sha256"] for item in bundle["items"]),
+                         sorted(item["sha256"] for item in planned["items"]))  # the same texts, in another order
+        (sent,) = self.skill_fit_requests(server)
+        self.assertEqual(sorted(sent["questions"]), ["o0", "o1"])
+        self.assertEqual(set(sent["state"]["fields"]),
+                         {"o0:skill_excerpt", "o1:skill_excerpt", "design_stage", "check"})
+        self.assertEqual((sent["state"]["fields"]["design_stage"], sent["state"]["fields"]["check"]),
+                         ("data", "data.entities"))
+
+    def test_an_uncertain_reply_is_used_but_keeps_the_admitted_order(self):
+        self.build_skills(PLAIN, ALPHA, BETA)
+        planned = self.plan_bundle()
+        server = FakeServer(self, self.answers(self.order(planned)[2], fit=0.6, miss=0.4))  # between no and yes
+        self.jev(url=server.url())
+        self.env["TYPESAFE_API_KEY"] = fake_key()
+        advice, bundle = self.advised()
+        self.assertEqual((advice["status"], advice["applied"], advice["reason"]), ("used", False, "uncertain"))
+        self.assertEqual((bundle["digest"], self.order(bundle)), (planned["digest"], self.order(planned)))
+        self.assertEqual(len(self.skill_fit_requests(server)), 1)
+
+    def test_a_typesafe_reply_that_drops_a_skill_keeps_the_admitted_bundle_bytes(self):
+        self.build_skills(PLAIN, ALPHA, BETA)
+        planned = self.plan_bundle()
+        server = FakeServer(self, self.answers(self.order(planned)[2], drop=True))
+        self.jev(url=server.url())
+        self.env["TYPESAFE_API_KEY"] = fake_key()
+        _advice, _bundle, admitted_block = self.advised_run(no_rerank=True)
+        self.assertEqual(server.requests, [])
+        advice, bundle, block = self.advised_run()
+        self.assertEqual((advice["status"], advice["applied"]), ("unused(error:bad-response)", False))
+        self.assertEqual((bundle["digest"], self.order(bundle)), (planned["digest"], self.order(planned)))
+        self.assertEqual(block, admitted_block)  # the brief carries the admitted skill texts byte for byte
+        self.assertEqual([sorted(sent["questions"]) for sent in self.skill_fit_requests(server)], [["o0", "o1"]])
+
+
 class DraftAndLegacyTest(DeliveryTask, unittest.TestCase):
     """E-T14 (a draft-only link) and E-T17 (no accepted links: no bundle, no block)."""
 
@@ -688,6 +825,32 @@ class PackUnitTest(unittest.TestCase):
         with self.assertRaises(skillpack.PackRefused) as caught:
             skillpack.check_brief("x" * (skillpack.BRIEF_BUDGET + 1))
         self.assertEqual((caught.exception.code, caught.exception.reason), ("OAH_SKILLS_BUDGET_EXCEEDED", "brief"))
+
+    def test_advice_reorders_only_optional_items_of_one_check(self):
+        from oah import skillpack
+
+        def item(name: str, required: bool, check: str) -> dict:
+            return {"skill": name, "required": required, "stage": "data", "check": check, "sha256": name}
+
+        operation = skillpack.Operation("dispatch", task="t1", lease=("l", 1))
+        admitted = skillpack.Admitted(operation, (item("req", True, "entities"), item("a", False, "entities"),
+                                                  item("b", False, "entities"), item("c", False, "ownership")))
+        asked = []
+
+        def advise(group):
+            asked.append([each["skill"] for each in group])
+            return {"status": "used", "applied": True, "reason": None, "scores": [0.1, 0.9]}
+
+        ranked, record = skillpack.rank(admitted, advise=advise)
+        self.assertEqual(asked, [["a", "b"]])  # the lone optional item of another check is never ranked
+        self.assertEqual([each["skill"] for each in ranked.items], ["req", "b", "a", "c"])
+        self.assertEqual((record["status"], record["applied"]), ("used", True))
+        kept, record = skillpack.rank(admitted, advise=lambda group: {"status": "used", "applied": False,
+                                                                       "reason": "uncertain", "scores": None})
+        self.assertEqual((kept.items, record["applied"], record["reason"]), (admitted.items, False, "uncertain"))
+        single = skillpack.Admitted(operation, (admitted.items[0], admitted.items[3]))
+        same, record = skillpack.rank(single, advise=lambda group: self.fail("nothing to rank"))
+        self.assertEqual((same.items, record["status"]), (single.items, "unused(single-option)"))
 
     def test_a_path_on_another_drive_is_outside_the_receiving_root(self):
         from oah import skillpack
