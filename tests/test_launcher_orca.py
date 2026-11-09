@@ -1509,9 +1509,11 @@ with StateLock(pathlib.Path(sys.argv[1])):
                 prepared.run.result_path.write_bytes(record)
                 (project.orca_state / "controls.json").write_text(json.dumps(
                     {"command": "terminal wait", "reply": payload}), encoding="utf-8")
+                before = len(project.orca_calls())
                 with self.assertRaises(EngineError) as ctx:
-                    orca.wait(client, project.state, prepared.run_id, timeout=0.2)
+                    orca.wait(client, project.state, prepared.run_id, timeout=30)
                 self.assertEqual(ctx.exception.code, orca.FAILED)
+                self.assertEqual([argv[:2] for argv in project.orca_calls()[before:]], [["terminal", "wait"]])
         for command, result in (("terminal read", {"terminal": []}),
                                 ("terminal read", {"terminal": {"tail": [42]}}),
                                 ("terminal show", {"terminal": {"preview": []}})):
@@ -1521,9 +1523,11 @@ with StateLock(pathlib.Path(sys.argv[1])):
                 (project.orca_state / "terminals" / f"{handle}.exit").write_text("0", encoding="utf-8")
                 (project.orca_state / "controls.json").write_text(json.dumps(
                     {"command": command, "reply": {"ok": True, "result": result}}), encoding="utf-8")
+                before = len(project.orca_calls())
                 with self.assertRaises(EngineError) as ctx:
-                    orca.wait(client, project.state, prepared.run_id, timeout=2)
+                    orca.wait(client, project.state, prepared.run_id, timeout=30)
                 self.assertEqual(ctx.exception.code, orca.FAILED)
+                self.assertIn(command.split(), [argv[:2] for argv in project.orca_calls()[before:]])
 
     def test_success_envelope_with_failed_process_exit_is_rejected(self):
         project = OrcaProject(self)
