@@ -16,7 +16,7 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 | `oah start`, `renew`, `status`, `finish`, `release`, `log` | Leases: claim paths, extend, list, close with checks, drop, note. |
 | `oah recommend` | Picks a tier from the four difficulty axes. |
 | `oah models` | Shows, and with `--refresh` re-reads, the model each tier uses. |
-| `oah call`, `oah wait` | Launches Claude Code or Codex for one stage and records the run; waits for a background run. |
+| `oah call`, `oah wait` | Launches Claude Code or Codex for one stage and records the run; waits for a background run. `oah call --launcher native` only offers the brief for your own AI's subagent, and `oah call settle` records what it returned (see [Skills and capabilities](skills-and-capabilities.md#native-subagents)). |
 | `oah gates` | Writes, lints and checks a task's gate ledger. |
 | `oah check` | Portable assertions for gate CHECK lines. |
 | `oah wiki` | Keeps the project wiki linked, sourced and tidy. |

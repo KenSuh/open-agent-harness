@@ -3,9 +3,11 @@
 
 - `process` (the default): P3b's foreground run or detached background runner, unchanged.
 - `orca`: the same prepared run inside an Orca worktree terminal (`oah.launchers.orca`).
+- `native` (flag only): no oah process at all. oah offers the exact brief for the lead's own host to pass to a
+  subagent and records the offer; `oah call settle` records what came back (`oah.launchers.native`).
 
-`[call] launcher` in `.oah/config.toml` picks one, and `oah call --launcher` overrides it for one call.
-A selected launcher that cannot run refuses; it never falls back to another one.
+`[call] launcher` in `.oah/config.toml` picks process or orca, and `oah call --launcher` overrides it for one call.
+`native` is never a configured default. A selected launcher that cannot run refuses; it never falls back.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from typing import Mapping
 from oah.engines.effort import EngineError
 
 NAMES = ("process", "orca")
+EXPLICIT = ("native",)  # accepted from `oah call --launcher` only, never from [call] launcher
 DEFAULTS = {"launcher": "process", "orca_command": ["orca"]}
 
 
@@ -31,7 +34,12 @@ def remaining(deadline: float | None, cap: float) -> float:
 
 def choose(flag: str | None, section: Mapping) -> str:
     """The launcher for this call: the flag when given, else the configured one."""
+    if flag in EXPLICIT:
+        return flag
     name = flag or section["launcher"]
+    if name in EXPLICIT:
+        raise EngineError("OAH_CONFIG_INVALID", f".oah/config.toml: call.launcher = {name!r} is accepted only as a "
+                          f"flag; pass --launcher {name} for one call, or use one of: {', '.join(NAMES)}")
     if name not in NAMES:
         raise EngineError("OAH_CONFIG_INVALID", f".oah/config.toml: call.launcher = {name!r}; use one of: "
                           f"{', '.join(NAMES)}")

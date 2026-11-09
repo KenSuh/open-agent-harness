@@ -37,6 +37,11 @@ VERIFY_FOOTER = resources.files("oah").joinpath("templates/engines/verify_footer
 LEASE_STAGES = ("initial", "correction")
 WORKER_LINE = ("You are a dispatched oah worker (OAH_WORKER=1, run {run_id}, task {task}). Skip any session-entry "
                "procedure and do only the task in this brief.")
+# The native route (`oah call --launcher native`): the lead's own host runs this brief as a subagent.
+NATIVE_WORKER_LINE = ("You are a native subagent the lead started for oah run {run_id}, task {task}: not a separate oah "
+                      "process. You share the lead's environment, so oah's worker guards are cooperative here; keep to "
+                      "them yourself. Skip any session-entry procedure, do only the task in this brief, and end your "
+                      "reply with the line `oah-canary: {canary}`.")
 _COMMAND_SAFE = re.compile(r"[A-Za-z0-9._/-]+")
 
 HasFooter = Callable[[str], bool]
@@ -124,12 +129,14 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
           skills: Sequence[tuple[str, str]] = (), footer: str, has_footer: HasFooter,
           skills_block: str | None = None, skill_ids: Sequence[str] = (), design_block: str | None = None,
           design_line: str | None = None, design_data: str | None = None,
-          skill_texts_block: str | None = None, capability_block: str | None = None) -> str:
+          skill_texts_block: str | None = None, capability_block: str | None = None,
+          native_canary: str | None = None) -> str:
     """The brief text, in the fixed layout. `binding` has `.id`, `.revision` and `.digest`.
 
     `skills_block` (from `oah.skillsel.Selection.brief_text`) replaces the one-line skills bullet; the
     bullet then names `skill_ids` and points at the block. `design_block` and `design_line` come from
-    `oah.design.task_context` (lane E adds further blocks after the design block, never inside it)."""
+    `oah.design.task_context` (lane E adds further blocks after the design block, never inside it). `native_canary`
+    replaces the worker line with the native subagent's line, which asks for that canary back."""
     marker = _marker(footer, has_footer)
     footer = _lf(footer)
     if stage in LEASE_STAGES:
@@ -142,7 +149,9 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
                 shell_word(value)
     scope_text = ", ".join(scope) if scope else (
         "(empty: OAH_SCOPE_EMPTY, no paths were declared; stop and ask the lead for a scope before editing)")
-    lines = [WORKER_LINE.format(run_id=run_id, task=task), "", "## Brief",
+    worker_line = (WORKER_LINE.format(run_id=run_id, task=task) if native_canary is None
+                   else NATIVE_WORKER_LINE.format(run_id=run_id, task=task, canary=native_canary))
+    lines = [worker_line, "", "## Brief",
              f"- Task: {task} · Stage: {stage} · Engine: {engine}",
              f"- Scope: {scope_text}",
              "- Rules: stay inside the scope; never push, merge or open pull requests; write the evidence for "

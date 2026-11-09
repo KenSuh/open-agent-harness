@@ -16,7 +16,7 @@
 | `oah start`, `renew`, `status`, `finish`, `release`, `log` | 리스. 경로를 잡고, 연장하고, 목록을 보고, 검사하며 닫고, 내려놓고, 메모를 남긴다. |
 | `oah recommend` | 네 가지 난이도 축으로 tier를 고른다. |
 | `oah models` | tier마다 쓰는 모델을 보여 주고 `--refresh`로 다시 읽는다. |
-| `oah call`, `oah wait` | 단계 하나에 Claude Code나 Codex를 띄우고 실행을 기록한다. 백그라운드 실행을 기다린다. |
+| `oah call`, `oah wait` | 단계 하나에 Claude Code나 Codex를 띄우고 실행을 기록한다. 백그라운드 실행을 기다린다. `oah call --launcher native`는 내 AI의 서브에이전트에게 줄 브리프를 제안만 하고, `oah call settle`은 그 결과를 기록한다([스킬과 능력](skills-and-capabilities.md#네이티브-서브에이전트) 참고). |
 | `oah gates` | 작업의 게이트 원장을 쓰고, 검토하고, 검사한다. |
 | `oah check` | 게이트 CHECK 줄에 쓰는 운영체제 공통 검사. |
 | `oah wiki` | 프로젝트 위키의 링크와 출처, 정리 상태를 관리한다. |

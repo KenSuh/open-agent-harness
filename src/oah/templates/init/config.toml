@@ -90,6 +90,24 @@ default_branch = {{DEFAULT_BRANCH}}
 auto_update = {{AUTO_UPDATE}}
 update_interval_days = 1
 
+# Finding specialist skills for a design's needs (oah skills find). Only oah's fixed public words leave the machine.
+# [skills.discovery]
+# enabled = true
+# provider = "skills-sh"
+# cache_hours = 24
+# max_queries = 4
+# license_allow = []   # empty: the [sources] license list
+
+# Tools that delivered skills name (oah capabilities plan): tag a server with a capability class, add dependencies.
+# [capabilities]
+# classes = {}
+# requires = {}
+
+# Where oah call runs a worker: "process" (the default) or "orca". The native route is a flag only:
+# oah call --launcher native offers the brief to your own AI's subagent; launcher = "native" here is refused.
+# [call]
+# launcher = "process"
+
 [updates]
 # After oah finish leaves no task or run active, at most once per interval_hours, bring Claude Code, Codex,
 # and Claude Code plugins up to date with each tool's own update command; every result is checked by reading

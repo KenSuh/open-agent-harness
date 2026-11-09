@@ -953,6 +953,12 @@ def dispatch_guard(prepared: Prepared):
                 raise
             yield live
         return
+    from oah.launchers import native
+
+    if os.path.lexists(run.file_path(native.OFFER_NAME)):
+        raise EngineError("OAH_RUN_LAUNCH_INVALID", f"run {prepared.run_id} is a native offer, not a dispatch "
+                          "authorization; nothing was launched. Settle it with oah call settle, or prepare a new run "
+                          "with oah call")
     try:
         saved = run._read_json("lease.json")
         if not (isinstance(saved, dict) and isinstance(saved.get("id"), str) and saved["id"]
@@ -1619,7 +1625,7 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
 
 
 def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
-                design=None, skill_pack=None):
+                design=None, skill_pack=None, native_canary=None):
     intent = packet.intent if packet else None
     section = (packet.section or getattr(intent, "section", None)) if packet else None
     instructions = request.round_instructions
@@ -1641,7 +1647,8 @@ def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warn
                         capability_block=skill_pack.capability_block if skill_pack is not None else None,
                         design_line=design.preamble if design is not None else None,
                         design_data=(design.transport.relative("").rstrip("/") if design is not None
-                                     and design.transport is not None else None))
+                                     and design.transport is not None else None),
+                        native_canary=native_canary)
 
 
 def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, brief_disabled, now):
@@ -2024,6 +2031,340 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
     if packet is not None:
         record_dispatch_binding(state_dir, packet, request.task, run.id, checked_lease=checked_lease, root=root)
     return plan.prepared
+
+
+# Lane E native route (DESIGN §5.5, §5.8): the common pure preflight, then a non-counting publication. ---------------
+@dataclasses.dataclass(frozen=True)
+class NativeOffer:
+    """What `oah call --launcher native` hands the lead: the offer, the exact message and the host's parameters."""
+
+    run_id: str
+    run_dir: str
+    offer: dict
+    message: str
+    host: dict
+    tier: str
+    tier_source: str
+    warnings: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _NativeBasis:
+    holder: object
+    packet: Packet
+    task_design: object
+    design: object
+    scope: tuple[str, ...]
+    scored: object
+    recorded: bool
+    floor_tier: str
+    warnings: list
+
+
+def _native_basis(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+                  parse_intent=None, read_source=None) -> _NativeBasis:
+    """The common pure preflight's reads in `_prepare`'s order (lease, packet, binding, design), spending nothing."""
+    warnings = list(routing.check_stage(request.engine, request.stage, settings.stages,
+                                        override=request.override_stage))
+    same = routing.same_engine_warning(settings.stages)
+    if same:
+        warnings.append(same)
+    holder = bound_lease(state_dir, request.task)
+    if holder is None:
+        raise EngineError("OAH_INTENT_NOT_CURRENT", f"task {request.task} has no active lease with an intent binding. "
+                          "Nothing was offered. Accept the packet, then bind it with "
+                          f"oah start --task {request.task} --agent {request.engine} --packet "
+                          f".oah/tasks/{request.task}/PACKET.md (use your packet's path); then offer again")
+    _check_dispatch_lease(holder, root, stage=request.stage)
+    leased = holder.binding()
+    bound = dispatch_binding(state_dir, request.task)
+    packet = read_packet(root, request.packet or root / (bound["source"] if bound else leased.source),
+                         parse_intent=parse_intent or oah_intent.parse,
+                         read_source=read_source or oah_intent.read_source)
+    _check_lease_source(leased, packet, request.task)
+    check_dispatch_binding(bound, packet, request.task)
+    task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=request.stage, task=request.task,
+                                       engine=request.engine)
+    if design is not None and not design.delivered:
+        from oah.design import task_context
+
+        raise EngineError(task_context.REFERENCE_UNAVAILABLE_CODE, f"task {request.task}: the design does not fit the "
+                          "brief whole, and a native subagent's reads cannot be observed; use the process launcher. "
+                          "Nothing was offered")
+    scope = tuple(packet.scope or holder.scope)
+    recorded = packet.axes.get(request.stage)
+    given = recorded.to_json() if recorded is not None else {}
+    given.update({axis: value for axis, value in request.axes.items() if value is not None})
+    scored = routing.score_axes(stage=request.stage, kind=given.pop("kind", None), scope=scope, overrides=given)
+    return _NativeBasis(holder, packet, task_design, design, scope, scored, recorded is not None,
+                        _call_floor(request.stage, scope, scored.axes.kind), warnings)
+
+
+def _native_tier(request: CallRequest, basis: _NativeBasis) -> tuple[str, str, list | None, routing.Axes | None]:
+    """The flag, packet or rule tier, as `_prepare` decides it before any judge; Jev is not asked."""
+    packet, scored, warnings = basis.packet, basis.scored, basis.warnings
+    axes = scored.axes if basis.recorded else None
+    if request.tier:
+        return request.tier, "flag", None, axes
+    if request.stage in packet.plan:
+        planned_engine, tier = packet.plan[request.stage]
+        if planned_engine != request.engine:
+            warnings.append(f"OAH_PACKET_PLAN_ENGINE: the packet plans {planned_engine} for {request.stage}; "
+                            f"its tier {tier} is used for {request.engine}")
+        return tier, "packet", None, axes
+    explicit = any(value is not None for value in request.axes.values())
+    recommendation = routing.recommend(scored.axes)
+    tier = recommendation.tier
+    reasons = list(scored.reasons) + list(recommendation.reasons)
+    warnings.extend(scored.warnings)
+    if request.stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(basis.floor_tier):
+        tier = basis.floor_tier
+        reasons.append(f"floor {basis.floor_tier}: this review's scope")
+    return tier, "flag" if explicit else "rules", reasons, scored.axes
+
+
+def _native_agent(tier: str, *, root: pathlib.Path, env: Mapping[str, str]) -> pathlib.Path | None:
+    """The registered Claude subagent for the tier: the project's `.claude/agents/oah-<tier>.md`, else the user's."""
+    user = pathlib.Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else skillsel.home_of(env) / ".claude"
+    for folder in (root / ".claude" / "agents", user / "agents"):
+        if (folder / f"oah-{tier}.md").is_file():
+            return folder / f"oah-{tier}.md"
+    return None
+
+
+def _native_target(engine: str, tier: str, settings: Settings, *, root: pathlib.Path,
+                   env: Mapping[str, str]) -> dict:
+    """TargetIdentity of the lead's host. Claude spawns the registered oah-<tier> agent; Codex picks its own role."""
+    import platform
+
+    from oah.launchers import native
+
+    config = root / ".oah" / "config.toml"
+    agent_bytes = None
+    if engine == "claude":
+        path = _native_agent(tier, root=root, env=env)
+        if path is None:
+            raise EngineError(native.HOST_UNSUPPORTED_CODE, f"the native route spawns the Claude subagent oah-{tier}, "
+                              f"and no .claude/agents/oah-{tier}.md exists in this repository or your Claude folder; "
+                              "run oah init to write the tier agents, then offer again. Nothing was offered")
+        from oah.init import agent_values
+
+        agent_bytes = path.read_bytes()
+        model, effort = agent_values(agent_bytes) or ("unknown", "unknown")
+    else:
+        values = settings.engines[engine]["tiers"][tier]
+        model, effort = values["model"] or "host-selected", values["effort"]
+    return {"engine": engine, "route": "native", "cli_version": None, "profile_id": f"oah-{tier}", "model": model,
+            "effort": effort, "platform": sys.platform, "architecture": platform.machine() or "unknown",
+            "root_digest": native.sha(str(root.resolve()).encode("utf-8")),
+            "config_digest": native.digest({"config": native.sha(config.read_bytes()) if config.is_file() else None,
+                                            "agent": native.sha(agent_bytes) if agent_bytes is not None else None})}
+
+
+def _native_identities(request: CallRequest, basis: _NativeBasis, bundle: Mapping | None, target: Mapping) -> dict:
+    """The task, design, target and budget identities an offer is made under and a settlement re-resolves."""
+    from oah import skillpack
+    from oah.launchers import native
+
+    packet, holder, intent = basis.packet, basis.holder, basis.holder.binding()
+    task = {"task": request.task, "subtask": None,
+            "packet_digest": native.digest({"source": packet.source, "section": packet.section,
+                                            "scope": list(packet.scope),
+                                            "plan": {stage: list(pair) for stage, pair in packet.plan.items()},
+                                            "rerank_disabled": packet.rerank_disabled,
+                                            "axes": {stage: axes.to_json() for stage, axes in packet.axes.items()},
+                                            "planned": dict(packet.planned)}),
+            "intent": {"id": intent.id, "revision": intent.revision, "digest": intent.digest},
+            "scope_digest": native.digest(list(basis.scope)), "dispatch_stage": request.stage,
+            "kind": basis.scored.axes.kind, "risk": basis.scored.axes.risk,
+            "lease": {"id": holder.id, "generation": holder.generation}}
+    design = None
+    record = getattr(basis.task_design, "task", None)
+    if record is not None:
+        binding = record.binding
+        accepted = getattr(getattr(basis.task_design, "context", None), "accepted", None)
+        coverage = accepted.texts.get("coverage") if accepted is not None else None
+        design = {"ref": {"project": binding.project, "id": binding.design, "revision": binding.revision,
+                          "digest": binding.digest},
+                  "fingerprint": native.digest(basis.design.record.get("fingerprint") if basis.design is not None
+                                               else None),
+                  "coverage_basis": native.sha((coverage or "").encode("utf-8"))}
+    budget = native.digest({"skill_budget": skillpack.SKILL_BUDGET, "brief_budget": skillpack.BRIEF_BUDGET,
+                            "items": skillpack.ITEM_LIMIT})
+    bundle_id = bundle["digest"] if bundle is not None else None
+    prep_id = native.digest({"operation": "dispatch", "task": task, "design": design, "target": dict(target),
+                             "budget_profile": budget, "bundle": bundle_id})
+    return {"task": task, "design": design, "target": dict(target), "budget_profile": budget, "bundle_id": bundle_id,
+            "prep_id": prep_id}
+
+
+def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+                   env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
+                   parse_intent: Callable[[str], object] | None = None,
+                   read_source: Callable[[pathlib.Path], str] | None = None,
+                   now: dt.datetime | None = None) -> NativeOffer:
+    """`oah call --launcher native`: the common pure preflight and skill admission, then one offer under a planned run.
+
+    It asks no paid model or difficulty judge, reserves nothing, logs no round start, starts no engine and never
+    finishes, releases or lands anything. A refusal offers nothing and creates no run folder. The run's status stays
+    `prepared`; `native-offer.json` holds the offered or settled state and cannot authorize a process or Orca run."""
+    from oah import skillpack
+    from oah.atomic import write_json_atomic
+    from oah.launchers import native
+
+    root = pathlib.Path(root)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    briefs.check_footer(footer, has_footer)
+    basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
+                          read_source=read_source)
+    skill_pack = _admit_skills(request, basis.holder, basis.task_design, root=root, state_dir=state_dir, env=env)
+    stored = None
+    if request.stored_brief is not None:
+        stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
+        _stored_brief_matches(stored, basis.packet)
+    tier, tier_source, reasons, axes = _native_tier(request, basis)
+    target = _native_target(request.engine, tier, settings, root=root, env=env)
+    selection = _brief_skills(root, kind=basis.scored.axes.kind, stage=request.stage, risk=basis.scored.axes.risk,
+                              scope=basis.scope, state_dir=state_dir, env=env, keychain=None, brief_disabled=True,
+                              now=now)
+    bundle = skill_pack.bundle if skill_pack is not None else None
+    identities = _native_identities(request, basis, bundle, target)
+    run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
+    token = native.canary(run.id, identities["bundle_id"])
+    warnings = basis.warnings
+    message = _brief_text(request, run.id, basis.packet, basis.scope, stored, footer, has_footer, warnings, selection,
+                          basis.holder, basis.design, skill_pack, native_canary=token)
+    if skill_pack is not None:
+        try:
+            skillpack.check_brief(message)
+        except skillpack.PackRefused as exc:
+            raise _pack_error(exc) from None
+    pack_id = native.digest({"prep_id": identities["prep_id"], "bundle": identities["bundle_id"],
+                             "capabilities": (native.digest(skill_pack.capabilities)
+                                              if skill_pack is not None and skill_pack.capabilities is not None
+                                              else None),
+                             "message": native.sha(message.encode("utf-8"))})
+    offer = native.offer_record(run_id=run.id, bundle_id=identities["bundle_id"], pack_id=pack_id,
+                                prep_id=identities["prep_id"], task=identities["task"], design=identities["design"],
+                                target=target, budget_profile=identities["budget_profile"], message=message,
+                                token=token, now=now)
+    description = f"oah {request.task} {request.stage} {run.id}"
+    params = native.host_params(request.engine, profile_id=target["profile_id"], description=description,
+                                message=message)
+    runs._create_run(run, record)
+    try:
+        run.write_prompt(message)
+        chosen, skills_rerank = selection
+        skills_record = {"rerank": skills_rerank, **chosen.to_record()}
+        if bundle is not None:
+            skills_record["bundle"] = bundle
+        write_json_atomic(run.file_path("skills.json"), skills_record)
+        if skill_pack is not None and skill_pack.capabilities is not None:
+            write_json_atomic(run.file_path("capabilities.json"), skill_pack.capabilities)
+        if basis.design is not None:
+            write_json_atomic(run.file_path(DESIGN_NAME), dict(basis.design.record, worktree=basis.holder.worktree))
+        run.result(status="prepared", read_only=request.stage == "review", axes=axes.to_json() if axes else None,
+                   tier=tier, tier_source=tier_source, tier_reasons=reasons, override_stage=request.override_stage,
+                   warnings=warnings, launcher={"name": "native", "offer": native.OFFER_NAME}, jev_status="unused(native)")
+        offer = native.publish_offer(run.path, offer)
+    except (EngineError, briefs.BriefError, runs.RunError) as exc:
+        run.result(status="refused", error=_recorded_error(exc, True), warnings=warnings)
+        raise
+    host = {"tool": "Agent" if request.engine == "claude" else "native-subagent", "params": params}
+    return NativeOffer(run.id, str(run.path), offer, message, host, tier, tier_source, tuple(warnings))
+
+
+@dataclasses.dataclass(frozen=True)
+class NativeSettlement:
+    run_id: str
+    settlement: dict
+    receiving: dict
+    offer: dict
+    existing: bool
+
+
+def _native_differences(offer: Mapping, current: Mapping) -> list[str]:
+    names = {"task": "task, intent, packet, scope or lease", "design": "design", "target": "host target or config",
+             "budget_profile": "budget profile", "bundle_id": "delivered skill texts or their pins",
+             "prep_id": "preparation"}
+    return [label for key, label in names.items() if offer[key] != current[key]]
+
+
+def settle_native(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[str, str], settings: Settings,
+                  run_id: str, offer_digest: str, host_child_id: str, outcome: str, result_path: pathlib.Path,
+                  token: str | None, parse_intent=None, read_source=None,
+                  now: dt.datetime | None = None) -> NativeSettlement:
+    """`oah call settle`: attest which host child received the offered message, after re-resolving every identity.
+
+    The identities are re-resolved before an identical retry returns its first receipt, so a settled offer cannot
+    become current again after drift. Settling never counts a round, finishes a task, releases a lease, registers a
+    review or infers that a skill was applied."""
+    from oah import skillpack
+    from oah.launchers import native
+
+    now = now or dt.datetime.now(dt.timezone.utc)
+    root = pathlib.Path(root)
+    try:
+        run = runs.find_run(state_dir, run_id)
+    except runs.RunError as exc:
+        if exc.code != "OAH_RUN_NOT_FOUND":
+            raise
+        run = None
+    offer = native.read_offer(run.path) if run is not None else None
+    if offer is None:
+        raise EngineError(native.UNMANAGED_RUN_CODE, f"{run_id} has no native offer in this state folder; only a run "
+                          "offered with oah call --launcher native can be settled")
+    # The offer's kind and risk came from the packet, the scope and any axis flags; the packet and scope are compared
+    # below, so the flags are carried rather than asked for again.
+    request = CallRequest(engine=offer["target"]["engine"], stage=offer["task"]["dispatch_stage"], task=run.task,
+                          tier=offer["target"]["profile_id"].removeprefix("oah-"),
+                          axes={"kind": offer["task"]["kind"], "risk": offer["task"]["risk"]})
+    problems = []
+    prompt = run.prompt_path.read_bytes() if run.prompt_path.is_file() else None
+    if prompt is None or native.sha(prompt) != offer["message"]["sha256"]:
+        problems.append("the run's brief changed after the offer")
+    if now >= dt.datetime.fromisoformat(offer["expires_at"].replace("Z", "+00:00")):
+        problems.append(f"the offer expired at {offer['expires_at']}")
+    try:
+        basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
+                              read_source=read_source)
+        roots = skillpack.environment_roots(root, state_dir, env)
+        admitted = skillpack.admit(skillpack.Operation("dispatch", task=request.task,
+                                                       lease=(basis.holder.id, basis.holder.generation)),
+                                   task_design=basis.task_design, state_dir=state_dir, engine=request.engine,
+                                   stage=request.stage, roots=roots)
+        _block, bundle = skillpack.finalize(admitted)
+        target = _native_target(request.engine, request.tier, settings, root=root, env=env)
+        current = _native_identities(request, basis, bundle, target)
+        problems.extend(f"the {label} changed" for label in _native_differences(offer, current))
+    except skillpack.PackRefused as exc:
+        problems.append(str(_pack_error(exc)))
+    except EngineError as exc:
+        problems.append(str(exc))
+    if problems or offer["state"] == "stale":
+        if offer["state"] == "offered":
+            offer = native.set_state(run.path, offer, "stale", None)
+        reasons = "; ".join(problems) or "it was marked stale by an earlier settle"
+        raise EngineError(native.STALE_CODE, f"run {run_id}'s native offer is stale: {reasons}. Its record is kept as "
+                          "evidence of the old offer; offer again with oah call --launcher native")
+    if offer_digest != offer["message"]["sha256"]:
+        raise EngineError(native.CONFLICT_CODE, f"{offer_digest} is not the digest of run {run_id}'s offered "
+                          f"message ({offer['message']['sha256']}); pass the digest the offer printed")
+    result = native.read_result(result_path)
+    stated = native.claim(offer, host_child_id=host_child_id, task_fingerprint=native.digest(current["task"]),
+                          result=result, outcome=outcome, token=token)
+    from oah.atomic import StateCorrupt, read_jsonl
+
+    try:
+        delivered = skillpack.bundle_of(run.path)
+    except ValueError as exc:
+        raise StateCorrupt(f"{StateCorrupt.code}: run {run_id}: {exc}; oah never repairs it, so offer again") from None
+    receiving = native.receiving_record(run.id, offer, delivered, read_jsonl(run.file_path(skillpack.READS_NAME)),
+                                        now=now)
+    settlement, existing = native.record_settlement(run.path, offer, stated, receiving, now)
+    if existing:
+        receiving = native.read_receiving(run.path) or receiving
+    return NativeSettlement(run.id, settlement, receiving, native.read_offer(run.path), existing)
 
 
 def _iso(moment: dt.datetime) -> str:

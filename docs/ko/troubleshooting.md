@@ -197,7 +197,11 @@
 | `OAH_SKILL_REFERENCE_UNAVAILABLE` | 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나 `<!-- oah`로 시작하는 줄을 담고 있다. 아무것도 시작하지 않았다. | 그 파일이 고정되도록 스킬을 다시 검토하거나, 연결에서 그 파일을 선택으로 바꾼다. |
 | `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유는 괄호 안에 있다. `user-only`, `license`, `host`, `marker`, `pin-mismatch`, 그리고 시작 직전에 설치본이 바뀌면 `changed`다. 아무것도 시작하지 않았다. | `changed`나 `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 나머지는 다른 스킬을 연결하거나 필요에서 그 발주 단계를 뺀다. |
 | `OAH_SKILLS_BUDGET_EXCEEDED` | 스킬 본문이나 브리프 전체가 바이트 예산을 넘었거나 항목이 128개를 넘었다. 메시지가 스킬마다 크기를 보여 준다. | 작업을 나누거나 선택 스킬의 연결을 끊은 뒤 다시 호출한다. |
-| `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run`이 스킬 묶음이 없는 run을 가리켰다. | run id를 확인한다. 연결된 스킬이 없는 run에는 읽을 것이 없다. |
+| `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run`이 스킬 묶음이 없는 run을 가리켰거나, `oah call settle`이 네이티브 제안이 없는 run을 가리켰다. | run id를 확인한다. 연결된 스킬이 없는 run에는 읽을 것이 없고, `oah call --launcher native`로 만든 run만 정산할 수 있다. |
+| `OAH_SKILL_HOST_UNSUPPORTED` | Claude용 `oah call --launcher native`가 저장소에서도 Claude 폴더에서도 `.claude/agents/oah-<tier>.md`를 찾지 못해, 호스트가 띄울 서브에이전트가 없다. | `oah init`으로 단 에이전트 파일을 쓴 뒤 다시 제안한다. |
+| `OAH_NATIVE_OFFER_STALE` | `oah call settle`이 제안 뒤에 무언가 바뀐 것을 찾았다. 작업, 의도, 패킷, 범위, 리스, 설계, 전달한 스킬 본문, 호스트 대상, 브리프 가운데 하나가 바뀌었거나 제안이 24시간을 넘었다. 옛 제안은 증거로 남는다. | `oah call --launcher native`로 다시 제안하고 새 run을 정산한다. |
+| `OAH_NATIVE_SETTLE_CONFLICT` | `oah call settle`이 다른 제안 digest를 받았거나, 이미 다른 결과·호스트 자식·결과 파일·카나리로 정산된 run이다. 처음 영수증이 그대로 남는다. | 제안이 출력한 digest를 넘긴다. 다른 결과를 남기려면 다시 제안한다. |
+| `OAH_NATIVE_RESULT_INVALID` | 정산 결과 파일이 65,536바이트를 넘었거나(`too-large`), UTF-8이 아니거나(`not-utf8`), `<!-- oah`로 시작하는 줄이 있다(`marker`). | 그 줄을 뺀 짧은 UTF-8 답을 저장한 뒤 다시 정산한다. |
 | `OAH_RUN_LAUNCH_INVALID` | 준비된 run의 저장 기록(리스 스냅샷, 의도 결속, 설계 기록, 스킬 기록 등)이 시작할 때 없거나 망가졌다. | `oah call`을 다시 실행해 새 run을 준비한다. |
 | `OAH_CAPABILITY_RELAY_REQUIRED` | 리드만 가진 필수 능력에 중계 결과가 필요하거나, 중계 결과가 낡았거나, 만료됐거나, 변조됐거나, 요청과 맞지 않는다. `oah capabilities relay`는 너무 크거나, oah 표시 줄을 담았거나, 비밀처럼 보이는 결과도 거절한다. 괄호 안에 이유가 없으면 리드가 아직 중계하지 않은 것이다. | `oah capabilities plan --task T --stage S --parent-inventory FILE`이 중계 요청을 출력한다. 요청된 도구를 직접 실행해 `oah capabilities relay`로 결과를 저장하고 `--relay-result HASH`로 다시 호출한다. 무엇이든 바뀌면 다시 중계한다. |
 | `OAH_CAPABILITY_UNAVAILABLE` | 필수 능력이 자식에 설정돼 있지 않거나 꺼져 있고, 리드의 목록에도 없다. | `--parent-inventory`로 리드의 목록을 주거나, 도구를 직접 설정한 뒤 다시 계획한다. |

@@ -113,6 +113,46 @@ tasks.
 required one refuses with `OAH_SKILL_NOT_DELIVERABLE(user-only)`. What it costs you: you run such a skill
 yourself.
 
+## Native subagents
+
+`oah call ENGINE --stage S --task T --launcher native` hands the brief to the AI you work with instead of starting a
+separate process. That AI, the lead, gives it to a subagent of its own: Claude Code's Agent tool, or a Codex native
+subagent.
+
+- It runs the same checks and skill admission as any `oah call`, then writes one run folder with the brief,
+  `skills.json` and `native-offer.json`, and prints the exact message with its byte count and SHA-256. For Claude it
+  prints the three Agent tool parameters: `subagent_type` (the `oah-<tier>` agent that `oah init` writes),
+  `description` and `prompt`. For Codex it prints the message only.
+- It asks no paid judge, reserves nothing, counts no round and starts no engine. The run stays `prepared`, and
+  neither `oah wait` nor an Orca worker starts it.
+- The brief's first line tells the subagent that it is a native subagent, not a separate oah process, and asks it
+  to end its reply with an `oah-canary:` line. The subagent may run `oah skills read --run R --item N` to read a
+  skill text again, and that read is recorded.
+- When the subagent returns, the lead saves its reply to a file and runs `oah call settle --run R --offer-digest H
+  --host-child-id ID --outcome succeeded|failed --result-file FILE [--canary VALUE]`. Settle checks the task, intent,
+  packet, scope, lease, design, skill texts and host target again. Anything that changed refuses with
+  `OAH_NATIVE_OFFER_STALE` and keeps the old offer as evidence. An offer can be settled for 24 hours.
+- Settle writes `native-settlement.json` and `skills-receiving.json`. Running it again with the same values returns
+  the first receipt; other values refuse with `OAH_NATIVE_SETTLE_CONFLICT`.
+
+**Offered is not delivered, and settled is not applied.** The host gives oah no signed receipt, so delivery is
+recorded as `parent-attested` and the evidence as `cooperative`. A matching canary proves only that the token came
+back. A skill text counts as read only when `oah skills read` recorded the read, and nothing marks a skill as
+applied. A settlement is not counted as a review or a process success, finishes no task and releases no lease. What
+it costs you: one more command, `oah call settle`, after each native subagent returns.
+
+**Native is a flag, never a default.** Only `--launcher native` selects it; `[call] launcher = "native"` refuses with
+`OAH_CONFIG_INVALID`. A native subagent shares the lead's environment, so oah's worker guards are cooperative: oah
+cannot stop it from running a lead-only command. What it costs you: nothing for existing setups; you choose native
+for each call.
+
+**The returned result is data.** The result file is never run. It must be UTF-8, at most 65,536 bytes, without a
+line starting with `<!-- oah`, or settle refuses with `OAH_NATIVE_RESULT_INVALID`. What it costs you: you save a
+short reply, not a long log.
+
+A Claude offer needs the tier agent file; without it the offer refuses with `OAH_SKILL_HOST_UNSUPPORTED`. A design
+too large for the brief also refuses on this route, because a subagent's reads cannot be observed.
+
 ## Capabilities a skill names
 
 A delivered skill can name tools in its `allowed-tools` line, such as an MCP server's tool. `oah` turns each
@@ -156,7 +196,8 @@ enable it yourself and plan again.
 ## Jev in these steps
 
 Jev chooses nothing on this page in this release. Coverage, discovery, delivery and capability routing follow
-fixed rules, and the capability plan records `jev: unused(not-implemented)`. The skill re-ranker described in
+fixed rules, and the capability plan records `jev: unused(not-implemented)`. A native offer asks no judge at all and
+records `jev_status: unused(native)`. The skill re-ranker described in
 [Skill selection](concepts.md#skill-selection) reorders installed skills for the brief; it never changes which
 skill texts are delivered.
 
@@ -169,3 +210,5 @@ skill texts are delivered.
 - Routes are planned before the run starts. oah does not watch the child's tool startup, and it never reports the
   `direct` route, which would need that.
 - The budgets are fixed byte counts. They do not measure the model's context window.
+- A native subagent's reads are seen only through `oah skills read`; the host's own file reads are not observed.
+  `oah call settle` does not check capability relays again.

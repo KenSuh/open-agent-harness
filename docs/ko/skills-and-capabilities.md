@@ -111,6 +111,46 @@ run 폴더도 만들지 않는다. 넘길 수 없는 선택 스킬은 건너뛰�
 **사람이 직접 부르는 스킬은 사람에게 남는다.** 사람만 부를 수 있는 스킬은 넘기지 않는다. 그런 스킬이 필수면
 `OAH_SKILL_NOT_DELIVERABLE(user-only)`로 거절된다. 사용자가 치르는 비용은 이렇다. 그런 스킬은 직접 실행한다.
 
+## 네이티브 서브에이전트
+
+`oah call ENGINE --stage S --task T --launcher native`는 별도 프로세스를 띄우지 않고, 지금 함께 일하는 AI에게
+브리프를 넘긴다. 그 AI(리드)가 자기 서브에이전트에게 준다. Claude Code의 Agent 도구나 Codex의 네이티브
+서브에이전트다.
+
+- 다른 `oah call`과 같은 확인과 스킬 받아들임을 거친 뒤 run 폴더 하나에 브리프, `skills.json`,
+  `native-offer.json`을 쓰고, 정확한 메시지를 바이트 수와 SHA-256과 함께 출력한다. Claude에는 Agent 도구 인자 세
+  개를 출력한다. `subagent_type`(`oah init`이 쓰는 `oah-<tier>` 에이전트), `description`, `prompt`다. Codex에는
+  메시지만 출력한다.
+- 유료 판정을 묻지 않고, 아무것도 예약하지 않고, 라운드를 세지 않고, 엔진을 시작하지 않는다. run은 `prepared`로
+  남고, `oah wait`도 Orca 워커도 그 run을 시작하지 않는다.
+- 브리프 첫 줄은 서브에이전트에게 별도 oah 프로세스가 아닌 네이티브 서브에이전트라고 알리고, 답의 끝에
+  `oah-canary:` 줄을 붙이라고 한다. 서브에이전트는 `oah skills read --run R --item N`으로 스킬 본문을 다시 읽을 수
+  있고, 그 읽기는 기록된다.
+- 서브에이전트가 돌아오면 리드는 그 답을 파일로 저장하고 `oah call settle --run R --offer-digest H
+  --host-child-id ID --outcome succeeded|failed --result-file FILE [--canary VALUE]`를 실행한다. 정산은 작업, 의도,
+  패킷, 범위, 리스, 설계, 스킬 본문, 호스트 대상을 다시 확인한다. 바뀐 것이 있으면 `OAH_NATIVE_OFFER_STALE`로
+  거절하고 옛 제안은 증거로 남긴다. 제안은 24시간 안에 정산할 수 있다.
+- 정산은 `native-settlement.json`과 `skills-receiving.json`을 쓴다. 같은 값으로 다시 실행하면 처음 영수증을
+  돌려주고, 다른 값이면 `OAH_NATIVE_SETTLE_CONFLICT`로 거절한다.
+
+**제안은 전달이 아니고, 정산은 적용이 아니다.** 호스트는 oah에 서명된 영수증을 주지 않으므로 전달은
+`parent-attested`로, 증거는 `cooperative`로 기록한다. 카나리가 맞아도 그 토큰이 돌아왔다는 것만 증명한다. 스킬
+본문은 `oah skills read`가 읽기를 기록했을 때만 읽은 것으로 치고, 스킬을 적용했다고 표시하는 것은 없다. 정산은
+리뷰나 프로세스 성공으로 세지 않고, 작업을 끝내지도 리스를 풀지도 않는다. 사용자가 치르는 비용은 이렇다.
+네이티브 서브에이전트가 돌아올 때마다 `oah call settle` 명령을 하나 더 실행한다.
+
+**네이티브는 플래그일 뿐 기본값이 되지 않는다.** `--launcher native`로만 고르고, `[call] launcher = "native"`는
+`OAH_CONFIG_INVALID`로 거절된다. 네이티브 서브에이전트는 리드의 환경을 함께 쓰므로 oah의 워커 보호는 협조에
+기댄다. oah는 그것이 리드 전용 명령을 실행하는 것을 막지 못한다. 사용자가 치르는 비용은 이렇다. 기존 설정에는
+없고, 네이티브는 호출마다 고른다.
+
+**돌려받은 결과는 데이터다.** 결과 파일은 실행하지 않는다. UTF-8이어야 하고 65,536바이트 이하여야 하며
+`<!-- oah`로 시작하는 줄이 없어야 한다. 아니면 정산은 `OAH_NATIVE_RESULT_INVALID`로 거절된다. 사용자가 치르는
+비용은 이렇다. 긴 로그가 아니라 짧은 답을 저장한다.
+
+Claude 제안에는 단 에이전트 파일이 있어야 한다. 없으면 `OAH_SKILL_HOST_UNSUPPORTED`로 거절된다. 브리프에 다 들어가지
+않는 큰 설계도 이 경로에서는 거절된다. 서브에이전트의 읽기를 지켜볼 수 없기 때문이다.
+
 ## 스킬이 이름 붙인 능력
 
 넘겨진 스킬은 `allowed-tools` 줄에 MCP 서버의 도구 같은 도구 이름을 적을 수 있다. `oah`는 이름 붙은 도구마다
@@ -151,7 +191,8 @@ run은 격리된 채로 남아 중계를 받지 않는다(`OAH_CAPABILITY_UNSUPP
 ## 이 단계들에서 Jev
 
 이번 릴리스에서 Jev는 이 문서의 어떤 것도 고르지 않는다. coverage, 탐색, 전달, 능력 경로는 정해진 규칙을 따르고,
-능력 계획은 `jev: unused(not-implemented)`를 기록한다. [스킬 선택](concepts.md#스킬-선택)에서 설명하는 스킬
+능력 계획은 `jev: unused(not-implemented)`를 기록한다. 네이티브 제안은 어떤 판정도 묻지 않고
+`jev_status: unused(native)`를 기록한다. [스킬 선택](concepts.md#스킬-선택)에서 설명하는 스킬
 재정렬기는 브리프에 넣을 설치된 스킬의 순서를 바꿀 뿐이고, 어떤 스킬 본문을 넘길지는 바꾸지 않는다.
 
 ## 이번 릴리스의 한계
@@ -162,3 +203,5 @@ run은 격리된 채로 남아 중계를 받지 않는다(`OAH_CAPABILITY_UNSUPP
 - 경로는 run이 시작하기 전에 정한다. oah는 자식의 도구 시작을 지켜보지 않으며, 그것이 있어야 하는 `direct`
   경로를 보고하지 않는다.
 - 예산은 고정된 바이트 수다. 모델의 문맥 창을 재지 않는다.
+- 네이티브 서브에이전트의 읽기는 `oah skills read`로만 보인다. 호스트가 직접 읽은 파일은 관찰하지 않는다.
+  `oah call settle`은 능력 중계를 다시 확인하지 않는다.
