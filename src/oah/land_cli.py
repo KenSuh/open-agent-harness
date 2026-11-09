@@ -219,7 +219,9 @@ def run(args: argparse.Namespace) -> int:
     except (land.LandError, ReviewError, scratch.ScratchError) as exc:
         refusal = exc if isinstance(exc, scratch.ScratchError) else exc.__cause__
         if isinstance(refusal, scratch.ScratchError):
-            return _done(refusal.code, refusal.detail, EXIT_REFUSED, args.json)
+            from oah.review.runner import credential_redactor
+
+            return _done(refusal.code, credential_redactor(env)(refusal.detail), EXIT_REFUSED, args.json)
         code = getattr(exc, "code", "OAH_LAND_FAILED")
         code = code if code in EXCEPTION_MESSAGES else "OAH_LAND_FAILED"
         return _done(code, EXCEPTION_MESSAGES[code], EXIT_ENVIRONMENT if code in ENVIRONMENT_CODES

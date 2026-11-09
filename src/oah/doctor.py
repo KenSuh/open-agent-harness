@@ -441,7 +441,10 @@ def scratch_leftovers(env: Mapping[str, str]) -> dict:
     try:
         return scratch.leftovers(env)
     except scratch.ScratchError as exc:
-        return {"base": exc.base, "error": exc.code, "reason": exc.reason, "unreadable": 1}
+        from oah.review.runner import credential_redactor
+
+        redact = credential_redactor(env)
+        return {"base": redact(exc.base), "error": exc.code, "reason": redact(exc.reason), "unreadable": 1}
 
 
 def _size(count: int) -> str:

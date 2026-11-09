@@ -120,6 +120,7 @@ def credential_redactor(env: Mapping[str, str]) -> Callable[[str], str]:
     """Keep runtime credentials and their JSON/repr encodings out of review artifacts."""
     values = {value for name, value in env.items() if value and name.upper().endswith(
         ("_KEY", "_TOKEN", "_PASSWORD", "_SECRET"))}
+    values |= {value.replace("\r\n", "\n") for value in values}
     encoded = set(values)
     for value in values:
         encoded.update(json.dumps(value, ensure_ascii=ascii_only)[1:-1] for ascii_only in (False, True))

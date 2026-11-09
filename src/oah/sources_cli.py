@@ -102,13 +102,16 @@ def run(args: argparse.Namespace) -> int:
     from oah.design.sources.view import ViewUnavailable
     from oah.toolkit.schedule import ScheduleError
     from oah.scratch import ScratchError
+    from oah.review.runner import credential_redactor
 
+    redact = credential_redactor(os.environ)
     try:
         return HANDLERS[args.sources_command](args)
     except ScratchError as exc:
-        print(exc, file=sys.stderr)
+        message = redact(str(exc))
+        print(message, file=sys.stderr)
         if getattr(args, "json", False):
-            _print({"code": exc.code, "message": str(exc)})
+            _print({"code": exc.code, "message": message})
         return EXIT_REFUSED
     except (ViewUnavailable, DesignError, RefUnavailable) as exc:
         code = getattr(exc, "code", "ref-unavailable")
@@ -116,13 +119,13 @@ def run(args: argparse.Namespace) -> int:
               "using design-dependent results.", file=sys.stderr)
         return EXIT_ENVIRONMENT
     except (Refused, SourceError, MaterialsError, OutputError, ScheduleError) as exc:
-        print(exc, file=sys.stderr)
+        print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT if getattr(exc, "code", "") in ENVIRONMENT_CODES else EXIT_REFUSED
     except (StateProblem, ConfigError, NotARepo, GitMissing, LockTimeout, StorageError) as exc:
-        print(exc, file=sys.stderr)
+        print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT
     except OSError as exc:
-        print(f"OAH_SOURCES_IO: {exc}. Check permissions and free disk space, then retry.", file=sys.stderr)
+        print(redact(f"OAH_SOURCES_IO: {exc}. Check permissions and free disk space, then retry."), file=sys.stderr)
         return EXIT_ENVIRONMENT
 
 
