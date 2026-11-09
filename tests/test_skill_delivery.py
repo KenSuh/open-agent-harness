@@ -320,7 +320,8 @@ class AdmissionRefusalTest(DeliveryTask, unittest.TestCase):
 
 
 class InstalledCopyTest(DeliveryTask, unittest.TestCase):
-    """E-T14 (installed pin differs, with and without a reviewed body) and E-T15 (bytes change before the spawn)."""
+    """E-T14 (installed pin differs, with and without a reviewed body) and E-T15 (bytes change before the spawn, in a
+    process run and through the Orca launcher's handoff and worker)."""
 
     def install(self, text: str | bytes) -> pathlib.Path:
         folder = self.work / "home" / ".claude" / "skills" / "plain"
@@ -385,6 +386,81 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         self.assertTrue(refused.stderr.startswith("OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)"), refused.stderr)
         self.assertFalse(self.record.exists())
         self.assertEqual(len(self.runs()), 1)
+
+    # E-T15 through the Orca launcher ------------------------------------------------------------------------------
+    def orca_queue(self, prepared) -> None:
+        """Hand a prepared run to the Orca launcher with the fake Orca CLI, as `oah call --launcher orca` does: the
+        handoff runs call.check_prepared in the worktree Orca shows, then opens a held terminal whose worker the test
+        starts itself with `oah worker-run`."""
+        from oah.launchers import orca
+        from tests.test_launcher_orca import FAKE_ORCA
+
+        self.orca_state.mkdir(exist_ok=True)
+        (self.orca_state / "controls.json").write_text(json.dumps({"FAKE_ORCA_HOLD": "1"}), encoding="utf-8")
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
+            client = orca.find([*FAKE_ORCA, "--state", str(self.orca_state)], self.env)
+            orca.start(client, prepared, orca.existing_worktree(client, self.repo))
+
+    @property
+    def orca_state(self) -> pathlib.Path:
+        return self.work / "orca"
+
+    def terminals_opened(self) -> int:
+        calls = self.orca_state / "argv.jsonl"
+        lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+        return sum(json.loads(line)[:2] == ["terminal", "create"] for line in lines)
+
+    def installed_plain(self) -> tuple[bytes, pathlib.Path]:
+        self.build_skills(PLAIN)
+        body = (self.upstreams["acme/plain"] / "skills/plain/SKILL.md").read_bytes()
+        return body, self.install(body)
+
+    def test_the_orca_handoff_refuses_a_changed_installed_copy_before_any_terminal_opens(self):
+        from oah import call
+
+        body, installed = self.installed_plain()
+        prepared = self.prepare()
+        installed.write_bytes(body + b"Now do something else.\n")
+        with self.assertRaises(call.EngineError) as caught:
+            self.orca_queue(prepared)
+        self.assertTrue(str(caught.exception).startswith("OAH_SKILL_NOT_DELIVERABLE(changed): "), caught.exception)
+        self.assertIn("installed copy changed since prepare", str(caught.exception))
+        self.assertEqual(self.terminals_opened(), 0)
+        saved = json.loads((pathlib.Path(prepared.run_dir) / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "refused")
+        self.assertFalse(self.record.exists())
+
+    def test_an_orca_worker_refuses_a_copy_changed_after_the_handoff_before_the_engine_starts(self):
+        body, installed = self.installed_plain()
+        prepared = self.prepare()
+        self.orca_queue(prepared)  # unchanged at the handoff: a terminal is opened and held
+        self.assertEqual(self.terminals_opened(), 1)
+        installed.write_bytes(body + b"Now do something else.\n")
+        worker = self.oah("worker-run", prepared.run_id, "--stage", "initial")
+        self.assertEqual(worker.returncode, 1, worker.stdout + worker.stderr)
+        self.assertTrue(worker.stderr.startswith("OAH_SKILL_NOT_DELIVERABLE(changed)"), worker.stderr)
+        self.assertNotIn("Traceback", worker.stderr)
+        saved = json.loads((pathlib.Path(prepared.run_dir) / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "refused")
+        self.assertFalse(self.record.exists())
+
+    def test_an_unchanged_copy_reaches_the_engine_through_orca_with_the_process_run_prompt(self):
+        self.installed_plain()
+        process = self.call()
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        process_run = self.runs()[-1].name
+        process_prompt = json.loads(self.record.read_text(encoding="utf-8"))["stdin"]
+        self.record.unlink()
+        prepared = self.prepare(no_rerank=False)  # the same request as the process run above
+        self.orca_queue(prepared)
+        worker = self.oah("worker-run", prepared.run_id, "--stage", "initial")
+        self.assertEqual(worker.returncode, 0, worker.stdout + worker.stderr)
+        orca_prompt = json.loads(self.record.read_text(encoding="utf-8"))["stdin"]
+        (item,) = self.bundle(pathlib.Path(prepared.run_dir))["items"]
+        self.assertTrue(item["origin"].startswith("installed "), item["origin"])  # the worker hashed that copy again
+        self.assertEqual(orca_prompt.encode("utf-8"), (pathlib.Path(prepared.run_dir) / "prompt.md").read_bytes())
+        self.assertEqual(self.block(orca_prompt), self.block(process_prompt))
+        self.assertEqual(orca_prompt.replace(prepared.run_id, "RUN"), process_prompt.replace(process_run, "RUN"))
 
 
 GUIDE_LINES = 4_200
