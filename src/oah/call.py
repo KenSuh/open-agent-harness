@@ -73,7 +73,8 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Callable, Collection, Mapping, Sequence
 
 if TYPE_CHECKING:
-    from oah.discovery.preparation import PreparedE
+    from oah.capabilities.plan import FrozenInputs
+    from oah.discovery.preparation import PreparedE, Record as ERecord
     from oah.skillpack import Admitted as SkillAdmission
 
 import oah.intent as oah_intent
@@ -1097,13 +1098,14 @@ def prepared_e_digest(run) -> str | None:
 
 
 def _check_e(prepared, holder, *, publication=None, native_record=None, env=None, before_spend=True,
-             correction=False):
+             correction=False, frozen: FrozenCheck | None = None):
     from oah import skillpack
     from oah.call_cli import load_settings
     from oah.discovery import budget, preparation
     from oah.discovery.store import digest
     from oah.config import ConfigError
     from oah.packet import PacketError
+    from oah.capabilities import plan as capability_plan
 
     state_dir, root = prepared.run.path.parents[2], pathlib.Path(prepared.cwd)
     env = os.environ if env is None else env
@@ -1143,7 +1145,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             if publication.plan.skills_record.get("prepared_e") != preparation.projection(record):
                 raise ValueError("the correction's closed E record changed")
         else:
-            saved = (prepared.run._read_json("skills.json")
+            saved = (frozen.skills if frozen is not None else prepared.run._read_json("skills.json")
                      if prepared.run.file_path("skills.json").is_file() else None)
             raw = (saved or {}).get("prepared_e")
             if prepared.e_digest is None and raw is None:
@@ -1151,13 +1153,18 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                     raise ValueError("managed content needs a complete PreparedE record; prepare again")
                 check_absence(saved)
                 return
-            record = preparation.parse(raw)
+            record = frozen.record if frozen is not None else preparation.parse(raw)
+            frozen_inputs = (frozen.inputs if frozen is not None else capability_plan.frozen_inputs(
+                record, state_dir=state_dir) if not before_spend else None)
             facts = record["facts"]
-            assert isinstance(facts, dict)
+            if not isinstance(facts, dict):
+                raise ValueError("the prepared facts are incomplete")
             context = facts["context"]
-            assert isinstance(context, dict)
+            if not isinstance(context, dict):
+                raise ValueError("the prepared dispatch context is incomplete")
             recorded_path = context["root"]
-            assert isinstance(recorded_path, str)
+            if not isinstance(recorded_path, str):
+                raise ValueError("the prepared command root is incomplete")
             recorded_root = pathlib.Path(recorded_path)
             if recorded_root.resolve() != root.resolve():
                 raise ValueError("the prepared command root changed")
@@ -1167,9 +1174,10 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             refs, facts = record["references"], record["facts"]
             if not isinstance(refs, dict) or not isinstance(facts, dict):
                 raise ValueError("the preparation references are malformed")
-            run_data = prepared.run.read()
+            run_data = frozen.result if frozen is not None else prepared.run.read()
             recorded_axes = context["axes"]
-            assert isinstance(recorded_axes, dict)
+            if not isinstance(recorded_axes, dict):
+                raise ValueError("the prepared dispatch axes are incomplete")
             axes = {key: str(value) for key, value in recorded_axes.items()}
             request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task, axes=axes,
                                   override_stage=run_data.get("override_stage") is True,
@@ -1186,7 +1194,8 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                 native=refs["route"] == "native", brief_disabled=True, packet=packet, frozen_needs=refs["needs"],
                 target_check=lambda: _e_target(request, refs["tier"], root=root, state_dir=state_dir,
                                                env=env, native=refs["route"] == "native"),
-                design=design, advise=False, expected=True, spent_record=record if not before_spend else None)
+                design=design, advise=False, expected=True, spent_record=record if not before_spend else None,
+                spent_inputs=frozen_inputs)
             if current is None or current.admitted is None or current.admitted.prepared is None \
                     or current.admitted.prepared.record()["facts"] != facts:
                 raise ValueError("the complete current local E identity changed")
@@ -1202,9 +1211,10 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
         facts = record["facts"]
         if facts["selectors"] != _e_selectors(env):
             raise ValueError("the actual child configuration selectors changed")
+        lease = facts["operation"]["lease"]
         if facts["engine"] != prepared.engine or facts["stage"] != prepared.stage \
-                or facts["operation"]["task"] != prepared.task \
-                or facts["operation"]["lease"] != [holder.id, holder.generation]:
+                or facts["operation"]["task"] != prepared.task or lease[0] != holder.id \
+                or before_spend and lease[1] != holder.generation:
             raise ValueError("the task, lease generation, engine or stage changed")
         if any(facts["target"][key] != value for key, value in (
                 ("model", prepared.model), ("effort", prepared.launch_effort), ("cli_version", prepared.cli_version))):
@@ -1388,7 +1398,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                   design_text: str | None = None, target=None, target_check=None, preview=None,
                   design=None, frozen_needs=None, advise: bool = True,
                   expected: bool | None = None, query_needs=None, query_file: str | None = None,
-                  spent_record=None) -> SkillPack | None:
+                  spent_record=None, spent_inputs: FrozenInputs | None = None) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links or task selections deliver skill texts, capabilities apply or task
     discovery ran, else None (the brief stays byte-identical). The skill admission, the capability plan's required
@@ -1402,11 +1412,12 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     from oah import discovery, skillpack
     from oah.capabilities import CapabilityRefused, inventory, plan as capability_plan
     from oah.config import ConfigError, load_config
-    from oah.discovery import budget, gateway, preparation, providers, tasks
+    from oah.discovery import budget, gateway, original, preparation, providers, tasks
     from oah.discovery.store import digest
 
     inputs = _CORRECTION_INPUTS.get() if expected is not False else None
     frozen_record = spent_record if spent_record is not None else (inputs.e_record if inputs is not None else None)
+    frozen_inputs = spent_inputs if spent_record is not None else (inputs.e_inputs if inputs is not None else None)
     settings = (inputs.config.section("skills", skillsel.config_defaults()) if inputs is not None
                 else skillsel.settings_for(root))
     roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env,
@@ -1436,6 +1447,9 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
                else load_config(root).section("capabilities", capability_plan.DEFAULTS))
     capability_settings = capability_plan.check_settings(section)
+    selected = (original.selections(state_dir, basis, discovery.policy_digest(found_settings))
+                if basis is not None else [])
+    managed_task = basis is not None and original.managed(basis, selected)
     recorded_axes = packet.axes.get(request.stage) if packet is not None else None
     given = recorded_axes.to_json() if recorded_axes is not None else {}
     given.update({axis: value for axis, value in request.axes.items() if value is not None})
@@ -1468,11 +1482,13 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         if query_file is not None and task_needs(live_basis, stage=request.stage,
                 policy=discovery.policy_digest(current_found), needs_file=query_file) != list(query_needs):
             raise tasks.NeedsInvalid("stale", "the search needs file changed; prepare the operation again")
-        selections = [tasks.selection_for(state_dir, item, lease_id=live.id) for item in current_needs]
+        policy = discovery.policy_digest(current_found)
+        identity_needs = original.needs(live_basis, list(current_needs) + current_queries, policy)
+        selections = original.selections(state_dir, live_basis, policy)
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env), now=current,
                                 classes=capability_settings["classes"])
-        if frozen_record is not None:
-            parent, loaded = capability_plan.frozen_inputs(frozen_record, state_dir=state_dir)
+        if frozen_inputs is not None:
+            parent, loaded = frozen_inputs.parent, frozen_inputs.relays
             relays = [row for row, _text in loaded]
         else:
             parent = inventory.read_parent(request.parent_inventory, now=current) if request.parent_inventory else None
@@ -1491,11 +1507,20 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         paths = _e_reference_paths(skillpack.finalize(value)[1], design, root)
         access = (_e_reference_access(request, root=root, env=env, target=current_target, paths=paths)
                   if paths else None)
-        return {"operation": value.operation.to_json(), "task": digest(dataclasses.asdict(live_basis)),
-                "lease": {"digest": digest(live.to_json()), "expires_at": live.expires_at},
+        operation = value.operation.to_json()
+        lease = {"digest": digest(live.to_json()), "expires_at": live.expires_at}
+        if frozen_record is not None:
+            original_lease = frozen_record["facts"]["operation"]["lease"]
+            if live.id != original_lease[0]:
+                raise ValueError("the original lease id changed")
+            live_basis = dataclasses.replace(live_basis, lease=(live.id, original_lease[1]))
+            if spent_record is not None:
+                operation["lease"] = original_lease
+                lease = frozen_record["facts"]["lease"]
+        return {"operation": operation, "task": digest(dataclasses.asdict(live_basis)), "lease": lease,
                 "engine": request.engine, "stage": request.stage, "route": "native" if native else request.route,
                 "context": context,
-                "needs": list({item["id"]: item for item in (*current_needs, *current_queries)}.values()),
+                "needs": identity_needs,
                 "selections": selections, "payloads": sorted(bodies, key=digest),
                 "not_delivered": list(value.not_delivered),
                 "policy": digest({"skills": current_policy, "capabilities": load_config(root).section(
@@ -1528,7 +1553,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
             relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
-            frozen_record=frozen_record)
+            frozen=frozen_inputs)
         needed = bool(value.items or value.not_delivered or capabilities is not None
                       or request.skill_needs is not None or request.parent_inventory or request.relay_results
                       or query_needs is not None)
@@ -1542,14 +1567,15 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                 config = (inputs.config if inputs is not None else load_config(root)).section("rerank", RERANK_DEFAULTS)
             except (ImportError, AttributeError, ConfigError):
                 config = None
-        if expected is not True and not gateway.reachable(value.operation.kind, managed=needed,
-                discovery=bool(answerable), task_advice=task_advice, config=config, env=env, keychain=keychain):
+        active = gateway.reachable(value.operation.kind, managed=needed, discovery=bool(answerable),
+                                   task_advice=task_advice, config=config, env=env, keychain=keychain)
+        if expected is not True and not active and not managed_task:
             return None
         if expected is False:
             raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed",
                                        "current managed E inputs need a new preparation")
         target = target_check() if target_check is not None else target
-        profile = budget.qualify(target or {}, now=dt.datetime.now(dt.timezone.utc))
+        profile = budget.qualify(target or {}, now=dt.datetime.now(dt.timezone.utc)) if active else {}
         block, _bundle = skillpack.finalize(value)
         deferred = _e_deferred(value, design, state_dir=state_dir, root=root)
         paths = _e_reference_paths(_bundle, design, root)
@@ -1560,16 +1586,17 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                            for index, item in enumerate(value.items, 1))
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env),
                                 now=dt.datetime.now(dt.timezone.utc), classes=capability_settings["classes"])
-        parent = (capability_plan.frozen_inputs(frozen_record, state_dir=state_dir)[0] if frozen_record is not None
+        parent = (frozen_inputs.parent if frozen_inputs is not None
                   else inventory.read_parent(request.parent_inventory, now=dt.datetime.now(dt.timezone.utc))
                   if request.parent_inventory else None)
         optional_bytes = skill_growth + capability_plan.optional_render_bound(child, parent)
         measurement = budget.measure(profile, text, deferred=deferred,
                                      skill_bytes=len((block or "").encode("utf-8")) + skill_growth,
-                                     design_bytes=_e_design_bytes(design), optional_bytes=optional_bytes, read_paths=paths)
+                                     design_bytes=_e_design_bytes(design), optional_bytes=optional_bytes, read_paths=paths) \
+            if profile else preparation.identity_envelope(text)
         facts = capture(value)
         facts["profile"] = digest(profile)
-        expires = min(profile["expires_at"], facts["lease"]["expires_at"],
+        expires = min(*([profile["expires_at"]] if profile else []), facts["lease"]["expires_at"],
                       _iso(dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=300)),
                       *(([facts["inventory"]["parent"]["expires_at"]]
                          if frozen_record is None and facts["inventory"]["parent"] else [])),
@@ -1582,7 +1609,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                 raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed", "the preparation evidence "
                                            "expired; prepare again")
             current = capture(value)
-            current["profile"] = digest(budget.qualify(current["target"], now=dt.datetime.now(dt.timezone.utc)))
+            current["profile"] = digest(budget.qualify(current["target"], now=dt.datetime.now(dt.timezone.utc))
+                                        if profile else {})
             if digest(current) != original:
                 raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed", "the complete local E "
                                            "identity changed; prepare again")
@@ -1632,7 +1660,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                 holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
                 items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
                 relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
-                class_needs=class_needs, class_status=class_status, advise=advise, frozen_record=frozen_record)
+                class_needs=class_needs, class_status=class_status, advise=advise, frozen=frozen_inputs)
         except CapabilityRefused as exc:
             raise _pack_error(exc) from None
 
@@ -2159,6 +2187,14 @@ class _CorrectionRun(runs.Run):
         yield  # Lifecycle changes stay in memory between the two locked publications.
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class FrozenCheck:
+    skills: ERecord
+    record: ERecord
+    inputs: FrozenInputs
+    result: ERecord
+
+
 @dataclasses.dataclass
 class _CorrectionInputs:
     state: pathlib.Path
@@ -2182,6 +2218,7 @@ class _CorrectionInputs:
     e_source: dict | None = None
     e_frozen: str | None = None
     e_record: dict | None = None
+    e_inputs: FrozenInputs | None = None
 
     def notice(self, text: str) -> None:
         from oah.rerank import _print_notice
@@ -2378,20 +2415,24 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
 def _freeze_e(inputs, *, env):
     from oah.atomic import StateCorrupt
     from oah.discovery.store import StoreProblem
+    from oah.discovery.budget import BudgetRefused
+    from oah.capabilities import CapabilityRefused
 
     try:
         _freeze_e_checked(inputs, env=env)
     except EngineError:
         raise
-    except (StateCorrupt, StoreProblem, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
+    except (StateCorrupt, StoreProblem, BudgetRefused, CapabilityRefused, ValueError, KeyError, TypeError,
+            AttributeError, RecursionError) as exc:
         raise EngineError("OAH_FIX_STATE_CHANGED", "the earlier E preparation or its current selection cannot be "
                           f"verified ({type(exc).__name__}); its record is kept; prepare again") from None
 
 
 def _freeze_e_checked(inputs, *, env):
     from oah.atomic import read_json
-    from oah import discovery, skillpack
-    from oah.discovery import preparation, providers, store, tasks
+    from oah import discovery
+    from oah.discovery import original, preparation, providers
+    from oah.capabilities import plan as capability_plan
 
     holder = inputs.holder()
 
@@ -2401,67 +2442,39 @@ def _freeze_e_checked(inputs, *, env):
         basis = task_basis(holder, judged, inputs.packet, root=pathlib.Path(holder.worktree))
         settings = inputs.config.section("skills", skillsel.config_defaults())
         policy = discovery.policy_digest(providers.settings_of(settings))
-        selected = any(row.get("packet_digest") == basis.source_digest
-                       and row.get("intent_digest") == basis.intent["digest"]
-                       and row.get("policy_digest") == policy
-                       and row.get("lease") == {"id": holder.id, "generation": holder.generation}
-                       and row.get("review_ids") for ref in tasks._index(inputs.state).values()
-                       if (row := store.get_record(inputs.state, tasks.SELECTIONS, ref)) is not None)
-        coverage = skillpack._accepted_coverage(judged)[0]
-        return selected or coverage is not None and any(
-            need["resolution"] == "skill" and "correction" in need["dispatch_stages"]
-            for stage in coverage["stages"] for need in stage["needs"])
+        return original.managed(basis, original.selections(inputs.state, basis, policy))
 
-    folder = runs.task_directory(inputs.state, holder.task)
-    candidates = sorted(folder.iterdir(), reverse=True) if folder.is_dir() else []
-    if len(candidates) > 1024:
-        raise EngineError("OAH_SKILL_NOT_DELIVERABLE(changed)", "too many preparation references to resolve; "
-                          "prepare the task selection again")
-    for path in candidates:
-        record_path = path / "skills.json"
-        if record_path.is_file() and record_path.stat().st_size > 2097152:
-            raise EngineError("OAH_SKILL_NOT_DELIVERABLE(changed)", "the preparation reference exceeds its bounded "
-                              "record size; prepare the task selection again")
-        saved = read_json(path / "skills.json", None) if path.is_dir() else None
-        if saved is not None and not isinstance(saved, dict):
-            raise ValueError("the earlier skills record is not a JSON object")
-        raw = saved.get("prepared_e") if saved is not None else None
-        if raw is None:
-            if (saved or {}).get("bundle"):
-                raise ValueError("the earlier selected run has no complete preparation")
-            result = read_json(path / "result.json", {}) if path.is_dir() else {}
-            if isinstance(result, dict) and result.get("stage") == "initial" and needs_frozen():
-                raise ValueError("the earlier managed run has no complete frozen record")
-            continue
-        if not isinstance(raw, dict):
-            raise ValueError("the earlier preparation is not a JSON object")
-        if "facts" not in raw:
-            if not (saved or {}).get("bundle") and (path / "correction.json").is_file():
-                preparation.check_projection(raw)
-                continue
-            raise ValueError("the earlier preparation has no verified identity")
-        record = preparation.parse(raw)
-        facts, refs = record["facts"], record["references"]
-        if not (saved or {}).get("bundle") and not any(facts["selections"]) \
-                and not refs["parent_inventory"] and not refs["relay_results"]:
-            continue
-        result = read_json(path / "result.json", {})
-        if not isinstance(result, dict):
-            raise ValueError("the earlier result is not a JSON object")
-        if result.get("status") not in ("running", "finished", "failed"):
-            raise ValueError("the earlier managed run no longer records a spent result")
-        source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
-                          stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
-                          model=facts["target"]["model"], launch_effort=facts["target"]["effort"],
-                          cli_version=facts["target"]["cli_version"], warnings=(), e_digest=record["digest"])
-        _check_e(source, holder, env=env, before_spend=False, correction=True)
-        inputs.e_needs = json.loads(json.dumps(refs["needs"]))
-        inputs.e_source = json.loads(json.dumps(refs))
-        inputs.e_frozen = preparation.correction_identity(record)
-        inputs.e_record = json.loads(json.dumps(record))
+    pointer = original.resolve(inputs.state, holder.task)
+    if pointer is None:
+        if needs_frozen():
+            raise ValueError("current managed content requires the original complete frozen run record")
         return
-    if needs_frozen():
-        raise ValueError("current managed content requires the original complete frozen run record")
+    path = runs.task_directory(inputs.state, holder.task) / pointer["run_id"]
+    record_path = path / "skills.json"
+    if record_path.is_file() and record_path.stat().st_size > 2097152:
+        raise ValueError("the original preparation exceeds its bounded record size")
+    saved = read_json(record_path, None)
+    if not isinstance(saved, dict):
+        raise ValueError("the original skills record is missing or not a JSON object")
+    record = preparation.parse(saved.get("prepared_e"))
+    if record["digest"] != pointer["digest"]:
+        raise ValueError("the original complete preparation differs from its task pointer")
+    facts, refs = record["facts"], record["references"]
+    result = read_json(path / "result.json", {})
+    if not isinstance(result, dict) or result.get("status") not in ("running", "finished", "failed"):
+        raise ValueError("the original managed run no longer records a spent result")
+    frozen_inputs = capability_plan.frozen_inputs(record, state_dir=inputs.state)
+    source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
+                      stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
+                      model=facts["target"]["model"], launch_effort=facts["target"]["effort"],
+                      cli_version=facts["target"]["cli_version"], warnings=(), e_digest=record["digest"])
+    _check_e(source, holder, env=env, before_spend=False, correction=True,
+             frozen=FrozenCheck(saved, record, frozen_inputs, result))
+    inputs.e_needs = refs["needs"]
+    inputs.e_source = refs
+    inputs.e_frozen = preparation.correction_identity(record)
+    inputs.e_record = record
+    inputs.e_inputs = frozen_inputs
 
 
 def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
@@ -2929,9 +2942,9 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                              design=design, skill_pack=skill_pack)
     run.write_prompt(plan.prompt)
     if plan.skills_record is not None:
-        from oah.atomic import write_json_atomic
+        from oah.discovery import original
 
-        write_json_atomic(run.file_path("skills.json"), plan.skills_record)
+        original.publish(run, plan.skills_record, stage=request.stage)
     if skill_pack is not None and skill_pack.capabilities is not None:
         from oah.atomic import write_json_atomic
 
@@ -3107,7 +3120,7 @@ def _native_target(engine: str, tier: str, settings: Settings, *, root: pathlib.
 
 
 def _native_identities(request: CallRequest, basis: _NativeBasis, bundle: Mapping | None, target: Mapping,
-                       prepared_e=None) -> dict:
+                       prepared_e=None, *, lease_generation: int | None = None) -> dict:
     """The task, design, target and budget identities an offer is made under and a settlement re-resolves."""
     from oah import skillpack
     from oah.launchers import native
@@ -3123,7 +3136,8 @@ def _native_identities(request: CallRequest, basis: _NativeBasis, bundle: Mappin
             "intent": {"id": intent.id, "revision": intent.revision, "digest": intent.digest},
             "scope_digest": native.digest(list(basis.scope)), "dispatch_stage": request.stage,
             "kind": basis.scored.axes.kind, "risk": basis.scored.axes.risk,
-            "lease": {"id": holder.id, "generation": holder.generation}}
+            "lease": {"id": holder.id, "generation": holder.generation if lease_generation is None
+                       else lease_generation}}
     design = None
     record = getattr(basis.task_design, "task", None)
     if record is not None:
@@ -3265,7 +3279,9 @@ def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.P
                 skills_record["prepared_e"] = e_record
             if skill_pack is not None and skill_pack.discovery:
                 skills_record["task_discovery"] = list(skill_pack.discovery)
-            write_json_atomic(run.file_path("skills.json"), skills_record)
+            from oah.discovery import original
+
+            original.publish(run, skills_record, stage=request.stage)
             if skill_pack is not None and skill_pack.capabilities is not None:
                 write_json_atomic(run.file_path("capabilities.json"), skill_pack.capabilities)
             if basis.design is not None:
@@ -3377,7 +3393,8 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
                             cli_version=None, warnings=(), e_digest=e_record["digest"] if e_record else None)
         _check_e(prepared, basis.holder, native_record=offer, env=env, before_spend=False)
         target = _native_target(request.engine, request.tier, settings, root=root, env=env)
-        current = _native_identities(request, basis, bundle, target, e_record)
+        current = _native_identities(request, basis, bundle, target, e_record,
+                                     lease_generation=offer["task"]["lease"]["generation"])
         problems.extend(f"the {label} changed" for label in _native_differences(offer, current))
     except skillpack.PackRefused as exc:
         problems.append(str(_pack_error(exc)))

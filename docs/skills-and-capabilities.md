@@ -131,6 +131,28 @@ step for a correction. The trade-off is that a correction sees tool results as o
 their relay time. Missing, changed or incomplete frozen records refuse before a child starts; after deleting run
 records, start a new run. A direct API call cannot skip admission.
 
+Each managed task keeps one original pointer outside its run folders, in the discovery store's
+`skills/originals` records and atomic `tasks/<task-hash>.json` index. Original preparation writes the complete
+`PreparedE` record and then publishes its run id and content digest in that same publication step. A later
+original replaces the pointer; correction and review never replace it. Correction reads only the named run.
+Missing or incomplete records, a different digest, or a result without a running, finished or failed status
+refuse with `OAH_FIX_STATE_CHANGED`. There is no fallback to an earlier run. A task with a skill only in a later
+dispatch stage still records its complete task identity during its empty original stage, without requiring an
+extra skill, relay or E capacity qualification. Ordinary tasks without managed content keep their existing flow.
+What it costs you: intact records need no extra step; damaged original records require a new initial run.
+
+At correction freeze, oah reads the pointed preparation once, takes the parent inventory embedded in it and
+verifies each authorized relay blob once. Admission, rendering and launch checks use those values in memory.
+Refreshing or deleting the lead's inventory file does not block a correction, and removing a relay blob after
+freeze does not change the bytes delivered. A missing or changed blob at freeze refuses before a child starts.
+What it costs you: no inventory refresh is needed; correction uses the original recorded tool results.
+
+Relay ingestion validates every stored time as ISO-8601 with a time zone before storing anything. A malformed
+time in an existing relay also gives `OAH_CAPABILITY_RELAY_REQUIRED(invalid)` before an ordinary child or native
+offer. After spend, settlement and correction bind the lease id; renewing that same lease does not invalidate
+the original. Pre-spend checks still compare the full lease identity. What it costs you: no new step for valid
+times or lease renewal; an invalid relay time is refused where it is recorded.
+
 **One request boundary.** `skills find --task` checks the same existing required capabilities, target capacity
 and access as a dispatch. Managed skill ordering also rechecks that admission immediately before its request.
 Taskless exploration and design inspection keep their own bounded lead admission. Every managed search,
@@ -436,8 +458,8 @@ should compare; one missing link keeps the first entry for that class.
   after that. It runs only where oah itself turned on stream-json for skill references. Runs with a design
   transport, Codex runs, native subagents and `oah fix` corrections are not read live.
 - `oah fix` correction runs carry verified skill texts in memory and save a closed E projection in `skills.json`.
-  Launch rechecks the current copies and frozen authorized relays. The command accepts no new relay inputs; a
-  required relay must already belong to the verified ordinary preparation and still be current.
+  Launch rechecks the current skill copies and uses authorized relay bytes already verified at freeze. The command
+  accepts no new relay inputs; a required relay must belong to the pointed original preparation.
 - Routes are planned before the run starts. The init event names tools only, so no tool use is checked against a
   schema (`schema_digest` stays null), and oah never reports the `direct` route, which would need a host that
   waits before any work until oah approves.

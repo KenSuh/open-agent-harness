@@ -91,15 +91,22 @@ class FrozenCorrectionTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(set(refs), {relayed[0]["id"]})
         self.assertEqual(ordinary.run.file_path("skills.json").read_bytes(), earlier)
 
-    def test_changed_relay_permission_basis_refuses_before_child_and_preserves_original(self):
+    def test_changed_recorded_relay_permission_basis_refuses_before_child_and_preserves_original(self):
         from oah.capabilities import inventory
+        from oah.discovery.store import digest
 
-        project, ordinary, now, parent, _relayed = self.selected_parent(relay=True)
-        changed = json.loads(parent.read_text(encoding="utf-8"))
+        project, ordinary, now, _parent, _relayed = self.selected_parent(relay=True)
+        path = ordinary.run.file_path("skills.json")
+        saved = json.loads(path.read_bytes())
+        changed = saved["prepared_e"]["facts"]["inventory"]["parent"]
         changed["entries"][0]["permission"]["effects"] = ["read-local"]
         changed["entries"][0]["entry_digest"] = inventory.entry_digest(changed["entries"][0])
         changed["digest"] = inventory.inventory_digest(changed)
-        capabilities.write(parent, changed)
+        record = saved["prepared_e"]
+        record["prep_id"] = digest({key: value for key, value in record["facts"].items()
+                                   if key not in ("relay_results", "capability_plan")})
+        record["digest"] = digest({key: value for key, value in record.items() if key != "digest"})
+        capabilities.write(path, saved)
         before, calls = ordinary.run.file_path("skills.json").read_bytes(), project.fix_calls()
         code, result, err = self.correct(project, now + dt.timedelta(minutes=7))
         self.assertEqual(code, 1, str(result) + err)

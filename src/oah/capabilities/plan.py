@@ -21,6 +21,7 @@ two or more qualified entries that all have linked public documentation (`select
 from __future__ import annotations
 
 import datetime as dt
+import dataclasses
 import hashlib
 import os
 from typing import Mapping, Sequence
@@ -30,6 +31,7 @@ from oah.capabilities import (BEGIN, DEPENDENCY_CODE, END, MAX_ROUNDS, RELAY_EFF
                               digest, server_of, tool_id)
 from oah.capabilities import inventory as inventories
 from oah.capabilities import select as selection
+from oah.discovery.preparation import Json, Record
 
 POLICY = "oah-capability-plan/v1"
 POLICY_DIGEST = digest({"policy": POLICY, "relay_effects": list(RELAY_EFFECTS), "max_bytes": RELAY_MAX_BYTES})
@@ -40,6 +42,15 @@ REQUEST_KEYS = {"version", "id", "prep_id", "run", "task", "design", "target", "
                 "parent_inventory_digest", "entry_digest", "schema_digest", "permission_digest", "result_kind",
                 "max_bytes", "policy_digest", "created_at", "expires_at"}
 INVOCATION_KEYS = {"outcome", "at", "arguments_digest"}
+RESULT_KEYS = {"version", "id", "request_id", "prep_id", "need_id", "capability_id", "entry_digest", "schema_digest",
+               "task_fingerprint", "permission_digest", "invocation", "payload", "expires_at", "attestation"}
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class FrozenInputs:
+    parent: Record | None
+    relays: tuple[tuple[Record, str], ...]
+    at: dt.datetime
 
 
 def _iso(moment: dt.datetime) -> str:
@@ -301,7 +312,7 @@ def settings_for(root) -> dict:
 def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: Sequence[Mapping], root, env,
              state_dir: os.PathLike, parent_path: str | None, relay_refs: Sequence[str], now: dt.datetime,
              settings: Mapping, class_needs: Sequence[Mapping] = (), class_status: str | None = None,
-             advise=None, frozen_record: Mapping | None = None) -> tuple[dict | None, str | None]:
+             advise=None, frozen: FrozenInputs | None = None) -> tuple[dict | None, str | None]:
     """(CapabilityPlanV1, `## Capabilities` block) for one dispatch, or (None, None) when it has no capability needs
     and no relay inputs (the brief then stays byte-identical). CapabilityRefused before anything is spent."""
     from oah import skillpack, skillsel
@@ -311,36 +322,63 @@ def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: 
         return None, None
     child = inventories.child(engine, root=root, env=env, home=skillsel.home_of(env), now=now,
                               classes=settings["classes"])
-    if frozen_record is None:
+    if frozen is None:
         parent = inventories.read_parent(parent_path, now=now) if parent_path else None
         loaded = [load(state_dir, ref, now=now) for ref in sorted(set(relay_refs))]
     else:
-        parent, loaded = frozen_inputs(frozen_record, state_dir=state_dir)
-        now = dt.datetime.fromisoformat(frozen_record["expires_at"]) - dt.timedelta(microseconds=1)
+        parent, loaded, now = frozen.parent, frozen.relays, frozen.at
     design = skillpack._accepted_coverage(task_design)[2]
     found = assess(task=task_identity(holder, task), design=design, engine=engine, stage=stage, needs=needs,
                    child=child, parent=parent, results=[record for record, _text in loaded],
                    requires=settings["requires"], now=now, state_dir=state_dir, class_needs=class_needs,
                    class_status=class_status, advise=advise,
                    evidence=selection.linked_evidence(settings.get("docs") or {}, root) if class_needs else None,
-                   frozen_prep=loaded[0][0]["prep_id"] if frozen_record is not None and loaded else None)
+                   frozen_prep=loaded[0][0]["prep_id"] if frozen is not None and loaded else None)
     if not found["selected"]:
         return None, None
     return found, block(found, {record["id"]: text for record, text in loaded},
                         times={record["id"]: record["invocation"]["at"] for record, _text in loaded})
 
 
-def frozen_inputs(record: Mapping, *, state_dir: os.PathLike) -> tuple[dict | None, list[tuple[dict, str]]]:
-    from oah.discovery import preparation
-
-    record = preparation.parse(record)
+def frozen_inputs(record: Mapping, *, state_dir: os.PathLike) -> FrozenInputs:
     at = dt.datetime.fromisoformat(record["expires_at"]) - dt.timedelta(microseconds=1)
     refs, facts = record["references"], record["facts"]
-    parent = inventories.read_parent(refs["parent_inventory"], now=at) if refs["parent_inventory"] else None
+    parent = facts["inventory"]["parent"]
     loaded = [load(state_dir, ref, now=at) for ref in sorted(set(refs["relay_results"]))]
-    if parent != facts["inventory"]["parent"] or [row for row, _text in loaded] != facts["relay_results"]:
+    if [row for row, _text in loaded] != facts["relay_results"]:
         raise ValueError("the frozen parent inventory or authorized relay result changed")
-    return parent, loaded
+    return FrozenInputs(parent, tuple(loaded), at)
+
+
+def _relay_time(value: Json, field: str) -> dt.datetime:
+    try:
+        if not isinstance(value, str):
+            raise ValueError("is not an ISO time")
+        return inventories._time(value, field)
+    except ValueError as exc:
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", f"{field}: {exc}; use an ISO time with a time zone") from None
+
+
+def check_result(record: Record) -> None:
+    from oah.discovery.preparation import _hash, _nonnegative
+
+    if set(record) != RESULT_KEYS or type(record["version"]) is not int or record["version"] != 1 \
+            or any(not _hash(record[key]) for key in ("id", "request_id", "prep_id", "need_id", "entry_digest",
+                "schema_digest", "task_fingerprint", "permission_digest")) \
+            or not isinstance(record["capability_id"], str) \
+            or record["attestation"] not in ("cooperative", "host-observed"):
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay result has incomplete fields")
+    invocation, payload = record["invocation"], record["payload"]
+    if not isinstance(invocation, dict) or set(invocation) != {"evidence_ref", "source", "at", "outcome",
+            "arguments_digest", "result_digest"} \
+            or any(not _hash(invocation[key]) for key in ("evidence_ref", "arguments_digest", "result_digest")) \
+            or invocation["source"] not in ("parent-attested", "host-observed") \
+            or invocation["outcome"] not in ("ok", "error", "denied") \
+            or not isinstance(payload, dict) or set(payload) != {"bytes", "sha256", "blob_ref"} \
+            or not _nonnegative(payload["bytes"]) or not _hash(payload["sha256"]) or not _hash(payload["blob_ref"]):
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay invocation or payload is incomplete")
+    _relay_time(invocation["at"], "invocation.at")
+    _relay_time(record["expires_at"], "expires_at")
 
 
 def relay_request(*, prep: str, task: Mapping, design: Mapping | None, target: Mapping, need: Mapping,
@@ -364,7 +402,8 @@ def check_request(request: object, *, now: dt.datetime) -> dict:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "tampered", "the request does not match its own id")
     if request["policy_digest"] != POLICY_DIGEST:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "stale", "the request was made under another relay policy")
-    if dt.datetime.fromisoformat(request["expires_at"]) <= now:
+    _relay_time(request["created_at"], "created_at")
+    if _relay_time(request["expires_at"], "expires_at") <= now:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "expired", "the request has expired; plan again")
     return dict(request)
 
@@ -384,6 +423,7 @@ def ingest(state_dir: os.PathLike, request: Mapping, *, capability: str, payload
             or not str(invocation["arguments_digest"]).startswith("sha256:"):
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the invocation file is {outcome: ok|error|denied, "
                                 "at: ISO time, arguments_digest: sha256:...}")
+    _relay_time(invocation["at"], "invocation.at")
     if len(payload) > request["max_bytes"]:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "too-large", f"the result is {len(payload)} bytes, over "
                                 f"{request['max_bytes']}")
@@ -418,19 +458,25 @@ def load(state_dir: os.PathLike, ref: str, *, now: dt.datetime) -> tuple[dict, s
 
     try:
         record = store.get_record(state_dir, RELAYS, ref)
+        if record is not None:
+            check_result(record)
         blob = store.get_record(state_dir, PAYLOADS, record["payload"]["blob_ref"]) if record else None
     except store.StoreProblem as exc:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "tampered", f"relay result {ref}: {exc}") from None
     if record is None or blob is None:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "missing", f"no stored relay result {ref}; store it with oah "
                                 "capabilities relay")
+    expires = _relay_time(record["expires_at"], "expires_at")
+    if set(blob) != {"id", "version", "text"} or blob["version"] != 1 or not isinstance(blob["text"], str):
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay payload is not text")
     text = blob["text"]
-    if "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest() != record["payload"]["sha256"]:
+    if "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest() != record["payload"]["sha256"] \
+            or len(text.encode("utf-8")) != record["payload"]["bytes"]:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "tampered", f"relay result {ref}: its payload changed")
     if record["invocation"]["outcome"] != "ok":
         raise CapabilityRefused(RELAY_REQUIRED_CODE, record["invocation"]["outcome"], f"relay result {ref} records "
                                 "a tool call that did not succeed; it is kept as evidence but meets no need")
-    if dt.datetime.fromisoformat(record["expires_at"]) <= now:
+    if expires <= now:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "expired", f"relay result {ref} has expired; plan and relay "
                                 "again")
     return record, text
@@ -459,9 +505,7 @@ def block(plan: Mapping, texts: Mapping[str, str], *, times: Mapping[str, str] |
         fence = "`" * max(4, longest + 1)
         lines += ["", f"### Relay result for {row['id']} ({relay})"]
         if times is not None:
-            at = dt.datetime.fromisoformat(times[relay])
-            if at.tzinfo is None:
-                raise ValueError("a relay invocation time needs its original time zone")
+            at = _relay_time(times[relay], "invocation.at")
             lines.append(f"Relayed at: {at.isoformat()} (evidence from the original run).")
         lines += [fence + "text", text.rstrip("\n"), fence]
     lines.append(END)

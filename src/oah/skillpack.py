@@ -307,15 +307,16 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
 
 def finish(admitted: Admitted, text: str, *, deferred: Sequence[bytes], design_bytes: int,
            capabilities: Mapping | None, read_paths: Sequence[str] = ()) -> PreparedE:
-    from oah.discovery import budget
+    from oah.discovery import budget, preparation
     from oah.discovery.store import digest
 
     require(admitted)
     assert admitted.prepared is not None
     block, bundle = finalize(admitted)
-    measurement = budget.measure(json.loads(admitted.prepared.profile), text, deferred=deferred,
+    profile = json.loads(admitted.prepared.profile)
+    measurement = budget.measure(profile, text, deferred=deferred,
                                   skill_bytes=len((block or "").encode("utf-8")), design_bytes=design_bytes,
-                                  read_paths=read_paths)
+                                  read_paths=read_paths) if profile else preparation.identity_envelope(text)
     return admitted.prepared.finish({"bundle_digest": bundle["digest"] if bundle else None,
                                      "capability_plan_digest": digest(capabilities) if capabilities is not None else None,
                                      "render_digest": _sha(text.encode("utf-8"))}, measurement)

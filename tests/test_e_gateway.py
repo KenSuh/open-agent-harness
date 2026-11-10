@@ -11,7 +11,7 @@ from unittest import mock
 
 from tests.helpers import git_commit
 from tests.test_capabilities import DOCS
-from tests.test_skill_delivery import DeliveryTask, FAKES, PLAIN, link_op, skill_md
+from tests.test_skill_delivery import DeliveryTask, FAKES, PLAIN, build_reference_guide, link_op, skill_md
 
 
 class TaskAdmissionTest(DeliveryTask, unittest.TestCase):
@@ -165,7 +165,10 @@ class ReceivingFailureTest(DeliveryTask, unittest.TestCase):
         from oah import call
         from oah.engines import claude
 
-        self.build_skills(PLAIN)
+        if os.name == "nt":
+            self.build_skills(PLAIN)
+        else:
+            build_reference_guide(self)
         script = ("import json,os,sys,time\n"
             f"sys.path.insert(0,{str(FAKES)!r})\n"
             "sys.dont_write_bytecode=True\nimport fake_claude,fakelib\n"
@@ -187,11 +190,14 @@ class ReceivingFailureTest(DeliveryTask, unittest.TestCase):
             argv.insert(at + 2, "--verbose")
             return argv
 
-        with mock.patch.object(claude, "build_command", stream_command):
+        with mock.patch.object(claude, "build_command", stream_command) if os.name == "nt" else contextlib.nullcontext():
             prepared = self.prepare()
         bundle = self.bundle(prepared.run.path)
         assert bundle is not None
-        self.assertEqual(bundle["budget"]["reference_bytes"], 0)
+        if os.name == "nt":
+            self.assertEqual(bundle["budget"]["reference_bytes"], 0)
+        else:
+            self.assertGreater(bundle["budget"]["reference_bytes"], 0)
         earlier = prepared.run.file_path("skills.json").read_bytes()
         real = call._conclude_observation
 
@@ -199,8 +205,9 @@ class ReceivingFailureTest(DeliveryTask, unittest.TestCase):
             prepared.run.file_path("capabilities-receiving.json").mkdir()
             return real(prepared, sink)
 
-        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
-                mock.patch.object(call, "_streamed_skill_bundle", return_value=bundle), \
+        inline = (mock.patch.object(call, "_streamed_skill_bundle", return_value=bundle)
+                  if os.name == "nt" else contextlib.nullcontext())
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), inline, \
                 mock.patch.object(call, "_conclude_observation", block_sidecar):
             result = call.execute(prepared, base_env=self.env)
 
