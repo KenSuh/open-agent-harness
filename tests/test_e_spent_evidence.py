@@ -111,10 +111,9 @@ class SpentEvidenceTest(DeliveryTask, unittest.TestCase):
         self.assertIn("Prepare the selected ledger rows.", project.fix_calls()[-1]["prompt"])
         self.assertEqual(ordinary.run.file_path("skills.json").read_bytes(), before)
 
-    def test_correction_with_changed_parent_record_refuses_and_keeps_the_frozen_selection(self):
+    def test_correction_with_refreshed_parent_file_uses_the_frozen_selection(self):
         from oah import call
         from oah.capabilities import inventory
-        from tests.test_fix import ReviewError
 
         project, ordinary, now, parent = self.selected_parent()
         before = ordinary.run.file_path("skills.json").read_bytes()
@@ -122,8 +121,9 @@ class SpentEvidenceTest(DeliveryTask, unittest.TestCase):
         capability_fixture.write(parent, inventory.parent_inventory([], observed=later))
         calls = project.fix_calls()
         with mock.patch.dict(os.environ, project.env, clear=True), contextlib.chdir(project.repo), \
-                mock.patch.object(call.dt, "datetime", clock(later)), self.assertRaises(ReviewError) as caught:
-            project.fix()
-        self.assertEqual(caught.exception.code, "OAH_FIX_STATE_CHANGED")
-        self.assertEqual(project.fix_calls(), calls)
+                mock.patch.object(call.dt, "datetime", clock(later)):
+            result = project.fix()
+        self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+        self.assertEqual(len(project.fix_calls()), len(calls) + 1)
+        self.assertIn("Prepare the selected ledger rows.", project.fix_calls()[-1]["prompt"])
         self.assertEqual(ordinary.run.file_path("skills.json").read_bytes(), before)
