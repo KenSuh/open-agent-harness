@@ -11,7 +11,7 @@ from unittest import mock
 
 from tests.helpers import git_commit
 from tests.test_capabilities import DOCS
-from tests.test_skill_delivery import DeliveryTask, FAKES, PLAIN, build_reference_guide, link_op, skill_md
+from tests.test_skill_delivery import DeliveryTask, FAKES, PLAIN, link_op, skill_md
 
 
 class TaskAdmissionTest(DeliveryTask, unittest.TestCase):
@@ -163,8 +163,9 @@ class SkillOrderTest(DeliveryTask, unittest.TestCase):
 class ReceivingFailureTest(DeliveryTask, unittest.TestCase):
     def test_first_receiving_write_failure_keeps_known_usage_before_normalization(self):
         from oah import call
+        from oah.engines import claude
 
-        build_reference_guide(self)
+        self.build_skills(PLAIN)
         script = ("import json,os,sys,time\n"
             f"sys.path.insert(0,{str(FAKES)!r})\n"
             "sys.dont_write_bytecode=True\nimport fake_claude,fakelib\n"
@@ -177,7 +178,20 @@ class ReceivingFailureTest(DeliveryTask, unittest.TestCase):
             "for event in events: print(json.dumps(event),flush=True)\n"
             "print('{broken',flush=True)\ntime.sleep(10)\n")
         (self.work / "fake_stream_claude.py").write_text(script, encoding="utf-8")
-        prepared = self.prepare()
+        command = claude.build_command
+
+        def stream_command(*args, **options):
+            argv = command(*args, **options)
+            at = argv.index("--output-format")
+            argv[at + 1] = "stream-json"
+            argv.insert(at + 2, "--verbose")
+            return argv
+
+        with mock.patch.object(claude, "build_command", stream_command):
+            prepared = self.prepare()
+        bundle = self.bundle(prepared.run.path)
+        assert bundle is not None
+        self.assertEqual(bundle["budget"]["reference_bytes"], 0)
         earlier = prepared.run.file_path("skills.json").read_bytes()
         real = call._conclude_observation
 
@@ -186,6 +200,7 @@ class ReceivingFailureTest(DeliveryTask, unittest.TestCase):
             return real(prepared, sink)
 
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
+                mock.patch.object(call, "_streamed_skill_bundle", return_value=bundle), \
                 mock.patch.object(call, "_conclude_observation", block_sidecar):
             result = call.execute(prepared, base_env=self.env)
 

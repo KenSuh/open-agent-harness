@@ -337,7 +337,14 @@ def _offer(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, ax
         print("Start a native subagent in Codex with a registered role, and give it exactly this message:")
     print(f"  {'prompt' if args.engine == 'claude' else 'message'}: the text between the markers, byte for byte "
           f"({offered.offer['message']['bytes']} bytes, {digest})")
-    sys.stdout.write(MESSAGE_BEGIN + offered.message + MESSAGE_END)
+    message = MESSAGE_BEGIN + offered.message + MESSAGE_END
+    sys.stdout.flush()
+    stream = getattr(sys.stdout, "buffer", None)
+    if stream is None:
+        sys.stdout.write(message)
+    else:
+        stream.write(message.encode("utf-8"))
+        stream.flush()
     print("When the subagent returns, save its reply to a file and settle the offer:")
     print(f"  {settle}")
     return EXIT_OK

@@ -41,6 +41,14 @@ class RequiredReadSlicesTest(DeliveryTask, unittest.TestCase):
         self.build_skills(("acme/slices", "skills/slices", files, {"aux": tuple(auxiliaries)}))
         git_commit(self.repo, {".claude/" + name: text for name, text in files.items() if name.startswith("skills/")},
                    "install required slice fixture")
+        if os.name == "nt":
+            with self.assertRaisesRegex(call.EngineError,
+                                        r"OAH_SKILL_REFERENCE_UNAVAILABLE\(unsupported-engine\)") as caught:
+                self.prepare()
+            self.assertIn("windows-process-profile-pending", str(caught.exception))
+            self.assertEqual(self.runs(), [])
+            self.assertFalse(self.record.exists())
+            return
         control = self.prepare()
         record = json.loads(control.run.file_path("skills.json").read_text(encoding="utf-8"))
         envelope = record["prepared_e"]["envelope"]

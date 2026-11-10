@@ -51,10 +51,10 @@ class NativeTask(DeliveryTask):
         (folder / f"oah-{tier}.md").write_bytes(init.agent_text(tier, "haiku", tier))
 
     def offer(self, engine: str = "claude", stage: str = "initial", tier: str = "low", *extra: str,
-              env: dict | None = None):
+              env: dict | None = None, raw_output: bool = False):
         self.record.unlink(missing_ok=True)
         return self.oah("call", engine, "--stage", stage, "--task", "t1", "--tier", tier, "--launcher", "native",
-                        *extra, env=env)
+                        *extra, env=env, raw_output=raw_output)
 
     def offered(self, engine: str = "claude", stage: str = "initial", tier: str = "low", **options):
         result = self.offer(engine, stage, tier, "--json", **options)
@@ -79,6 +79,28 @@ class NativeTask(DeliveryTask):
 
 
 class NativeOfferTest(NativeTask, unittest.TestCase):
+    def test_crlf_offer_through_a_windows_text_stream_keeps_the_exact_message_bytes(self):
+        from oah import cli
+
+        packet = self.repo / ".oah/tasks/t1/PACKET.md"
+        packet.write_bytes(packet.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        raw = io.BytesIO()
+        with io.TextIOWrapper(raw, encoding="utf-8", newline="\r\n") as output:
+            with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(["call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low",
+                                 "--launcher", "native"])
+            output.flush()
+            printed = raw.getvalue()
+        self.assertEqual(code, 0, printed.decode("utf-8"))
+        run_id, = re.findall(rb"OAH_NATIVE_OFFERED run=(\S+) ", printed)
+        run = self.state_dir / "runs/t1" / run_id.decode("ascii")
+        message = printed.split(BEGIN_MESSAGE.rstrip("\n").encode("ascii"), 1)[1]
+        message = message[2:] if message.startswith(b"\r\n") else message[1:]
+        message = message.split(END_MESSAGE.rstrip("\n").encode("ascii"), 1)[0]
+        self.assertEqual(message, (run / "prompt.md").read_bytes())
+        self.assertFalse(self.record.exists())
+
     def test_the_offer_message_is_the_native_prompt_and_only_documented_host_keys_are_printed(self):
         data, run = self.offered()
         prompt = (run / "prompt.md").read_bytes()
@@ -122,16 +144,17 @@ class NativeOfferTest(NativeTask, unittest.TestCase):
             self.assertNotIn(run.name, log.read_text(encoding="utf-8"))
 
         # The text form prints the same bytes between the markers, the host parameters and the settle command.
-        printed = self.offer()
+        printed = self.offer(raw_output=True)
         self.assertEqual(printed.returncode, 0, printed.stdout + printed.stderr)
-        (second_id,) = re.findall(r"^OAH_NATIVE_OFFERED run=(\S+) ", printed.stdout, re.MULTILINE)
+        output = printed.stdout.decode("utf-8")
+        (second_id,) = re.findall(r"^OAH_NATIVE_OFFERED run=(\S+) ", output, re.MULTILINE)
         second = self.state_dir / "runs" / "t1" / second_id
-        message = printed.stdout.split(BEGIN_MESSAGE, 1)[1].split(END_MESSAGE, 1)[0]
+        message = output.split(BEGIN_MESSAGE, 1)[1].split(END_MESSAGE, 1)[0]
         self.assertEqual(message.encode("utf-8"), (second / "prompt.md").read_bytes())
-        head = printed.stdout.split(BEGIN_MESSAGE, 1)[0]
+        head = output.split(BEGIN_MESSAGE, 1)[0]
         self.assertIn("offered, not delivered", head)
         self.assertIn("subagent_type: oah-low", head)
-        self.assertIn(f"oah call settle --run {second.name} --offer-digest ", printed.stdout)
+        self.assertIn(f"oah call settle --run {second.name} --offer-digest ", output)
         self.assertFalse(self.record.exists())
 
     def test_codex_gets_the_message_only(self):

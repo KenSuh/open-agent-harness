@@ -389,7 +389,7 @@ def _stage_advisor(store, view, snapshot):
 
     from oah import skillpack
 
-    admitted = skillpack.inspect((snapshot.project, snapshot.design, snapshot.revision, snapshot.digest),
+    admitted = skillpack.inspect((view.project, view.design, snapshot.revision, snapshot.digest),
                                  max_queries=1, root=store.root)
 
     def advise(options: dict) -> dict:

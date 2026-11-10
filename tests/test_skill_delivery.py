@@ -20,7 +20,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.helpers import git_commit, make_tmp_dir
+from tests.helpers import git_blob, git_commit, make_tmp_dir
 from tests.test_design_context import FAKES, DesignTask
 from tests.test_design_sources import LICENSE as MIT_LICENSE
 from tests.test_design_store import TODAY
@@ -113,7 +113,7 @@ class DeliveryTask(DesignTask):
         for patch in patches():
             self.enterContext(patch)
 
-    def oah(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    def oah(self, *args: str, env: dict | None = None, raw_output: bool = False) -> subprocess.CompletedProcess:
         root = pathlib.Path(__file__).resolve().parents[1]
         bootstrap = ("import runpy,sys; sys.dont_write_bytecode=True; "
                      f"runpy.run_path({str(root / 'tests' / 'e_qualification.py')!r})['install'](); "
@@ -122,7 +122,7 @@ class DeliveryTask(DesignTask):
         child_env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
         child_env["PYTHONPATH"] = str(root / "src")
         return subprocess.run([sys.executable, "-B", "-c", bootstrap, *args], cwd=self.repo, capture_output=True,
-                              text=True, encoding="utf-8", env=child_env, timeout=300)
+                              text=not raw_output, encoding=None if raw_output else "utf-8", env=child_env, timeout=300)
 
     def git_url(self, locator: str) -> str:
         return str(self.upstreams[locator.split("github.com/", 1)[1].removesuffix(".git").strip("/")])
@@ -233,11 +233,12 @@ class InlineDeliveryTest(DeliveryTask, unittest.TestCase):
         result = self.call()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         (run,) = self.runs()
-        prompt = (run / "prompt.md").read_text(encoding="utf-8")
+        prompt = (run / "prompt.md").read_bytes().decode("utf-8")
         self.assertEqual(json.loads(self.record.read_text(encoding="utf-8"))["stdin"], prompt)
         bundle = self.bundle(run)
         (item,) = bundle["items"]
-        body = (self.upstreams["acme/skills"] / "skills/grill/SKILL.md").read_bytes()
+        body = git_blob(self.upstreams["acme/skills"], "skills/grill/SKILL.md",
+                        self.reviews["grill"]["source"]["commit"])
         self.assertEqual((item["skill"], item["required"], item["origin"], item["mode"]),
                          ("grill", True, "reviewed", "inline"))
         self.assertEqual((item["sha256"], item["bytes"]), (sha(body), len(body)))
@@ -383,8 +384,9 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         from oah import call
 
         self.build_skills(PLAIN)
-        body = (self.upstreams["acme/plain"] / "skills/plain/SKILL.md").read_bytes()
-        installed = self.install(body.replace(b"\n", b"\r\n"))  # same LF digest as the pin
+        body = git_blob(self.upstreams["acme/plain"], "skills/plain/SKILL.md",
+                        self.reviews["plain"]["source"]["commit"])
+        installed = self.install(body.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
         prepared = self.prepare()
         (item,) = self.bundle(pathlib.Path(prepared.run_dir))["items"]
         self.assertTrue(item["origin"].startswith("installed "), item["origin"])
@@ -432,7 +434,8 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         result = self.call()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         (item,) = self.bundle(self.runs()[-1])["items"]
-        body = (self.upstreams["acme/plain"] / "skills/plain/SKILL.md").read_bytes()
+        body = git_blob(self.upstreams["acme/plain"], "skills/plain/SKILL.md",
+                        self.reviews["plain"]["source"]["commit"])
         self.assertEqual((item["origin"], item["sha256"]), ("reviewed", sha(body)))
         self.assertTrue(item["note"].startswith("installed copy differs"), item["note"])
 

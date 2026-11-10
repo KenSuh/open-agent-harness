@@ -15,7 +15,7 @@ import unittest
 import urllib.parse
 from unittest import mock
 
-from tests.helpers import git_commit, make_tmp_dir
+from tests.helpers import git_blob, git_commit, make_tmp_dir
 from tests.test_design_coverage import CoverageRepo
 from tests.test_design_sources import LICENSE as MIT_LICENSE
 from tests.test_design_store import SRC as SRC_PATH
@@ -422,7 +422,7 @@ class ReviewTest(DiscoveryRepo, unittest.TestCase):
         self.assertRegex(record["source"]["source_id"], r"^sk-[0-9a-f]{37}$")
         self.assertEqual(record["source"]["commit"], subprocess.run(["git", "-C", str(up), "rev-parse", "HEAD"],
                                                                     capture_output=True, text=True).stdout.strip())
-        body = (up / "skills/grill/SKILL.md").read_bytes()
+        body = git_blob(up, "skills/grill/SKILL.md", record["source"]["commit"])
         self.assertEqual(record["source"]["skill_sha256"], "sha256:" + hashlib.sha256(body).hexdigest())
         hexdigest = record["id"].split(":", 1)[1]
         self.assertTrue((self.skills_state / "reviews" / hexdigest[:2] / f"{hexdigest}.json").is_file())

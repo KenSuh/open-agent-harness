@@ -1328,7 +1328,9 @@ def task_basis(holder, task_design, packet: Packet, *, root: pathlib.Path):
         text = oah_intent.read_source(pathlib.Path(root) / packet.source)
     except Exception as exc:  # the source helpers raise their own coded errors
         raise tasks.NeedsInvalid("stale", f"the packet cannot be read again ({exc})") from None
-    if packet.intent is None or briefs.raw_section(text) != packet.section:
+    section = briefs.raw_section(text)
+    if (packet.intent is None or section is None or packet.section is None
+            or oah_intent.normalize_newlines(section) != oah_intent.normalize_newlines(packet.section)):
         raise tasks.NeedsInvalid("stale", "the packet's intent section changed while this call read it")
     scope = tuple(packet.scope or holder.scope)
     axes = {}

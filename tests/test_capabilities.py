@@ -1104,7 +1104,7 @@ class CapabilitySelectFlowTest(TaskRepo, unittest.TestCase):
         from oah.discovery import store, tasks
 
         (whole,) = self.find_task("--subtask", "lookup", out="whole.json")["needs"]
-        data = FLOW_TEXT.encode("utf-8")
+        data = (self.repo / ".oah/tasks/t1/PACKET.md").read_bytes()
         items, ids = [], {}
         for subtask, text in (("lookup", LOOKUP_AC), ("upgrade", UPGRADE_AC)):
             offset, size = data.index(text.encode("utf-8")), len(text.encode("utf-8"))
@@ -1114,6 +1114,19 @@ class CapabilitySelectFlowTest(TaskRepo, unittest.TestCase):
             items.append(item)
             ids[subtask] = item["id"]
         return write(self.files / "needs.json", tasks.needs_file("t1", items)), ids
+
+    def test_crlf_packet_subtask_ranges_deliver_each_original_requirement(self):
+        self.start()
+        packet = self.repo / ".oah/tasks/t1/PACKET.md"
+        packet.write_bytes(packet.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        needs, _ids = self.needs()
+        code, out, err = self.dispatch(needs)
+        self.assertEqual(code, 0, out + err)
+        sent = self.capability_requests()
+        spans = [body["state"]["fields"]["task_need"] for _free, body in sent if
+                 "task_need" in body["state"]["fields"]]
+        self.assertTrue(any(LOOKUP_AC in text for text in spans), spans)
+        self.assertTrue(any(UPGRADE_AC in text for text in spans), spans)
 
     def lead(self) -> pathlib.Path:
         from oah.capabilities import inventory
