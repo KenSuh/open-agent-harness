@@ -31,7 +31,7 @@ from oah.capabilities import (BEGIN, DEPENDENCY_CODE, END, MAX_ROUNDS, RELAY_EFF
                               digest, server_of, tool_id)
 from oah.capabilities import inventory as inventories
 from oah.capabilities import select as selection
-from oah.discovery.preparation import Json, Record
+from oah.discovery.preparation_schema import Json, Record, _hash, _nonnegative
 
 POLICY = "oah-capability-plan/v1"
 POLICY_DIGEST = digest({"policy": POLICY, "relay_effects": list(RELAY_EFFECTS), "max_bytes": RELAY_MAX_BYTES})
@@ -360,8 +360,6 @@ def _relay_time(value: Json, field: str) -> dt.datetime:
 
 
 def check_result(record: Record) -> None:
-    from oah.discovery.preparation import _hash, _nonnegative
-
     if set(record) != RESULT_KEYS or type(record["version"]) is not int or record["version"] != 1 \
             or any(not _hash(record[key]) for key in ("id", "request_id", "prep_id", "need_id", "entry_digest",
                 "schema_digest", "task_fingerprint", "permission_digest")) \

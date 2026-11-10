@@ -7,7 +7,7 @@ import datetime as dt
 from oah import routing
 from oah.capabilities import CapabilityRefused, inventory, plan
 from oah.discovery import budget, tasks
-from oah.discovery.preparation import (FACT_KEYS, FINAL_KEYS, REFERENCE_KEYS, Json, Record, _hash, _nonnegative)
+from oah.discovery.preparation_schema import (FACT_KEYS, FINAL_KEYS, REFERENCE_KEYS, Json, Record, _hash, _nonnegative)
 from oah.discovery.store import digest
 
 

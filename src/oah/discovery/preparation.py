@@ -3,19 +3,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Callable, Final, TypeAlias
+from typing import Callable, Final
 
+from oah.discovery.preparation_schema import FACT_KEYS, FINAL_KEYS, REFERENCE_KEYS, Json, Record, _hash, _nonnegative
 from oah.discovery.store import digest
 
-Json: TypeAlias = str | int | float | bool | None | list["Json"] | dict[str, "Json"]
-Record: TypeAlias = dict[str, Json]
 KEYS: Final = frozenset({"version", "prep_id", "facts", "references", "profile", "envelope", "expires_at", "final",
                         "digest"})
-FACT_KEYS: Final = frozenset({"operation", "task", "lease", "engine", "stage", "route", "needs", "selections",
-                            "payloads", "not_delivered", "policy", "inventory", "relay_results", "target",
-                            "request_budget", "references", "profile", "selectors", "access", "context"})
-REFERENCE_KEYS: Final = frozenset({"needs", "skill_needs", "parent_inventory", "relay_results", "tier", "route"})
-FINAL_KEYS: Final = frozenset({"bundle_digest", "capability_plan_digest", "render_digest"})
 PROJECTION_KEYS: Final = frozenset({"version", "identity_digest", "prep_id", "admission_digest", "bundle_digest",
     "capability_plan_digest", "pack_id", "profile_digest", "render_digest", "task_digest", "need_digest",
     "selection_digest", "policy_digest", "inventory_digest", "relay_digest", "reference_digest", "context_digest",
@@ -191,12 +185,3 @@ def correction_identity(record: Record) -> str:
     return digest({"task": facts["task"], "needs": facts["needs"], "selections": facts["selections"],
                    "policy": facts["policy"], "root": context["root"], "parent": inventory["parent"],
                    "relays": facts["relay_results"]})
-
-
-def _hash(value: Json) -> bool:
-    return isinstance(value, str) and value.startswith("sha256:") and len(value) == 71 and all(
-        char in "0123456789abcdef" for char in value[7:])
-
-
-def _nonnegative(value: Json) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
