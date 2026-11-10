@@ -1,4 +1,3 @@
-# 지출 후 근거 회귀 — 정산은 제안의 창을 쓰고 새 수정은 도구 근거를 다시 요구하는지 확인한다.
 from __future__ import annotations
 
 import contextlib
@@ -98,33 +97,33 @@ class SpentEvidenceTest(DeliveryTask, unittest.TestCase):
             project, ordinary, _need, _basis = e_c6_fixture.selected_ordinary(self)
         return project, ordinary, now, parent
 
-    def test_correction_after_seven_minutes_requires_the_parent_tools_to_be_read_again(self):
+    def test_correction_after_seven_minutes_reuses_the_original_parent_evidence(self):
         from oah import call
-        from tests.test_fix import ReviewError
 
         project, ordinary, now, _parent = self.selected_parent()
         before = ordinary.run.file_path("skills.json").read_bytes()
         calls = project.fix_calls()
         with mock.patch.dict(os.environ, project.env, clear=True), contextlib.chdir(project.repo), \
-                mock.patch.object(call.dt, "datetime", clock(now + dt.timedelta(minutes=7))), \
-                self.assertRaises(ReviewError) as caught:
-            project.fix()
-        self.assertEqual(caught.exception.code, "OAH_CAPABILITY_INVENTORY_UNKNOWN")
-        self.assertIn("read the tools again", str(caught.exception))
-        self.assertEqual(project.fix_calls(), calls)
+                mock.patch.object(call.dt, "datetime", clock(now + dt.timedelta(minutes=7))):
+            result = project.fix()
+        self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+        self.assertEqual(len(project.fix_calls()), len(calls) + 1)
+        self.assertIn("Prepare the selected ledger rows.", project.fix_calls()[-1]["prompt"])
         self.assertEqual(ordinary.run.file_path("skills.json").read_bytes(), before)
 
-    def test_correction_with_refreshed_parent_evidence_keeps_the_frozen_selection(self):
+    def test_correction_with_changed_parent_record_refuses_and_keeps_the_frozen_selection(self):
         from oah import call
         from oah.capabilities import inventory
+        from tests.test_fix import ReviewError
 
         project, ordinary, now, parent = self.selected_parent()
         before = ordinary.run.file_path("skills.json").read_bytes()
         later = now + dt.timedelta(minutes=7)
         capability_fixture.write(parent, inventory.parent_inventory([], observed=later))
+        calls = project.fix_calls()
         with mock.patch.dict(os.environ, project.env, clear=True), contextlib.chdir(project.repo), \
-                mock.patch.object(call.dt, "datetime", clock(later)):
-            result = project.fix()
-        self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
-        self.assertIn("Prepare the selected ledger rows.", project.fix_calls()[-1]["prompt"])
+                mock.patch.object(call.dt, "datetime", clock(later)), self.assertRaises(ReviewError) as caught:
+            project.fix()
+        self.assertEqual(caught.exception.code, "OAH_FIX_STATE_CHANGED")
+        self.assertEqual(project.fix_calls(), calls)
         self.assertEqual(ordinary.run.file_path("skills.json").read_bytes(), before)

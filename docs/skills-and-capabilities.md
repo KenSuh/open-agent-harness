@@ -117,23 +117,29 @@ command from a project subdirectory uses that same project's policy. This includ
 requires preparation again. Preparation has a five-minute window before launch or offer. Native settlement uses
 the offer's own 24-hour window, including an identical retry, while still comparing the current identities. It keeps
 the offered parent inventory and relay evidence rather than reading those short-lived inputs again after the spend.
-A correction takes fresh admission and preparation; the original run's short window is not checked again, but its
-verified needs, selections and policy must still match. A changed identity refuses and preserves the earlier record. Corrections
+A correction re-admits skills against current configuration and policy and reuses the original run's frozen
+parent inventory and authorized relay bytes. Preparation, inventory and relay time windows apply only before
+the original launch or offer; they do not expire during settlement or correction. Stored digests and current
+design, packet, needs, schema, permissions and policy must still match. Stage-specific coverage is resolved for
+the correction stage from that same accepted design. A changed identity refuses and preserves the earlier record. Corrections
 report `OAH_FIX_STATE_CHANGED` through their existing correction interface. An unchanged native
 selection settles once; an identical retry returns that same receipt. Corrections freeze the verified needs,
 selections and authorized relays and save only their closed digest/count/enum projection; worker text is resolved
 in memory. What it costs you: queued work needs preparation again after five minutes, corrections need it after a
-relevant local change, and native settlement needs a new offer after its own expiry. Correcting work with a parent
-inventory or relay older than five minutes requires reading the tools again and supplying refreshed evidence;
-the refusal names that requirement. A direct API call cannot skip admission.
+relevant local change, and native settlement needs a new offer after its own expiry. There is no evidence-refresh
+step for a correction. The trade-off is that a correction sees tool results as of the original run, labelled with
+their relay time. Missing, changed or incomplete frozen records refuse before a child starts; after deleting run
+records, start a new run. A direct API call cannot skip admission.
 
 **One request boundary.** `skills find --task` checks the same existing required capabilities, target capacity
 and access as a dispatch. Managed skill ordering also rechecks that admission immediately before its request.
 Taskless exploration and design inspection keep their own bounded lead admission. Every managed search,
 collector HTTP request, Git advertisement (`ls-remote`), Git fetch and advice request rechecks admission immediately
-before I/O, after its attempt record is prepared with zero requests, and keeps its bounded attempt open until the
+before I/O, after its attempt record is prepared with `requests: null` (count unknown), and keeps its bounded attempt open until the
 operation returns or fails. The live row becomes started only as transport starts. If a later summary write fails,
-the earlier zero-request preparation remains and a warning reports that the outcome could not be saved; the
+the saved count remains unknown and a warning reports that the outcome could not be saved. A final-guard refusal
+saves zero requests; a returned transport saves one. A process interruption before the end save leaves the count
+unknown. No write separates the final guard from transport; the
 transport result or refusal is preserved. Git URL mapping is local and
 creates no request attempt. What it costs you: an
 unavailable required capability or a changed local input needs an explicit correction and a new preparation

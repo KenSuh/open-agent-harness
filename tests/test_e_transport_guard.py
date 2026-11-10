@@ -5,6 +5,9 @@ import contextlib
 import io
 import json
 import os
+import pathlib
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -14,6 +17,22 @@ from tests.test_skill_delivery import DeliveryTask, PLAIN
 
 
 class LastGuardTest(unittest.TestCase):
+    def test_process_exit_during_transport_leaves_request_count_unknown(self):
+        root = make_tmp_dir(self)
+        env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"),
+                   PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        script = ("import os\nfrom pathlib import Path\nfrom oah import skillpack\n"
+                  "from oah.discovery import gateway\nfrom oah.discovery.store import digest\n"
+                  "def transport():\n    Path('started').write_text('yes', encoding='utf-8')\n    os._exit(23)\n"
+                  "gateway.send(skillpack.explore(1), 'skill-search', digest('fixture'), transport, state=Path.cwd())\n")
+        child = subprocess.run([sys.executable, "-B", "-c", script], cwd=root, env=env,
+                               capture_output=True, encoding="utf-8", timeout=30, check=False)
+        self.assertEqual(child.returncode, 23, child.stdout + child.stderr)
+        self.assertEqual((root / "started").read_text(encoding="utf-8"), "yes")
+        path, = (root / "skills/attempts").glob("*.json")
+        row, = json.loads(path.read_text(encoding="utf-8"))["requests"]
+        self.assertIsNone(row["requests"])
+
     def test_policy_change_during_first_attempt_save_refuses_with_zero_requests(self):
         from oah import atomic, skillpack
         from oah.discovery import gateway

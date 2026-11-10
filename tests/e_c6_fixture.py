@@ -7,7 +7,7 @@ import os
 from unittest import mock
 
 
-def selected_ordinary(test):
+def selected_ordinary(test, *, skill_tools="", configure=None):
     from oah import call, call_cli
     from oah.discovery import policy_digest, providers, tasks
     from oah.secrets import NoKeychain
@@ -16,8 +16,10 @@ def selected_ordinary(test):
 
     project = fixes.FixProject(test, config="\n[models]\nfetch_scores=false\n")
     test.upstream("acme/ledger", {"LICENSE": MIT_LICENSE,
-        "skills/ledger/SKILL.md": skill_md("ledger", "Prepare the selected ledger rows.\n")})
+        "skills/ledger/SKILL.md": skill_md("ledger", "Prepare the selected ledger rows.\n", extra=skill_tools)})
     reviewed = test.reviewed(project.state, "acme/ledger", "skills/ledger")
+    if configure is not None:
+        configure(project, reviewed)
     tools = call_cli.intent_tools()
     with mock.patch.dict(os.environ, project.env, clear=True), contextlib.chdir(project.repo):
         packet = call.read_packet(project.repo, project.repo / ".oah/tasks/t1/PACKET.md",
@@ -25,11 +27,15 @@ def selected_ordinary(test):
         judged, _ = call._task_design(project.lease, packet, state_dir=project.state, stage="initial",
                                       task="t1", engine="codex")
         basis = call.task_basis(project.lease, judged, packet, root=project.repo)
-        need = tasks.need(basis, dispatch_stage="initial", policy=policy_digest(providers.settings_of({})),
-                          required=True)
-        tasks.select(project.state, need, [reviewed["id"]], basis=basis)
+        policy = policy_digest(providers.settings_of({}))
+        if basis.design is None:
+            needs_list = [tasks.need(basis, dispatch_stage="initial", policy=policy, required=True)]
+            tasks.select(project.state, needs_list[0], [reviewed["id"]], basis=basis)
+        else:
+            needs_list = tasks.derive(basis, dispatch_stage="initial", policy=policy)
+        need = needs_list[0]
         needs = project.work / "needs.json"
-        needs.write_text(json.dumps({"version": 1, "task": "t1", "needs": [need]}), encoding="utf-8")
+        needs.write_text(json.dumps({"version": 1, "task": "t1", "needs": needs_list}), encoding="utf-8")
         ordinary = call.prepare(call.CallRequest(engine="codex", stage="initial", task="t1", tier="high",
             override_stage=True, skill_needs=str(needs), no_rerank=True), call_cli.load_settings(project.repo),
             root=project.repo, state_dir=project.state, env=project.env, footer=tools.footer,

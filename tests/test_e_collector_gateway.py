@@ -98,7 +98,7 @@ class CollectorGatewayTest(DiscoveryRepo, unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertEqual([row["name"] for row in trace], ["ls-remote", "fetch"])
         self.assertTrue(all(row["gateway_depth"] == 1 for row in trace))
-        self.assertTrue(all(any(r["state"] == "unknown" and r["requests"] == 0 for summary in row["attempts"]
+        self.assertTrue(all(any(r["state"] == "unknown" and r["requests"] is None for summary in row["attempts"]
                                for r in summary["requests"]) for row in trace))
         self.assertEqual(len(summaries), 2)
         rows = [row for summary in summaries for row in summary["requests"]]

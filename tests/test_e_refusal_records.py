@@ -104,7 +104,7 @@ class RefusalAttemptTest(unittest.TestCase):
                 self.assertEqual(sent, [1])
                 saved = [json.loads(path.read_bytes()) for path in (root / "skills/attempts").glob("*.json")]
                 self.assertEqual(len(saved), 1)
-                self.assertEqual(saved[0]["requests"][0]["requests"], 0)
+                self.assertIsNone(saved[0]["requests"][0]["requests"])
                 self.assertEqual(saved[0]["requests"][0]["state"], "unknown")
 
 

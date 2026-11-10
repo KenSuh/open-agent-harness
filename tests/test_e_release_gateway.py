@@ -147,7 +147,7 @@ class ReleaseGatewayTest(ReleaseFixture):
             with self.subTest(operation=index):
                 self.assertEqual(step["gateway_depth"], 1)
                 self.assertEqual(len(step["attempts"]), index + 1)
-                active = [s for s in step["attempts"] if any(r["state"] == "unknown" and r["requests"] == 0
+                active = [s for s in step["attempts"] if any(r["state"] == "unknown" and r["requests"] is None
                                                            for r in s["requests"])]
                 self.assertEqual(len(active), 1)
                 self.assertEqual(len(active[0]["requests"]), 1)

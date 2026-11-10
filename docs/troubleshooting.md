@@ -195,6 +195,12 @@ delivery or application. Unknown totals are recorded
 as unknown, never zero; an observed partial count is not a total. What it costs you: a failed attempt may still
 have used requests or tokens, and that remains inspectable before retry.
 
+A prepared request count is `null` until its outcome is saved. A final-guard refusal records zero; a returned
+transport records one. A process interruption or failed end save leaves the count unknown. Corrections and native
+settlements reuse the original frozen inventory and relay evidence without refreshing its time window, while
+checking its stored digests and current validity basis. Corrections receive tool results labelled with their
+original relay time; deleting the run's frozen records requires a new run.
+
 | Code | What it means | What to do next |
 |---|---|---|
 | `OAH_COVERAGE_INVALID` | A coverage part or a coverage edit file breaks the format: an unknown key, a wrong value, a check out of catalog order, or a file over 256 KiB. | Fix the field the message names. Build edits with `oah design coverage edit`, not by hand. |
@@ -216,7 +222,7 @@ have used requests or tokens, and that remains inspectable before retry.
 | `OAH_SKILLS_BUDGET_EXCEEDED` | `(target-capacity-unknown)`: the exact route has no current evidence-pinned capacity profile; the packaged registry currently has no real qualified profiles. Otherwise inline skills, the whole reachable render including required reads, design bytes or target tokens exceed their independent limit, or payloads exceed 128. Measured refusals show totals. | Use inline or smaller material outside managed delivery, split the task or drop optional material. Managed delivery requires a reviewed measured profile with evidence and expiry; a configured context count is insufficient. |
 | `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run` named a run that has no skill bundle, or `oah call settle` named a run that has no native offer. | Check the run id. A run without linked skills has nothing to read, and only a run from `oah call --launcher native` can be settled. |
 | `OAH_SKILL_HOST_UNSUPPORTED` | `oah call --launcher native` for Claude found no `.claude/agents/oah-<tier>.md` in the repository or your Claude folder, so the host has no subagent to start. | Run `oah init` to write the tier agents, then offer again. |
-| `OAH_NATIVE_OFFER_STALE` | `oah call settle` found a changed task, intent, packet, scope, lease, design, skill selection, policy, capability inventory/permissions, relay, host target or brief, an expired preparation/profile/inventory/relay window, or an offer older than 24 hours. This check also precedes an identical settlement retry. The old offer and any earlier receipt are kept. | Prepare a new offer with `oah call --launcher native` and settle that run. |
+| `OAH_NATIVE_OFFER_STALE` | `oah call settle` found a changed task, intent, packet, scope, lease, design, skill selection, policy, capability inventory/permissions, relay, host target or brief, or an offer older than 24 hours. Preparation, inventory and relay time windows were checked before the original offer and do not expire again during settlement. This check also precedes an identical settlement retry. The old offer and any earlier receipt are kept. | Prepare a new offer with `oah call --launcher native` and settle that run. |
 | `OAH_NATIVE_SETTLE_CONFLICT` | `oah call settle` named another offer digest, or the run was already settled with another outcome, host child, result or canary. The first receipt stands. | Pass the digest the offer printed. To record a different result, offer again. |
 | `OAH_NATIVE_RESULT_INVALID` | The settle result file is over 65,536 bytes (`too-large`), not UTF-8 (`not-utf8`) or has a line starting with `<!-- oah` (`marker`). | Save a short UTF-8 reply without that line, then settle again. |
 | `OAH_RUN_LAUNCH_INVALID` | A prepared run's saved records, such as its lease snapshot, intent binding, design record or skill record, are missing or damaged at launch. | Run `oah call` again to prepare a new run. |

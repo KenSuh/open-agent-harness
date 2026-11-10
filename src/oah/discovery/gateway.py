@@ -62,7 +62,12 @@ def send(admitted: Admitted, kind: attempts.Kind, input_digest: str, transport: 
         live.reserve_query()
     with attempts.request(kind, input_digest, state=state, known=known,
                           preparation=str(record["digest"])) as fact:
-        live.require()
+        try:
+            live.require()
+        except skillpack.PackRefused:
+            if fact is not None:
+                fact["requests"] = 0
+            raise
         if fact is not None:
             fact["state"] = "started"
             fact["requests"] = 1 if known else None

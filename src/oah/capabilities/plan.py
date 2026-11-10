@@ -133,7 +133,7 @@ def prep_id(*, task: Mapping, design: Mapping | None, target: Mapping, needs: Se
 def assess(*, task: Mapping, design: Mapping | None, engine: str, stage: str, needs: Sequence[Mapping],
            child: Mapping, parent: Mapping | None, results: Sequence[Mapping], requires: Mapping, now: dt.datetime,
            state_dir: os.PathLike, class_needs: Sequence[Mapping] = (), class_status: str | None = None,
-           evidence=None, advise=None) -> dict:
+           evidence=None, advise=None, frozen_prep: str | None = None) -> dict:
     """CapabilityPlanV1 (the subset this release records), or CapabilityRefused for a required need.
 
     `class_needs` are optional capability-class needs (Jev's class inference, already applied by the caller); each
@@ -150,7 +150,7 @@ def assess(*, task: Mapping, design: Mapping | None, engine: str, stage: str, ne
     by_need = {}
     ordered = sorted(results, key=lambda result: result["id"])  # one answer whatever the flag order
     for result in ordered:
-        if result["prep_id"] != prep:
+        if result["prep_id"] != (frozen_prep or prep):
             raise CapabilityRefused(RELAY_REQUIRED_CODE, "stale", f"relay result {result['id']} was made for another "
                                     "preparation (the task, design, needs or inventories changed); plan again and "
                                     "relay again; nothing was launched")
@@ -301,7 +301,7 @@ def settings_for(root) -> dict:
 def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: Sequence[Mapping], root, env,
              state_dir: os.PathLike, parent_path: str | None, relay_refs: Sequence[str], now: dt.datetime,
              settings: Mapping, class_needs: Sequence[Mapping] = (), class_status: str | None = None,
-             advise=None) -> tuple[dict | None, str | None]:
+             advise=None, frozen_record: Mapping | None = None) -> tuple[dict | None, str | None]:
     """(CapabilityPlanV1, `## Capabilities` block) for one dispatch, or (None, None) when it has no capability needs
     and no relay inputs (the brief then stays byte-identical). CapabilityRefused before anything is spent."""
     from oah import skillpack, skillsel
@@ -311,17 +311,36 @@ def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: 
         return None, None
     child = inventories.child(engine, root=root, env=env, home=skillsel.home_of(env), now=now,
                               classes=settings["classes"])
-    parent = inventories.read_parent(parent_path, now=now) if parent_path else None
-    loaded = [load(state_dir, ref, now=now) for ref in sorted(set(relay_refs))]  # the same first refusal in any order
+    if frozen_record is None:
+        parent = inventories.read_parent(parent_path, now=now) if parent_path else None
+        loaded = [load(state_dir, ref, now=now) for ref in sorted(set(relay_refs))]
+    else:
+        parent, loaded = frozen_inputs(frozen_record, state_dir=state_dir)
+        now = dt.datetime.fromisoformat(frozen_record["expires_at"]) - dt.timedelta(microseconds=1)
     design = skillpack._accepted_coverage(task_design)[2]
     found = assess(task=task_identity(holder, task), design=design, engine=engine, stage=stage, needs=needs,
                    child=child, parent=parent, results=[record for record, _text in loaded],
                    requires=settings["requires"], now=now, state_dir=state_dir, class_needs=class_needs,
                    class_status=class_status, advise=advise,
-                   evidence=selection.linked_evidence(settings.get("docs") or {}, root) if class_needs else None)
+                   evidence=selection.linked_evidence(settings.get("docs") or {}, root) if class_needs else None,
+                   frozen_prep=loaded[0][0]["prep_id"] if frozen_record is not None and loaded else None)
     if not found["selected"]:
         return None, None
-    return found, block(found, {record["id"]: text for record, text in loaded})
+    return found, block(found, {record["id"]: text for record, text in loaded},
+                        times={record["id"]: record["invocation"]["at"] for record, _text in loaded})
+
+
+def frozen_inputs(record: Mapping, *, state_dir: os.PathLike) -> tuple[dict | None, list[tuple[dict, str]]]:
+    from oah.discovery import preparation
+
+    record = preparation.parse(record)
+    at = dt.datetime.fromisoformat(record["expires_at"]) - dt.timedelta(microseconds=1)
+    refs, facts = record["references"], record["facts"]
+    parent = inventories.read_parent(refs["parent_inventory"], now=at) if refs["parent_inventory"] else None
+    loaded = [load(state_dir, ref, now=at) for ref in sorted(set(refs["relay_results"]))]
+    if parent != facts["inventory"]["parent"] or [row for row, _text in loaded] != facts["relay_results"]:
+        raise ValueError("the frozen parent inventory or authorized relay result changed")
+    return parent, loaded
 
 
 def relay_request(*, prep: str, task: Mapping, design: Mapping | None, target: Mapping, need: Mapping,
@@ -417,7 +436,7 @@ def load(state_dir: os.PathLike, ref: str, *, now: dt.datetime) -> tuple[dict, s
     return record, text
 
 
-def block(plan: Mapping, texts: Mapping[str, str]) -> str | None:
+def block(plan: Mapping, texts: Mapping[str, str], *, times: Mapping[str, str] | None = None) -> str | None:
     """The `## Capabilities` block: routes as guidance and each relay result as fenced data; None without needs."""
     if not plan["selected"]:
         return None
@@ -438,7 +457,13 @@ def block(plan: Mapping, texts: Mapping[str, str]) -> str | None:
             run = run + 1 if char == "`" else 0
             longest = max(longest, run)
         fence = "`" * max(4, longest + 1)
-        lines += ["", f"### Relay result for {row['id']} ({relay})", fence + "text", text.rstrip("\n"), fence]
+        lines += ["", f"### Relay result for {row['id']} ({relay})"]
+        if times is not None:
+            at = dt.datetime.fromisoformat(times[relay])
+            if at.tzinfo is None:
+                raise ValueError("a relay invocation time needs its original time zone")
+            lines.append(f"Relayed at: {at.isoformat()} (evidence from the original run).")
+        lines += [fence + "text", text.rstrip("\n"), fence]
     lines.append(END)
     return "\n".join(lines) + "\n"
 

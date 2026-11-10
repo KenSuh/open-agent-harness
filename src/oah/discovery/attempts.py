@@ -65,7 +65,7 @@ class Attempt:
     @contextlib.contextmanager
     def request(self, kind: Kind, input_digest: str, *, known: bool = True) -> Iterator[RequestFact]:
         row: RequestFact = {"kind": kind, "input_digest": input_digest, "state": "unknown",
-                            "requests": 0, "outcome_digest": None}
+                            "requests": None, "outcome_digest": None}
         if len(self.rows) < 128:
             self.rows.append(row)
         else:
@@ -89,7 +89,7 @@ class Attempt:
                 self.save()
             except (OSError, ValueError) as exc:
                 print(f"OAH_SKILLS_ATTEMPT_SAVE_FAILED: the request outcome could not be saved "
-                      f"({type(exc).__name__}); its earlier request record is kept", file=sys.stderr)
+                      f"({type(exc).__name__}); the saved request count is unknown", file=sys.stderr)
 
 
 CURRENT: ContextVar[Attempt | None] = ContextVar("oah_e_attempt", default=None)

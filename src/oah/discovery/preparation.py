@@ -64,6 +64,10 @@ def parse(raw: Json) -> Record:
             or not isinstance(final, dict) or set(final) != FINAL_KEYS:
         raise ValueError("the PreparedE facts, references or final projection have unknown or missing fields")
     context = facts["context"]
+    operation = facts["operation"]
+    if not isinstance(operation, dict) or (facts["route"] == "lead") != (operation.get("kind") != "dispatch") \
+            or facts["route"] != references["route"]:
+        raise ValueError("the PreparedE operation and route do not agree")
     if not isinstance(context, dict) or set(context) != {"root", "axes", "floor"} \
             or not isinstance(context["root"], str) or not context["root"]:
         raise ValueError("the PreparedE command context is incomplete")
@@ -78,6 +82,42 @@ def parse(raw: Json) -> Record:
     from oah.discovery.budget import moment
 
     moment(str(raw["expires_at"]))
+    for key in ("needs", "selections", "payloads", "not_delivered", "relay_results"):
+        if not isinstance(facts[key], list) or any(not isinstance(item, dict) and not (
+                key == "selections" and item is None) for item in facts[key]):
+            raise ValueError(f"the PreparedE {key} must be complete recorded rows")
+    if not isinstance(references["needs"], list) or references["needs"] != facts["needs"] \
+            or not isinstance(references["relay_results"], list) \
+            or any(not _hash(ref) for ref in references["relay_results"]):
+        raise ValueError("the PreparedE need or relay references are incomplete")
+    if facts["route"] != "lead":
+        from oah.capabilities import inventory as inventories
+
+        if facts["route"] not in ("process", "orca", "native") or facts["engine"] not in ("claude", "codex") \
+                or facts["stage"] not in ("initial", "correction", "review"):
+            raise ValueError("the PreparedE dispatch target is incomplete")
+        inventory = facts["inventory"]
+        if not isinstance(inventory, dict) or set(inventory) != {"child", "parent"} \
+                or not _hash(inventory["child"]):
+            raise ValueError("the PreparedE inventory is incomplete")
+        parent = inventory["parent"]
+        if parent is not None:
+            if not isinstance(parent, dict) or not isinstance(parent.get("observed_at"), str):
+                raise ValueError("the PreparedE parent inventory is incomplete")
+            inventories.check_parent(parent, now=moment(parent["observed_at"]))
+        if (references["parent_inventory"] is not None and not isinstance(references["parent_inventory"], str)) \
+                or bool(references["parent_inventory"]) != (parent is not None) \
+                or sorted(references["relay_results"]) != sorted(row.get("id", "") for row in facts["relay_results"]):
+            raise ValueError("the PreparedE inventory or relay references do not match their records")
+        for row in facts["payloads"]:
+            if not isinstance(row, dict) or row.get("kind") not in ("body", "auxiliary", "relay") \
+                    or type(row.get("required")) is not bool or not _nonnegative(row.get("bytes")) \
+                    or not _hash(row.get("sha256")) \
+                    or row.get("mode") not in ("inline", "reference", "reference-only", "not-delivered"):
+                raise ValueError("the PreparedE payload is incomplete")
+        if not isinstance(facts["target"], dict) or not all(
+                key in facts["target"] for key in ("model", "effort", "cli_version")):
+            raise ValueError("the PreparedE target is incomplete")
     pre_result = {key: value for key, value in facts.items() if key not in ("relay_results", "capability_plan")}
     if raw["prep_id"] != digest(pre_result):
         raise ValueError("the run's PreparedE preparation identity changed; prepare the run again")
@@ -185,28 +225,14 @@ def check_projection(raw: Record) -> None:
 
 def correction_identity(record: Record) -> str:
     facts = parse(record)["facts"]
-    assert isinstance(facts, dict)
+    if not isinstance(facts, dict):
+        raise ValueError("a correction needs dispatch facts")
     inventory, context = facts["inventory"], facts["context"]
-    assert isinstance(inventory, dict) and isinstance(context, dict)
-    parent = inventory["parent"]
-    stable_parent: Record | None = None
-    if parent is not None:
-        assert isinstance(parent, dict)
-        entries = parent["entries"]
-        assert isinstance(entries, list)
-        stable_entries: list[Json] = []
-        for item in entries:
-            assert isinstance(item, dict)
-            source = item["source"]
-            assert isinstance(source, dict)
-            stable_entries.append({key: value for key, value in item.items() if key not in ("entry_digest", "source")}
-                | {"source": {key: value for key, value in source.items() if key not in ("observed_at", "expires_at")}})
-        stable_parent = {key: value for key, value in parent.items()
-                         if key not in ("digest", "observed_at", "expires_at", "entries")}
-        stable_parent["entries"] = stable_entries
-    return digest({"needs": facts["needs"], "selections": facts["selections"], "payloads": facts["payloads"],
-                   "not_delivered": facts["not_delivered"], "policy": facts["policy"],
-                   "root": context["root"], "parent": stable_parent})
+    if not isinstance(inventory, dict) or not isinstance(context, dict):
+        raise ValueError("a correction needs a dispatch inventory and context")
+    return digest({"task": facts["task"], "needs": facts["needs"], "selections": facts["selections"],
+                   "policy": facts["policy"], "root": context["root"], "parent": inventory["parent"],
+                   "relays": facts["relay_results"]})
 
 
 def _hash(value: Json) -> bool:

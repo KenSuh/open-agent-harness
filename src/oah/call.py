@@ -1404,6 +1404,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     from oah.discovery.store import digest
 
     inputs = _CORRECTION_INPUTS.get() if expected is not False else None
+    frozen_record = spent_record if spent_record is not None else (inputs.e_record if inputs is not None else None)
     settings = (inputs.config.section("skills", skillsel.config_defaults()) if inputs is not None
                 else skillsel.settings_for(root))
     roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env,
@@ -1427,6 +1428,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             raise EngineError(f"{exc.code}({exc.reason})", f"{str(exc).split(': ', 1)[1]}; nothing was "
                               "launched") from None
     search_needs = needs if query_needs is None else query_needs
+    delivery_needs = (task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings), needs_file=None)
+                      if frozen_needs is not None and basis is not None and basis.design is not None else needs)
     answerable = [item for item in search_needs if tasks.answerable(item)]
     section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
                else load_config(root).section("capabilities", capability_plan.DEFAULTS))
@@ -1466,10 +1469,13 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         selections = [tasks.selection_for(state_dir, item, lease_id=live.id) for item in current_needs]
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env), now=current,
                                 classes=capability_settings["classes"])
-        parent = (spent_record["facts"]["inventory"]["parent"] if spent_record is not None else
-                  inventory.read_parent(request.parent_inventory, now=current) if request.parent_inventory else None)
-        relays = (spent_record["facts"]["relay_results"] if spent_record is not None else
-                  [capability_plan.load(state_dir, ref, now=current)[0] for ref in sorted(set(request.relay_results))])
+        if frozen_record is not None:
+            parent, loaded = capability_plan.frozen_inputs(frozen_record, state_dir=state_dir)
+            relays = [row for row, _text in loaded]
+        else:
+            parent = inventory.read_parent(request.parent_inventory, now=current) if request.parent_inventory else None
+            relays = [capability_plan.load(state_dir, ref, now=current)[0]
+                      for ref in sorted(set(request.relay_results))]
         bodies = []
         for item in value.items:
             bodies.append({"kind": "body", "required": item["required"], "bytes": item["bytes"],
@@ -1519,7 +1525,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         capabilities, capability_block = capability_plan.for_task(
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
-            relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings)
+            relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
+            frozen_record=frozen_record)
         needed = bool(value.items or value.not_delivered or capabilities is not None
                       or request.skill_needs is not None or request.parent_inventory or request.relay_results
                       or query_needs is not None)
@@ -1551,8 +1558,9 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                            for index, item in enumerate(value.items, 1))
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env),
                                 now=dt.datetime.now(dt.timezone.utc), classes=capability_settings["classes"])
-        parent = inventory.read_parent(request.parent_inventory, now=dt.datetime.now(dt.timezone.utc)) \
-            if request.parent_inventory else None
+        parent = (capability_plan.frozen_inputs(frozen_record, state_dir=state_dir)[0] if frozen_record is not None
+                  else inventory.read_parent(request.parent_inventory, now=dt.datetime.now(dt.timezone.utc))
+                  if request.parent_inventory else None)
         optional_bytes = skill_growth + capability_plan.optional_render_bound(child, parent)
         measurement = budget.measure(profile, text, deferred=deferred,
                                      skill_bytes=len((block or "").encode("utf-8")) + skill_growth,
@@ -1561,12 +1569,14 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         facts["profile"] = digest(profile)
         expires = min(profile["expires_at"], facts["lease"]["expires_at"],
                       _iso(dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=300)),
-                      *(([facts["inventory"]["parent"]["expires_at"]] if facts["inventory"]["parent"] else [])),
-                      *[row["expires_at"] for row in facts["relay_results"]], key=budget.moment)
+                      *(([facts["inventory"]["parent"]["expires_at"]]
+                         if frozen_record is None and facts["inventory"]["parent"] else [])),
+                      *([row["expires_at"] for row in facts["relay_results"]] if frozen_record is None else []),
+                      key=budget.moment)
         original = digest(facts)
 
         def recheck():
-            if dt.datetime.now(dt.timezone.utc) >= budget.moment(expires):
+            if frozen_record is None and dt.datetime.now(dt.timezone.utc) >= budget.moment(expires):
                 raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed", "the preparation evidence "
                                            "expired; prepare again")
             current = capture(value)
@@ -1597,7 +1607,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                                    task_design=task_design, state_dir=state_dir, engine=request.engine,
                                    stage=request.stage, roots=roots,
                                    receiving_root=root if not native and request.retain_worker_text else None,
-                                   needs=needs, policy=settings, scope=packet.scope or holder.scope,
+                                   needs=delivery_needs, policy=settings, scope=packet.scope or holder.scope,
                                    prepare=prepare_e)
     except budget.BudgetRefused as exc:
         raise EngineError(f"{skillpack.BUDGET_CODE}({exc.reason})", exc.detail) from None
@@ -1620,7 +1630,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                 holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
                 items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
                 relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
-                class_needs=class_needs, class_status=class_status, advise=advise)
+                class_needs=class_needs, class_status=class_status, advise=advise, frozen_record=frozen_record)
         except CapabilityRefused as exc:
             raise _pack_error(exc) from None
 
@@ -2169,6 +2179,7 @@ class _CorrectionInputs:
     e_prepared: PreparedE | None = None
     e_source: dict | None = None
     e_frozen: str | None = None
+    e_record: dict | None = None
 
     def notice(self, text: str) -> None:
         from oah.rerank import _print_notice
@@ -2364,21 +2375,41 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
 
 def _freeze_e(inputs, *, env):
     from oah.atomic import StateCorrupt
+    from oah.discovery.store import StoreProblem
 
     try:
         _freeze_e_checked(inputs, env=env)
     except EngineError:
         raise
-    except (StateCorrupt, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
+    except (StateCorrupt, StoreProblem, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         raise EngineError("OAH_FIX_STATE_CHANGED", "the earlier E preparation or its current selection cannot be "
                           f"verified ({type(exc).__name__}); its record is kept; prepare again") from None
 
 
 def _freeze_e_checked(inputs, *, env):
     from oah.atomic import read_json
-    from oah.discovery import preparation
+    from oah import discovery, skillpack
+    from oah.discovery import preparation, providers, store, tasks
 
     holder = inputs.holder()
+
+    def needs_frozen():
+        judged, _design = _task_design(holder, inputs.packet, state_dir=inputs.state, stage="correction",
+                                       task=holder.task, engine="codex")
+        basis = task_basis(holder, judged, inputs.packet, root=pathlib.Path(holder.worktree))
+        settings = inputs.config.section("skills", skillsel.config_defaults())
+        policy = discovery.policy_digest(providers.settings_of(settings))
+        selected = any(row.get("packet_digest") == basis.source_digest
+                       and row.get("intent_digest") == basis.intent["digest"]
+                       and row.get("policy_digest") == policy
+                       and row.get("lease") == {"id": holder.id, "generation": holder.generation}
+                       and row.get("review_ids") for ref in tasks._index(inputs.state).values()
+                       if (row := store.get_record(inputs.state, tasks.SELECTIONS, ref)) is not None)
+        coverage = skillpack._accepted_coverage(judged)[0]
+        return selected or coverage is not None and any(
+            need["resolution"] == "skill" and "correction" in need["dispatch_stages"]
+            for stage in coverage["stages"] for need in stage["needs"])
+
     folder = runs.task_directory(inputs.state, holder.task)
     candidates = sorted(folder.iterdir(), reverse=True) if folder.is_dir() else []
     if len(candidates) > 1024:
@@ -2396,11 +2427,14 @@ def _freeze_e_checked(inputs, *, env):
         if raw is None:
             if (saved or {}).get("bundle"):
                 raise ValueError("the earlier selected run has no complete preparation")
+            result = read_json(path / "result.json", {}) if path.is_dir() else {}
+            if isinstance(result, dict) and result.get("stage") == "initial" and needs_frozen():
+                raise ValueError("the earlier managed run has no complete frozen record")
             continue
         if not isinstance(raw, dict):
             raise ValueError("the earlier preparation is not a JSON object")
         if "facts" not in raw:
-            if not (saved or {}).get("bundle"):
+            if not (saved or {}).get("bundle") and (path / "correction.json").is_file():
                 preparation.check_projection(raw)
                 continue
             raise ValueError("the earlier preparation has no verified identity")
@@ -2413,7 +2447,7 @@ def _freeze_e_checked(inputs, *, env):
         if not isinstance(result, dict):
             raise ValueError("the earlier result is not a JSON object")
         if result.get("status") not in ("running", "finished", "failed"):
-            continue
+            raise ValueError("the earlier managed run no longer records a spent result")
         source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
                           stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
                           model=facts["target"]["model"], launch_effort=facts["target"]["effort"],
@@ -2422,7 +2456,10 @@ def _freeze_e_checked(inputs, *, env):
         inputs.e_needs = json.loads(json.dumps(refs["needs"]))
         inputs.e_source = json.loads(json.dumps(refs))
         inputs.e_frozen = preparation.correction_identity(record)
+        inputs.e_record = json.loads(json.dumps(record))
         return
+    if needs_frozen():
+        raise ValueError("current managed content requires the original complete frozen run record")
 
 
 def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease,
