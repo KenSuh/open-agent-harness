@@ -121,6 +121,33 @@ class RecordedAxesTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(project.fix_calls(), calls)
         self.assertEqual(path.read_bytes(), kept)
 
+    def test_extra_run_folders_do_not_block_the_pointed_original(self):
+        from oah import cli
+        from oah.review import fix
+        from tests.test_fix import RULES
+
+        project, original, _need, _basis = e_c6_fixture.selected_ordinary(self)
+        for index in range(1025):
+            (original.run.path.parent / f"r{index:05d}").mkdir()
+        kept = {path: path.read_bytes() for path in original.run.path.iterdir() if path.is_file()}
+        calls = project.fix_calls()
+        real = fix.correct
+        out, err = io.StringIO(), io.StringIO()
+
+        def correct(request, **options):
+            return real(request, **options, rules=RULES, temp_root=project.temp_root)
+
+        with mock.patch.dict(os.environ, project.env, clear=True), contextlib.chdir(project.repo), \
+                mock.patch.object(fix, "correct", correct), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            code = cli.main(["fix", "--task", "t1", "--tier", "high", "--json"])
+
+        result = json.loads(out.getvalue())
+        self.assertEqual((code, result["code"]), (0, "OAH_FIX_APPLIED"), str(result) + err.getvalue())
+        self.assertEqual(len(project.fix_calls()), len(calls) + 1)
+        self.assertIn("Prepare the selected ledger rows.", project.fix_calls()[-1]["prompt"])
+        self.assertEqual({path: path.read_bytes() for path in kept}, kept)
+
 
 class OrdinaryAndCodeTest(unittest.TestCase):
     def test_unmanaged_packet_read_and_parse_errors_keep_the_existing_launch_behavior(self):
@@ -164,20 +191,3 @@ class OrdinaryAndCodeTest(unittest.TestCase):
             result = call.execute(prepared, base_env=project.env)
         self.assertEqual(result["status"], "finished", result)
         self.assertEqual(project.recorded()["stdin"].encode("utf-8"), prompt)
-
-    def test_earlier_record_bound_refusal_keeps_its_code_and_reason(self):
-        from oah import call, runs
-        from tests.helpers import make_tmp_dir
-
-        root = make_tmp_dir(self)
-        folder = root / "task"
-        folder.mkdir()
-        for index in range(1025):
-            (folder / f"r{index:05d}").mkdir()
-        inputs = mock.Mock(state=root)
-        inputs.holder.return_value = mock.Mock(task="t1", worktree=str(root))
-        with mock.patch.object(runs, "task_directory", return_value=folder), \
-                self.assertRaises(call.EngineError) as caught:
-            call._freeze_e(inputs, env={})
-        self.assertEqual(caught.exception.code, "OAH_SKILL_NOT_DELIVERABLE(changed)")
-        self.assertIn("too many preparation references", str(caught.exception))
