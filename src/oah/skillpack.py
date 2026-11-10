@@ -26,6 +26,7 @@ import re
 from typing import Callable, Mapping, Sequence
 
 from oah.discovery.preparation import PreparedE
+from oah.design.sources.adapters import TransportRefused
 
 OPERATIONS = ("dispatch", "design-inspect", "public-explore")
 TASKLESS = ("design-inspect", "public-explore")  # lead-only exploration: a request budget, never delivery
@@ -44,7 +45,7 @@ RECEIVING_NAME = "skills-receiving.json"
 _ISSUER = object()
 
 
-class PackRefused(Exception):
+class PackRefused(TransportRefused):
     """A typed local refusal; a later recheck may follow earlier requests."""
 
     def __init__(self, code: str, reason: str, detail: str, *, plan: Sequence[str] = ()) -> None:
@@ -204,7 +205,9 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
     if prepare is not None:
         prepared = prepare(value)
     else:
-        root = pathlib.Path.cwd()
+        from oah.paths import repo_info
+
+        root = repo_info(pathlib.Path.cwd()).root if operation.kind == "dispatch" else pathlib.Path.cwd()
         config = root / ".oah" / "config.toml"
         original = _sha(config.read_bytes()) if config.is_file() else None
         required_needs = tuple(dict(item) for item in (*needs, *query_needs))
@@ -241,7 +244,9 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
         expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
 
         def verify_local():
-            if pathlib.Path.cwd().resolve() != root.resolve():
+            current_root = (repo_info(pathlib.Path.cwd()).root if operation.kind == "dispatch"
+                            else pathlib.Path.cwd())
+            if current_root.resolve() != root.resolve():
                 raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the local admission root changed; prepare again")
             if dt.datetime.now(dt.timezone.utc) >= expires:
                 raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the local admission expired; prepare again")

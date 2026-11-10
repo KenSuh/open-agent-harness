@@ -5,6 +5,7 @@ import contextlib
 import datetime as dt
 import pathlib
 import secrets
+import sys
 from contextvars import ContextVar
 from typing import Iterator, Literal, TypedDict, get_args
 
@@ -69,14 +70,25 @@ class Attempt:
             self.rows.append(row)
         else:
             self.omitted += 1
-        self.save()
+        try:
+            self.save()
+        except (OSError, ValueError):
+            if self.rows and self.rows[-1] is row:
+                self.rows.pop()
+            else:
+                self.omitted -= 1
+            raise
         ended = False
         try:
             yield row
             ended = True
         finally:
             row["state"] = "returned" if ended else "failed"
-            self.save()
+            try:
+                self.save()
+            except (OSError, ValueError) as exc:
+                print(f"OAH_SKILLS_ATTEMPT_SAVE_FAILED: the request outcome could not be saved "
+                      f"({type(exc).__name__}); its earlier request record is kept", file=sys.stderr)
 
 
 CURRENT: ContextVar[Attempt | None] = ContextVar("oah_e_attempt", default=None)
@@ -93,10 +105,7 @@ def scope(state: pathlib.Path) -> Iterator[Attempt]:
     try:
         yield attempt
     finally:
-        try:
-            attempt.save()
-        finally:
-            CURRENT.reset(token)
+        CURRENT.reset(token)
 
 
 @contextlib.contextmanager

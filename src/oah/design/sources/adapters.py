@@ -55,6 +55,10 @@ class Transport:
 IO_FIELDS = frozenset(("getter", "ls_remote", "fetch"))
 
 
+class TransportRefused(Exception):
+    pass
+
+
 @dataclasses.dataclass(frozen=True)
 class Settings:
     timeout: float = 30.0

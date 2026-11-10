@@ -98,26 +98,34 @@ class ReleaseGatewayTest(ReleaseFixture):
                 getter=observed("http", original.getter), ls_remote=remote,
                 fetch=observed("fetch", original.fetch)), skillpack.explore(1), state=fixture.root)
             fixture.collector.transport = fixture.collector.observer.transport = guarded
-            result = fixture.collector.check_one(fixture.spec)
+            try:
+                result = fixture.collector.check_one(fixture.spec)
+            except skillpack.PackRefused as exc:
+                result = exc
         self.assertEqual({p: p.read_bytes() for p in fixture.earlier}, fixture.earlier)
         self.assertIsNotNone(fixture.collector.snapshot(fixture.snapshot))
         self.assertEqual(fixture.collector.observation(fixture.observation)["snapshot"], fixture.snapshot)
         summaries = [json.loads(p.read_text(encoding="utf-8"))
                      for p in (fixture.root / "skills/attempts").glob("*.json")]
-        EVIDENCE[change_at or "control"] = {"result": result.result, "problems": result.problems,
+        EVIDENCE[change_at or "control"] = {"result": str(result) if isinstance(result, skillpack.PackRefused)
+            else result.result, "problems": () if isinstance(result, skillpack.PackRefused) else result.problems,
             "trace": trace, "summaries": summaries, "refusals": refusals, "earlier_preserved": True}
         return result, trace, summaries, refusals
 
     def test_policy_change_at_url_refuses_before_advertisement(self):
+        from oah.skillpack import PackRefused
+
         result, trace, summaries, refusals = self.collect("url")
-        self.assertEqual((result.result, result.problems), ("failed", ("attempt-failed",)))
+        self.assertIsInstance(result, PackRefused)
         self.assertEqual(refusals, ["OAH_SKILL_NOT_DELIVERABLE(changed)"])
         self.assertEqual(trace, [])
         self.assertEqual(summaries, [])
 
     def test_policy_change_after_advertisement_refuses_before_next_operation(self):
+        from oah.skillpack import PackRefused
+
         result, trace, summaries, refusals = self.collect("remote")
-        self.assertEqual((result.result, result.problems), ("failed", ("attempt-failed",)))
+        self.assertIsInstance(result, PackRefused)
         self.assertEqual(refusals, ["OAH_SKILL_NOT_DELIVERABLE(changed)"])
         self.assertEqual([r["name"] for r in trace], ["ls-remote"])
         self.assertEqual(len(summaries), 1)
@@ -126,7 +134,10 @@ class ReleaseGatewayTest(ReleaseFixture):
         self.assertIsNotNone(summaries[0]["requests"][0]["outcome_digest"])
 
     def test_unchanged_release_records_each_operation_while_open(self):
+        from oah.skillpack import PackRefused
+
         result, trace, summaries, refusals = self.collect(None)
+        assert not isinstance(result, PackRefused)
         self.assertEqual(result.result, "changed")
         self.assertEqual(refusals, [])
         self.assertEqual([r["name"] for r in trace], ["ls-remote", "http", "http", "fetch",

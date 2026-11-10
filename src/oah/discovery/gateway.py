@@ -60,9 +60,9 @@ def send(admitted: Admitted, kind: attempts.Kind, input_digest: str, transport: 
                                    "a retained request-summary location is required; nothing was sent")
     if query:
         live.reserve_query()
+    live.require()
     with attempts.request(kind, input_digest, state=state, known=known,
                           preparation=str(record["digest"])) as fact:
-        live.require()
         result = transport()
         if fact is not None:
             fact["outcome_digest"] = digest({"status": "returned"})
@@ -117,18 +117,11 @@ class SkillOrderProvider:
 
 
 def receive(run: Run, observation: Mapping[str, preparation.Json]) -> str | None:
-    from oah import skillpack
     from oah.atomic import write_json_atomic
     from oah.capabilities import inventory
 
     try:
         write_json_atomic(run.file_path(inventory.RECEIVING_NAME), observation)
     except OSError as exc:
-        failure = type(exc).__name__
-        try:
-            write_json_atomic(run.file_path(skillpack.RECEIVING_NAME),
-                              {"version": 1, "run": run.id, "available_usage": observation["available_usage"]})
-        except OSError as second:
-            failure += f"; closed usage summary also unavailable: {type(second).__name__}"
-        return failure
+        return type(exc).__name__
     return None

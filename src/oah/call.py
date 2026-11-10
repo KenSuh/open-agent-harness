@@ -617,6 +617,10 @@ def _call_floor(stage: str | None, scope: Sequence[str], kind: str) -> str:
     return routing.review_floor(scope, kind) if stage == "review" else routing.floor_tier(kind)
 
 
+def _launch_floor(stage: str, tier: str, floor_tier: str) -> str:
+    return floor_tier if stage == "review" else min(tier, floor_tier, key=routing.TIERS.index)
+
+
 def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: str, floor_tier: str,
                           freshness: models.Freshness, warnings: list[str], comparable: bool) -> bool:
     """Refuse a review below its floor; False when the user's named model leaves nothing to check against."""
@@ -732,7 +736,7 @@ def _read_text(path: pathlib.Path) -> str:
 
 
 def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callable[[str], object] | None,
-                read_source: Callable[[pathlib.Path], str] | None = None) -> Packet:
+                read_source: Callable[[pathlib.Path], str] | None = None, validate_plan: bool = True) -> Packet:
     """The parts of a packet a call needs. oah.intent (lane P4a) reads the source safely and parses it."""
     try:
         text = (read_source or _read_text)(path)
@@ -760,7 +764,12 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
         recorded = _PLAN_AXES.match(line)
         if recorded:
             values = routing.Axes(*recorded.groups()[1:])
-            routing.recommend(values)  # validate the recorded values before they reach selection
+            try:
+                routing.recommend(values)
+            except routing.RoutingError:
+                if validate_plan:
+                    raise
+                continue
             axes[recorded.group(1)] = values
         rule = _PLAN_RULE.match(line)
         if rule:
@@ -1081,7 +1090,7 @@ def prepared_e_digest(run) -> str | None:
                           "the earlier record is kept; prepare again") from None
 
 
-def _check_e(prepared, holder, *, publication=None, native_record=None, env=None):
+def _check_e(prepared, holder, *, publication=None, native_record=None, env=None, before_spend=True):
     from oah import skillpack
     from oah.call_cli import load_settings
     from oah.discovery import budget, preparation
@@ -1096,7 +1105,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
         request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task,
                               retain_worker_text=prepared.retain_worker_text)
         packet = read_packet(root, root / holder.binding().source, parse_intent=oah_intent.parse,
-                              read_source=oah_intent.read_source)
+                              read_source=oah_intent.read_source, validate_plan=False)
         _check_lease_source(holder.binding(), packet, prepared.task)
         task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=prepared.stage,
                                            task=prepared.task, engine=prepared.engine)
@@ -1127,12 +1136,16 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                 check_absence(saved)
                 return
             record = preparation.parse(raw)
-            if dt.datetime.now(dt.timezone.utc) >= budget.moment(record["expires_at"]):
+            if before_spend and dt.datetime.now(dt.timezone.utc) >= budget.moment(record["expires_at"]):
                 raise ValueError("the original preparation evidence expired")
             refs, facts = record["references"], record["facts"]
             if not isinstance(refs, dict) or not isinstance(facts, dict):
                 raise ValueError("the preparation references are malformed")
-            request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task,
+            run_data = prepared.run.read()
+            axes = ({key: native_record["task"][key] for key in ("kind", "risk")} if native_record is not None
+                    else run_data.get("axes") or {})
+            request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task, axes=axes,
+                                  override_stage=run_data.get("override_stage") is True,
                                   tier=refs["tier"], skill_needs=refs["skill_needs"],
                                   parent_inventory=refs["parent_inventory"], relay_results=tuple(refs["relay_results"]),
                                   route=refs["route"], retain_worker_text=prepared.retain_worker_text)
@@ -1192,8 +1205,10 @@ def _e_target(request, tier, *, root, state_dir, env, native=False):
     if native:
         return _native_target(request.engine, tier, settings, root=root, env=env)
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, persist=False)
+    basis = _native_basis(request, settings, root=root, state_dir=state_dir, allow_reference=True)
     resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, checked=checked,
-                                floor_tier=tier, stage=request.stage, record=False)
+                                floor_tier=_launch_floor(request.stage, tier, basis.floor_tier),
+                                stage=request.stage, record=False)
     path = pathlib.Path(resolution.base[0]).resolve()
     with path.open("rb") as handle:
         executable = "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
@@ -2289,6 +2304,16 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
 
 
 def _freeze_e(inputs, *, env):
+    from oah.atomic import StateCorrupt
+
+    try:
+        _freeze_e_checked(inputs, env=env)
+    except (EngineError, StateCorrupt, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
+        raise EngineError("OAH_FIX_STATE_CHANGED", "the earlier E preparation or its current selection cannot be "
+                          f"verified ({type(exc).__name__}); its record is kept; prepare again") from None
+
+
+def _freeze_e_checked(inputs, *, env):
     from oah.atomic import read_json
     from oah.discovery import preparation
 
@@ -2304,21 +2329,31 @@ def _freeze_e(inputs, *, env):
             raise EngineError("OAH_SKILL_NOT_DELIVERABLE(changed)", "the preparation reference exceeds its bounded "
                               "record size; prepare the task selection again")
         saved = read_json(path / "skills.json", None) if path.is_dir() else None
-        raw = saved.get("prepared_e") if isinstance(saved, dict) else None
-        if not isinstance(raw, dict) or "facts" not in raw:
+        if saved is not None and not isinstance(saved, dict):
+            raise ValueError("the earlier skills record is not a JSON object")
+        raw = saved.get("prepared_e") if saved is not None else None
+        if raw is None:
             continue
+        if not isinstance(raw, dict):
+            raise ValueError("the earlier preparation is not a JSON object")
+        if "facts" not in raw:
+            if preparation._hash(raw.get("identity_digest")):
+                continue
+            raise ValueError("the earlier preparation has no verified identity")
         record = preparation.parse(raw)
         facts, refs = record["facts"], record["references"]
         if not any(facts.get("selections", [])) or not (saved or {}).get("bundle"):
             continue
         result = read_json(path / "result.json", {})
+        if not isinstance(result, dict):
+            raise ValueError("the earlier result is not a JSON object")
         if result.get("status") not in ("running", "finished", "failed"):
             continue
         source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
                           stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
                           model=facts["target"]["model"], launch_effort=facts["target"]["effort"],
                           cli_version=facts["target"]["cli_version"], warnings=(), e_digest=record["digest"])
-        _check_e(source, holder, env=env)
+        _check_e(source, holder, env=env, before_spend=False)
         inputs.e_needs = json.loads(json.dumps(refs["needs"]))
         inputs.e_source = json.loads(json.dumps(refs))
         return
@@ -2385,6 +2420,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     from oah.lockfile import LockTimeout, StateLock
     from oah.review import receipts, rounds
     from oah.discovery import attempts
+    from oah import skillpack
 
     managed_review = rounds._MANAGED_DISPATCH.get()
     managed = (_CORRECTION_INPUTS.get() is not None
@@ -2401,6 +2437,8 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             return _prepare(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
                             has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now,
                             keychain=keychain)
+    except skillpack.PackRefused as exc:
+        raise _pack_error(exc) from None
     finally:
         if lock is not None:
             lock.__exit__(None, None, None)
@@ -2554,9 +2592,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
             warnings.append(secret_warning(difficulty.note, f"the packet {packet.source}"))
     else:
         difficulty = Difficulty(rule_tier, tier, False, TIER_GIVEN)
-    if request.stage != "review":
-        # Explicit flag and packet tiers keep their meaning outside review.
-        floor_tier = min(tier, floor_tier, key=routing.TIERS.index)
+    floor_tier = _launch_floor(request.stage, tier, floor_tier)
     # Admit the rule's pair before reserving any spend, then account durably before the paid judge.
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
                             now=now, keychain=keychain)
@@ -3012,10 +3048,14 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
                    read_source: Callable[[pathlib.Path], str] | None = None,
                    now: dt.datetime | None = None) -> NativeOffer:
     from oah.discovery import attempts
+    from oah import skillpack
 
-    with attempts.scope(state_dir):
-        return _prepare_native(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
-                                has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now)
+    try:
+        with attempts.scope(state_dir):
+            return _prepare_native(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
+                                    has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now)
+    except skillpack.PackRefused as exc:
+        raise _pack_error(exc) from None
 
 
 def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
@@ -3230,7 +3270,7 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
                             stage=request.stage, argv=(), cwd=str(root), timeout_s=300, env_additions={},
                             model=offer["target"]["model"], launch_effort=offer["target"]["effort"],
                             cli_version=None, warnings=(), e_digest=e_record["digest"] if e_record else None)
-        _check_e(prepared, basis.holder, native_record=offer, env=env)
+        _check_e(prepared, basis.holder, native_record=offer, env=env, before_spend=False)
         target = _native_target(request.engine, request.tier, settings, root=root, env=env)
         current = _native_identities(request, basis, bundle, target, e_record)
         problems.extend(f"the {label} changed" for label in _native_differences(offer, current))

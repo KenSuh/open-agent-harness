@@ -113,12 +113,15 @@ Search, review, refresh and skill advice require this live admission, including 
 A direct API call without admission refuses before transport. `PreparedE` binds these facts to the qualified
 target profile and final render digests. Every launch and native settlement checks the current facts again under
 the final guard. This includes a run prepared without managed content: adding its first task skill selection
-requires preparation again. A changed or expired identity refuses and preserves the earlier record. Corrections
+requires preparation again. Preparation has a five-minute window before launch or offer. Native settlement uses
+the offer's own 24-hour window, including an identical retry, while still comparing the current identities.
+A correction takes fresh admission and preparation; the original run's short window is not checked again, but its
+verified needs, selections and policy must still match. A changed identity refuses and preserves the earlier record. Corrections
 report `OAH_FIX_STATE_CHANGED` through their existing correction interface. An unchanged native
 selection settles once; an identical retry returns that same receipt. Corrections freeze the verified needs,
 selections and authorized relays and save only their closed digest/count/enum projection; worker text is resolved
-in memory. What it costs you: queued work, a correction or a settlement must be prepared again after a relevant
-local change or expiry; a direct API call cannot skip admission.
+in memory. What it costs you: queued work needs preparation again after five minutes, corrections need it after a
+relevant local change, and native settlement needs a new offer after its own expiry; a direct API call cannot skip admission.
 
 **One request boundary.** `skills find --task` checks the same existing required capabilities, target capacity
 and access as a dispatch. Managed skill ordering also rechecks that admission immediately before its request.
@@ -252,8 +255,8 @@ longer apply. What it costs you: you select again for a changed need or a new le
 **The call may search.** A call whose needs carry public technology words sends up to `max_queries` searches to
 skills.sh after admission, each with a 15-second limit and never under a launch lock. Answers and an unchanged
 need's discovery are reused for `cache_hours`. `[skills.discovery] enabled = false` turns it off. What it costs you:
-the first such call each day can wait for the search. `oah fix` corrections never search and do not carry task
-selections.
+the first such call each day can wait for the search. `oah fix` corrections never search; they re-admit the verified
+frozen selections and save only their closed projection.
 
 ## Native subagents
 

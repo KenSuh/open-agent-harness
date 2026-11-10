@@ -58,7 +58,7 @@ def combined(rows: list[Values]) -> Values:
             if value is not None:
                 previous = result[key]
                 result[key] = value if previous is None else previous + value
-    return result
+    return values(result)
 
 
 class AvailableUsage:
