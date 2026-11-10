@@ -608,7 +608,9 @@ class RelayIdentityTest(DeliveryTask, unittest.TestCase):
                          {"mcp:docs/lookup": lookup, "mcp:docs/search": search})
         for capability, relay, payload in (("mcp:docs/lookup", lookup, RESULT),
                                            ("mcp:docs/search", search, SEARCH_RESULT)):
-            self.assertIn(f"### Relay result for {capability} ({relay})\n````text\n{payload}````\n", prompts[0])
+            at = dt.datetime.fromisoformat(requests[capability]["created_at"]).isoformat()
+            self.assertIn(f"### Relay result for {capability} ({relay})\n"
+                          f"Relayed at: {at} (evidence from the original run).\n````text\n{payload}````\n", prompts[0])
         self.assertLess(prompts[0].index("mcp:docs/lookup ("), prompts[0].index("mcp:docs/search ("))
 
         # A new authorized result for the same request changes the plan only; with the old one too, it conflicts.
