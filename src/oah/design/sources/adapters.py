@@ -171,7 +171,8 @@ class Observer:
     def _release(self, spec: SourceSpec, verified: dict | None, deadline: float) -> Observation:
         git_url = self.transport.git_url(spec.locator)
         selector = release.Selector(spec, api_base=self.transport.api_base, git_url=git_url,
-                                    getter=self.transport.getter, policy=self._api_policy, deadline=deadline,
+                                    getter=self.transport.getter, advertiser=self.transport.ls_remote,
+                                    policy=self._api_policy, deadline=deadline,
                                     timeout=self.settings.timeout, put_blob=self.state.put_blob, clock=self.clock)
         old = ((verified or {}).get("observed") or {}).get("release") or {}
         problems: list[str] = []

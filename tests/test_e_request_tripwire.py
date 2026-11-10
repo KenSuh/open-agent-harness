@@ -14,6 +14,7 @@ from unittest import mock
 
 from tests.helpers import git_commit, make_tmp_dir
 from tests.test_skill_delivery import DeliveryTask, PLAIN, link_op, skill_md
+from tests.test_e_release_gateway import ReleaseFixture
 
 EVIDENCE = {}
 
@@ -204,6 +205,31 @@ class TaskFlowTripwireTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(guard.calls["provider.opener"], 1)
         self.assertEqual(len(server.requests), 1)
         EVIDENCE["legacy-order"] = dict(guard.calls)
+
+
+class ReleaseFlowTripwireTest(ReleaseFixture):
+    def test_release_selection_keeps_an_attempt_open_for_every_advertisement_and_fetch(self):
+        from oah import skillpack
+        from oah.design.sources import adapters, gitref
+        from oah.discovery import gateway
+
+        fixture = self.release_fixture()
+        guard = RequestTripwire(self)
+        guard.install()
+        original = fixture.collector.transport
+        original = dataclasses.replace(original, getter=guard.checked("release.http", original.getter),
+                                       ls_remote=gitref.ls_remote, fetch=adapters.fetch)
+        with contextlib.chdir(fixture.root):
+            guarded = gateway.collector_transport(original, skillpack.explore(1), state=fixture.root)
+            fixture.collector.transport = fixture.collector.observer.transport = guarded
+            result = fixture.collector.check_one(fixture.spec)
+        EVIDENCE["release"] = {"calls": dict(guard.calls), "violations": list(guard.violations),
+                               "result": result.result}
+        self.assertEqual(guard.violations, [])
+        self.assertEqual(result.result, "changed")
+        self.assertEqual(guard.calls["git.ls_remote"], 2)
+        self.assertEqual(guard.calls["sources.fetch"], 1)
+        self.assertEqual(guard.calls["release.http"], 4)
 
 
 class CollectorFieldTest(unittest.TestCase):
