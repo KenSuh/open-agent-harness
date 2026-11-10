@@ -48,8 +48,8 @@ class Transport:
     allow_loopback: bool = False
     resolve: Mapping[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
     getter: Callable[..., web.WebResult] = staticmethod(web.get)
-    ls_remote: Callable[..., gitref.Advertisement] = staticmethod(gitref.ls_remote)
-    fetch: Callable[..., Tree] = staticmethod(fetch)
+    ls_remote: Callable[..., gitref.Advertisement] = dataclasses.field(default_factory=lambda: gitref.ls_remote)
+    fetch: Callable[..., Tree] = dataclasses.field(default_factory=lambda: fetch)
 
 
 IO_FIELDS = frozenset(("getter", "ls_remote", "fetch"))
