@@ -28,13 +28,15 @@ class UsageFactsTest(unittest.TestCase):
                 {"rows": [], "whole": {}, "session": None}, target={}, at="2026-11-10T00:00:00Z", usage=changed)
 
     def test_a_summary_with_a_changed_digest_refuses_and_keeps_the_earlier_record(self):
-        from oah.discovery.attempts import Attempt
+        from oah import skillpack
+        from oah.discovery import attempts, gateway
         from oah.discovery.store import digest
 
         state = make_tmp_dir(self)
-        attempt = Attempt(state)
-        with attempt.request("skill-search", digest("fixture request")):
-            pass
+        sent = []
+        with contextlib.chdir(state), attempts.scope(state) as attempt:
+            gateway.send(skillpack.explore(1), "skill-search", digest("fixture request"), lambda: sent.append(1))
+        self.assertEqual(sent, [1])
         (path,) = (state / "skills" / "attempts").glob("*.json")
         before = path.read_bytes()
         attempt.rows[0]["outcome_digest"] = "not-a-digest"

@@ -75,12 +75,14 @@ class CorrectionWindowTest(DeliveryTask, unittest.TestCase):
         before = ordinary.run.file_path("skills.json").read_bytes()
         saved = json.loads(before)["prepared_e"]
         admissions = []
+        identity_checks = []
         real = call._admit_skills
 
         def capture(*args, **options):
             pack = real(*args, **options)
             if pack and pack.admitted and pack.admitted.prepared:
-                admissions.append(pack.admitted.prepared.record())
+                records = identity_checks if options.get("spent_record") is not None else admissions
+                records.append(pack.admitted.prepared.record())
             return pack
 
         with mock.patch.dict(os.environ, project.env, clear=True), contextlib.chdir(project.repo), \
@@ -89,6 +91,8 @@ class CorrectionWindowTest(DeliveryTask, unittest.TestCase):
             result = project.fix()
 
         self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+        self.assertTrue(identity_checks)
+        self.assertTrue(all(row["expires_at"] == saved["expires_at"] for row in identity_checks))
         self.assertTrue(admissions)
         self.assertTrue(all(dt.datetime.fromisoformat(row["expires_at"]) >
                             dt.datetime.fromisoformat(saved["expires_at"]) for row in admissions))
