@@ -83,12 +83,14 @@ def parse(raw: Json) -> Record:
 
     moment(str(raw["expires_at"]))
     for key in ("needs", "selections", "payloads", "not_delivered", "relay_results"):
-        if not isinstance(facts[key], list) or any(not isinstance(item, dict) and not (
-                key == "selections" and item is None) for item in facts[key]):
+        rows = facts[key]
+        if not isinstance(rows, list) or any(not isinstance(item, dict) and not (
+                key == "selections" and item is None) for item in rows):
             raise ValueError(f"the PreparedE {key} must be complete recorded rows")
-    if not isinstance(references["needs"], list) or references["needs"] != facts["needs"] \
-            or not isinstance(references["relay_results"], list) \
-            or any(not _hash(ref) for ref in references["relay_results"]):
+    recorded_needs, saved_needs, relay_refs = facts["needs"], references["needs"], references["relay_results"]
+    if not isinstance(recorded_needs, list) or not isinstance(saved_needs, list) \
+            or any(not isinstance(item, dict) or item not in recorded_needs for item in saved_needs) \
+            or not isinstance(relay_refs, list) or any(not _hash(ref) for ref in relay_refs):
         raise ValueError("the PreparedE need or relay references are incomplete")
     if facts["route"] != "lead":
         from oah.capabilities import inventory as inventories
