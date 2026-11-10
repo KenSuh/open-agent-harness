@@ -185,7 +185,10 @@ These appear in v0.3.0.
 [Skills and capabilities](skills-and-capabilities.md) explains these steps. Initial deterministic admission and
 capacity refusals happen before a run folder or spend. Later preparation, receiving or settlement refusals can
 follow started requests or a child process. Inspect the state folder's `skills/attempts/*.json` for bounded per-attempt request
-facts, including skill ordering, and `capabilities-receiving.json` in the run for available usage before retrying.
+facts, including skill ordering and each collector HTTP, `ls-remote` and Git fetch operation, and
+`capabilities-receiving.json` in the run for available usage before retrying. Each collector operation rechecks
+admission immediately before I/O; a policy change between operations refuses the next one while retaining earlier
+request records. Prepare again to continue. Local Git URL mapping creates no request attempt.
 If that first receiving write fails, the closed available-usage summary is retained in `skills-receiving.json`
 when that path is writable, before output normalization. The run still fails; a saved usage summary proves no
 delivery or application. Unknown totals are recorded

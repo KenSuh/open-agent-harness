@@ -1,3 +1,4 @@
+"""Check listed AST call shapes and wrapper forwarding; this scanner does not prove runtime I/O coverage."""
 from __future__ import annotations
 
 import ast
@@ -74,9 +75,8 @@ def request_violations(text: str, *, gateway_module: bool = False) -> list[int]:
         if name in ("oah.skillsel.choose", "skillsel.choose", "oah.skillsel.rerank_skills", "skillsel.rerank_skills"):
             transport = not any(k.arg == "admitted" and dotted(k.value) == "admitted" for k in original.keywords)
         if leaf in ("check_one", "refresh_for"):
-            guarded = function is not None and all(any(isinstance(n, ast.FunctionDef) and n.name == callback
-                and any(isinstance(c, ast.Call) and qualified(c.func) in ("oah.discovery.gateway.send", "gateway.send")
-                        for c in ast.walk(n)) for n in ast.walk(function)) for callback in ("getter", "git_url"))
+            guarded = function is not None and any(isinstance(n, ast.Call) and qualified(n.func) in (
+                "oah.discovery.gateway.collector_transport", "gateway.collector_transport") for n in ast.walk(function))
             transport = not guarded
         if transport and not through_gateway(original):
             violations.append(original.lineno)

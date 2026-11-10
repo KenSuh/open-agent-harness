@@ -123,7 +123,9 @@ local change or expiry; a direct API call cannot skip admission.
 **One request boundary.** `skills find --task` checks the same existing required capabilities, target capacity
 and access as a dispatch. Managed skill ordering also rechecks that admission immediately before its request.
 Taskless exploration and design inspection keep their own bounded lead admission. Every managed search,
-collector fetch and advice request writes a bounded attempt summary before sending. What it costs you: an
+collector HTTP request, Git advertisement (`ls-remote`), Git fetch and advice request rechecks admission immediately
+before I/O and keeps its bounded attempt open until the operation returns or fails. Git URL mapping is local and
+creates no request attempt. What it costs you: an
 unavailable required capability or a changed local input needs an explicit correction and a new preparation
 before another request; failed work that used requests or tokens stays inspectable before retry.
 

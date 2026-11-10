@@ -48,6 +48,11 @@ class Transport:
     allow_loopback: bool = False
     resolve: Mapping[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
     getter: Callable[..., web.WebResult] = staticmethod(web.get)
+    ls_remote: Callable[..., gitref.Advertisement] = staticmethod(gitref.ls_remote)
+    fetch: Callable[..., Tree] = staticmethod(fetch)
+
+
+IO_FIELDS = frozenset(("getter", "ls_remote", "fetch"))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -192,7 +197,7 @@ class Observer:
                 fetched = commit
             else:
                 with oah_scratch.directory("oah-source-") as scratch:
-                    tree = fetch(git_url, f"refs/tags/{chosen.tag}", pathlib.Path(scratch) / "repo",
+                    tree = self.transport.fetch(git_url, f"refs/tags/{chosen.tag}", pathlib.Path(scratch) / "repo",
                                  timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False,
                                  remaining=lambda: self._left(deadline))
                     fetched = tree.commit
@@ -242,7 +247,7 @@ class Observer:
 
     def _commit(self, spec: SourceSpec, verified: dict | None, deadline: float) -> Observation:
         git_url = self.transport.git_url(spec.locator)
-        advertisement = gitref.ls_remote(git_url, (spec.ref,), timeout=min(gitref.TIMEOUT, self._left(deadline)))
+        advertisement = self.transport.ls_remote(git_url, (spec.ref,), timeout=min(gitref.TIMEOUT, self._left(deadline)))
         self._left(deadline)
         commit = advertisement.refs.get(spec.ref)
         if commit is None:
@@ -251,7 +256,7 @@ class Observer:
             return Observation("unchanged", seen=commit)
         problems: list[str] = []
         with oah_scratch.directory("oah-source-") as scratch:
-            tree = fetch(git_url, spec.ref, pathlib.Path(scratch) / "repo",
+            tree = self.transport.fetch(git_url, spec.ref, pathlib.Path(scratch) / "repo",
                          timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False,
                          remaining=lambda: self._left(deadline))
             if tree.commit != commit:

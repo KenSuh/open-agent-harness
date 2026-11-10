@@ -11,7 +11,6 @@ undeliverable inline. Nothing is installed, executed or delivered here.
 from __future__ import annotations
 
 import datetime as dt
-import dataclasses
 import hashlib
 import re
 from typing import Mapping
@@ -140,7 +139,7 @@ def review(state_dir, *, repo: str, path: str, candidate: Mapping, allow: list[s
     from oah import skillpack
     from oah.discovery import gateway
 
-    skillpack.require(admitted)
+    live = skillpack.require(admitted)
     short, full, fields = identity(repo, path)
     try:
         store.remember_identity(state_dir, short, full, fields)
@@ -149,21 +148,14 @@ def review(state_dir, *, repo: str, path: str, candidate: Mapping, allow: list[s
     sources = sources or skill_sources(state_dir, allow)
     original_transport, original_observer = sources.transport, sources.observer.transport
 
-    def getter(url, **options):
-        return gateway.send(admitted, "skill-review", store.digest({"url": url}),
-                            lambda: original_observer.getter(url, **options), state=state_dir, query=True)
-
-    def git_url(locator):
-        return gateway.send(admitted, "skill-review", store.digest({"locator": locator}),
-                            lambda: original_observer.git_url(locator), state=state_dir, query=True, known=False)
-
-    guarded = dataclasses.replace(original_observer, getter=getter, git_url=git_url)
+    guarded = gateway.collector_transport(original_observer, live, state=state_dir)
     sources.transport = sources.observer.transport = guarded
     try:
         _word, spec = sources.register(build_spec(url=f"https://github.com/{repo}", source_id=short, track="commit",
                                                   paths=[path]))
-        skillpack.require(admitted)
+        skillpack.require(live)
         result = sources.check_one(spec)
+        skillpack.require(live)
     except SourceError as exc:
         raise ReviewFailed("collector", str(exc), environment=True) from None
     finally:

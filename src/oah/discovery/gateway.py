@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
-from typing import Callable, Mapping, Protocol, Sequence, TYPE_CHECKING, TypeVar
+from typing import Callable, Mapping, ParamSpec, Protocol, Sequence, TYPE_CHECKING, TypeVar
 
 from oah.discovery import attempts, preparation
 from oah.discovery.store import digest
@@ -11,10 +11,12 @@ from oah.rerank.base import Candidate
 from oah.secrets import Keychain, Secret
 
 if TYPE_CHECKING:
+    from oah.design.sources.adapters import Transport
     from oah.runs import Run
     from oah.skillpack import Admitted
 
 T = TypeVar("T")
+P = ParamSpec("P")
 
 
 def reachable(operation: str, *, managed: bool = False, discovery: bool = False, task_advice: bool = False,
@@ -65,6 +67,24 @@ def send(admitted: Admitted, kind: attempts.Kind, input_digest: str, transport: 
         if fact is not None:
             fact["outcome_digest"] = digest({"status": "returned"})
         return result
+
+
+def collector_transport(original: Transport, admitted: Admitted, *, state: pathlib.Path) -> Transport:
+    """Reserve one bounded source check; keep an admitted attempt around each of its I/O operations."""
+    from oah import skillpack
+    from oah.design.sources.adapters import IO_FIELDS
+
+    skillpack.require(admitted).reserve_query()
+
+    def wrap(name: str, operation: Callable[P, T]) -> Callable[P, T]:
+        def request(*args: P.args, **options: P.kwargs) -> T:
+            return send(admitted, "skill-review", digest({"operation": name,
+                        "target": str(args[0]) if args else ""}),
+                        lambda: operation(*args, **options), state=state)
+
+        return request
+
+    return dataclasses.replace(original, **{name: wrap(name, getattr(original, name)) for name in IO_FIELDS})
 
 
 class ScoreProvider(Protocol):
