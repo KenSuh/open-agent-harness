@@ -60,9 +60,12 @@ def send(admitted: Admitted, kind: attempts.Kind, input_digest: str, transport: 
                                    "a retained request-summary location is required; nothing was sent")
     if query:
         live.reserve_query()
-    live.require()
     with attempts.request(kind, input_digest, state=state, known=known,
                           preparation=str(record["digest"])) as fact:
+        live.require()
+        if fact is not None:
+            fact["state"] = "started"
+            fact["requests"] = 1 if known else None
         result = transport()
         if fact is not None:
             fact["outcome_digest"] = digest({"status": "returned"})

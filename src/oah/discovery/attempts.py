@@ -53,7 +53,7 @@ class Attempt:
         for row in self.rows:
             valid = valid and (set(row) == set(RequestFact.__annotations__) and row["kind"] in get_args(Kind)
                 and row["state"] in get_args(Status) and _hash(row["input_digest"])
-                and (row["requests"] is None or type(row["requests"]) is int and row["requests"] == 1)
+                and (row["requests"] is None or type(row["requests"]) is int and row["requests"] in (0, 1))
                 and (row["outcome_digest"] is None or _hash(row["outcome_digest"])))
         if not valid:
             raise ValueError("closed-summary: request evidence needs bounded digests, counts and enums")
@@ -64,8 +64,8 @@ class Attempt:
 
     @contextlib.contextmanager
     def request(self, kind: Kind, input_digest: str, *, known: bool = True) -> Iterator[RequestFact]:
-        row: RequestFact = {"kind": kind, "input_digest": input_digest, "state": "started",
-                            "requests": 1 if known else None, "outcome_digest": None}
+        row: RequestFact = {"kind": kind, "input_digest": input_digest, "state": "unknown",
+                            "requests": 0, "outcome_digest": None}
         if len(self.rows) < 128:
             self.rows.append(row)
         else:
@@ -83,7 +83,8 @@ class Attempt:
             yield row
             ended = True
         finally:
-            row["state"] = "returned" if ended else "failed"
+            if row["state"] == "started":
+                row["state"] = "returned" if ended else "failed"
             try:
                 self.save()
             except (OSError, ValueError) as exc:

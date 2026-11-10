@@ -167,17 +167,17 @@ def _marker_line(text: str) -> bool:
     return any(line.lstrip().casefold().startswith("<!-- oah") for line in text.split("\n"))
 
 
-def explore(max_queries: int) -> Admitted:
+def explore(max_queries: int, *, root: pathlib.Path | None = None) -> Admitted:
     """Admission for a taskless public exploration: only the explicit request budget is granted (E-DR3-F01)."""
     return admit(Operation("public-explore", max_queries=max(0, int(max_queries))), task_design=None,
-                 state_dir=pathlib.Path(), engine="", stage="")
+                 state_dir=pathlib.Path(), engine="", stage="", root=root)
 
 
-def inspect(snapshot: tuple[str, str, int, str], *, max_queries: int) -> Admitted:
+def inspect(snapshot: tuple[str, str, int, str], *, max_queries: int, root: pathlib.Path | None = None) -> Admitted:
     """Admission for a lead reading one verified design snapshot, accepted or not, with no task (E-DR3-F01). It
     grants the explicit request budget only: no task authority and no delivery."""
     return admit(Operation("design-inspect", design=snapshot, max_queries=max(0, int(max_queries))),
-                 task_design=None, state_dir=pathlib.Path(), engine="", stage="")
+                 task_design=None, state_dir=pathlib.Path(), engine="", stage="", root=root)
 
 
 def _installed_copy(name: str, roots) -> tuple[bytes, str, pathlib.Path] | None:
@@ -196,7 +196,7 @@ def _installed_copy(name: str, roots) -> tuple[bytes, str, pathlib.Path] | None:
 def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine: str, stage: str,
           roots=(), receiving_root: pathlib.Path | None = None, needs: Sequence[Mapping] = (),
           policy: Mapping | None = None, scope: Sequence[str] = (), prepare: Callable | None = None,
-          query_needs: Sequence[Mapping] = ()) -> Admitted:
+          query_needs: Sequence[Mapping] = (), root: pathlib.Path | None = None) -> Admitted:
     from oah.discovery import preparation
     from oah.discovery.store import digest
 
@@ -205,9 +205,16 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
     if prepare is not None:
         prepared = prepare(value)
     else:
-        from oah.paths import repo_info
+        from oah.paths import NotARepo, repo_info
 
-        root = repo_info(pathlib.Path.cwd()).root if operation.kind == "dispatch" else pathlib.Path.cwd()
+        if root is None:
+            try:
+                root = repo_info(pathlib.Path.cwd()).root
+            except NotARepo:
+                if operation.kind == "dispatch":
+                    raise
+                root = pathlib.Path.cwd()
+        root = root.resolve()
         config = root / ".oah" / "config.toml"
         original = _sha(config.read_bytes()) if config.is_file() else None
         required_needs = tuple(dict(item) for item in (*needs, *query_needs))
@@ -244,10 +251,6 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
         expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
 
         def verify_local():
-            current_root = (repo_info(pathlib.Path.cwd()).root if operation.kind == "dispatch"
-                            else pathlib.Path.cwd())
-            if current_root.resolve() != root.resolve():
-                raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the local admission root changed; prepare again")
             if dt.datetime.now(dt.timezone.utc) >= expires:
                 raise PackRefused(NOT_DELIVERABLE_CODE, "changed", "the local admission expired; prepare again")
             current = _sha(config.read_bytes()) if config.is_file() else None
@@ -269,7 +272,8 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
                  "selections": (task or {}).get("selections", []), "task": task, "lease": operation.lease,
                  "not_delivered": list(value.not_delivered), "route": "lead", "inventory": None,
                  "relay_results": [], "target": None, "request_budget": operation.max_queries,
-                 "references": None, "profile": None, "selectors": None, "access": None}
+                 "references": None, "profile": None, "selectors": None, "access": None,
+                 "context": {"root": str(root), "axes": None, "floor": None}}
         refs = {"needs": list(needs) + list(query_needs), "skill_needs": None, "parent_inventory": None,
                 "relay_results": [], "tier": None, "route": "lead"}
         prepared = preparation.PreparedE(json.dumps(facts, sort_keys=True), json.dumps(refs), "{}", "{}",
@@ -279,13 +283,16 @@ def admit(operation: Operation, *, task_design, state_dir: pathlib.Path, engine:
 
         def checked():
             from oah.capabilities import CapabilityRefused
+            from oah.config import ConfigError
             from oah.discovery.budget import BudgetRefused
             from oah.discovery.tasks import NeedsInvalid
             from oah.engines.effort import EngineError
+            from oah.routing import RoutingError
 
             try:
                 guard()
-            except (PackRefused, CapabilityRefused, BudgetRefused, NeedsInvalid, EngineError, OSError, ValueError) as exc:
+            except (PackRefused, CapabilityRefused, BudgetRefused, NeedsInvalid, EngineError, ConfigError,
+                    RoutingError, OSError, ValueError) as exc:
                 raise PackRefused(NOT_DELIVERABLE_CODE, "changed", f"{exc}; prepare again") from None
 
         prepared = dataclasses.replace(prepared, recheck=checked)

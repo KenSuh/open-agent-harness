@@ -570,8 +570,8 @@ def _find(args: argparse.Namespace) -> int:
     # Taskless: a design's needs are a design-inspect of the snapshot read above, a bare search is public-explore;
     # each is one closed operation with only the configured request budget and no delivery (E-DR3-F01).
     budget = found_settings["max_queries"]
-    admitted = (skillpack.inspect(snapshot, max_queries=budget) if snapshot is not None
-                else skillpack.explore(budget))
+    admitted = (skillpack.inspect(snapshot, max_queries=budget, root=info.root) if snapshot is not None
+                else skillpack.explore(budget, root=info.root))
     report = discovery.find(needs, state_dir=state, settings=found_settings, now=dt.datetime.now(dt.timezone.utc),
                             provider=provider, view=view, admitted=admitted,
                             roots=_roots(info, state, settings), choice=choice,
@@ -768,7 +768,7 @@ def _review(args: argparse.Namespace) -> int:
     info, state, _home = _context()
     _settings, found_settings = _discovery_settings(info)
     allow = _license_allow(info, found_settings)
-    admitted = skillpack.explore(discovery.LINK_REFRESH_LIMIT)
+    admitted = skillpack.explore(discovery.LINK_REFRESH_LIMIT, root=info.root)
     if args.path and not args.github:
         raise Refused("OAH_SKILLS_USAGE", "--path goes with --github OWNER/REPO")
     if args.links:
@@ -819,7 +819,7 @@ def _refresh_links(args: argparse.Namespace, info, state: pathlib.Path, allow: l
 
     record, snapshot = _design_snapshot(info, args.links)
     linked = discovery.linked_reviews(record, state)
-    admitted = skillpack.inspect(snapshot, max_queries=min(len(linked), discovery.LINK_REFRESH_LIMIT))
+    admitted = skillpack.inspect(snapshot, max_queries=min(len(linked), discovery.LINK_REFRESH_LIMIT), root=info.root)
     rows = discovery.refresh_links(admitted, record, state_dir=state, allow=allow)
     project, design, revision, digest = snapshot
     if args.json:

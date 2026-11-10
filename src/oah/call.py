@@ -1050,6 +1050,7 @@ def _check_skill_bundle(prepared: Prepared, run, lease_id: str, *, env=None) -> 
     """Local only, under the launch lock: every delivered skill text still has its recorded bytes, and a task
     selection's item is still the lead's current selection for its need under this lease (DESIGN §4.1)."""
     from oah import skillpack
+    from oah.config import ConfigError
     from oah.discovery import tasks
 
     try:
@@ -1059,7 +1060,12 @@ def _check_skill_bundle(prepared: Prepared, run, lease_id: str, *, env=None) -> 
     if bundle is None:
         return
     state_dir = run.path.parents[2]
-    roots = skillpack.environment_roots(pathlib.Path(prepared.cwd), state_dir, env if env is not None else os.environ)
+    try:
+        roots = skillpack.environment_roots(pathlib.Path(prepared.cwd), state_dir,
+                                            env if env is not None else os.environ)
+    except ConfigError as exc:
+        raise EngineError(f"{skillpack.NOT_DELIVERABLE_CODE}(changed)",
+                          f"{exc}; nothing was launched and the earlier E record is kept; prepare again") from None
     problems = (skillpack.recheck(bundle, state_dir=state_dir) + skillpack.recheck_installed(bundle, roots)
                 + skillpack.recheck_references(bundle, pathlib.Path(prepared.cwd)))
     problems += [f"{item['skill']}: the lead's task selection for need {item['need_id'][7:19]} changed since prepare"
@@ -1090,11 +1096,14 @@ def prepared_e_digest(run) -> str | None:
                           "the earlier record is kept; prepare again") from None
 
 
-def _check_e(prepared, holder, *, publication=None, native_record=None, env=None, before_spend=True):
+def _check_e(prepared, holder, *, publication=None, native_record=None, env=None, before_spend=True,
+             correction=False):
     from oah import skillpack
     from oah.call_cli import load_settings
     from oah.discovery import budget, preparation
     from oah.discovery.store import digest
+    from oah.config import ConfigError
+    from oah.packet import PacketError
 
     state_dir, root = prepared.run.path.parents[2], pathlib.Path(prepared.cwd)
     env = os.environ if env is None else env
@@ -1104,15 +1113,22 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             return
         request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task,
                               retain_worker_text=prepared.retain_worker_text)
-        packet = read_packet(root, root / holder.binding().source, parse_intent=oah_intent.parse,
-                              read_source=oah_intent.read_source, validate_plan=False)
-        _check_lease_source(holder.binding(), packet, prepared.task)
-        task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=prepared.stage,
-                                           task=prepared.task, engine=prepared.engine)
-        _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env,
-                      native=native_record is not None,
-                      brief_disabled=(skills or {}).get("rerank") == "unused(disabled-by-brief)",
-                      packet=packet, design=design, advise=False, expected=False)
+        try:
+            packet = read_packet(root, root / holder.binding().source, parse_intent=oah_intent.parse,
+                                  read_source=oah_intent.read_source, validate_plan=False)
+            _check_lease_source(holder.binding(), packet, prepared.task)
+            task_design, design = _task_design(holder, packet, state_dir=state_dir, stage=prepared.stage,
+                                               task=prepared.task, engine=prepared.engine)
+            _admit_skills(request, holder, task_design, root=root, state_dir=state_dir, env=env,
+                          native=native_record is not None,
+                          brief_disabled=(skills or {}).get("rerank") == "unused(disabled-by-brief)",
+                          packet=packet, design=design, advise=False, expected=False)
+        except (ConfigError, PacketError, OSError, ValueError):
+            return
+        except EngineError as exc:
+            if exc.code.startswith(("OAH_SKILL_", "OAH_SKILLS_", "OAH_CAPABILITY_")):
+                raise
+            return
 
     try:
         if publication is not None:
@@ -1136,14 +1152,25 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                 check_absence(saved)
                 return
             record = preparation.parse(raw)
+            facts = record["facts"]
+            assert isinstance(facts, dict)
+            context = facts["context"]
+            assert isinstance(context, dict)
+            recorded_path = context["root"]
+            assert isinstance(recorded_path, str)
+            recorded_root = pathlib.Path(recorded_path)
+            if recorded_root.resolve() != root.resolve():
+                raise ValueError("the prepared command root changed")
+            root = recorded_root
             if before_spend and dt.datetime.now(dt.timezone.utc) >= budget.moment(record["expires_at"]):
                 raise ValueError("the original preparation evidence expired")
             refs, facts = record["references"], record["facts"]
             if not isinstance(refs, dict) or not isinstance(facts, dict):
                 raise ValueError("the preparation references are malformed")
             run_data = prepared.run.read()
-            axes = ({key: native_record["task"][key] for key in ("kind", "risk")} if native_record is not None
-                    else run_data.get("axes") or {})
+            recorded_axes = context["axes"]
+            assert isinstance(recorded_axes, dict)
+            axes = {key: str(value) for key, value in recorded_axes.items()}
             request = CallRequest(engine=prepared.engine, stage=prepared.stage, task=prepared.task, axes=axes,
                                   override_stage=run_data.get("override_stage") is True,
                                   tier=refs["tier"], skill_needs=refs["skill_needs"],
@@ -1159,7 +1186,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                 native=refs["route"] == "native", brief_disabled=True, packet=packet, frozen_needs=refs["needs"],
                 target_check=lambda: _e_target(request, refs["tier"], root=root, state_dir=state_dir,
                                                env=env, native=refs["route"] == "native"),
-                design=design, advise=False, expected=True)
+                design=design, advise=False, expected=True, spent_record=record if not before_spend else None)
             if current is None or current.admitted is None or current.admitted.prepared is None \
                     or current.admitted.prepared.record()["facts"] != facts:
                 raise ValueError("the complete current local E identity changed")
@@ -1188,9 +1215,11 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             text = prepared.run.prompt_path.read_bytes().decode("utf-8")
         if record["final"]["render_digest"] != skillpack._sha(text.encode("utf-8")):
             raise ValueError("the exact final render changed")
-    except (ValueError, KeyError, TypeError, OSError, budget.BudgetRefused, skillpack.PackRefused,
+    except (ValueError, KeyError, TypeError, OSError, ConfigError, routing.RoutingError,
+            budget.BudgetRefused, skillpack.PackRefused,
             EngineError) as exc:
-        code = "OAH_FIX_STATE_CHANGED" if publication is not None else f"{skillpack.NOT_DELIVERABLE_CODE}(changed)"
+        code = ("OAH_FIX_STATE_CHANGED" if publication is not None or correction
+                else f"{skillpack.NOT_DELIVERABLE_CODE}(changed)")
         raise EngineError(code,
                           f"{exc}; nothing was sent and the earlier E record is kept; prepare again") from None
 
@@ -1356,7 +1385,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                   brief_disabled: bool = False, packet: Packet | None = None,
                   design_text: str | None = None, target=None, target_check=None, preview=None,
                   design=None, frozen_needs=None, advise: bool = True,
-                  expected: bool | None = None, query_needs=None, query_file: str | None = None) -> SkillPack | None:
+                  expected: bool | None = None, query_needs=None, query_file: str | None = None,
+                  spent_record=None) -> SkillPack | None:
     """Lane E's single admission (DESIGN §5.1, §6.4): local and deterministic; a refusal spends and reserves nothing.
     A SkillPack when accepted coverage links or task selections deliver skill texts, capabilities apply or task
     discovery ran, else None (the brief stays byte-identical). The skill admission, the capability plan's required
@@ -1401,6 +1431,13 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     section = (inputs.config.section("capabilities", capability_plan.DEFAULTS) if inputs is not None
                else load_config(root).section("capabilities", capability_plan.DEFAULTS))
     capability_settings = capability_plan.check_settings(section)
+    recorded_axes = packet.axes.get(request.stage) if packet is not None else None
+    given = recorded_axes.to_json() if recorded_axes is not None else {}
+    given.update({axis: value for axis, value in request.axes.items() if value is not None})
+    scored = routing.score_axes(stage=request.stage, kind=given.pop("kind", None),
+                               scope=packet.scope or holder.scope, overrides=given)
+    context = {"root": str(root.resolve()), "axes": scored.axes.to_json(),
+               "floor": _call_floor(request.stage, packet.scope or holder.scope, scored.axes.kind)}
 
     def capture(value):
         current = dt.datetime.now(dt.timezone.utc)
@@ -1429,8 +1466,10 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         selections = [tasks.selection_for(state_dir, item, lease_id=live.id) for item in current_needs]
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env), now=current,
                                 classes=capability_settings["classes"])
-        parent = inventory.read_parent(request.parent_inventory, now=current) if request.parent_inventory else None
-        relays = [capability_plan.load(state_dir, ref, now=current)[0] for ref in sorted(set(request.relay_results))]
+        parent = (spent_record["facts"]["inventory"]["parent"] if spent_record is not None else
+                  inventory.read_parent(request.parent_inventory, now=current) if request.parent_inventory else None)
+        relays = (spent_record["facts"]["relay_results"] if spent_record is not None else
+                  [capability_plan.load(state_dir, ref, now=current)[0] for ref in sorted(set(request.relay_results))])
         bodies = []
         for item in value.items:
             bodies.append({"kind": "body", "required": item["required"], "bytes": item["bytes"],
@@ -1447,6 +1486,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         return {"operation": value.operation.to_json(), "task": digest(dataclasses.asdict(live_basis)),
                 "lease": {"digest": digest(live.to_json()), "expires_at": live.expires_at},
                 "engine": request.engine, "stage": request.stage, "route": "native" if native else request.route,
+                "context": context,
                 "needs": list({item["id"]: item for item in (*current_needs, *current_queries)}.values()),
                 "selections": selections, "payloads": sorted(bodies, key=digest),
                 "not_delivered": list(value.not_delivered),
@@ -1465,6 +1505,17 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
 
     def prepare_e(value):
         nonlocal target
+        if spent_record is not None:
+            facts = capture(value)
+            facts["profile"] = digest(spent_record["profile"])
+
+            def refuse_spend():
+                raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "admission",
+                                           "a settlement identity check grants no new request; prepare again")
+
+            return preparation.PreparedE(json.dumps(facts, sort_keys=True), json.dumps(spent_record["references"]),
+                json.dumps(spent_record["profile"]), json.dumps(spent_record["envelope"]),
+                spent_record["expires_at"], refuse_spend, json.dumps(spent_record["final"]))
         capabilities, capability_block = capability_plan.for_task(
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
@@ -1555,6 +1606,13 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
 
     if admitted.prepared is None:
         return None
+    if spent_record is not None:
+        block, bundle = skillpack.finalize(admitted)
+        return SkillPack(block, bundle, None, None, admitted=admitted)
+    if inputs is not None and inputs.e_frozen is not None \
+            and preparation.correction_identity(admitted.prepared.record()) != inputs.e_frozen:
+        raise EngineError("OAH_FIX_STATE_CHANGED", "the new admission differs from the earlier frozen selection; "
+                          "its record is kept; prepare again")
 
     def plan_capabilities(class_needs=(), class_status=None, advise=None):
         try:
@@ -2110,6 +2168,7 @@ class _CorrectionInputs:
     e_needs: list | None = None
     e_prepared: PreparedE | None = None
     e_source: dict | None = None
+    e_frozen: str | None = None
 
     def notice(self, text: str) -> None:
         from oah.rerank import _print_notice
@@ -2308,7 +2367,9 @@ def _freeze_e(inputs, *, env):
 
     try:
         _freeze_e_checked(inputs, env=env)
-    except (EngineError, StateCorrupt, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
+    except EngineError:
+        raise
+    except (StateCorrupt, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         raise EngineError("OAH_FIX_STATE_CHANGED", "the earlier E preparation or its current selection cannot be "
                           f"verified ({type(exc).__name__}); its record is kept; prepare again") from None
 
@@ -2333,16 +2394,20 @@ def _freeze_e_checked(inputs, *, env):
             raise ValueError("the earlier skills record is not a JSON object")
         raw = saved.get("prepared_e") if saved is not None else None
         if raw is None:
+            if (saved or {}).get("bundle"):
+                raise ValueError("the earlier selected run has no complete preparation")
             continue
         if not isinstance(raw, dict):
             raise ValueError("the earlier preparation is not a JSON object")
         if "facts" not in raw:
-            if preparation._hash(raw.get("identity_digest")):
+            if not (saved or {}).get("bundle"):
+                preparation.check_projection(raw)
                 continue
             raise ValueError("the earlier preparation has no verified identity")
         record = preparation.parse(raw)
         facts, refs = record["facts"], record["references"]
-        if not any(facts.get("selections", [])) or not (saved or {}).get("bundle"):
+        if not (saved or {}).get("bundle") and not any(facts["selections"]) \
+                and not refs["parent_inventory"] and not refs["relay_results"]:
             continue
         result = read_json(path / "result.json", {})
         if not isinstance(result, dict):
@@ -2353,9 +2418,10 @@ def _freeze_e_checked(inputs, *, env):
                           stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
                           model=facts["target"]["model"], launch_effort=facts["target"]["effort"],
                           cli_version=facts["target"]["cli_version"], warnings=(), e_digest=record["digest"])
-        _check_e(source, holder, env=env, before_spend=False)
+        _check_e(source, holder, env=env, before_spend=False, correction=True)
         inputs.e_needs = json.loads(json.dumps(refs["needs"]))
         inputs.e_source = json.loads(json.dumps(refs))
+        inputs.e_frozen = preparation.correction_identity(record)
         return
 
 
@@ -3402,23 +3468,29 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     try:
         result = _run_prepared(prepared, env, prompt, sink=sink)
     except (OSError, ValueError, subprocess.SubprocessError, RootUnavailable) as exc:
-        _conclude_observation(prepared, sink)
+        observation_failure = _conclude_observation(prepared, sink)
         if prepared.retain_worker_text:
             run.write_logs("", "")
         extra = _end_reference_failed(reference)
-        return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
-                          error=(clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}") if prepared.retain_worker_text else
-                                 _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False)),
+        error = (clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}") if prepared.retain_worker_text else
+                 _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False))
+        if observation_failure:
+            error += "; " + (clean(observation_failure) if prepared.retain_worker_text else
+                             _recorded_error(EngineError(observation_failure.split(":", 1)[0], ""), False))
+        return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)), error=error,
                           **({"warnings": [*run.read().get("warnings", []), *extra]} if extra else {}))
     except (KeyboardInterrupt, SystemExit):
-        _conclude_observation(prepared, sink)
+        observation_failure = _conclude_observation(prepared, sink)
         # _run_prepared already stopped the process tree; never leave the run looking alive.
         if prepared.retain_worker_text:
             run.write_logs("", "")
         _end_reference_failed(reference)
-        run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
-                   error="OAH_RUN_INTERRUPTED: the run was interrupted (Ctrl-C or a stop signal) and its process "
-                         "tree was stopped; call the engine again when you are ready")
+        error = ("OAH_RUN_INTERRUPTED: the run was interrupted (Ctrl-C or a stop signal) and its process "
+                 "tree was stopped; call the engine again when you are ready")
+        if observation_failure:
+            error += "; " + (clean(observation_failure) if prepared.retain_worker_text else
+                             _recorded_error(EngineError(observation_failure.split(":", 1)[0], ""), False))
+        run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)), error=error)
         raise
     except EngineError:
         _end_reference_failed(reference)

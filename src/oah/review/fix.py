@@ -90,6 +90,12 @@ LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
 
 # Exception codes are data too: only these literal codes and sentences may cross an error boundary.
 _ERROR_DIAGNOSTICS = {
+    "OAH_CAPABILITY_INVENTORY_UNKNOWN": "read the tools again and refresh the parent inventory evidence before "
+                                        "retrying oah fix; the earlier preparation is kept.",
+    "OAH_CAPABILITY_RELAY_REQUIRED(expired)": "read the tools again, plan and relay again with fresh evidence "
+                                             "before retrying oah fix; the earlier preparation is kept.",
+    "OAH_SKILL_NOT_DELIVERABLE(changed)": "prepare the task selection again before retrying oah fix; the earlier "
+                                         "preparation is kept.",
     "OAH_FIX_FAILED": "the correction failed; inspect the worktree and task records, then retry oah fix.",
     "OAH_FIX_CLEANUP_FAILED": "process-tree cleanup could not be verified; inspect running workers and the "
                               "worktree before retrying oah fix.",

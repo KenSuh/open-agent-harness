@@ -13,9 +13,14 @@ KEYS: Final = frozenset({"version", "prep_id", "facts", "references", "profile",
                         "digest"})
 FACT_KEYS: Final = frozenset({"operation", "task", "lease", "engine", "stage", "route", "needs", "selections",
                             "payloads", "not_delivered", "policy", "inventory", "relay_results", "target",
-                            "request_budget", "references", "profile", "selectors", "access"})
+                            "request_budget", "references", "profile", "selectors", "access", "context"})
 REFERENCE_KEYS: Final = frozenset({"needs", "skill_needs", "parent_inventory", "relay_results", "tier", "route"})
 FINAL_KEYS: Final = frozenset({"bundle_digest", "capability_plan_digest", "render_digest"})
+PROJECTION_KEYS: Final = frozenset({"version", "identity_digest", "prep_id", "admission_digest", "bundle_digest",
+    "capability_plan_digest", "pack_id", "profile_digest", "render_digest", "task_digest", "need_digest",
+    "selection_digest", "policy_digest", "inventory_digest", "relay_digest", "reference_digest", "context_digest",
+    "target_digest", "payloads", "not_delivered", "engine", "stage", "route", "receiving", "counts", "envelope",
+    "expires_at", "counted"})
 
 
 def encoded(value: Record) -> str:
@@ -58,6 +63,18 @@ def parse(raw: Json) -> Record:
     if set(facts) != FACT_KEYS or not isinstance(references, dict) or set(references) != REFERENCE_KEYS \
             or not isinstance(final, dict) or set(final) != FINAL_KEYS:
         raise ValueError("the PreparedE facts, references or final projection have unknown or missing fields")
+    context = facts["context"]
+    if not isinstance(context, dict) or set(context) != {"root", "axes", "floor"} \
+            or not isinstance(context["root"], str) or not context["root"]:
+        raise ValueError("the PreparedE command context is incomplete")
+    axes = context["axes"]
+    if facts["route"] == "lead":
+        if axes is not None or context["floor"] is not None:
+            raise ValueError("a taskless preparation has no dispatch axes or floor")
+    elif not isinstance(axes, dict) or set(axes) != {"kind", "intensity", "reasoning", "risk"} \
+            or any(not isinstance(value, str) for value in axes.values()) \
+            or context["floor"] not in ("low", "medium", "high", "max"):
+        raise ValueError("the PreparedE request axes are incomplete")
     from oah.discovery.budget import moment
 
     moment(str(raw["expires_at"]))
@@ -112,6 +129,7 @@ def projection(record: Record) -> Record:
             "policy_digest": digest(facts.get("policy")), "inventory_digest": digest(facts.get("inventory")),
             "relay_digest": digest(facts.get("relay_results")),
             "reference_digest": digest({"references": checked["references"], "access": facts.get("access")}),
+            "context_digest": digest(facts["context"]),
             "target_digest": digest(facts.get("target")), "payloads": payloads,
             "not_delivered": [{"reason_digest": digest(reason)} for reason in reasons],
             "engine": facts.get("engine"), "stage": facts.get("stage"), "route": facts.get("route"),
@@ -122,6 +140,73 @@ def projection(record: Record) -> Record:
                        "relay_results": len(relays),
                        "payloads": len(payloads), "not_delivered": len(reasons)},
             "envelope": envelope, "expires_at": checked["expires_at"], "counted": False}
+
+
+def check_projection(raw: Record) -> None:
+    from oah.discovery.budget import moment
+
+    if set(raw) != PROJECTION_KEYS or type(raw["version"]) is not int or raw["version"] != 1 \
+            or raw["counted"] is not False:
+        raise ValueError("the earlier correction projection is incomplete")
+    nullable = {"bundle_digest", "capability_plan_digest", "render_digest"}
+    for key in (key for key in PROJECTION_KEYS if key.endswith("digest") or key in ("prep_id", "pack_id")):
+        if not _hash(raw[key]) and not (key in nullable and raw[key] is None):
+            raise ValueError("the earlier correction projection has an invalid digest")
+    if raw["engine"] not in ("claude", "codex") or raw["stage"] not in ("initial", "correction", "review") \
+            or raw["route"] not in ("process", "orca", "native"):
+        raise ValueError("the earlier correction projection has an invalid target")
+    counts, envelope, receiving = raw["counts"], raw["envelope"], raw["receiving"]
+    if not isinstance(counts, dict) or set(counts) != {"needs", "selections", "relay_results", "payloads", "not_delivered"} \
+            or any(not _nonnegative(value) for value in counts.values()) \
+            or not isinstance(envelope, dict) or set(envelope) != {"prompt_bytes", "deferred_required_bytes",
+                "deferred_render_bytes", "optional_reserve_bytes", "upper_tokens", "available_tokens", "sha256"} \
+            or not _hash(envelope["sha256"]) \
+            or any(not _nonnegative(value) for key, value in envelope.items() if key != "sha256") \
+            or not isinstance(receiving, dict) or set(receiving) != {"delivery", "reference_delivery", "read", "application"} \
+            or receiving["delivery"] not in ("offered", "prompt-written") \
+            or receiving["reference_delivery"] not in ("required", "not-needed") \
+            or receiving["read"] != "unverified" or receiving["application"] != "not-observed":
+        raise ValueError("the earlier correction projection has invalid counts or receiving fields")
+    payloads, reasons = raw["payloads"], raw["not_delivered"]
+    if not isinstance(payloads, list) or len(payloads) != counts["payloads"] \
+            or not isinstance(reasons, list) or len(reasons) != counts["not_delivered"]:
+        raise ValueError("the earlier correction projection has incomplete payloads")
+    for row in payloads:
+        if not isinstance(row, dict) or set(row) != {"kind", "required", "bytes", "sha256", "mode"} \
+                or row["kind"] not in ("body", "auxiliary", "relay") or type(row["required"]) is not bool \
+                or not _nonnegative(row["bytes"]) or not _hash(row["sha256"]) \
+                or row["mode"] not in ("inline", "reference", "reference-only", "not-delivered"):
+            raise ValueError("the earlier correction projection has an invalid payload")
+    if any(not isinstance(row, dict) or set(row) != {"reason_digest"} or not _hash(row["reason_digest"])
+           for row in reasons):
+        raise ValueError("the earlier correction projection has an invalid omission")
+    moment(str(raw["expires_at"]))
+
+
+def correction_identity(record: Record) -> str:
+    facts = parse(record)["facts"]
+    assert isinstance(facts, dict)
+    inventory, context = facts["inventory"], facts["context"]
+    assert isinstance(inventory, dict) and isinstance(context, dict)
+    parent = inventory["parent"]
+    stable_parent: Record | None = None
+    if parent is not None:
+        assert isinstance(parent, dict)
+        entries = parent["entries"]
+        assert isinstance(entries, list)
+        stable_entries: list[Json] = []
+        for item in entries:
+            assert isinstance(item, dict)
+            source = item["source"]
+            assert isinstance(source, dict)
+            stable_entries.append({key: value for key, value in item.items() if key not in ("entry_digest", "source")}
+                | {"source": {key: value for key, value in source.items() if key not in ("observed_at", "expires_at")}})
+        stable_parent = {key: value for key, value in parent.items()
+                         if key not in ("digest", "observed_at", "expires_at", "entries")}
+        stable_parent["entries"] = stable_entries
+    return digest({"needs": facts["needs"], "selections": facts["selections"], "payloads": facts["payloads"],
+                   "not_delivered": facts["not_delivered"], "policy": facts["policy"],
+                   "root": context["root"], "parent": stable_parent})
 
 
 def _hash(value: Json) -> bool:

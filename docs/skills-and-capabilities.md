@@ -112,22 +112,29 @@ engine and stage. An excluded mandatory skill refuses; an omitted optional skill
 Search, review, refresh and skill advice require this live admission, including disabled, cached and retry paths.
 A direct API call without admission refuses before transport. `PreparedE` binds these facts to the qualified
 target profile and final render digests. Every launch and native settlement checks the current facts again under
-the final guard. This includes a run prepared without managed content: adding its first task skill selection
+the final guard, using the preparation's recorded project root, effective request axes and floor. Running a taskless
+command from a project subdirectory uses that same project's policy. This includes a run prepared without managed content: adding its first task skill selection
 requires preparation again. Preparation has a five-minute window before launch or offer. Native settlement uses
-the offer's own 24-hour window, including an identical retry, while still comparing the current identities.
+the offer's own 24-hour window, including an identical retry, while still comparing the current identities. It keeps
+the offered parent inventory and relay evidence rather than reading those short-lived inputs again after the spend.
 A correction takes fresh admission and preparation; the original run's short window is not checked again, but its
 verified needs, selections and policy must still match. A changed identity refuses and preserves the earlier record. Corrections
 report `OAH_FIX_STATE_CHANGED` through their existing correction interface. An unchanged native
 selection settles once; an identical retry returns that same receipt. Corrections freeze the verified needs,
 selections and authorized relays and save only their closed digest/count/enum projection; worker text is resolved
 in memory. What it costs you: queued work needs preparation again after five minutes, corrections need it after a
-relevant local change, and native settlement needs a new offer after its own expiry; a direct API call cannot skip admission.
+relevant local change, and native settlement needs a new offer after its own expiry. Correcting work with a parent
+inventory or relay older than five minutes requires reading the tools again and supplying refreshed evidence;
+the refusal names that requirement. A direct API call cannot skip admission.
 
 **One request boundary.** `skills find --task` checks the same existing required capabilities, target capacity
 and access as a dispatch. Managed skill ordering also rechecks that admission immediately before its request.
 Taskless exploration and design inspection keep their own bounded lead admission. Every managed search,
 collector HTTP request, Git advertisement (`ls-remote`), Git fetch and advice request rechecks admission immediately
-before I/O and keeps its bounded attempt open until the operation returns or fails. Git URL mapping is local and
+before I/O, after its attempt record is prepared with zero requests, and keeps its bounded attempt open until the
+operation returns or fails. The live row becomes started only as transport starts. If a later summary write fails,
+the earlier zero-request preparation remains and a warning reports that the outcome could not be saved; the
+transport result or refusal is preserved. Git URL mapping is local and
 creates no request attempt. What it costs you: an
 unavailable required capability or a changed local input needs an explicit correction and a new preparation
 before another request; failed work that used requests or tokens stays inspectable before retry.
@@ -435,7 +442,8 @@ should compare; one missing link keeps the first entry for that class.
   section. A lead may narrow it to a byte range in the needs file, and oah checks that range against the packet
   again; the command offers no way to choose one.
 - A native subagent's reads are seen only through `oah skills read`; the host's own file reads are not observed.
-  `oah call settle` rechecks capability relay identity and expiry before first settlement and receipt reuse.
+  `oah call settle` compares the recorded capability relay identity before first settlement and receipt reuse;
+  the offer's 24-hour window governs settlement, and fresh relay evidence is needed for a new spend.
 - Capability classes come only from Jev and from the tools a skill names. A dispatch's stage and kind add no
   class, packet lines that name a capability ID are not read, and an entry chosen for a class does not bring its
   own dependencies.

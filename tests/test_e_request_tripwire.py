@@ -36,10 +36,10 @@ class RequestTripwire:
             attempt, row = self.open_rows[-1]
             saved = json.loads((attempt.state / "skills/attempts" / f"{attempt.id[7:]}.json").read_text(
                 encoding="utf-8"))
-            if row["state"] != "started" or not any(r["state"] == "started" and
+            if row["state"] != "started" or row["requests"] != 1 or not any(r["state"] == "unknown" and r["requests"] == 0 and
                     r["input_digest"] == row["input_digest"] for r in saved["requests"]):
                 self.violations.append(name)
-                raise AssertionError(f"{name}: the started request is not retained")
+                raise AssertionError(f"{name}: the zero-request preparation or live transport start is missing")
             return operation(*args, **kwargs)
 
         return invoke

@@ -165,6 +165,8 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    from oah.skillpack import PackRefused
+
     try:
         if os.environ.get("OAH_WORKER") == "1" and args.design_command in WORKER_REFUSED:
             from oah.design.binding import WORKER_REFUSED_CODE
@@ -174,6 +176,9 @@ def run(args: argparse.Namespace) -> int:
                               "carries designs")
         store = open_store(pathlib.Path.cwd())
         return HANDLERS[args.design_command](args, store)
+    except PackRefused as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_REFUSED
     except WikiError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
@@ -385,7 +390,7 @@ def _stage_advisor(store, view, snapshot):
     from oah import skillpack
 
     admitted = skillpack.inspect((snapshot.project, snapshot.design, snapshot.revision, snapshot.digest),
-                                 max_queries=1)
+                                 max_queries=1, root=store.root)
 
     def advise(options: dict) -> dict:
         import hashlib

@@ -711,11 +711,11 @@ def _admitted(rubric, admitted) -> bool:
         return True
     from oah import skillpack
 
-    try:
-        skillpack.require(admitted)
-        return True
-    except skillpack.PackRefused:
+    if not isinstance(admitted, skillpack.Admitted) or admitted._issuer is not skillpack._ISSUER \
+            or admitted.prepared is None:
         return False
+    skillpack.require(admitted)
+    return True
 
 
 def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=None, brief_disabled: bool = False,
