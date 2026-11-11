@@ -175,7 +175,35 @@ Plans can change as the tools change.
 ### v0.4.0: design together, one question at a time
 
 **Planned, not available yet.** You say what you want to build, and oah asks one design question at a time
-with a recommendation. You take part in the design decisions before implementation begins.
+with a recommendation. You take part in the design decisions before implementation begins. The update is
+planned to include:
+
+- **One question at a time.** oah asks one key design question, says why it matters and recommends an answer.
+  You can say you don't know, decide later, mark a question as not applicable, and pick up where you left off.
+- **The whole design, not one issue.** The conversation covers behaviour, how long data is kept, which side is
+  the authority, secrets, effects outside the project, optional payment, recovery, cost and accessibility.
+  Topics that don't apply are skipped, and a changed decision rechecks what depends on it.
+- **Starts when you ask.** In supported AI tools, asking for a design in plain words opens the design
+  conversation and applies its question-by-question method. You can turn this off.
+- **Stack suggestions with trade-offs.** oah suggests a language and source combination that fits, with what it
+  means for learning and operation. It never forces Rust or a multi-language setup.
+- **Open-source references you can check.** Each reference keeps its source, reviewed revision, release and
+  license, and MIT, dual-licensed, ineligible and unknown stay distinct. Registered sources are refreshed when
+  work starts or resumes and on a schedule; a failed refresh is never shown as fresh.
+- **Every run uses the latest design.** Each decision has a stable ID and revision. Start, resume, hand-off and
+  review all receive the current design. When a decision changes, the packets and reviews it affects are
+  marked out of date, and landing waits until they are redone.
+- **Skills and tools you can see.** oah can find skills beyond a fixed list with verified tools, showing source,
+  pin, license and compatibility, and never installs anything silently. It shows which skills, MCP servers and
+  plugins a worker really gets: directly, relayed by the lead session, or not supported. Claude Code, Codex,
+  Orca workers and native subagents get the same preparation.
+- **Repeated problems are traced to their cause.** When the same kind of review problem comes back after a fix,
+  the correction has to explain why the earlier fix missed it, fix every place with the same cause, and add one
+  test that catches the whole kind.
+- **Your project wiki keeps the design.** The design index, decisions and history live in the project wiki, and
+  your own notes and other projects are left untouched.
+- TypeSafe Jev can help rank choices; recorded facts and your decisions stay the authority. Standard-library
+  Python on Windows and macOS, as before.
 
 ## Documentation
 
