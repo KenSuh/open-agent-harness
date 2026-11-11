@@ -175,7 +175,41 @@ Plans can change as the tools change.
 ### v0.4.0: design together, one question at a time
 
 **Planned, not available yet.** You say what you want to build, and oah asks one design question at a time
-with a recommendation. You take part in the design decisions before implementation begins.
+with a recommendation. You take part in the design decisions before implementation begins. The update is
+planned to include:
+
+- **One question at a time.** oah asks one key design question, says why it matters and recommends an answer.
+  You can say you don't know, decide later, mark a question as not applicable, and pick up where you left off.
+- **The whole design, not one issue.** The conversation covers behaviour, how long data is kept, what the server
+  decides, secrets, effects outside the project, recovery, cost, accessibility and payment where it applies. It
+  skips irrelevant topics and revisits parts of the design that depend on a decision when it changes.
+- **Starts when you ask.** In supported AI tools, asking for a design in plain words opens the design
+  conversation and applies its question-by-question method. You can turn this off.
+- **Stack suggestions with trade-offs.** oah suggests a language and source combination that fits, with what it
+  means for learning and operation. It never forces Rust or a multi-language setup.
+- **Open-source references you can check.** Each reference keeps its source, reviewed revision, release and
+  license, and MIT, dual-licensed, ineligible and unknown stay distinct. Registered sources are refreshed when
+  work starts or resumes and on a schedule; a failed refresh is never shown as fresh.
+- **Work follows the current approved design.** Each decision has a stable ID and revision. When you start,
+  resume, hand off or review work, oah uses the current approved design. When you approve a change to a
+  decision, oah marks the work instructions and reviews it affects as out of date. Before the work can be
+  merged, those instructions must be updated and those reviews run again.
+- **Design changes update earlier project documents.** When you approve a change to the design or one of its
+  decisions, oah uses gbrain to find earlier wiki pages, notes and documents that depend on the previous design.
+  It updates affected material within the project's configured scope, and you can roll back those changes.
+  gbrain searches on your computer using embeddings from Ollama. This feature is on by default for everyone. It
+  needs Ollama, Bun, about 2.7 GB of disk space and time to build the first search index.
+- **Skills and tools you can see.** oah can find skills beyond a fixed list with verified tools, showing source,
+  pin, license and compatibility, and never installs anything silently. It shows which skills, MCP servers and
+  plugins a worker really gets: directly, relayed by the lead session, or not supported. Claude Code, Codex,
+  Orca workers and native subagents share the same preparation process when launched in a way oah supports.
+- **Repeated problems are traced to their cause.** When the same kind of review problem comes back after a fix,
+  the correction has to explain why the earlier fix missed it, fix every place with the same cause, and add one
+  test that catches the whole kind.
+- **Your project wiki keeps the design.** The design index, decisions and history live in the project wiki, and
+  your own notes and other projects are left untouched.
+- TypeSafe Jev can help rank design options. The design follows recorded facts and your decisions. The oah CLI
+  uses the Python standard library and runs on Windows and macOS.
 
 ## Documentation
 
