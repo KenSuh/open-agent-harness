@@ -193,6 +193,11 @@ planned to include:
 - **Every run uses the latest design.** Each decision has a stable ID and revision. Start, resume, hand-off and
   review all receive the current design. When a decision changes, the packets and reviews it affects are
   marked out of date, and landing waits until they are redone.
+- **A design change reaches earlier material too.** When the design or a decision changes, oah also finds the
+  earlier material written under the old design (wiki pages, notes and documents that depend on it) and updates
+  it automatically, with a check and a way to roll back. Finding it uses gbrain search over local ollama
+  embeddings, so the search runs on your computer. This is on for everyone; it needs ollama and bun, about
+  2.7 GB of disk, and some time for the first indexing.
 - **Skills and tools you can see.** oah can find skills beyond a fixed list with verified tools, showing source,
   pin, license and compatibility, and never installs anything silently. It shows which skills, MCP servers and
   plugins a worker really gets: directly, relayed by the lead session, or not supported. Claude Code, Codex,
