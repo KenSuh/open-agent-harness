@@ -90,8 +90,65 @@ LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
 
 # Exception codes are data too: only these literal codes and sentences may cross an error boundary.
 _ERROR_DIAGNOSTICS = {
+    "OAH_CAPABILITY_UNAVAILABLE(not-configured)": "a required capability is missing from the correction target's "
+                                                  "configuration; make it available and prepare a new initial run.",
+    "OAH_CAPABILITY_UNAVAILABLE(disabled)": "a required capability is disabled for the correction target; enable "
+                                            "the required capability and prepare a new initial run.",
+    "OAH_CAPABILITY_UNSUPPORTED(pending-approval)": "a required capability has no verified approval for the "
+                                                    "correction target; prepare a new initial run with an authorized "
+                                                    "lead relay.",
+    "OAH_CAPABILITY_UNSUPPORTED(unknown-schema)": "a required capability has no verified schema for the correction "
+                                                  "target; prepare a new initial run with an authorized lead relay.",
+    "OAH_CAPABILITY_DEPENDENCY_UNSATISFIED(unsatisfied)": "a required plugin dependency is missing or disabled; "
+                                                         "make it available and prepare a new initial run.",
+    "OAH_CAPABILITY_DEPENDENCY_UNSATISFIED(cycle)": "the capability requirements form a cycle; correct "
+                                                   "[capabilities.requires] and prepare a new initial run.",
+    "OAH_CAPABILITY_DEPENDENCY_UNSATISFIED(depth)": "the capability requirements exceed the dependency limit; "
+                                                   "shorten [capabilities.requires] and prepare a new initial run.",
+    "OAH_CAPABILITY_RELAY_REQUIRED": "a required capability needs a lead relay; record the tool result with "
+                                     "oah capabilities relay and prepare a new initial run with the relay result.",
+    "OAH_SKILL_MANDATORY_MISSING": "a required skill is missing; link a reviewed skill in the accepted coverage or "
+                                   "select it for the task, then prepare a new initial run.",
+    "OAH_SKILL_NEEDS_INVALID(stale)": "a skill need no longer matches the task; derive its needs and prepare a new "
+                                     "initial run.",
+    "OAH_SKILL_NEEDS_INVALID(malformed)": "a skill need has invalid fields; derive valid needs and prepare a new "
+                                         "initial run.",
+    "OAH_SKILL_NEEDS_INVALID(scope)": "a skill need falls outside the task's scope; derive needs within that scope "
+                                     "and prepare a new initial run.",
+    "OAH_SKILL_NOT_DELIVERABLE(user-only)": "a required skill is for explicit use only; link or select a skill the "
+                                           "correction can use, then prepare a new initial run.",
+    "OAH_SKILL_NOT_DELIVERABLE(excluded)": "a required skill is excluded by the local skill policy; choose an allowed "
+                                           "skill and prepare a new initial run.",
+    "OAH_SKILL_NOT_DELIVERABLE(host)": "a required skill is unsupported on this host; choose a compatible skill and "
+                                       "prepare a new initial run.",
+    "OAH_SKILL_NOT_DELIVERABLE(scope)": "a required skill does not cover the task scope; choose a skill for this "
+                                        "scope and prepare a new initial run.",
+    "OAH_SKILL_NOT_DELIVERABLE(license)": "a required skill has an ineligible license; choose an eligible reviewed "
+                                          "skill and prepare a new initial run.",
+    "OAH_SKILL_NOT_DELIVERABLE(marker)": "a required skill contains a reserved marker; review a copy without that "
+                                         "marker, then prepare a new initial run.",
+    "OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)": "a required skill does not match its pin; restore the reviewed bytes "
+                                               "or review the intended copy, then prepare a new initial run.",
     "OAH_SKILL_NOT_DELIVERABLE(changed)": "prepare the task selection again before retrying oah fix; the earlier "
                                          "preparation is kept.",
+    "OAH_SKILL_REFERENCE_UNAVAILABLE(inaccessible)": "the required skill file cannot be read at its pin; restore the "
+                                                      "reviewed file and prepare a new initial run.",
+    "OAH_SKILL_REFERENCE_UNAVAILABLE(unsupported-engine)": "the correction cannot receive a required file by "
+                                                           "reference; split the skill file so it fits inline.",
+    "OAH_SKILL_STATE_CORRUPT": "the skill state records are invalid; move the damaged file aside and prepare the task "
+                               "again.",
+    "OAH_SKILLS_BUDGET_EXCEEDED(items)": "there are too many skill files for this correction; split the task.",
+    "OAH_SKILLS_BUDGET_EXCEEDED(skills)": "the skill material exceeds the correction budget; split the task or "
+                                          "unlink optional skills.",
+    "OAH_SKILLS_BUDGET_EXCEEDED(brief)": "the correction brief exceeds the qualified limit; split the task or remove "
+                                         "optional material.",
+    "OAH_SKILLS_BUDGET_EXCEEDED(design)": "the required design exceeds the qualified limit; split the design and "
+                                          "prepare the task again.",
+    "OAH_SKILLS_BUDGET_EXCEEDED(target-capacity)": "the correction inputs exceed the qualified target capacity; "
+                                                   "split the task or remove optional material.",
+    "OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)": "this correction target has no qualified capacity "
+                                                           "profile; split the task, use smaller unmanaged material, "
+                                                           "or record a qualified route with evidence and expiry.",
     "OAH_FIX_FAILED": "the correction failed; inspect the worktree and task records, then retry oah fix.",
     "OAH_FIX_CLEANUP_FAILED": "process-tree cleanup could not be verified; inspect running workers and the "
                               "worktree before retrying oah fix.",

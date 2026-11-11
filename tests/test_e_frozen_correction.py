@@ -91,7 +91,7 @@ class FrozenCorrectionTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(set(refs), {relayed[0]["id"]})
         self.assertEqual(ordinary.run.file_path("skills.json").read_bytes(), earlier)
 
-    def test_changed_recorded_relay_permission_basis_refuses_before_child_and_preserves_original(self):
+    def test_changed_recorded_relay_permission_with_pointer_unchanged_refuses_before_child(self):
         from oah.capabilities import inventory
         from oah.discovery.store import digest
 
@@ -114,7 +114,7 @@ class FrozenCorrectionTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(project.fix_calls(), calls)
         self.assertEqual(ordinary.run.file_path("skills.json").read_bytes(), before)
 
-    def test_parent_empty_list_with_matching_checksums_refuses_with_state_changed(self):
+    def test_parent_empty_list_with_pointer_unchanged_refuses_with_state_changed(self):
         from oah.discovery.store import digest
 
         project, ordinary, now, _parent, _relayed = self.selected_parent()

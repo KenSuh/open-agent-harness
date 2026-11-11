@@ -29,9 +29,11 @@ LIMIT = 1 << 20
 class StoreProblem(Exception):
     """A discovery state file oah cannot use; it is never repaired or reset."""
 
+    code = "OAH_SKILL_STATE_CORRUPT"
+
     def __init__(self, path: pathlib.Path, detail: str) -> None:
         self.path = path
-        super().__init__(f"OAH_SKILL_STATE_CORRUPT: {path}: {detail}; oah never repairs or resets it. Move the file "
+        super().__init__(f"{self.code}: {path}: {detail}; oah never repairs or resets it. Move the file "
                          "aside to start that part again")
 
 

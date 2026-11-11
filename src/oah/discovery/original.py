@@ -6,6 +6,7 @@ from typing import Mapping
 
 from oah.atomic import write_json_atomic
 from oah.discovery import preparation, store, tasks
+from oah.engines.effort import EngineError
 
 FOLDER = "originals"
 
@@ -14,16 +15,25 @@ def _index(state_dir: pathlib.Path, task: str) -> pathlib.Path:
     return store.root(state_dir) / FOLDER / "tasks" / (store.digest(task)[7:] + ".json")
 
 
-def publish(run, skills: Mapping[str, preparation.Json], *, stage: str) -> None:
-    record = skills.get("prepared_e")
-    if stage in ("correction", "review") or record is None:
-        write_json_atomic(run.file_path("skills.json"), skills)
-        return
-    checked = preparation.parse(record)
+def publish(run, skills: Mapping[str, preparation.Json] | None, *, stage: str) -> None:
+    record = skills.get("prepared_e") if skills is not None else None
+    is_original = stage not in ("correction", "review")
     state_dir = run.path.parents[2]
-    _word, pointer = store.put_record(state_dir, FOLDER, {"run_id": run.id, "digest": checked["digest"]})
-    write_json_atomic(run.file_path("skills.json"), skills)
-    write_json_atomic(_index(state_dir, run.task), {"original": pointer["id"]})
+    pointer = None
+    if is_original and record is not None:
+        try:
+            checked = preparation.parse(record)
+        except (ValueError, KeyError, TypeError, RecursionError) as exc:
+            raise EngineError("OAH_RUN_LAUNCH_INVALID", f"{exc}; the original pointer is kept") from None
+        _word, pointer = store.put_record(state_dir, FOLDER, {"run_id": run.id, "digest": checked["digest"]})
+    if skills is not None:
+        write_json_atomic(run.file_path("skills.json"), skills)
+    if is_original:
+        index = _index(state_dir, run.task)
+        if pointer is None:
+            index.unlink(missing_ok=True)
+        else:
+            write_json_atomic(index, {"original": pointer["id"]})
 
 
 def resolve(state_dir: pathlib.Path, task: str) -> preparation.Record | None:

@@ -131,23 +131,27 @@ step for a correction. The trade-off is that a correction sees tool results as o
 their relay time. Missing, changed or incomplete frozen records refuse before a child starts; after deleting run
 records, start a new run. A direct API call cannot skip admission.
 
-Each managed task keeps one original pointer outside its run folders, in the discovery store's
-`skills/originals` records and atomic `tasks/<task-hash>.json` index. Original preparation writes the complete
-`PreparedE` record and then publishes its run id and content digest in that same publication step. A later
-original replaces the pointer; correction and review never replace it. Correction reads only the named run.
-Missing or incomplete records, a different digest, or a result without a running, finished or failed status
-refuse with `OAH_FIX_STATE_CHANGED`. There is no fallback to an earlier run. A task with a skill only in a later
-dispatch stage still records its complete task identity during its empty original stage, without requiring an
-extra skill, relay or E capacity qualification. Ordinary tasks without managed content keep their existing flow.
-What it costs you: intact records need no extra step; damaged original records require a new initial run.
+Original preparation updates a task's pointer in the discovery store's `skills/originals` records and atomic
+`tasks/<task-hash>.json` index. A managed original writes the complete `PreparedE` and publishes its run id and
+content digest. An ordinary original removes an existing pointer for the task. Corrections and reviews keep
+the pointer as it is. A managed correction reads only the run named by that pointer. A missing pointer when
+managed content is needed, missing or incomplete records, a different digest, or a result without a running,
+finished or failed status gives `OAH_FIX_STATE_CHANGED`. A task with a skill only in a later dispatch stage still
+records its complete identity during its empty original stage without requiring an extra skill, relay or
+capacity qualification. Ordinary tasks without managed content keep their existing flow.
+What it costs you: corrections use the latest original. Prepare a new initial run if its record is damaged or
+the task needs managed content again. If the latest initial run was prepared but never run, run it or make a new
+initial run before correcting.
 
-At correction freeze, oah reads the pointed preparation once, takes the parent inventory embedded in it and
-verifies each authorized relay blob once. Admission, rendering and launch checks use those values in memory.
+At correction freeze, oah reads the pointed skills, result, prompt and capability plan once, takes the parent
+inventory embedded in the preparation and verifies each authorized relay blob once. Admission, rendering and
+launch checks use those values in memory.
 Refreshing or deleting the lead's inventory file does not block a correction, and removing a relay blob after
 freeze does not change the bytes delivered. A missing or changed blob at freeze refuses before a child starts.
 What it costs you: no inventory refresh is needed; correction uses the original recorded tool results.
 
-Relay ingestion validates every stored time as ISO-8601 with a time zone before storing anything. A malformed
+Relay ingestion validates the full arguments digest and every stored time as ISO-8601 with a time zone before
+storing anything. A malformed
 time in an existing relay also gives `OAH_CAPABILITY_RELAY_REQUIRED(invalid)` before an ordinary child or native
 offer. After spend, settlement and correction bind the lease id; renewing that same lease does not invalidate
 the original. Pre-spend checks still compare the full lease identity. What it costs you: no new step for valid

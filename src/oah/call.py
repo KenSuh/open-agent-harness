@@ -64,6 +64,7 @@ import os
 import pathlib
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -1082,6 +1083,27 @@ def _pack_error(exc) -> EngineError:
     return EngineError(f"{exc.code}({exc.reason})" if exc.reason else exc.code, exc.message)
 
 
+@contextmanager
+def _admission_refusals():
+    from oah import skillpack
+    from oah.capabilities import CapabilityRefused
+    from oah.discovery.budget import BudgetRefused
+    from oah.discovery.tasks import NeedsInvalid
+
+    try:
+        yield
+    except BudgetRefused as exc:
+        raise EngineError(f"{skillpack.BUDGET_CODE}({exc.reason})", exc.detail) from None
+    except (skillpack.PackRefused, CapabilityRefused) as exc:
+        raise _pack_error(exc) from None
+    except NeedsInvalid as exc:
+        raise EngineError(f"{exc.code}({exc.reason})", f"{str(exc).split(': ', 1)[1]}; nothing was "
+                          "launched") from None
+
+
+_PREPARATION_VALIDATION_ERRORS = (ValueError, KeyError, TypeError, AttributeError, RecursionError)
+
+
 def prepared_e_digest(run) -> str | None:
     from oah.discovery import preparation
 
@@ -1092,7 +1114,7 @@ def prepared_e_digest(run) -> str | None:
         return None
     try:
         return preparation.parse(saved["prepared_e"])["digest"]
-    except (ValueError, KeyError, TypeError):
+    except _PREPARATION_VALIDATION_ERRORS:
         raise EngineError("OAH_RUN_LAUNCH_INVALID", "the complete prepared E record cannot be verified; "
                           "the earlier record is kept; prepare again") from None
 
@@ -1100,12 +1122,13 @@ def prepared_e_digest(run) -> str | None:
 def _check_e(prepared, holder, *, publication=None, native_record=None, env=None, before_spend=True,
              correction=False, frozen: FrozenCheck | None = None):
     from oah import skillpack
+    from oah.atomic import StateCorrupt
+    from oah.capabilities import CapabilityRefused, plan as capability_plan
     from oah.call_cli import load_settings
     from oah.discovery import budget, preparation
-    from oah.discovery.store import digest
+    from oah.discovery.store import StoreProblem, digest
     from oah.config import ConfigError
     from oah.packet import PacketError
-    from oah.capabilities import plan as capability_plan
 
     state_dir, root = prepared.run.path.parents[2], pathlib.Path(prepared.cwd)
     env = os.environ if env is None else env
@@ -1202,7 +1225,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             bundle = (saved or {}).get("bundle")
             if record["final"]["bundle_digest"] != (bundle or {}).get("digest"):
                 raise ValueError("the delivered bundle changed its task, lease, engine, stage or payloads")
-            caps = (prepared.run._read_json("capabilities.json")
+            caps = (frozen.capabilities if frozen is not None else prepared.run._read_json("capabilities.json")
                     if prepared.run.file_path("capabilities.json").is_file() else None)
             if record["final"]["capability_plan_digest"] != (digest(caps) if caps is not None else None):
                 raise ValueError("the capability record changed")
@@ -1221,13 +1244,14 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             raise ValueError("the final launch model, effort or CLI identity changed")
         if publication is not None:
             text = publication.plan.prompt
+        elif frozen is not None:
+            text = frozen.prompt
         else:
             text = prepared.run.prompt_path.read_bytes().decode("utf-8")
         if record["final"]["render_digest"] != skillpack._sha(text.encode("utf-8")):
             raise ValueError("the exact final render changed")
-    except (ValueError, KeyError, TypeError, OSError, ConfigError, routing.RoutingError,
-            budget.BudgetRefused, skillpack.PackRefused,
-            EngineError) as exc:
+    except (*_PREPARATION_VALIDATION_ERRORS, StateCorrupt, StoreProblem, ConfigError, routing.RoutingError,
+            runs.RunError, budget.BudgetRefused, skillpack.PackRefused, CapabilityRefused, EngineError) as exc:
         code = ("OAH_FIX_STATE_CHANGED" if publication is not None or correction
                 else f"{skillpack.NOT_DELIVERABLE_CODE}(changed)")
         raise EngineError(code,
@@ -1410,7 +1434,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
     observes the reads) and asks skill-fit advice, after admission; a native offer or a correction never does.
     `expected` compares a boundary's recorded E presence; None is initial preparation, without a prior record."""
     from oah import discovery, skillpack
-    from oah.capabilities import CapabilityRefused, inventory, plan as capability_plan
+    from oah.capabilities import inventory, plan as capability_plan
     from oah.config import ConfigError, load_config
     from oah.discovery import budget, gateway, original, preparation, providers, tasks
     from oah.discovery.store import digest
@@ -1429,7 +1453,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             found_settings = providers.settings_of(settings)
         except ValueError as exc:
             raise EngineError("OAH_CONFIG_INVALID", f"{exc}; nothing was launched") from None
-        try:
+        with _admission_refusals():
             basis = task_basis(holder, task_design, packet, root=root)
             if frozen_needs is None and inputs is not None:
                 frozen_needs = inputs.e_needs
@@ -1437,9 +1461,6 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                       for item in frozen_needs] if frozen_needs is not None else
                      task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings),
                                 needs_file=request.skill_needs))
-        except tasks.NeedsInvalid as exc:
-            raise EngineError(f"{exc.code}({exc.reason})", f"{str(exc).split(': ', 1)[1]}; nothing was "
-                              "launched") from None
     search_needs = needs if query_needs is None else query_needs
     delivery_needs = (task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings), needs_file=None)
                       if frozen_needs is not None and basis is not None and basis.design is not None else needs)
@@ -1629,7 +1650,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                                          "capability_plan_digest": digest(capabilities) if capabilities else None,
                                          "render_digest": skillpack._sha(text.encode("utf-8"))}))
 
-    try:
+    with _admission_refusals():
         admitted = skillpack.admit(skillpack.Operation("dispatch", task=request.task,
                                                        lease=(holder.id, holder.generation),
                                                        max_queries=found_settings["max_queries"]
@@ -1639,10 +1660,6 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                                    receiving_root=root if not native and request.retain_worker_text else None,
                                    needs=delivery_needs, policy=settings, scope=packet.scope or holder.scope,
                                    prepare=prepare_e)
-    except budget.BudgetRefused as exc:
-        raise EngineError(f"{skillpack.BUDGET_CODE}({exc.reason})", exc.detail) from None
-    except (skillpack.PackRefused, CapabilityRefused) as exc:
-        raise _pack_error(exc) from None
 
     if admitted.prepared is None:
         return None
@@ -1655,14 +1672,12 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                           "its record is kept; prepare again")
 
     def plan_capabilities(class_needs=(), class_status=None, advise=None):
-        try:
+        with _admission_refusals():
             return capability_plan.for_task(
                 holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
                 items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
                 relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
                 class_needs=class_needs, class_status=class_status, advise=advise, frozen=frozen_inputs)
-        except CapabilityRefused as exc:
-            raise _pack_error(exc) from None
 
     early_capabilities = plan_capabilities()[1]  # required capabilities admit here: a missing relay refuses now
     early_block = skillpack.finalize(admitted)[0]  # advice only reorders, so these sizes are final
@@ -2193,6 +2208,8 @@ class FrozenCheck:
     record: ERecord
     inputs: FrozenInputs
     result: ERecord
+    capabilities: ERecord | None
+    prompt: str
 
 
 @dataclasses.dataclass
@@ -2422,14 +2439,29 @@ def _freeze_e(inputs, *, env):
         _freeze_e_checked(inputs, env=env)
     except EngineError:
         raise
-    except (StateCorrupt, StoreProblem, BudgetRefused, CapabilityRefused, ValueError, KeyError, TypeError,
-            AttributeError, RecursionError) as exc:
+    except (*_PREPARATION_VALIDATION_ERRORS, StateCorrupt, StoreProblem, BudgetRefused, CapabilityRefused) as exc:
         raise EngineError("OAH_FIX_STATE_CHANGED", "the earlier E preparation or its current selection cannot be "
                           f"verified ({type(exc).__name__}); its record is kept; prepare again") from None
 
 
+def _preparation_file(run: runs.Run, name: str, *, limit: int | None = None) -> pathlib.Path:
+    try:
+        path = run.file_path(name)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return path
+    except (runs.RunError, NotADirectoryError) as exc:
+        raise ValueError(f"the recorded {name} is not a regular file") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"the recorded {name} is not a regular file")
+    if limit is not None and info.st_size > limit:
+        raise ValueError(f"the recorded {name} exceeds its bounded record size")
+    return path
+
+
 def _freeze_e_checked(inputs, *, env):
-    from oah.atomic import read_json
+    from oah.atomic import StorageError, read_json
     from oah import discovery
     from oah.discovery import original, preparation, providers
     from oah.capabilities import plan as capability_plan
@@ -2450,26 +2482,37 @@ def _freeze_e_checked(inputs, *, env):
             raise ValueError("current managed content requires the original complete frozen run record")
         return
     path = runs.task_directory(inputs.state, holder.task) / pointer["run_id"]
-    record_path = path / "skills.json"
-    if record_path.is_file() and record_path.stat().st_size > 2097152:
-        raise ValueError("the original preparation exceeds its bounded record size")
-    saved = read_json(record_path, None)
+    run = runs.Run(path.name, holder.task, path)
+    saved = read_json(_preparation_file(run, "skills.json", limit=2097152), None)
     if not isinstance(saved, dict):
         raise ValueError("the original skills record is missing or not a JSON object")
     record = preparation.parse(saved.get("prepared_e"))
     if record["digest"] != pointer["digest"]:
         raise ValueError("the original complete preparation differs from its task pointer")
     facts, refs = record["facts"], record["references"]
-    result = read_json(path / "result.json", {})
+    result = read_json(_preparation_file(run, "result.json"), {})
     if not isinstance(result, dict) or result.get("status") not in ("running", "finished", "failed"):
         raise ValueError("the original managed run no longer records a spent result")
+    try:
+        capabilities = read_json(_preparation_file(run, "capabilities.json"), None)
+    except (PermissionError, StorageError) as exc:
+        if record["final"]["capability_plan_digest"] is not None and (
+                isinstance(exc, PermissionError) or isinstance(exc.__cause__, PermissionError)):
+            raise ValueError("the required original capability record cannot be read") from None
+        raise
+    if capabilities is not None and not isinstance(capabilities, dict):
+        raise ValueError("the original capability record is not a JSON object")
+    try:
+        prompt = _preparation_file(run, "prompt.md").read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        raise ValueError("the original prompt is missing") from None
     frozen_inputs = capability_plan.frozen_inputs(record, state_dir=inputs.state)
     source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
                       stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
                       model=facts["target"]["model"], launch_effort=facts["target"]["effort"],
                       cli_version=facts["target"]["cli_version"], warnings=(), e_digest=record["digest"])
     _check_e(source, holder, env=env, before_spend=False, correction=True,
-             frozen=FrozenCheck(saved, record, frozen_inputs, result))
+             frozen=FrozenCheck(saved, record, frozen_inputs, result, capabilities, prompt))
     inputs.e_needs = refs["needs"]
     inputs.e_source = refs
     inputs.e_frozen = preparation.correction_identity(record)
@@ -2538,7 +2581,6 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     from oah.lockfile import LockTimeout, StateLock
     from oah.review import receipts, rounds
     from oah.discovery import attempts
-    from oah import skillpack
 
     managed_review = rounds._MANAGED_DISPATCH.get()
     managed = (_CORRECTION_INPUTS.get() is not None
@@ -2551,12 +2593,10 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             raise EngineError("OAH_REVIEW_SERIES_BUSY", "another review or paid preparation owns this task; wait "
                               "for it to finish, then retry oah call") from None
     try:
-        with attempts.scope(state_dir):
+        with attempts.scope(state_dir), _admission_refusals():
             return _prepare(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
                             has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now,
                             keychain=keychain)
-    except skillpack.PackRefused as exc:
-        raise _pack_error(exc) from None
     finally:
         if lock is not None:
             lock.__exit__(None, None, None)
@@ -2887,21 +2927,17 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
              "advisory": skills_rerank}, ("count", "sha256", "advisory"))
     e_record, stored_prompt = None, None
     if skill_pack is not None and skill_pack.admitted is not None and skill_pack.admitted.prepared is not None:
-        from oah.discovery import budget, preparation
+        from oah.discovery import preparation
         from oah.discovery.store import digest
 
         live = skill_pack.admitted.prepared
-        try:
+        with _admission_refusals():
             from oah import skillpack
 
             live = skillpack.finish(skill_pack.admitted, text,
                 deferred=_e_deferred(skill_pack.admitted, design, state_dir=state_dir, root=root),
                 design_bytes=_e_design_bytes(design), capabilities=skill_pack.capabilities,
                 read_paths=_e_reference_paths(skill_pack.bundle, design, root))
-        except budget.BudgetRefused as exc:
-            raise EngineError(f"OAH_SKILLS_BUDGET_EXCEEDED({exc.reason})", exc.detail) from None
-        except skillpack.PackRefused as exc:
-            raise _pack_error(exc) from None
         e_record = live.record()
         inputs = _CORRECTION_INPUTS.get()
         published = e_record
@@ -2941,10 +2977,9 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                              warnings=warnings, selection=selection, checked_lease=checked_lease, judge=judge,
                              design=design, skill_pack=skill_pack)
     run.write_prompt(plan.prompt)
-    if plan.skills_record is not None:
-        from oah.discovery import original
+    from oah.discovery import original
 
-        original.publish(run, plan.skills_record, stage=request.stage)
+    original.publish(run, plan.skills_record, stage=request.stage)
     if skill_pack is not None and skill_pack.capabilities is not None:
         from oah.atomic import write_json_atomic
 
@@ -3167,14 +3202,10 @@ def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Pa
                    read_source: Callable[[pathlib.Path], str] | None = None,
                    now: dt.datetime | None = None) -> NativeOffer:
     from oah.discovery import attempts
-    from oah import skillpack
 
-    try:
-        with attempts.scope(state_dir):
-            return _prepare_native(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
-                                    has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now)
-    except skillpack.PackRefused as exc:
-        raise _pack_error(exc) from None
+    with attempts.scope(state_dir), _admission_refusals():
+        return _prepare_native(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
+                               has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now)
 
 
 def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
@@ -3230,19 +3261,13 @@ def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.P
             raise _pack_error(exc) from None
     e_record = None
     if skill_pack is not None and skill_pack.admitted is not None and skill_pack.admitted.prepared is not None:
-        from oah.discovery import budget
-
         live = skill_pack.admitted.prepared
-        try:
+        with _admission_refusals():
             live = skillpack.finish(skill_pack.admitted, message,
                 deferred=_e_deferred(skill_pack.admitted, basis.design, state_dir=state_dir, root=root),
                 design_bytes=_e_design_bytes(basis.design), capabilities=skill_pack.capabilities,
                 read_paths=_e_reference_paths(skill_pack.bundle, basis.design, root))
             e_record = live.record()
-        except budget.BudgetRefused as exc:
-            raise EngineError(f"OAH_SKILLS_BUDGET_EXCEEDED({exc.reason})", exc.detail) from None
-        except skillpack.PackRefused as exc:
-            raise _pack_error(exc) from None
         identities = _native_identities(request, basis, bundle, target, e_record)
     pack_id = native.digest({"prep_id": identities["prep_id"], "bundle": identities["bundle_id"],
                              "capabilities": (native.digest(skill_pack.capabilities)
@@ -3354,6 +3379,7 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
     become current again after drift. Settling never counts a round, finishes a task, releases a lease, registers a
     review or infers that a skill was applied."""
     from oah import skillpack
+    from oah.atomic import StateCorrupt, read_json, read_jsonl
     from oah.launchers import native
 
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -3382,15 +3408,20 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
     try:
         basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                               read_source=read_source)
-        saved = run._read_json("skills.json") or {}
-        e_record = saved.get("prepared_e")
+        saved = read_json(_preparation_file(run, "skills.json"), None)
+        if saved is not None and not isinstance(saved, dict):
+            raise ValueError("the offered skills record is not a JSON object")
+        e_record = saved.get("prepared_e") if saved is not None else None
         bundle = skillpack.bundle_of(run.path)
-        if e_record is None and (bundle is not None or run.file_path("capabilities.json").is_file()):
+        capabilities = _preparation_file(run, "capabilities.json")
+        if e_record is None and (bundle is not None or capabilities.is_file()):
             raise EngineError(native.STALE_CODE, "managed content needs a complete PreparedE record; offer again")
+        if e_record is not None:
+            _preparation_file(run, "result.json")
         prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=run.task, engine=request.engine,
                             stage=request.stage, argv=(), cwd=str(root), timeout_s=300, env_additions={},
                             model=offer["target"]["model"], launch_effort=offer["target"]["effort"],
-                            cli_version=None, warnings=(), e_digest=e_record["digest"] if e_record else None)
+                            cli_version=None, warnings=(), e_digest=e_record["digest"] if e_record is not None else None)
         _check_e(prepared, basis.holder, native_record=offer, env=env, before_spend=False)
         target = _native_target(request.engine, request.tier, settings, root=root, env=env)
         current = _native_identities(request, basis, bundle, target, e_record,
@@ -3398,7 +3429,7 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
         problems.extend(f"the {label} changed" for label in _native_differences(offer, current))
     except skillpack.PackRefused as exc:
         problems.append(str(_pack_error(exc)))
-    except EngineError as exc:
+    except (*_PREPARATION_VALIDATION_ERRORS, StateCorrupt, runs.RunError, EngineError) as exc:
         problems.append(str(exc))
     if problems or offer["state"] == "stale":
         reasons = "; ".join(problems) or "it was marked stale by an earlier settle"
@@ -3410,8 +3441,6 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
     result = native.read_result(result_path)
     stated = native.claim(offer, host_child_id=host_child_id, task_fingerprint=native.digest(current["task"]),
                           result=result, outcome=outcome, token=token)
-    from oah.atomic import StateCorrupt, read_jsonl
-
     try:
         delivered = skillpack.bundle_of(run.path)
     except ValueError as exc:

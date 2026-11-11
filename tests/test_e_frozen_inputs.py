@@ -11,7 +11,7 @@ from tests.e_c9_fixture import CorrectionFixture, reseal
 
 
 class FrozenInputsTest(CorrectionFixture):
-    def test_naive_preparation_expiry_refuses_with_state_changed(self):
+    def test_naive_preparation_expiry_with_pointer_unchanged_refuses_with_state_changed(self):
         project, original, _need, _basis = e_c6_fixture.selected_ordinary(self)
         path = original.run.file_path("skills.json")
         saved = json.loads(path.read_bytes())
@@ -22,7 +22,7 @@ class FrozenInputsTest(CorrectionFixture):
 
         self.assert_refusal(project, original)
 
-    def test_naive_parent_observation_refuses_with_state_changed(self):
+    def test_naive_parent_observation_with_pointer_unchanged_refuses_with_state_changed(self):
         from oah.capabilities import inventory
 
         project, original, _now, _parent, _relayed = self.selected_parent()
@@ -37,7 +37,7 @@ class FrozenInputsTest(CorrectionFixture):
 
         self.assert_refusal(project, original)
 
-    def test_taskless_operation_in_a_dispatch_record_refuses_with_state_changed(self):
+    def test_taskless_dispatch_operation_with_pointer_unchanged_refuses_with_state_changed(self):
         project, original, _need, _basis = e_c6_fixture.selected_ordinary(self)
         path = original.run.file_path("skills.json")
         saved = json.loads(path.read_bytes())

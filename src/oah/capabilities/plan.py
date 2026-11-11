@@ -341,7 +341,10 @@ def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: 
 
 
 def frozen_inputs(record: Mapping, *, state_dir: os.PathLike) -> FrozenInputs:
-    at = dt.datetime.fromisoformat(record["expires_at"]) - dt.timedelta(microseconds=1)
+    try:
+        at = _relay_time(record["expires_at"], "expires_at").astimezone(dt.timezone.utc) - dt.timedelta(microseconds=1)
+    except OverflowError:
+        raise ValueError("the original preparation has no representable time before its expiry") from None
     refs, facts = record["references"], record["facts"]
     parent = facts["inventory"]["parent"]
     loaded = [load(state_dir, ref, now=at) for ref in sorted(set(refs["relay_results"]))]
@@ -359,13 +362,14 @@ def _relay_time(value: Json, field: str) -> dt.datetime:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", f"{field}: {exc}; use an ISO time with a time zone") from None
 
 
-def check_result(record: Record) -> None:
-    if set(record) != RESULT_KEYS or type(record["version"]) is not int or record["version"] != 1 \
+def check_result(record: Json) -> dt.datetime:
+    if not isinstance(record, dict) or set(record) != RESULT_KEYS \
+            or type(record["version"]) is not int or record["version"] != 1 \
             or any(not _hash(record[key]) for key in ("id", "request_id", "prep_id", "need_id", "entry_digest",
                 "schema_digest", "task_fingerprint", "permission_digest")) \
             or not isinstance(record["capability_id"], str) \
             or record["attestation"] not in ("cooperative", "host-observed"):
-        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay result has incomplete fields")
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the relay result has incomplete fields")
     invocation, payload = record["invocation"], record["payload"]
     if not isinstance(invocation, dict) or set(invocation) != {"evidence_ref", "source", "at", "outcome",
             "arguments_digest", "result_digest"} \
@@ -374,9 +378,9 @@ def check_result(record: Record) -> None:
             or invocation["outcome"] not in ("ok", "error", "denied") \
             or not isinstance(payload, dict) or set(payload) != {"bytes", "sha256", "blob_ref"} \
             or not _nonnegative(payload["bytes"]) or not _hash(payload["sha256"]) or not _hash(payload["blob_ref"]):
-        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay invocation or payload is incomplete")
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the relay invocation or payload is incomplete")
     _relay_time(invocation["at"], "invocation.at")
-    _relay_time(record["expires_at"], "expires_at")
+    return _relay_time(record["expires_at"], "expires_at")
 
 
 def relay_request(*, prep: str, task: Mapping, design: Mapping | None, target: Mapping, need: Mapping,
@@ -396,13 +400,19 @@ def check_request(request: object, *, now: dt.datetime) -> dict:
     if not isinstance(request, Mapping) or set(request) != REQUEST_KEYS or request.get("version") != 1:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the request file is not a RelayRequestV1 that "
                                 "oah capabilities plan printed")
-    if digest({key: value for key, value in request.items() if key != "id"}) != request["id"]:
+    try:
+        ident = digest({key: value for key, value in request.items() if key != "id"})
+    except (ValueError, RecursionError):
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the request file does not contain valid JSON data") from None
+    if ident != request["id"]:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "tampered", "the request does not match its own id")
     if request["policy_digest"] != POLICY_DIGEST:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "stale", "the request was made under another relay policy")
     _relay_time(request["created_at"], "created_at")
     if _relay_time(request["expires_at"], "expires_at") <= now:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "expired", "the request has expired; plan again")
+    if not _nonnegative(request["max_bytes"]) or request["max_bytes"] > RELAY_MAX_BYTES:
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the relay request has an invalid result size limit")
     return dict(request)
 
 
@@ -416,12 +426,9 @@ def ingest(state_dir: os.PathLike, request: Mapping, *, capability: str, payload
     if capability != request["capability_id"]:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "mismatch", f"the request is for {request['capability_id']}, "
                                 f"not {capability}")
-    if not isinstance(invocation, Mapping) or set(invocation) != INVOCATION_KEYS \
-            or invocation["outcome"] not in ("ok", "error", "denied") \
-            or not str(invocation["arguments_digest"]).startswith("sha256:"):
+    if not isinstance(invocation, Mapping) or set(invocation) != INVOCATION_KEYS:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the invocation file is {outcome: ok|error|denied, "
                                 "at: ISO time, arguments_digest: sha256:...}")
-    _relay_time(invocation["at"], "invocation.at")
     if len(payload) > request["max_bytes"]:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "too-large", f"the result is {len(payload)} bytes, over "
                                 f"{request['max_bytes']}")
@@ -435,18 +442,25 @@ def ingest(state_dir: os.PathLike, request: Mapping, *, capability: str, payload
     if rule is not None:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "secret", f"the result matches the privacy rule {rule}; remove "
                                 "it before relaying (oah never delivers it to a child)")
-    _word, blob = store.put_record(state_dir, PAYLOADS, {"version": 1, "text": text})
+    blob = store.with_id({"version": 1, "text": text})
+    try:
+        evidence_ref = digest(dict(invocation))
+    except (ValueError, RecursionError):
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the invocation file does not contain valid JSON data") from None
     record = {"version": 1, "request_id": request["id"], "prep_id": request["prep_id"], "need_id": request["need_id"],
               "capability_id": capability, "entry_digest": request["entry_digest"],
               "schema_digest": request["schema_digest"], "task_fingerprint": digest(request["task"]),
               "permission_digest": request["permission_digest"],
-              "invocation": {"evidence_ref": digest(dict(invocation)), "source": "parent-attested",
-                             "at": str(invocation["at"]), "outcome": invocation["outcome"],
+              "invocation": {"evidence_ref": evidence_ref, "source": "parent-attested",
+                             "at": invocation["at"], "outcome": invocation["outcome"],
                              "arguments_digest": invocation["arguments_digest"],
                              "result_digest": digest(text)},
               "payload": {"bytes": len(payload), "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
                           "blob_ref": blob["id"]},
               "expires_at": request["expires_at"], "attestation": "cooperative"}
+    record = store.with_id(record)
+    check_result(record)
+    store.put_record(state_dir, PAYLOADS, blob)
     return store.put_record(state_dir, RELAYS, record)[::-1]
 
 
@@ -457,14 +471,17 @@ def load(state_dir: os.PathLike, ref: str, *, now: dt.datetime) -> tuple[dict, s
     try:
         record = store.get_record(state_dir, RELAYS, ref)
         if record is not None:
-            check_result(record)
-        blob = store.get_record(state_dir, PAYLOADS, record["payload"]["blob_ref"]) if record else None
+            expires = check_result(record)
+            blob = store.get_record(state_dir, PAYLOADS, record["payload"]["blob_ref"])
+        else:
+            blob = None
     except store.StoreProblem as exc:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "tampered", f"relay result {ref}: {exc}") from None
+    except (ValueError, RecursionError):
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay does not contain valid JSON data") from None
     if record is None or blob is None:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "missing", f"no stored relay result {ref}; store it with oah "
                                 "capabilities relay")
-    expires = _relay_time(record["expires_at"], "expires_at")
     if set(blob) != {"id", "version", "text"} or blob["version"] != 1 or not isinstance(blob["text"], str):
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay payload is not text")
     text = blob["text"]

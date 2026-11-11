@@ -450,6 +450,7 @@ def _wait_repo_info(cwd: pathlib.Path, deadline: float):
 
 def run(args: argparse.Namespace) -> int:
     from oah.config import ConfigError
+    from oah.discovery.store import StoreProblem
 
     deadline = (time.monotonic() + min(max(args.timeout_seconds, 0.0), call.WAIT_LIMIT_S)
                 if args.command == "wait" else None)
@@ -472,7 +473,7 @@ def run(args: argparse.Namespace) -> int:
     except (routing.RoutingError, briefs.BriefError, RunError, LeaseError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
-    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError,
+    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError, StoreProblem,
             ScratchError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT

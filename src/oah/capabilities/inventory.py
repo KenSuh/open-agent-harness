@@ -252,6 +252,10 @@ def _time(value: object, what: str) -> dt.datetime:
         raise ValueError(f"{what} is not an ISO time") from None
     if moment.tzinfo is None:
         raise ValueError(f"{what} has no time zone")
+    try:
+        moment.astimezone(dt.timezone.utc)
+    except OverflowError:
+        raise ValueError(f"{what} cannot be represented in UTC") from None
     return moment
 
 

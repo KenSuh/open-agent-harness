@@ -81,7 +81,10 @@ def moment(value: str) -> dt.datetime:
     parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.utcoffset() is None:
         raise BudgetRefused("target-capacity-unknown", "qualification times must include a UTC offset")
-    return parsed.astimezone(dt.timezone.utc)
+    try:
+        return parsed.astimezone(dt.timezone.utc)
+    except OverflowError:
+        raise BudgetRefused("target-capacity-unknown", "qualification times must be representable in UTC") from None
 
 
 def _hash(value: object) -> bool:
