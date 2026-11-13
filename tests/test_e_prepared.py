@@ -165,7 +165,7 @@ class PreparedIdentityTest(DeliveryTask, unittest.TestCase):
         result = self.call()
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("OAH_SKILL_NOT_DELIVERABLE(excluded)", result.stderr)
+        self.assertTrue(result.stderr.startswith("OAH_SKILL_NOT_DELIVERABLE(excluded):"), result.stderr)
         self.assertEqual(self.runs(), [])
         self.assertFalse(self.record.exists())
 
