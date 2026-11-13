@@ -303,6 +303,13 @@ class BoundaryCompletenessTest(unittest.TestCase):
                 for node in ast.walk(function_node):
                     if not isinstance(node, ast.Call):
                         continue
+                    if isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) in (
+                            "records", "record_files"):
+                        eager = [ast.unparse(part) for argument in (*node.args,
+                            *(keyword.value for keyword in node.keywords)) for part in ast.walk(argument)
+                            if isinstance(part, ast.Attribute) and part.attr in (
+                                "file_path", "prompt_path", "result_path")]
+                        self.assertEqual(eager, [], eager)
                     if isinstance(node.func, ast.Name) and node.func.id == "open":
                         direct.append(ast.unparse(node))
                     if isinstance(node.func, ast.Attribute) and node.func.attr in (

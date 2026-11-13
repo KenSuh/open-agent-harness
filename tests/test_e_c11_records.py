@@ -49,6 +49,20 @@ def read_fault(path, error):
 
 
 @contextlib.contextmanager
+def stat_fault(path, error):
+    lstat, seen = pathlib.Path.lstat, []
+
+    def changed(current, *args, **options):
+        if current == path:
+            seen.append(current)
+            raise error
+        return lstat(current, *args, **options)
+
+    with mock.patch.object(pathlib.Path, "lstat", changed):
+        yield seen
+
+
+@contextlib.contextmanager
 def changed_file(path, kind):
     earlier = path.read_bytes()
     fault = contextlib.nullcontext()
@@ -65,6 +79,10 @@ def changed_file(path, kind):
         fault = read_fault(path, PermissionError(errno.EACCES, "fixture read denied"))
     elif kind == "io":
         fault = read_fault(path, OSError(errno.EIO, "fixture disk read failed"))
+    elif kind == "stat-denied":
+        fault = stat_fault(path, PermissionError(errno.EACCES, "fixture file stat denied", str(path)))
+    elif kind == "stat-io":
+        fault = stat_fault(path, OSError(errno.EIO, "fixture file stat failed", str(path)))
     try:
         yield fault
     finally:
@@ -76,6 +94,21 @@ def changed_file(path, kind):
 class CommandRecordTest(DeliveryTask, unittest.TestCase):
     request = relay_fixture.RelayTimesTest.request
     offered_parent_relay = spent_fixture.SpentEvidenceTest.offered_parent_relay
+
+    def test_settle_prompt_stat_denial_uses_stale_before_reading(self):
+        _now, run, command = self.offered_parent_relay()
+        prompt, before = run / "prompt.md", files(self.state_dir)
+        with stat_fault(prompt, PermissionError(errno.EACCES, "fixture prompt stat denied", str(prompt))) as stats, \
+                read_fault(prompt, AssertionError("the fixture prompt must not be read after stat denial")) as reads:
+            code, out, err = cli_result(self.repo, self.env, *command)
+
+        self.assertTrue(stats, out + err)
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith("OAH_NATIVE_OFFER_STALE:"), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(reads, [])
+        self.assertEqual(files(self.state_dir), before)
+        self.assertFalse(self.record.exists())
 
     def test_launch_last_guard_parent_disk_error_keeps_state_io_before_child(self):
         from oah import call
@@ -304,14 +337,14 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         receipt = (run / "native-settlement.json").read_bytes()
         for name in boundaries.TABLE["settle"].optional_files:
-            for kind in ("missing", "directory", "invalid", "null", "denied", "io"):
+            for kind in ("missing", "directory", "invalid", "null", "denied", "io", "stat-denied", "stat-io"):
                 with self.subTest(file=name, change=kind), changed_file(run / name, kind) as fault:
                     before = files(self.state_dir)
                     with fault:
                         code, out, err = cli_result(self.repo, self.env, *command)
 
                     expected = ((0, "") if name == "skills-reads.jsonl" and kind == "missing" else
-                                (69, "OAH_STATE_IO:") if kind == "io" else (1, "OAH_NATIVE_OFFER_STALE:"))
+                                (69, "OAH_STATE_IO:") if kind in ("io", "stat-io") else (1, "OAH_NATIVE_OFFER_STALE:"))
                     self.assertEqual(code, expected[0], out + err)
                     if expected[1]:
                         self.assertTrue(err.startswith(expected[1]), err)
@@ -386,7 +419,7 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                 "arguments_digest": "sha256:" + "3" * 64}, now=now)
         execute = call.execute
         for name in boundaries.TABLE["launch"].files:
-            for kind in ("missing", "directory", "invalid", "null", "denied", "io"):
+            for kind in ("missing", "directory", "invalid", "null", "denied", "io", "stat-denied", "stat-io"):
                 with self.subTest(boundary="launch", file=name, change=kind):
                     observed = []
 
@@ -408,7 +441,7 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                             "--task", "t1", "--tier", "low", "--parent-inventory", str(parent),
                             "--relay-result", relay["id"], "--json")
 
-                    expected = (69, "OAH_STATE_IO:") if kind == "io" else (1, "OAH_RUN_LAUNCH_INVALID:")
+                    expected = (69, "OAH_STATE_IO:") if kind in ("io", "stat-io") else (1, "OAH_RUN_LAUNCH_INVALID:")
                     self.assertEqual(code, expected[0], out + err)
                     self.assertIn(expected[1], err)
                     self.assertNotIn("Traceback", err)
@@ -417,7 +450,7 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                     result = observed[-1].get(pathlib.Path("result.json"))
                     if result is not None and result not in (b"[]", b"null"):
                         self.assertNotEqual(json.loads(result)["status"], "running")
-                    if name == "result.json" and kind != "io":
+                    if name == "result.json" and kind not in ("io", "stat-io"):
                         self.assertIn(b"OAH_RUN_LAUNCH_INVALID", observed[-1][pathlib.Path("stderr.log")])
 
     def test_relay_reparse_request_refuses_before_reading_its_bytes(self):
@@ -510,13 +543,13 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                  ("prompt.md", "skills.json", "result.json", "capabilities.json", "native-offer.json")}
         paths.update(relay_paths(self.state_dir, json.loads((run / "skills.json").read_bytes())))
         for name in boundaries.TABLE["settle"].files:
-            for kind in ("missing", "directory", "invalid", "null", "denied", "io"):
+            for kind in ("missing", "directory", "invalid", "null", "denied", "io", "stat-denied", "stat-io"):
                 with self.subTest(boundary="settle", file=name, change=kind), changed_file(paths[name], kind) as fault:
                     before = files(self.state_dir)
                     with fault:
                         code, out, err = cli_result(self.repo, self.env, *command)
 
-                    expected = (69, "OAH_STATE_IO:") if kind == "io" else (1, "OAH_NATIVE_OFFER_STALE:")
+                    expected = (69, "OAH_STATE_IO:") if kind in ("io", "stat-io") else (1, "OAH_NATIVE_OFFER_STALE:")
                     self.assertEqual(code, expected[0], out + err)
                     self.assertTrue(err.startswith(expected[1]), err)
                     self.assertNotIn("Traceback", err)
@@ -566,13 +599,13 @@ class FreezeRecordTest(e_c9_fixture.CorrectionFixture):
         project, original, _now, _parent, _relays = self.selected_parent(relay=True)
         paths, calls = self.record_paths(project, original), project.fix_calls()
         for name in boundaries.TABLE["freeze"].files:
-            for kind in ("missing", "directory", "invalid", "null", "denied", "io"):
+            for kind in ("missing", "directory", "invalid", "null", "denied", "io", "stat-denied", "stat-io"):
                 with self.subTest(boundary="freeze", file=name, change=kind), changed_file(paths[name], kind) as fault:
                     before = files(project.state)
                     with fault:
                         code, result, err = self.correct(project, dt.datetime.now(dt.timezone.utc))
 
-                    expected = (69, "OAH_STATE_IO") if kind == "io" else (1, "OAH_FIX_STATE_CHANGED")
+                    expected = (69, "OAH_STATE_IO") if kind in ("io", "stat-io") else (1, "OAH_FIX_STATE_CHANGED")
                     self.assertEqual((code, result["code"]), expected, str(result) + err)
                     self.assertNotIn("Traceback", err)
                     self.assertEqual(project.fix_calls(), calls)

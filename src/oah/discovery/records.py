@@ -51,14 +51,17 @@ def io_failure(path: pathlib.Path, exc: OSError) -> InvalidRecord | StorageError
     return exc if isinstance(exc, StorageError) else StorageError(path, exc)
 
 
-def _read(path: pathlib.Path, operation: Callable[[], T], *, required: bool, limit: int | None) -> T | None:
+def _read(path: pathlib.Path, operation: Callable[[pathlib.Path], T], *, required: bool, limit: int | None,
+          resolve: Callable[[], pathlib.Path] | None = None) -> T | None:
     try:
+        if resolve is not None:
+            path = resolve()
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise InvalidRecord(path, Issue.NOT_REGULAR, "is not a regular file")
         if limit is not None and info.st_size > limit:
             raise InvalidRecord(path, Issue.CONTENT, "exceeds its bounded record size")
-        return operation()
+        return operation(path)
     except OSError as exc:
         failure = io_failure(path, exc)
         if isinstance(failure, InvalidRecord) and failure.issue == Issue.MISSING and not required:
@@ -69,7 +72,7 @@ def _read(path: pathlib.Path, operation: Callable[[], T], *, required: bool, lim
 
 
 def read_bytes(path: pathlib.Path, *, required: bool = True, limit: int | None = None) -> bytes | None:
-    return _read(path, path.read_bytes, required=required, limit=limit)
+    return _read(path, lambda source: source.read_bytes(), required=required, limit=limit)
 
 
 def json_bytes(raw: bytes, path: pathlib.Path) -> object:
@@ -112,7 +115,10 @@ def read_json(path: pathlib.Path, *, required: bool = True, limit: int | None = 
 
 
 def read_rows(path: pathlib.Path) -> list[dict[str, Json]]:
-    raw = read_bytes(path, required=False)
+    return _rows(read_bytes(path, required=False), path)
+
+
+def _rows(raw: bytes | None, path: pathlib.Path) -> list[dict[str, Json]]:
     if raw is None:
         return []
     if raw and not raw.endswith(b"\n"):
@@ -126,11 +132,22 @@ def read_rows(path: pathlib.Path) -> list[dict[str, Json]]:
 def run_json(run, name: str, *, required: bool = True) -> dict[str, Json] | None:
     from oah.runs import WorkerRun
 
-    path = run.file_path(name)
+    path = run.path / name
     limit = LIMIT if name == "skills.json" else None
     if isinstance(run, WorkerRun):
-        return _read(path, lambda: _object(run._read_json(name), path), required=required, limit=limit)
-    return read_json(path, required=required, limit=limit)
+        operation = lambda source: _object(run._read_json(name), source)
+    else:
+        operation = lambda source: _object(json_bytes(source.read_bytes(), source), source)
+    return _read(path, operation, required=required, limit=limit, resolve=lambda: run.file_path(name))
+
+
+def run_rows(run, name: str) -> list[dict[str, Json]]:
+    from oah.runs import WorkerRun
+
+    path = run.path / name
+    raw = _read(path, lambda source: run._read_bytes(name) if isinstance(run, WorkerRun) else source.read_bytes(),
+                required=False, limit=None, resolve=lambda: run.file_path(name))
+    return _rows(raw, path)
 
 
 def read_text(path: pathlib.Path, *, required: bool = True, limit: int | None = None) -> str | None:
@@ -141,8 +158,11 @@ def read_text(path: pathlib.Path, *, required: bool = True, limit: int | None = 
 
 
 def run_text(run) -> str:
-    path = run.file_path("prompt.md")
-    raw = _read(path, run.prompt_path.read_bytes, required=True, limit=None)
+    from oah.runs import WorkerRun
+
+    path = run.path / "prompt.md"
+    raw = _read(path, lambda source: run.prompt_path.read_bytes() if isinstance(run, WorkerRun) else source.read_bytes(),
+                required=True, limit=None, resolve=lambda: run.file_path("prompt.md"))
     assert raw is not None
     return _text(raw, path)
 

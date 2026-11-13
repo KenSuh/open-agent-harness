@@ -2453,21 +2453,21 @@ def _freeze_e_checked(inputs, *, env):
         return
     path = runs.task_directory(inputs.state, holder.task) / pointer["run_id"]
     run = runs.Run(path.name, holder.task, path)
-    saved = records.read_json(run.file_path("skills.json"), limit=records.LIMIT)
+    saved = records.run_json(run, "skills.json")
     if not isinstance(saved, dict):
         raise ValueError("the original skills record is missing or not a JSON object")
     record = preparation.parse(saved.get("prepared_e"))
     if record["digest"] != pointer["digest"]:
         raise ValueError("the original complete preparation differs from its task pointer")
     facts, refs = record["facts"], record["references"]
-    result = records.read_json(run.file_path("result.json"))
+    result = records.run_json(run, "result.json")
     if not isinstance(result, dict) or result.get("status") not in ("running", "finished", "failed"):
         raise ValueError("the original managed run no longer records a spent result")
-    capabilities = records.read_json(run.file_path("capabilities.json"),
+    capabilities = records.run_json(run, "capabilities.json",
                                      required=record["final"]["capability_plan_digest"] is not None)
     if capabilities is not None and not isinstance(capabilities, dict):
         raise ValueError("the original capability record is not a JSON object")
-    prompt = records.read_text(run.prompt_path)
+    prompt = records.run_text(run)
     assert prompt is not None
     frozen_inputs = capability_plan.frozen_inputs(record, state_dir=inputs.state)
     source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
@@ -3339,7 +3339,7 @@ def _native_offer_for_settle(run):
     with boundaries.refusals("settle"), records.content(run.path / native.OFFER_NAME):
         offer = native.read_offer(run.path)
         if offer is None:
-            result = records.read_json(run.result_path)
+            result = records.run_json(run, "result.json")
             if isinstance(result, dict) and isinstance(result.get("launcher"), dict) \
                     and result["launcher"].get("name") == "native":
                 raise records.InvalidRecord(run.path / native.OFFER_NAME, records.Issue.MISSING, "is missing")
@@ -3389,24 +3389,24 @@ def _settle_native_operation(*, state_dir: pathlib.Path, root: pathlib.Path, env
     if now >= dt.datetime.fromisoformat(offer["expires_at"].replace("Z", "+00:00")):
         problems.append(f"the offer expired at {offer['expires_at']}")
     with boundaries.refusals("settle"), records.content(run.path / "skills.json"):
-        prompt = records.read_text(run.prompt_path)
+        prompt = records.run_text(run)
         assert prompt is not None
         if native.sha(prompt.encode("utf-8")) != offer["message"]["sha256"]:
             problems.append("the run's brief changed after the offer")
         basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                               read_source=read_source)
-        saved = records.read_json(run.file_path("skills.json"), required=False, limit=records.LIMIT)
+        saved = records.run_json(run, "skills.json", required=False)
         if saved is not None and not isinstance(saved, dict):
             raise ValueError("the offered skills record is not a JSON object")
         e_record = saved.get("prepared_e") if saved is not None else None
         bundle = skillpack.parse_bundle(saved["bundle"]) if saved is not None and saved.get("bundle") else None
-        capabilities = records.read_json(run.file_path("capabilities.json"), required=False)
+        capabilities = records.run_json(run, "capabilities.json", required=False)
         if e_record is None and (bundle is not None or capabilities is not None):
             raise EngineError(native.STALE_CODE, "managed content needs a complete PreparedE record; offer again")
         frozen = None
         if e_record is not None:
             e_record = preparation.parse(e_record)
-            result = records.read_json(run.file_path("result.json"))
+            result = records.run_json(run, "result.json")
             frozen = FrozenCheck(saved, e_record, capability_plan.frozen_inputs(e_record, state_dir=state_dir),
                                  result, capabilities, prompt)
         prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=run.task, engine=request.engine,
@@ -3428,7 +3428,7 @@ def _settle_native_operation(*, state_dir: pathlib.Path, root: pathlib.Path, env
     result = native.read_result(result_path)
     stated = native.claim(offer, host_child_id=host_child_id, task_fingerprint=native.digest(current["task"]),
                           result=result, outcome=outcome, token=token)
-    receiving = native.receiving_record(run.id, offer, bundle, records.read_rows(run.file_path(skillpack.READS_NAME)),
+    receiving = native.receiving_record(run.id, offer, bundle, records.run_rows(run, skillpack.READS_NAME),
                                         now=now)
     settlement, receiving, existing = native.record_settlement(run.path, offer, stated, receiving, now)
     return NativeSettlement(run.id, settlement, receiving, native.read_offer(run.path), existing)
