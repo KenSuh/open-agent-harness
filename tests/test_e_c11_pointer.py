@@ -1,3 +1,4 @@
+# 원본 포인터 회귀 시험 — 포인터 소유자의 이유와 새 최초 실행 안내를 확인한다.
 from __future__ import annotations
 
 import datetime as dt

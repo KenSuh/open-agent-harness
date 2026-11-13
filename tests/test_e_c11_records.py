@@ -1,3 +1,4 @@
+# 저장 기록 회귀 시험 — 자기 시험 파일을 바꾸고 거절 코드와 앞선 기록 보존을 확인한다.
 from __future__ import annotations
 
 import datetime as dt

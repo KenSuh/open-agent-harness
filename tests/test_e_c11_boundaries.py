@@ -1,3 +1,4 @@
+# 명령 경계 회귀 시험 — 선언한 오류 표의 모든 행과 실제 거절 경로를 확인한다.
 from __future__ import annotations
 
 import ast

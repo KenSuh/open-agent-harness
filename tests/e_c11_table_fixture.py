@@ -1,3 +1,4 @@
+# 오류 표 시험 재료 — 실제 명령에서 같은 오류와 공개 거절 코드를 대조한다.
 from __future__ import annotations
 
 import dataclasses
