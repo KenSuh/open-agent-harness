@@ -420,6 +420,35 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                     if name == "result.json" and kind != "io":
                         self.assertIn(b"OAH_RUN_LAUNCH_INVALID", observed[-1][pathlib.Path("stderr.log")])
 
+    def test_relay_reparse_request_refuses_before_reading_its_bytes(self):
+        request, _parent, _now = self.request()
+        source = capability_fixture.write(self.work / "request.json", request)
+        payload = capability_fixture.write(self.work / "relay.txt", capability_fixture.RESULT)
+        invocation = capability_fixture.write(self.work / "invocation.json", {
+            "outcome": "ok", "at": request["created_at"], "arguments_digest": "sha256:" + "3" * 64})
+        earlier, before = source.read_bytes(), files(self.state_dir)
+        lstat, checked = pathlib.Path.lstat, []
+
+        def recorded_stat(path):
+            if path == source:
+                checked.append(path)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG, st_size=len(earlier), st_file_attributes=0x400)
+            return lstat(path)
+
+        with mock.patch.object(pathlib.Path, "lstat", recorded_stat), read_fault(
+                source, AssertionError("the fixture reparse request must be refused before reading")) as reads:
+            code, out, err = cli_result(self.repo, self.env, "capabilities", "relay", "--request", str(source),
+                "--capability", request["capability_id"], "--result-file", str(payload), "--invocation", str(invocation))
+
+        self.assertTrue(checked, out + err)
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith("OAH_CAPABILITIES_USAGE:"), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(reads, [])
+        self.assertEqual(source.read_bytes(), earlier)
+        self.assertEqual(files(self.state_dir), before)
+        self.assertFalse(self.record.exists())
+
     def test_windows_reparse_prompt_refuses_before_reading_it(self):
         _now, run, command = self.offered_parent_relay()
         prompt, lstat = run / "prompt.md", pathlib.Path.lstat
