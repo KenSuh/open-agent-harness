@@ -26,6 +26,40 @@ from tests.test_skill_delivery import DeliveryTask
 class AdmissionTableTest(DeliveryTask, unittest.TestCase):
     request = relay_fixture.RelayTimesTest.request
 
+    def test_windows_scratch_refusal_keeps_its_code_and_remedy_in_both_cli_modes(self):
+        from oah import call
+        from oah.scratch import ScratchError
+
+        self.request()
+        error = ScratchError(self.work / "LocalAppData", "fixture local folder is not absolute", "win32")
+        for flags in ((), ("--json",)):
+            with self.subTest(flags=flags):
+                with mock.patch.object(call, "_prepare", side_effect=error):
+                    code, out, err = cli_result(self.repo, self.env, "call", "claude", "--stage", "initial",
+                        "--task", "t1", "--tier", "low", *flags)
+
+                self.assertEqual(code, 69, out + err)
+                self.assertEqual(err, str(error) + "\n")
+                self.assertEqual(out, "")
+                self.assertEqual(self.runs(), [])
+                self.assertFalse(self.record.exists())
+
+    def test_stale_need_refusal_keeps_one_prefix_and_the_no_launch_message(self):
+        from oah import call
+        from oah.discovery.tasks import NeedsInvalid
+
+        self.request()
+        error = NeedsInvalid("stale", "the fixture packet changed after the needs were written")
+        with mock.patch.object(call, "_prepare", side_effect=error):
+            code, out, err = cli_result(self.repo, self.env, "call", "claude", "--stage", "initial",
+                "--task", "t1", "--tier", "low", "--json")
+
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(err, str(error) + "; nothing was launched\n")
+        self.assertEqual(out, "")
+        self.assertEqual(self.runs(), [])
+        self.assertFalse(self.record.exists())
+
     def test_every_declared_admission_row_reaches_process_and_native_cli(self):
         from oah import call
         import oah.discovery.boundaries as boundaries
@@ -70,6 +104,26 @@ class OrcaAdmissionTableTest(unittest.TestCase):
 
 class LaunchTableTest(DeliveryTask, unittest.TestCase):
     request = relay_fixture.RelayTimesTest.request
+
+    def test_already_changed_pack_refusal_is_kept_once_before_launch(self):
+        from oah import call
+        from oah.capabilities import plan
+        from oah.skillpack import PackRefused
+
+        request, parent, now = self.request()
+        relay, _ = plan.ingest(self.state_dir, request, capability=request["capability_id"],
+            payload=capability_fixture.RESULT.encode("utf-8"), invocation={"outcome": "ok", "at": request["created_at"],
+                "arguments_digest": "sha256:" + "3" * 64}, now=now)
+        error = PackRefused("OAH_SKILL_NOT_DELIVERABLE", "changed", "the preparation evidence expired; prepare again")
+        with mock.patch.object(call, "_streamed_skill_bundle", side_effect=error):
+            code, out, err = cli_result(self.repo, self.env, "call", "claude", "--stage", "initial", "--task",
+                "t1", "--tier", "low", "--parent-inventory", str(parent), "--relay-result", relay["id"], "--json")
+
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(err.rstrip().splitlines()[-1], str(error))
+        self.assertFalse(self.record.exists())
+        self.assertTrue(all(json.loads((run / "result.json").read_bytes())["status"] == "refused"
+                            for run in self.runs()))
 
     def test_every_declared_launch_row_refuses_before_engine(self):
         from oah import call

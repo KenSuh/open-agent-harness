@@ -43,6 +43,7 @@ def samples(root: pathlib.Path) -> dict[str, Sample]:
     from oah.runs import RunError
     from oah.skillpack import PackRefused
     from oah.launchers.native import ProtocolRefused
+    from oah.scratch import ScratchError
 
     return {
         "InvalidRecord": Sample(InvalidRecord(root / "fixture.json", Issue.CONTENT, "has invalid fixture data"), ""),
@@ -61,14 +62,17 @@ def samples(root: pathlib.Path) -> dict[str, Sample]:
         "EngineError": Sample(EngineError("OAH_MODEL_UNRESOLVED", "fixture target"), "OAH_MODEL_UNRESOLVED"),
         "ProtocolRefused": Sample(ProtocolRefused("OAH_NATIVE_SETTLE_CONFLICT", "fixture settlement claim"),
                                   "OAH_NATIVE_SETTLE_CONFLICT"),
+        "ScratchError": Sample(ScratchError(root / "fixture-scratch", "fixture private-folder proof", "win32"),
+                               "OAH_SCRATCH_UNSAFE"),
         "OSError": Sample(OSError(errno.EIO, "fixture disk read failed"), "OAH_STATE_IO"),
     }
 
 
 def expected(rule, sample: Sample) -> tuple[int, str]:
     code = sample.code if rule.outward == "preserve" else rule.outward
-    return (69 if code in ("OAH_STATE_IO", "OAH_SKILL_STATE_CORRUPT", "OAH_CAPABILITY_INVENTORY_UNKNOWN",
-                            "OAH_STATE_CORRUPT", "OAH_CONFIG_INVALID") else 1), code
+    exit_code = (69 if code in ("OAH_STATE_IO", "OAH_SKILL_STATE_CORRUPT", "OAH_CAPABILITY_INVENTORY_UNKNOWN",
+                               "OAH_STATE_CORRUPT", "OAH_CONFIG_INVALID", "OAH_SCRATCH_UNSAFE") else 1)
+    return (rule.exit_code if rule.exit_code is not None else exit_code), code
 
 
 def assert_cli(test, result, rule, sample: Sample) -> None:

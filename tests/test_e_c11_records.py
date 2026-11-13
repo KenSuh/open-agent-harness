@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import dataclasses
 import contextlib
 import errno
 import io
@@ -224,9 +225,10 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
         prepared, parent = self.prepared_parent_relay()
         out, err = io.StringIO(), io.StringIO()
         popen, child = call.subprocess.Popen, []
+        runner = call._boot_argv("background_main", str(prepared.run.path))
 
         def launch(argv, *args, **options):
-            if "creationflags" in options:
+            if isinstance(argv, (list, tuple)) and list(argv) == runner:
                 child.append(argv)
                 raise AssertionError("the fixture runner must not start")
             return popen(argv, *args, **options)
@@ -245,6 +247,31 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(admitted.call_count, 1)
         self.assertEqual(child, [])
         self.assertFalse(self.record.exists())
+
+    def test_windows_git_creation_flags_do_not_stand_in_for_a_runner(self):
+        from oah import call
+        from oah.engines import proc
+
+        popen, flagged = call.subprocess.Popen, []
+
+        def windows_git_popen(argv, *args, **options):
+            if isinstance(argv, (list, tuple)) and pathlib.Path(str(argv[0])).stem == "git":
+                options["creationflags"] = options.get("creationflags", 0) | 0x08000000
+                flagged.append(list(argv))
+            return call.subprocess.Popen(argv, *args, **options)
+
+        def native_popen(argv, *args, **options):
+            if os.name != "nt":
+                options.pop("creationflags", None)
+            return popen(argv, *args, **options)
+
+        windows_process = types.SimpleNamespace(**vars(call.subprocess))
+        windows_process.Popen = windows_git_popen
+        with mock.patch.object(proc, "subprocess", windows_process), \
+                mock.patch.object(call.subprocess, "Popen", native_popen):
+            self.test_windows_launcher_state_io_does_not_enter_the_process_retry()
+
+        self.assertTrue(flagged)
 
     def test_settle_missing_prompt_refuses_stale_and_keeps_the_offer(self):
         _now, run, command = self.offered_parent_relay()
@@ -411,12 +438,14 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
     def test_launch_file_cases_are_generated_from_the_boundary_table(self):
         from oah import call
         from oah.capabilities import plan
+        from oah.discovery import records
         import oah.discovery.boundaries as boundaries
 
         request, parent, now = self.request()
         relay, _ = plan.ingest(self.state_dir, request, capability=request["capability_id"],
             payload=capability_fixture.RESULT.encode("utf-8"), invocation={"outcome": "ok", "at": request["created_at"],
                 "arguments_digest": "sha256:" + "3" * 64}, now=now)
+        fixture_at = dt.datetime.fromisoformat(request["created_at"])
         execute = call.execute
         for name in boundaries.TABLE["launch"].files:
             for kind in ("missing", "directory", "invalid", "null", "denied", "io", "stat-denied", "stat-io"):
@@ -429,21 +458,34 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                         paths = {key: run / key for key in
                                  ("prompt.md", "skills.json", "result.json", "capabilities.json")}
                         paths.update(relay_paths(self.state_dir, saved))
+                        read, reached = records._read, []
+
+                        def recorded_read(path, *args, **kwargs):
+                            if path == paths[name]:
+                                reached.append(path)
+                            return read(path, *args, **kwargs)
+
                         with changed_file(paths[name], kind) as fault:
                             try:
-                                with fault:
-                                    return execute(prepared, **options)
+                                with mock.patch.object(records, "_read", recorded_read), fault as failed_read:
+                                    try:
+                                        return execute(prepared, **options)
+                                    finally:
+                                        self.assertTrue(reached, (name, kind))
+                                        if failed_read is not None:
+                                            self.assertTrue(failed_read, (name, kind))
                             finally:
                                 observed.append(files(run))
 
-                    with mock.patch.object(call, "execute", change):
+                    with mock.patch.object(call, "execute", change), \
+                            mock.patch.object(call.dt, "datetime", spent_fixture.clock(fixture_at)):
                         code, out, err = cli_result(self.repo, self.env, "call", "claude", "--stage", "initial",
                             "--task", "t1", "--tier", "low", "--parent-inventory", str(parent),
                             "--relay-result", relay["id"], "--json")
 
                     expected = (69, "OAH_STATE_IO:") if kind in ("io", "stat-io") else (1, "OAH_RUN_LAUNCH_INVALID:")
                     self.assertEqual(code, expected[0], out + err)
-                    self.assertIn(expected[1], err)
+                    self.assertTrue(err.rstrip().splitlines()[-1].startswith(expected[1]), err)
                     self.assertNotIn("Traceback", err)
                     self.assertFalse(self.record.exists())
                     self.assertTrue(observed)
@@ -452,6 +494,27 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                         self.assertNotEqual(json.loads(result)["status"], "running")
                     if name == "result.json" and kind not in ("io", "stat-io"):
                         self.assertIn(b"OAH_RUN_LAUNCH_INVALID", observed[-1][pathlib.Path("stderr.log")])
+
+    def test_launch_file_cases_reach_the_record_after_elapsed_fixture_time(self):
+        from oah import call
+        from oah.capabilities import plan
+        from oah.discovery import boundaries
+
+        ingest, delayed = plan.ingest, []
+        launch = dataclasses.replace(boundaries.TABLE["launch"], files=("relay-record",))
+        with contextlib.ExitStack() as held:
+            def after_ingest(state, request, *args, **options):
+                result = ingest(state, request, *args, **options)
+                later = dt.datetime.fromisoformat(request["created_at"]) + dt.timedelta(minutes=8)
+                held.enter_context(mock.patch.object(call.dt, "datetime", spent_fixture.clock(later)))
+                delayed.append(later)
+                return result
+
+            held.enter_context(mock.patch.object(plan, "ingest", after_ingest))
+            held.enter_context(mock.patch.dict(boundaries.TABLE, {"launch": launch}))
+            self.test_launch_file_cases_are_generated_from_the_boundary_table()
+
+        self.assertTrue(delayed)
 
     def test_relay_reparse_request_refuses_before_reading_its_bytes(self):
         request, _parent, _now = self.request()
