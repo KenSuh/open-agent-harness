@@ -1236,8 +1236,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
         elif frozen is not None:
             text = frozen.prompt
         else:
-            text = records.read_text(prepared.run.prompt_path)
-            assert text is not None
+            text = records.run_text(prepared.run)
         if record["final"]["render_digest"] != skillpack._sha(text.encode("utf-8")):
             raise ValueError("the exact final render changed")
 
@@ -3528,8 +3527,7 @@ def _launch_inputs(prepared, publication):
                 records.run_json(run, "capabilities.json", required=record["final"]["capability_plan_digest"] is not None)
         bundle = _streamed_skill_bundle(prepared)
         prompt = (publication.plan.prompt if publication is not None and publication.plan.prepared == prepared
-                  else records.read_text(run.prompt_path))
-        assert prompt is not None
+                  else records.run_text(run))
         plan = records.run_json(run, "capabilities.json", required=False) if bundle is not None else None
         return bundle, prompt, _capability_sink(prepared, bundle, plan)
 

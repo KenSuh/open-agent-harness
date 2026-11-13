@@ -137,6 +137,17 @@ def read_text(path: pathlib.Path, *, required: bool = True, limit: int | None = 
     raw = read_bytes(path, required=required, limit=limit)
     if raw is None:
         return None
+    return _text(raw, path)
+
+
+def run_text(run) -> str:
+    path = run.file_path("prompt.md")
+    raw = _read(path, run.prompt_path.read_bytes, required=True, limit=None)
+    assert raw is not None
+    return _text(raw, path)
+
+
+def _text(raw: bytes, path: pathlib.Path) -> str:
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:

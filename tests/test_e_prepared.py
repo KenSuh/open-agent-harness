@@ -151,7 +151,7 @@ class PreparedIdentityTest(DeliveryTask, unittest.TestCase):
 
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
                 mock.patch.object(call.dt, "datetime", Later), \
-                self.assertRaisesRegex(call.EngineError, "OAH_SKILL_NOT_DELIVERABLE\\(changed\\)"):
+                self.assertRaisesRegex(call.EngineError, "OAH_RUN_LAUNCH_INVALID"):
             call.check_prepared(prepared)
         self.assertEqual(path.read_bytes(), before)
         self.assertFalse(self.record.exists())
@@ -218,7 +218,7 @@ class PreparedIdentityTest(DeliveryTask, unittest.TestCase):
                 changed = json.dumps(saved).encode("utf-8")
                 path.write_bytes(changed)
                 with self.subTest(field=field):
-                    with self.assertRaisesRegex(call.EngineError, "OAH_SKILL_NOT_DELIVERABLE\\(changed\\)"):
+                    with self.assertRaisesRegex(call.EngineError, "OAH_RUN_LAUNCH_INVALID"):
                         call.check_prepared(prepared)
                     self.assertEqual(path.read_bytes(), changed)
                 path.write_bytes(original)
@@ -234,7 +234,7 @@ class PreparedIdentityTest(DeliveryTask, unittest.TestCase):
         config.write_text(config.read_text(encoding="utf-8") + '\n[skills]\nexclude = ["plain"]\n',
                           encoding="utf-8")
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
-            with self.assertRaisesRegex(call.EngineError, "OAH_SKILL_NOT_DELIVERABLE\\(changed\\)"):
+            with self.assertRaisesRegex(call.EngineError, "OAH_SKILL_NOT_DELIVERABLE\\(excluded\\)"):
                 call.check_prepared(prepared)
         self.assertEqual((prepared.run.path / "skills.json").read_bytes(), before)
         self.assertFalse(self.record.exists())

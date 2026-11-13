@@ -150,8 +150,8 @@ class FrozenCorrectionTest(DeliveryTask, unittest.TestCase):
                 self.assertRaises(fix_fixture.ReviewError) as caught:
             project.fix()
 
-        self.assertEqual(caught.exception.code, "OAH_FIX_STATE_CHANGED")
-        self.assertEqual(seen, ["OAH_FIX_STATE_CHANGED"])
+        self.assertEqual(caught.exception.code, "OAH_SKILL_NOT_DELIVERABLE(changed)")
+        self.assertEqual(seen, ["OAH_SKILL_NOT_DELIVERABLE(changed)"])
         self.assertEqual(project.fix_calls(), old_calls)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0][0], records[0][1])
@@ -284,7 +284,7 @@ class InventorySettlementTest(DeliveryTask, unittest.TestCase):
                 parent["digest"] = inventory.inventory_digest(parent)
                 lead.write_text(json.dumps(parent), encoding="utf-8")
                 with self.subTest(field=field, child=child), \
-                        self.assertRaisesRegex(call.EngineError, "OAH_SKILL_NOT_DELIVERABLE\\(changed\\)"):
+                        self.assertRaisesRegex(call.EngineError, "OAH_CAPABILITY_RELAY_REQUIRED\\(stale\\)"):
                     call.check_prepared(prepared)
                 self.assertEqual((prepared.run.path / "skills.json").read_bytes(), before)
                 self.assertFalse(self.record.exists())
