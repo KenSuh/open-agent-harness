@@ -240,7 +240,8 @@ def child(engine: str, *, root: pathlib.Path, env: Mapping[str, str], home: path
 
 def _closed(value: object, keys: set[str], what: str) -> Mapping:
     if not isinstance(value, Mapping) or set(value) != keys:
-        missing, extra = sorted(keys - set(value or {})), sorted(set(value or {}) - keys)
+        actual = set(value) if isinstance(value, Mapping) else set()
+        missing, extra = sorted(keys - actual), sorted(actual - keys)
         raise ValueError(f"{what} has keys {sorted(keys)} (missing {missing}, unknown {extra})")
     return value
 
@@ -297,13 +298,12 @@ def check_parent(data: object, *, now: dt.datetime) -> dict:
 
 def read_parent(path: str | os.PathLike, *, now: dt.datetime) -> dict:
     """The lead's InventoryV1 file; OAH_CAPABILITY_INVENTORY_UNKNOWN (exit 69) when it cannot be read or trusted."""
-    data, readable = _read_json(pathlib.Path(path))
-    if data is None:
-        why = "it is missing" if readable else "it is unreadable, over 1 MiB or not JSON"
-        raise CapabilityRefused(INVENTORY_UNKNOWN_CODE, "", f"the parent inventory {path}: {why}")
+    from oah.discovery import records
+
     try:
-        return check_parent(data, now=now)
-    except ValueError as exc:
+        with records.content(pathlib.Path(path)):
+            return check_parent(records.read_json(pathlib.Path(path), limit=FILE_LIMIT), now=now)
+    except records.InvalidRecord as exc:
         raise CapabilityRefused(INVENTORY_UNKNOWN_CODE, "", f"the parent inventory {path}: {exc}") from None
 
 

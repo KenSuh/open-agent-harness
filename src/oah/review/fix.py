@@ -368,7 +368,19 @@ def _error_diagnostic(exc: BaseException) -> tuple[str, str]:
     code = INTERRUPTED if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", None)
     if not isinstance(code, str) or code not in _ERROR_DIAGNOSTICS:
         code = "OAH_STATE_IO" if isinstance(exc, OSError) else "OAH_FIX_FAILED"
-    return code, f"{code}: {_ERROR_DIAGNOSTICS[code]}"
+    diagnostic = _ERROR_DIAGNOSTICS[code]
+    if code == "OAH_FIX_STATE_CHANGED":
+        from oah.discovery.original import MissingReason
+
+        reason = getattr(exc, "pointer_reason", None)
+        if isinstance(reason, MissingReason):
+            diagnostic = {
+                MissingReason.NEVER_WRITTEN: "no managed initial run is recorded for the current content; "
+                                             "start a new initial run, let it run, then correct.",
+                MissingReason.RETIRED: "an ordinary initial run retired the earlier managed original; "
+                                      "start a new initial run, let it run, then correct.",
+            }.get(reason, diagnostic)
+    return code, f"{code}: {diagnostic}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1037,6 +1049,11 @@ def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]],
         code, diagnostic = _error_diagnostic(exc)
         message = diagnostic[len(code) + 2:]
         safe = FixInterrupted(message) if isinstance(exc, KeyboardInterrupt) else ReviewError(code, message)
+        from oah.discovery.original import MissingReason
+
+        reason = getattr(exc, "pointer_reason", None)
+        if code == "OAH_FIX_STATE_CHANGED" and isinstance(reason, MissingReason):
+            setattr(safe, "pointer_reason", reason)
     raise safe from None
 
 

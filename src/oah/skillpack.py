@@ -1065,13 +1065,10 @@ def parse_bundle(data) -> dict:
 
 def bundle_of(run_dir: pathlib.Path) -> dict | None:
     """The run's SkillBundleV1, or None for a run without one; ValueError when the record cannot be trusted."""
+    from oah.discovery import records
+
     path = pathlib.Path(run_dir) / "skills.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError, RecursionError, ValueError) as exc:
-        raise ValueError(f"the run's skills record cannot be read ({type(exc).__name__})") from None
+    data = records.read_json(path, required=False)
     bundle = data.get("bundle") if isinstance(data, dict) else None
     if bundle is None:
         return None
@@ -1081,6 +1078,7 @@ def bundle_of(run_dir: pathlib.Path) -> dict | None:
 def oah_read(run_dir: pathlib.Path, item: int, *, at: str) -> tuple[dict, str]:
     """One bundle item's delivered text, read back from the run's own brief, with an oah-mediated read row."""
     from oah.atomic import append_jsonl
+    from oah.discovery import records
 
     bundle = bundle_of(run_dir)
     if bundle is None:
@@ -1088,7 +1086,8 @@ def oah_read(run_dir: pathlib.Path, item: int, *, at: str) -> tuple[dict, str]:
     entry = next((each for each in bundle["items"] if each["n"] == item), None)
     if entry is None:
         raise PackRefused(UNMANAGED_RUN_CODE, "", f"the run's bundle has no item {item}")
-    prompt = (pathlib.Path(run_dir) / "prompt.md").read_text(encoding="utf-8")
+    prompt = records.read_text(pathlib.Path(run_dir) / "prompt.md")
+    assert prompt is not None
     text = _item_text(prompt, entry)
     if text is None or _sha(text.encode("utf-8")) != entry["delivered_sha256"]:
         raise PackRefused(NOT_DELIVERABLE_CODE, "changed", f"item {item} in the run's brief no longer matches its "

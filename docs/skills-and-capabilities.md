@@ -133,15 +133,18 @@ records, start a new run. A direct API call cannot skip admission.
 
 Original preparation updates a task's pointer in the discovery store's `skills/originals` records and atomic
 `tasks/<task-hash>.json` index. A managed original writes the complete `PreparedE` and publishes its run id and
-content digest. An ordinary original removes an existing pointer for the task. Corrections and reviews keep
+content digest. An ordinary original clears an existing pointer for the task during preparation, even if that
+ordinary run is later refused or never spent. Corrections and reviews keep
 the pointer as it is. A managed correction reads only the run named by that pointer. A missing pointer when
 managed content is needed, missing or incomplete records, a different digest, or a result without a running,
 finished or failed status gives `OAH_FIX_STATE_CHANGED`. A task with a skill only in a later dispatch stage still
 records its complete identity during its empty original stage without requiring an extra skill, relay or
 capacity qualification. Ordinary tasks without managed content keep their existing flow.
 What it costs you: corrections use the latest original. Prepare a new initial run if its record is damaged or
-the task needs managed content again. If the latest initial run was prepared but never run, run it or make a new
-initial run before correcting.
+the task needs managed content again. Once an ordinary original clears the pointer, the earlier managed run
+cannot be corrected until a new initial run is spent. The refusal explains whether no managed original is
+recorded or an ordinary original retired it, and names starting a new initial run as the remedy. If the latest
+managed initial run was prepared but never run, run it or make a new initial run before correcting.
 
 At correction freeze, oah reads the pointed skills, result, prompt and capability plan once, takes the parent
 inventory embedded in the preparation and verifies each authorized relay blob once. Admission, rendering and
@@ -149,6 +152,12 @@ launch checks use those values in memory.
 Refreshing or deleting the lead's inventory file does not block a correction, and removing a relay blob after
 freeze does not change the bytes delivered. A missing or changed blob at freeze refuses before a child starts.
 What it costs you: no inventory refresh is needed; correction uses the original recorded tool results.
+
+Stored E records use one read rule: missing files, non-regular files (including Windows reparse points), permission
+denial and invalid content give the command's stale-record refusal. Correction freeze gives `OAH_FIX_STATE_CHANGED`,
+native settlement gives `OAH_NATIVE_OFFER_STALE`, and a prepared launch records `OAH_RUN_LAUNCH_INVALID` before a
+child starts. Other storage errors, such as a disk read failure, keep `OAH_STATE_IO`. Valid use costs nothing extra;
+a damaged task folder has fewer message variants to interpret.
 
 Relay ingestion validates the full arguments digest and every stored time as ISO-8601 with a time zone before
 storing anything. A malformed

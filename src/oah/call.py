@@ -1080,53 +1080,40 @@ def _check_skill_bundle(prepared: Prepared, run, lease_id: str, *, env=None) -> 
 
 def _pack_error(exc) -> EngineError:
     """A skill admission refusal as the CLI prints it: `CODE(reason): detail`, the code first."""
-    return EngineError(f"{exc.code}({exc.reason})" if exc.reason else exc.code, exc.message)
+    from oah.discovery import boundaries
+
+    failure = boundaries.mapped("admission", exc)
+    assert isinstance(failure, EngineError)
+    return failure
 
 
 @contextmanager
 def _admission_refusals():
-    from oah import skillpack
-    from oah.capabilities import CapabilityRefused
-    from oah.discovery.budget import BudgetRefused
-    from oah.discovery.tasks import NeedsInvalid
+    from oah.discovery import boundaries
 
-    try:
+    with boundaries.refusals("admission"):
         yield
-    except BudgetRefused as exc:
-        raise EngineError(f"{skillpack.BUDGET_CODE}({exc.reason})", exc.detail) from None
-    except (skillpack.PackRefused, CapabilityRefused) as exc:
-        raise _pack_error(exc) from None
-    except NeedsInvalid as exc:
-        raise EngineError(f"{exc.code}({exc.reason})", f"{str(exc).split(': ', 1)[1]}; nothing was "
-                          "launched") from None
-
-
-_PREPARATION_VALIDATION_ERRORS = (ValueError, KeyError, TypeError, AttributeError, RecursionError)
 
 
 def prepared_e_digest(run) -> str | None:
-    from oah.discovery import preparation
+    from oah.discovery import boundaries, preparation, records
 
-    saved = run._read_json("skills.json") if run.file_path("skills.json").is_file() else None
-    if saved is None and run.file_path("capabilities.json").is_file():
-        raise EngineError("OAH_RUN_LAUNCH_INVALID", "managed capabilities need a complete PreparedE record")
-    if saved is None or isinstance(saved, dict) and saved.get("prepared_e") is None and not saved.get("bundle"):
-        return None
-    try:
+    with boundaries.refusals("launch"), records.content(run.path / "skills.json"):
+        saved = records.run_json(run, "skills.json", required=False)
+        if saved is None and records.run_json(run, "capabilities.json", required=False) is not None:
+            raise ValueError("managed capabilities need a complete PreparedE record")
+        if saved is None or isinstance(saved, dict) and saved.get("prepared_e") is None and not saved.get("bundle"):
+            return None
         return preparation.parse(saved["prepared_e"])["digest"]
-    except _PREPARATION_VALIDATION_ERRORS:
-        raise EngineError("OAH_RUN_LAUNCH_INVALID", "the complete prepared E record cannot be verified; "
-                          "the earlier record is kept; prepare again") from None
 
 
 def _check_e(prepared, holder, *, publication=None, native_record=None, env=None, before_spend=True,
              correction=False, frozen: FrozenCheck | None = None):
     from oah import skillpack
-    from oah.atomic import StateCorrupt
-    from oah.capabilities import CapabilityRefused, plan as capability_plan
+    from oah.capabilities import plan as capability_plan
     from oah.call_cli import load_settings
-    from oah.discovery import budget, preparation
-    from oah.discovery.store import StoreProblem, digest
+    from oah.discovery import boundaries, budget, preparation, records
+    from oah.discovery.store import digest
     from oah.config import ConfigError
     from oah.packet import PacketError
 
@@ -1155,7 +1142,8 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                 raise
             return
 
-    try:
+    boundary = "freeze" if publication is not None or correction else "settle" if native_record is not None else "launch"
+    with boundaries.refusals(boundary), records.content(prepared.run.path / "skills.json"):
         if publication is not None:
             live = publication.e_prepared
             if prepared.e_digest is None and live is None:
@@ -1168,8 +1156,8 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             if publication.plan.skills_record.get("prepared_e") != preparation.projection(record):
                 raise ValueError("the correction's closed E record changed")
         else:
-            saved = (frozen.skills if frozen is not None else prepared.run._read_json("skills.json")
-                     if prepared.run.file_path("skills.json").is_file() else None)
+            saved = (frozen.skills if frozen is not None else records.run_json(
+                prepared.run, "skills.json", required=prepared.e_digest is not None))
             raw = (saved or {}).get("prepared_e")
             if prepared.e_digest is None and raw is None:
                 if (saved or {}).get("bundle") or prepared.run.file_path("capabilities.json").is_file():
@@ -1197,7 +1185,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             refs, facts = record["references"], record["facts"]
             if not isinstance(refs, dict) or not isinstance(facts, dict):
                 raise ValueError("the preparation references are malformed")
-            run_data = frozen.result if frozen is not None else prepared.run.read()
+            run_data = (frozen.result if frozen is not None else records.run_json(prepared.run, "result.json"))
             recorded_axes = context["axes"]
             if not isinstance(recorded_axes, dict):
                 raise ValueError("the prepared dispatch axes are incomplete")
@@ -1225,8 +1213,9 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             bundle = (saved or {}).get("bundle")
             if record["final"]["bundle_digest"] != (bundle or {}).get("digest"):
                 raise ValueError("the delivered bundle changed its task, lease, engine, stage or payloads")
-            caps = (frozen.capabilities if frozen is not None else prepared.run._read_json("capabilities.json")
-                    if prepared.run.file_path("capabilities.json").is_file() else None)
+            caps = (frozen.capabilities if frozen is not None else records.run_json(
+                prepared.run, "capabilities.json",
+                required=record["final"]["capability_plan_digest"] is not None))
             if record["final"]["capability_plan_digest"] != (digest(caps) if caps is not None else None):
                 raise ValueError("the capability record changed")
         if prepared.e_digest != record["digest"]:
@@ -1247,15 +1236,10 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
         elif frozen is not None:
             text = frozen.prompt
         else:
-            text = prepared.run.prompt_path.read_bytes().decode("utf-8")
+            text = records.read_text(prepared.run.prompt_path)
+            assert text is not None
         if record["final"]["render_digest"] != skillpack._sha(text.encode("utf-8")):
             raise ValueError("the exact final render changed")
-    except (*_PREPARATION_VALIDATION_ERRORS, StateCorrupt, StoreProblem, ConfigError, routing.RoutingError,
-            runs.RunError, budget.BudgetRefused, skillpack.PackRefused, CapabilityRefused, EngineError) as exc:
-        code = ("OAH_FIX_STATE_CHANGED" if publication is not None or correction
-                else f"{skillpack.NOT_DELIVERABLE_CODE}(changed)")
-        raise EngineError(code,
-                          f"{exc}; nothing was sent and the earlier E record is kept; prepare again") from None
 
 
 def _e_target(request, tier, *, root, state_dir, env, native=False):
@@ -1847,6 +1831,15 @@ def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
 def _record_refusal(prepared: Prepared, error: EngineError) -> None:
     """Mark only the caller's own run refused; a queued Orca run belongs to the worker that claims it."""
     run = prepared.run
+    if prepared.e_digest is not None and not isinstance(run, runs.WorkerRun):
+        from oah.discovery import records
+
+        try:
+            if not isinstance(records.run_json(run, "result.json"), dict):
+                raise records.InvalidRecord(run.result_path, records.Issue.CONTENT, "is not a JSON object")
+        except records.InvalidRecord:
+            run.write_logs("", _recorded_error(error, False) + "\n")
+            return
     if isinstance(run, runs.WorkerRun):
         data = run.read()
         if data.get("status") != "running" or data.get("pid") != os.getpid():
@@ -2430,40 +2423,15 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
 
 
 def _freeze_e(inputs, *, env):
-    from oah.atomic import StateCorrupt
-    from oah.discovery.store import StoreProblem
-    from oah.discovery.budget import BudgetRefused
-    from oah.capabilities import CapabilityRefused
+    from oah.discovery import boundaries, records
 
-    try:
+    with boundaries.refusals("freeze"), records.content(inputs.state / "skills" / "originals"):
         _freeze_e_checked(inputs, env=env)
-    except EngineError:
-        raise
-    except (*_PREPARATION_VALIDATION_ERRORS, StateCorrupt, StoreProblem, BudgetRefused, CapabilityRefused) as exc:
-        raise EngineError("OAH_FIX_STATE_CHANGED", "the earlier E preparation or its current selection cannot be "
-                          f"verified ({type(exc).__name__}); its record is kept; prepare again") from None
-
-
-def _preparation_file(run: runs.Run, name: str, *, limit: int | None = None) -> pathlib.Path:
-    try:
-        path = run.file_path(name)
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            return path
-    except (runs.RunError, NotADirectoryError) as exc:
-        raise ValueError(f"the recorded {name} is not a regular file") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError(f"the recorded {name} is not a regular file")
-    if limit is not None and info.st_size > limit:
-        raise ValueError(f"the recorded {name} exceeds its bounded record size")
-    return path
 
 
 def _freeze_e_checked(inputs, *, env):
-    from oah.atomic import StorageError, read_json
     from oah import discovery
-    from oah.discovery import original, preparation, providers
+    from oah.discovery import original, preparation, providers, records
     from oah.capabilities import plan as capability_plan
 
     holder = inputs.holder()
@@ -2476,36 +2444,29 @@ def _freeze_e_checked(inputs, *, env):
         policy = discovery.policy_digest(providers.settings_of(settings))
         return original.managed(basis, original.selections(inputs.state, basis, policy))
 
-    pointer = original.resolve(inputs.state, holder.task)
-    if pointer is None:
+    pointer = original.lookup(inputs.state, holder.task)
+    if isinstance(pointer, original.MissingReason):
         if needs_frozen():
-            raise ValueError("current managed content requires the original complete frozen run record")
+            raise original.OriginalUnavailable(pointer)
         return
     path = runs.task_directory(inputs.state, holder.task) / pointer["run_id"]
     run = runs.Run(path.name, holder.task, path)
-    saved = read_json(_preparation_file(run, "skills.json", limit=2097152), None)
+    saved = records.read_json(run.file_path("skills.json"), limit=records.LIMIT)
     if not isinstance(saved, dict):
         raise ValueError("the original skills record is missing or not a JSON object")
     record = preparation.parse(saved.get("prepared_e"))
     if record["digest"] != pointer["digest"]:
         raise ValueError("the original complete preparation differs from its task pointer")
     facts, refs = record["facts"], record["references"]
-    result = read_json(_preparation_file(run, "result.json"), {})
+    result = records.read_json(run.file_path("result.json"))
     if not isinstance(result, dict) or result.get("status") not in ("running", "finished", "failed"):
         raise ValueError("the original managed run no longer records a spent result")
-    try:
-        capabilities = read_json(_preparation_file(run, "capabilities.json"), None)
-    except (PermissionError, StorageError) as exc:
-        if record["final"]["capability_plan_digest"] is not None and (
-                isinstance(exc, PermissionError) or isinstance(exc.__cause__, PermissionError)):
-            raise ValueError("the required original capability record cannot be read") from None
-        raise
+    capabilities = records.read_json(run.file_path("capabilities.json"),
+                                     required=record["final"]["capability_plan_digest"] is not None)
     if capabilities is not None and not isinstance(capabilities, dict):
         raise ValueError("the original capability record is not a JSON object")
-    try:
-        prompt = _preparation_file(run, "prompt.md").read_bytes().decode("utf-8")
-    except FileNotFoundError:
-        raise ValueError("the original prompt is missing") from None
+    prompt = records.read_text(run.prompt_path)
+    assert prompt is not None
     frozen_inputs = capability_plan.frozen_inputs(record, state_dir=inputs.state)
     source = Prepared(run_dir=str(path), run_id=path.name, task=holder.task, engine=facts["engine"],
                       stage=facts["stage"], argv=(), cwd=holder.worktree, timeout_s=300, env_additions={},
@@ -3354,7 +3315,7 @@ def settle_native(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[s
             raise
         raise EngineError(native.UNMANAGED_RUN_CODE,
                           f"{run_id} has no native offer in this state folder; offer a native run first") from None
-    offer = native.read_offer(run.path)
+    offer = _native_offer_for_settle(run)
     if offer is None:
         raise EngineError(native.UNMANAGED_RUN_CODE, "this run has no native offer")
     current = bound_lease(state_dir, run.task)
@@ -3369,7 +3330,33 @@ def settle_native(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[s
         raise EngineError(native.STALE_CODE, f"{exc}; the earlier offer is kept; prepare again") from None
 
 
+def _native_offer_for_settle(run):
+    from oah.discovery import boundaries, records
+    from oah.launchers import native
+
+    with boundaries.refusals("settle"), records.content(run.path / native.OFFER_NAME):
+        offer = native.read_offer(run.path)
+        if offer is None:
+            result = records.read_json(run.result_path)
+            if isinstance(result, dict) and isinstance(result.get("launcher"), dict) \
+                    and result["launcher"].get("name") == "native":
+                raise records.InvalidRecord(run.path / native.OFFER_NAME, records.Issue.MISSING, "is missing")
+        return offer
+
+
 def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[str, str], settings: Settings,
+                  run_id: str, offer_digest: str, host_child_id: str, outcome: str, result_path: pathlib.Path,
+                  token: str | None, parse_intent=None, read_source=None,
+                  now: dt.datetime | None = None) -> NativeSettlement:
+    from oah.discovery import boundaries, records
+
+    with boundaries.refusals("settle"), records.content(pathlib.Path(state_dir)):
+        return _settle_native_operation(state_dir=state_dir, root=root, env=env, settings=settings, run_id=run_id,
+            offer_digest=offer_digest, host_child_id=host_child_id, outcome=outcome, result_path=result_path,
+            token=token, parse_intent=parse_intent, read_source=read_source, now=now)
+
+
+def _settle_native_operation(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[str, str], settings: Settings,
                   run_id: str, offer_digest: str, host_child_id: str, outcome: str, result_path: pathlib.Path,
                   token: str | None, parse_intent=None, read_source=None,
                   now: dt.datetime | None = None) -> NativeSettlement:
@@ -3379,18 +3366,15 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
     become current again after drift. Settling never counts a round, finishes a task, releases a lease, registers a
     review or infers that a skill was applied."""
     from oah import skillpack
-    from oah.atomic import StateCorrupt, read_json, read_jsonl
+    from oah.capabilities import plan as capability_plan
+    from oah.discovery import boundaries, preparation, records
     from oah.launchers import native
 
     now = now or dt.datetime.now(dt.timezone.utc)
     root = pathlib.Path(root)
-    try:
+    with boundaries.refusals("settle"), records.content(pathlib.Path(state_dir)):
         run = runs.find_run(state_dir, run_id)
-    except runs.RunError as exc:
-        if exc.code != "OAH_RUN_NOT_FOUND":
-            raise
-        run = None
-    offer = native.read_offer(run.path) if run is not None else None
+        offer = _native_offer_for_settle(run)
     if offer is None:
         raise EngineError(native.UNMANAGED_RUN_CODE, f"{run_id} has no native offer in this state folder; only a run "
                           "offered with oah call --launcher native can be settled")
@@ -3400,56 +3384,51 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
                           tier=offer["target"]["profile_id"].removeprefix("oah-"),
                           axes={"kind": offer["task"]["kind"], "risk": offer["task"]["risk"]})
     problems = []
-    prompt = run.prompt_path.read_bytes() if run.prompt_path.is_file() else None
-    if prompt is None or native.sha(prompt) != offer["message"]["sha256"]:
-        problems.append("the run's brief changed after the offer")
     if now >= dt.datetime.fromisoformat(offer["expires_at"].replace("Z", "+00:00")):
         problems.append(f"the offer expired at {offer['expires_at']}")
-    try:
+    with boundaries.refusals("settle"), records.content(run.path / "skills.json"):
+        prompt = records.read_text(run.prompt_path)
+        assert prompt is not None
+        if native.sha(prompt.encode("utf-8")) != offer["message"]["sha256"]:
+            problems.append("the run's brief changed after the offer")
         basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                               read_source=read_source)
-        saved = read_json(_preparation_file(run, "skills.json"), None)
+        saved = records.read_json(run.file_path("skills.json"), required=False, limit=records.LIMIT)
         if saved is not None and not isinstance(saved, dict):
             raise ValueError("the offered skills record is not a JSON object")
         e_record = saved.get("prepared_e") if saved is not None else None
-        bundle = skillpack.bundle_of(run.path)
-        capabilities = _preparation_file(run, "capabilities.json")
-        if e_record is None and (bundle is not None or capabilities.is_file()):
+        bundle = skillpack.parse_bundle(saved["bundle"]) if saved is not None and saved.get("bundle") else None
+        capabilities = records.read_json(run.file_path("capabilities.json"), required=False)
+        if e_record is None and (bundle is not None or capabilities is not None):
             raise EngineError(native.STALE_CODE, "managed content needs a complete PreparedE record; offer again")
+        frozen = None
         if e_record is not None:
-            _preparation_file(run, "result.json")
+            e_record = preparation.parse(e_record)
+            result = records.read_json(run.file_path("result.json"))
+            frozen = FrozenCheck(saved, e_record, capability_plan.frozen_inputs(e_record, state_dir=state_dir),
+                                 result, capabilities, prompt)
         prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=run.task, engine=request.engine,
                             stage=request.stage, argv=(), cwd=str(root), timeout_s=300, env_additions={},
                             model=offer["target"]["model"], launch_effort=offer["target"]["effort"],
                             cli_version=None, warnings=(), e_digest=e_record["digest"] if e_record is not None else None)
-        _check_e(prepared, basis.holder, native_record=offer, env=env, before_spend=False)
+        _check_e(prepared, basis.holder, native_record=offer, env=env, before_spend=False, frozen=frozen)
         target = _native_target(request.engine, request.tier, settings, root=root, env=env)
         current = _native_identities(request, basis, bundle, target, e_record,
                                      lease_generation=offer["task"]["lease"]["generation"])
         problems.extend(f"the {label} changed" for label in _native_differences(offer, current))
-    except skillpack.PackRefused as exc:
-        problems.append(str(_pack_error(exc)))
-    except (*_PREPARATION_VALIDATION_ERRORS, StateCorrupt, runs.RunError, EngineError) as exc:
-        problems.append(str(exc))
     if problems or offer["state"] == "stale":
         reasons = "; ".join(problems) or "it was marked stale by an earlier settle"
         raise EngineError(native.STALE_CODE, f"run {run_id}'s native offer is stale: {reasons}. Its record is kept as "
                           "evidence of the old offer; offer again with oah call --launcher native")
     if offer_digest != offer["message"]["sha256"]:
-        raise EngineError(native.CONFLICT_CODE, f"{offer_digest} is not the digest of run {run_id}'s offered "
+        raise native.ProtocolRefused(native.CONFLICT_CODE, f"{offer_digest} is not the digest of run {run_id}'s offered "
                           f"message ({offer['message']['sha256']}); pass the digest the offer printed")
     result = native.read_result(result_path)
     stated = native.claim(offer, host_child_id=host_child_id, task_fingerprint=native.digest(current["task"]),
                           result=result, outcome=outcome, token=token)
-    try:
-        delivered = skillpack.bundle_of(run.path)
-    except ValueError as exc:
-        raise StateCorrupt(f"{StateCorrupt.code}: run {run_id}: {exc}; oah never repairs it, so offer again") from None
-    receiving = native.receiving_record(run.id, offer, delivered, read_jsonl(run.file_path(skillpack.READS_NAME)),
+    receiving = native.receiving_record(run.id, offer, bundle, records.read_rows(run.file_path(skillpack.READS_NAME)),
                                         now=now)
-    settlement, existing = native.record_settlement(run.path, offer, stated, receiving, now)
-    if existing:
-        receiving = native.read_receiving(run.path) or receiving
+    settlement, receiving, existing = native.record_settlement(run.path, offer, stated, receiving, now)
     return NativeSettlement(run.id, settlement, receiving, native.read_offer(run.path), existing)
 
 
@@ -3530,6 +3509,31 @@ def _finish_inline_delivery(prepared: Prepared) -> None:
         write_json_atomic(prepared.run.file_path(DESIGN_NAME), saved)
 
 
+def _launch_inputs(prepared, publication):
+    from oah.capabilities import plan as capability_plan
+    from oah.discovery import boundaries, preparation, records
+
+    run = prepared.run
+    with boundaries.refusals("launch"), records.content(run.path / "prompt.md"):
+        if prepared.e_digest is not None:
+            result = records.run_json(run, "result.json")
+            if not isinstance(result, dict):
+                raise ValueError("the prepared result is not a JSON object")
+            if publication is None:
+                saved = records.run_json(run, "skills.json")
+                if not isinstance(saved, dict):
+                    raise ValueError("the prepared skills record is not a JSON object")
+                record = preparation.parse(saved["prepared_e"])
+                capability_plan.frozen_inputs(record, state_dir=run.path.parents[2])
+                records.run_json(run, "capabilities.json", required=record["final"]["capability_plan_digest"] is not None)
+        bundle = _streamed_skill_bundle(prepared)
+        prompt = (publication.plan.prompt if publication is not None and publication.plan.prepared == prepared
+                  else records.read_text(run.prompt_path))
+        assert prompt is not None
+        plan = records.run_json(run, "capabilities.json", required=False) if bundle is not None else None
+        return bundle, prompt, _capability_sink(prepared, bundle, plan)
+
+
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
@@ -3539,16 +3543,18 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     env = dict(os.environ if base_env is None else base_env)
     env.update(prepared.env_additions)
     clean = redact or (lambda text: text)
-    skill_bundle = _streamed_skill_bundle(prepared)
+    publication = _CORRECTION_PUBLICATION.get()
+    try:
+        skill_bundle, prompt, planned_sink = _launch_inputs(prepared, publication)
+    except EngineError as exc:
+        _record_refusal(prepared, exc)
+        raise
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
-    publication = _CORRECTION_PUBLICATION.get()
-    prompt = (publication.plan.prompt if publication is not None and publication.plan.prepared == prepared else
-              run.prompt_path.read_bytes().decode("utf-8"))  # the brief goes to stdin byte for byte
     if prepared.retain_worker_text:
         run.file_path("last-message.md")
     reference = _start_reference(prepared, env)
-    sink = _capability_sink(prepared, skill_bundle) if reference is None else None
+    sink = planned_sink if reference is None else None
     tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(_design_bound(prepared)))
     try:
         result = _run_prepared(prepared, env, prompt, sink=sink)
@@ -3699,10 +3705,7 @@ def _streamed_skill_bundle(prepared: "Prepared") -> dict | None:
         return None
     from oah import skillpack
 
-    try:
-        bundle = skillpack.bundle_of(prepared.run.path)
-    except ValueError as exc:
-        raise EngineError("OAH_RUN_LAUNCH_INVALID", f"{exc}; run oah call again to prepare it") from None
+    bundle = skillpack.bundle_of(prepared.run.path)
     return bundle if bundle is not None and skillpack.references(bundle) else None
 
 
@@ -4131,14 +4134,12 @@ def _stream_correction(child, prepared: Prepared, prompt: str, *, sink=None):
                            timed_out, output)
 
 
-def _capability_sink(prepared: "Prepared", bundle: Mapping | None):
+def _capability_sink(prepared: "Prepared", bundle: Mapping | None, plan):
     """EventSinkV1 for the one row where E itself switched Claude to stream-json: skill references to read and no
     design transport (DESIGN §6.5, §7.4). Every other row keeps its output unread by E; None there."""
     if bundle is None or "stream-json" not in prepared.argv:
         return None
     from oah.capabilities import inventory
-
-    plan = prepared.run._read_json("capabilities.json")
     planned = {row["id"]: row for row in plan.get("selected", [])} if isinstance(plan, dict) else {}
     argv = list(prepared.argv)
     mode = argv[argv.index("--permission-mode") + 1] if "--permission-mode" in argv[:-1] else None

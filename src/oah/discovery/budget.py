@@ -5,6 +5,7 @@ import dataclasses
 import datetime as dt
 import hashlib
 import json
+import pathlib
 from typing import Final, Literal, Mapping, Sequence, TypedDict
 
 from oah.discovery.store import digest
@@ -93,14 +94,21 @@ def _hash(value: object) -> bool:
 
 
 def profiles(target: Target, *, now: dt.datetime) -> list[TargetBudgetProfileV1]:
+    from oah.discovery import records
+
     try:
         source = _profile_source(target)
     except OSError as exc:
-        raise BudgetRefused("target-capacity-unknown", "the pinned qualification source cannot be read") from exc
+        failure = records.io_failure(pathlib.Path("target-profiles.json"), exc)
+        if isinstance(failure, records.InvalidRecord):
+            raise BudgetRefused("target-capacity-unknown", "the pinned qualification source cannot be read") from None
+        if failure is exc:
+            raise
+        raise failure from exc
     if len(source.raw) > 65536 or hashlib.sha256(source.raw).hexdigest() != source.sha256:
         raise BudgetRefused("target-capacity-unknown", "the packaged qualification data does not match its pin")
     try:
-        data = json.loads(source.raw.decode("utf-8"))
+        data = records.json_bytes(source.raw, pathlib.Path("target-profiles.json"))
         if not isinstance(data, dict) or set(data) != {"version", "profiles"} or type(data["version"]) is not int \
                 or data["version"] != 1 \
                 or not isinstance(data["profiles"], list) or len(data["profiles"]) > 32:

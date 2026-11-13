@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pathlib
+from enum import StrEnum
 from typing import Mapping
 
 from oah.atomic import write_json_atomic
@@ -9,6 +10,17 @@ from oah.discovery import preparation, store, tasks
 from oah.engines.effort import EngineError
 
 FOLDER = "originals"
+
+
+class MissingReason(StrEnum):
+    NEVER_WRITTEN = "never-written"
+    RETIRED = "retired-by-ordinary-original"
+
+
+class OriginalUnavailable(EngineError):
+    def __init__(self, reason: MissingReason) -> None:
+        self.pointer_reason = reason
+        super().__init__("OAH_FIX_STATE_CHANGED", "the original pointer is unavailable; start a new initial run")
 
 
 def _index(state_dir: pathlib.Path, task: str) -> pathlib.Path:
@@ -31,16 +43,19 @@ def publish(run, skills: Mapping[str, preparation.Json] | None, *, stage: str) -
     if is_original:
         index = _index(state_dir, run.task)
         if pointer is None:
-            index.unlink(missing_ok=True)
+            if isinstance(lookup(state_dir, run.task), dict):
+                write_json_atomic(index, {"original": None})
         else:
             write_json_atomic(index, {"original": pointer["id"]})
 
 
-def resolve(state_dir: pathlib.Path, task: str) -> preparation.Record | None:
+def lookup(state_dir: pathlib.Path, task: str) -> preparation.Record | MissingReason:
     path = _index(state_dir, task)
     index = store._read(path)
     if index is None:
-        return None
+        return MissingReason.NEVER_WRITTEN
+    if index == {"original": None}:
+        return MissingReason.RETIRED
     if not isinstance(index, dict) or set(index) != {"original"} or not preparation._hash(index["original"]):
         raise store.StoreProblem(path, "the task's original pointer index is incomplete")
     pointer = store.get_record(state_dir, FOLDER, index["original"])
@@ -51,6 +66,11 @@ def resolve(state_dir: pathlib.Path, task: str) -> preparation.Record | None:
             or not preparation._hash(pointer["digest"]):
         raise store.StoreProblem(path, "the task's original pointer is missing or incomplete")
     return pointer
+
+
+def resolve(state_dir: pathlib.Path, task: str) -> preparation.Record | None:
+    found = lookup(state_dir, task)
+    return found if isinstance(found, dict) else None
 
 
 def selections(state_dir: pathlib.Path, basis: tasks.TaskBasis, policy: str) -> list[preparation.Record]:

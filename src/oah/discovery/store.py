@@ -21,7 +21,7 @@ import pathlib
 from typing import Mapping
 
 from oah.atomic import StateCorrupt, write_text_atomic
-from oah.design.sources.state import StateProblem, loads
+from oah.discovery import records as record_files
 
 LIMIT = 1 << 20
 
@@ -57,16 +57,8 @@ def with_id(record: Mapping) -> dict:
 
 def _read(path: pathlib.Path) -> object | None:
     try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise StoreProblem(path, f"cannot be read ({exc.strerror or exc})") from None
-    if len(raw) > LIMIT:
-        raise StoreProblem(path, "is larger than 1 MiB")
-    try:
-        return loads(raw, path.name)
-    except StateProblem as exc:
+        return record_files.read_json(path, required=False, limit=LIMIT)
+    except record_files.InvalidRecord as exc:
         raise StoreProblem(path, exc.detail) from None
 
 

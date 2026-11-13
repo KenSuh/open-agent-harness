@@ -131,19 +131,19 @@ def _plan(args: argparse.Namespace) -> int:
 
 def _relay(args: argparse.Namespace) -> int:
     from oah.capabilities import plan
+    from oah.discovery import boundaries, records
 
     if os.environ.get("OAH_WORKER") == "1":
         raise Refused("OAH_SKILLS_WORKER_REFUSED", "dispatched workers do not run oah capabilities relay; only the "
                       "lead records relay results")
     _info, state = _context()
-    try:
-        request = json.loads(pathlib.Path(args.request).read_text(encoding="utf-8"))
-        invocation = json.loads(pathlib.Path(args.invocation).read_text(encoding="utf-8"))
-        payload = pathlib.Path(args.result_file).read_bytes()
-    except (OSError, ValueError) as exc:
-        raise Refused(USAGE_CODE, f"cannot read the request, invocation or result file ({exc})") from None
-    record, word = plan.ingest(state, request, capability=args.capability, payload=payload, invocation=invocation,
-                               now=_now())
+    with boundaries.refusals("relay"), records.content(pathlib.Path(args.request)):
+        request = records.read_json(pathlib.Path(args.request))
+        invocation = records.read_json(pathlib.Path(args.invocation))
+        payload = records.read_bytes(pathlib.Path(args.result_file))
+        assert payload is not None
+        record, word = plan.ingest(state, request, capability=args.capability, payload=payload, invocation=invocation,
+                                   now=_now())
     if args.json:
         print(json.dumps({"id": record["id"], "word": word, "need_id": record["need_id"],
                           "prep_id": record["prep_id"]}, indent=2, ensure_ascii=False))
@@ -166,10 +166,15 @@ def run(args: argparse.Namespace) -> int:
     from oah.paths import GitMissing, NotARepo
     from oah.review.runner import credential_redactor
     from oah.skillpack import PackRefused
+    from oah.engines.effort import EngineError
 
     redact = credential_redactor(os.environ)
     try:
         return HANDLERS[args.capabilities_command](args)
+    except EngineError as exc:
+        print(redact(str(exc)), file=sys.stderr)
+        return EXIT_ENVIRONMENT if exc.code in ("OAH_STATE_IO", "OAH_SKILL_STATE_CORRUPT",
+                                                "OAH_CAPABILITY_INVENTORY_UNKNOWN") else EXIT_REFUSED
     except CapabilityRefused as exc:
         print(redact(str(exc)), file=sys.stderr)
         return exc.exit_code

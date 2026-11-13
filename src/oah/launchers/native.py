@@ -43,6 +43,10 @@ RECEIVING_KEYS = ("version", "id", "run", "bundle_id", "target_digest", "session
                   "reference_delivery", "capability_receiving_ref", "at")
 
 
+class ProtocolRefused(EngineError):
+    pass
+
+
 def sha(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -67,7 +71,7 @@ def host_params(engine: str, *, profile_id: str, description: str, message: str)
         return {"subagent_type": profile_id, "description": description, "prompt": message}
     if engine == "codex":
         return {"message": message}
-    raise EngineError(HOST_UNSUPPORTED_CODE, f"no native host route for {engine!r}; nothing was offered")
+    raise ProtocolRefused(HOST_UNSUPPORTED_CODE, f"no native host route for {engine!r}; nothing was offered")
 
 
 def offer_id(record: Mapping) -> str:
@@ -111,16 +115,17 @@ def _create_only(path: pathlib.Path, record: Mapping) -> bool:
             pass
 
 
-def _read(path: pathlib.Path, keys: tuple[str, ...], *, optional: tuple[str, ...] = ()) -> dict | None:
+def _read(path: pathlib.Path, keys: tuple[str, ...], *, optional: tuple[str, ...] = (),
+          required: bool = False) -> dict | None:
+    from oah.discovery import records
+
     try:
-        data = json.loads(path.read_bytes().decode("utf-8"))
-    except FileNotFoundError:
-        return None
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        data = records.read_json(path, required=required)
+    except records.InvalidRecord as exc:
         raise StateCorrupt(f"{StateCorrupt.code}: {path} is not valid UTF-8 JSON ({type(exc).__name__}); oah never "
                            "resets it, so repair or remove the file by hand") from None
-    except OSError as exc:
-        raise StorageError(path, exc) from exc
+    if data is None:
+        return None
     if not isinstance(data, dict) or not set(keys) <= set(data) <= {*keys, *optional} or data.get("version") != 1:
         raise StateCorrupt(f"{StateCorrupt.code}: {path} is not a version 1 record with exactly its documented keys")
     return data
@@ -145,7 +150,7 @@ def publish_offer(run_dir: pathlib.Path, record: Mapping) -> dict:
     stored = read_offer(run_dir)
     if stored is not None and stored["id"] == record["id"]:
         return stored
-    raise EngineError(CONFLICT_CODE, f"run {record['run']} already holds a different native offer; nothing was "
+    raise ProtocolRefused(CONFLICT_CODE, f"run {record['run']} already holds a different native offer; nothing was "
                       "offered")
 
 
@@ -164,14 +169,14 @@ def read_result(path: pathlib.Path) -> bytes:
     except OSError as exc:
         raise StorageError(pathlib.Path(path), exc) from exc
     if len(data) > RESULT_LIMIT:
-        raise EngineError(f"{RESULT_CODE}(too-large)", f"the result file is over {RESULT_LIMIT} bytes; keep the "
+        raise ProtocolRefused(f"{RESULT_CODE}(too-large)", f"the result file is over {RESULT_LIMIT} bytes; keep the "
                           "subagent's reply short, or save its long output elsewhere and settle with a summary")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
-        raise EngineError(f"{RESULT_CODE}(not-utf8)", "the result file is not valid UTF-8 text") from None
+        raise ProtocolRefused(f"{RESULT_CODE}(not-utf8)", "the result file is not valid UTF-8 text") from None
     if any(line.lstrip().casefold().startswith("<!-- oah") for line in text.split("\n")):
-        raise EngineError(f"{RESULT_CODE}(marker)", "the result file has a line starting with <!-- oah, which only "
+        raise ProtocolRefused(f"{RESULT_CODE}(marker)", "the result file has a line starting with <!-- oah, which only "
                           "oah writes; remove that line and settle again")
     return data
 
@@ -190,20 +195,20 @@ def claim(offer: Mapping, *, host_child_id: str, task_fingerprint: str, result: 
             "counted": False}
 
 
-def read_settlement(run_dir: pathlib.Path) -> dict | None:
+def read_settlement(run_dir: pathlib.Path, *, required: bool = False) -> dict | None:
     path = pathlib.Path(run_dir) / SETTLEMENT_NAME
-    settlement = _read(path, SETTLEMENT_KEYS)
+    settlement = _read(path, SETTLEMENT_KEYS, required=required)
     if settlement is not None and settlement["id"] != digest({key: value for key, value in settlement.items()
                                                               if key != "id"}):
         raise StateCorrupt(f"{StateCorrupt.code}: {path} does not match its own id")
     return settlement
 
 
-def read_receiving(run_dir: pathlib.Path) -> dict | None:
+def read_receiving(run_dir: pathlib.Path, *, required: bool = False) -> dict | None:
     from oah.capabilities.usage import valid_summary
 
     path = pathlib.Path(run_dir) / RECEIVING_NAME
-    record = _read(path, RECEIVING_KEYS, optional=("available_usage",))
+    record = _read(path, RECEIVING_KEYS, optional=("available_usage",), required=required)
     if record is not None and "available_usage" in record and (
             not valid_summary(record["available_usage"])
             or record["id"] != digest({key: value for key, value in record.items() if key != "id"})):
@@ -233,12 +238,12 @@ def receiving_record(run_id: str, offer: Mapping, bundle: Mapping | None, reads:
 
 
 def record_settlement(run_dir: pathlib.Path, offer: Mapping, stated: Mapping, receiving: Mapping,
-                      now: dt.datetime) -> tuple[dict, bool]:
-    """(the settlement, whether it already existed). A first settlement writes the receiving record, then the
+                      now: dt.datetime) -> tuple[dict, dict, bool]:
+    """(the settlement, receiving record, whether they already existed). A first settlement writes the receiving record, then the
     settlement create-only, then the offer's state. An identical retry returns the first receipt; a contradictory
     one refuses and changes nothing."""
     run_dir = pathlib.Path(run_dir)
-    existing = read_settlement(run_dir)
+    existing = read_settlement(run_dir, required=offer["settlement"] is not None)
     if existing is None:
         write_json_atomic(run_dir / RECEIVING_NAME, dict(receiving))
         settlement = {**stated, "receiving_ref": receiving["id"], "at": iso(now)}
@@ -246,13 +251,15 @@ def record_settlement(run_dir: pathlib.Path, offer: Mapping, stated: Mapping, re
         settlement = {key: settlement[key] for key in SETTLEMENT_KEYS}
         if _create_only(run_dir / SETTLEMENT_NAME, settlement):
             set_state(run_dir, offer, f"settled-{stated['outcome']}", settlement["id"])
-            return settlement, False
-        existing = read_settlement(run_dir)  # another settle won the race; compare with it
+            return settlement, dict(receiving), False
+        existing = read_settlement(run_dir, required=True)  # another settle won the race; compare with it
+    stored_receiving = read_receiving(run_dir, required=True)
+    assert existing is not None and stored_receiving is not None
     differs = [key for key in CLAIM_KEYS if existing[key] != stated[key]]
     if differs:
-        raise EngineError(CONFLICT_CODE, f"run {offer['run']} was already settled with another "
+        raise ProtocolRefused(CONFLICT_CODE, f"run {offer['run']} was already settled with another "
                           f"{', '.join(key.replace('_', ' ') for key in differs)}; the first receipt stands and "
                           "nothing was changed")
     if offer["state"] != f"settled-{existing['outcome']}" or offer["settlement"] != existing["id"]:
         set_state(run_dir, offer, f"settled-{existing['outcome']}", existing["id"])  # finish an interrupted settle
-    return existing, True
+    return existing, stored_receiving, True

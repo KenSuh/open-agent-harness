@@ -416,7 +416,7 @@ def check_request(request: object, *, now: dt.datetime) -> dict:
     return dict(request)
 
 
-def ingest(state_dir: os.PathLike, request: Mapping, *, capability: str, payload: bytes, invocation: object,
+def ingest(state_dir: os.PathLike, request: Json, *, capability: str, payload: bytes, invocation: object,
            now: dt.datetime) -> tuple[dict, str]:
     """Store a lead's tool result for one relay request: create-only, content-addressed; (record, word)."""
     from oah.design.task_context import screen_hit
