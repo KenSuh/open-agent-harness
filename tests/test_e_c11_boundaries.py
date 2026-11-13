@@ -216,6 +216,40 @@ CLI_CASES = {"admission": {"process": AdmissionTableTest, "native": AdmissionTab
 
 
 class BoundaryCompletenessTest(unittest.TestCase):
+    def test_every_direct_typed_mapping_catch_is_declared(self):
+        from oah import call
+        import oah.discovery.boundaries as boundaries
+
+        tree = ast.parse(inspect.getsource(call))
+        owners = {}
+        for function in tree.body:
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            for node in ast.walk(function):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                        and isinstance(node.func.value, ast.Name) and node.func.value.id == "boundaries" \
+                        and node.func.attr == "mapped" and node.args and isinstance(node.args[0], ast.Constant):
+                    owners[function.name] = node.args[0].value
+        self.assertTrue(owners)
+        kinds, seen = boundaries.error_types(), []
+        for handler in (node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)):
+            calls = [node for statement in handler.body for node in ast.walk(statement)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                     and node.func.id in owners and node.args and isinstance(node.args[0], ast.Name)
+                     and node.args[0].id == handler.name]
+            for node in calls:
+                assert isinstance(node.func, ast.Name)
+                boundary = owners[node.func.id]
+                caught = handler.type.elts if isinstance(handler.type, ast.Tuple) else (handler.type,)
+                for kind in caught:
+                    name = kind.attr if isinstance(kind, ast.Attribute) else kind.id if isinstance(kind, ast.Name) else ""
+                    with self.subTest(boundary=boundary, caught=name, line=handler.lineno):
+                        self.assertIn(name, kinds)
+                        self.assertTrue(any(issubclass(kinds[name], incoming)
+                                            for incoming in boundaries.incoming(boundary)), name)
+                        seen.append((boundary, name))
+        self.assertTrue(seen)
+
     def test_record_failures_and_every_declared_row_have_cli_cases(self):
         import oah.discovery.boundaries as boundaries
         from oah.discovery import records
