@@ -74,5 +74,5 @@ def assert_cli(test, result, rule, sample: Sample) -> None:
     code, out, err = result
     exit_code, public = expected(rule, sample)
     test.assertEqual(code, exit_code, out + err)
-    test.assertTrue(err.startswith(public + ":"), err)
+    test.assertTrue(err.rstrip().splitlines()[-1].startswith(public + ":"), err)
     test.assertNotIn("Traceback", err)

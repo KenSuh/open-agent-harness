@@ -81,6 +81,7 @@ if TYPE_CHECKING:
 import oah.intent as oah_intent
 import oah.packet as oah_packet
 from oah import benchmarks, briefs, launchers, models, routing, runs, scoring, skillsel
+from oah.atomic import StorageError
 from oah.engines import claude, codex
 from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, load_rules,
                                 verify_inference)
@@ -1135,7 +1136,9 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                           native=native_record is not None,
                           brief_disabled=(skills or {}).get("rerank") == "unused(disabled-by-brief)",
                           packet=packet, design=design, advise=False, expected=False)
-        except (ConfigError, PacketError, OSError, ValueError):
+        except (ConfigError, PacketError, OSError, ValueError) as exc:
+            if isinstance(exc, StorageError):
+                raise
             return
         except EngineError as exc:
             if exc.code.startswith(("OAH_SKILL_", "OAH_SKILLS_", "OAH_CAPABILITY_")):
@@ -1827,7 +1830,7 @@ def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
     return tuple(class_needs), status, advise
 
 
-def _record_refusal(prepared: Prepared, error: EngineError) -> None:
+def _record_refusal(prepared: Prepared, error: EngineError | StorageError) -> None:
     """Mark only the caller's own run refused; a queued Orca run belongs to the worker that claims it."""
     run = prepared.run
     if prepared.e_digest is not None and not isinstance(run, runs.WorkerRun):
@@ -3556,6 +3559,10 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(_design_bound(prepared)))
     try:
         result = _run_prepared(prepared, env, prompt, sink=sink)
+    except StorageError as exc:
+        _end_reference_failed(reference)
+        _record_refusal(prepared, exc)
+        raise
     except (OSError, ValueError, subprocess.SubprocessError, RootUnavailable) as exc:
         observation_failure = _conclude_observation(prepared, sink)
         if prepared.retain_worker_text:
@@ -4407,9 +4414,9 @@ def _background_run(run_dir: str) -> runs.Run:
 def launch_main(run_dir: str) -> int:
     try:
         return _launch_main(run_dir)
-    except EngineError as exc:
+    except (EngineError, StorageError) as exc:
         print(exc, file=sys.stderr)
-        return 1
+        return 69 if isinstance(exc, StorageError) else 1
 
 
 def _launch_main(run_dir: str) -> int:
@@ -4428,6 +4435,8 @@ def _launch_main(run_dir: str) -> int:
         try:
             with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                 child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
+        except StorageError:
+            raise
         except OSError as exc:
             if require_detach:
                 print(f"OAH_RUN_DETACH_FAILED: Windows refused job breakaway ({exc}); retry without "
@@ -4458,9 +4467,9 @@ def background_main(run_dir: str) -> int:
     prepared = Prepared.from_json(read_json(_background_run(run_dir).launch_path, None))
     try:
         execute(prepared)
-    except EngineError as exc:
+    except (EngineError, StorageError) as exc:
         print(exc, file=sys.stderr)
-        return 1
+        return 69 if isinstance(exc, StorageError) else 1
     except BaseException as exc:
         prepared.run.result(status="failed", error=f"OAH_RUN_RUNNER_FAILED: {type(exc).__name__}: {exc}")
         raise

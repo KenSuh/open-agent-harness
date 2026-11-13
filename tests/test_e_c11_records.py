@@ -3,7 +3,9 @@ from __future__ import annotations
 import datetime as dt
 import contextlib
 import errno
+import io
 import json
+import os
 import pathlib
 import stat
 import types
@@ -24,15 +26,25 @@ def relay_paths(state, saved):
             "relay-blob": state / "skills/relay-payloads" / (relay["payload"]["blob_ref"][7:] + ".json")}
 
 
+@contextlib.contextmanager
 def read_fault(path, error):
-    read = pathlib.Path.read_bytes
+    read, read_text, seen = pathlib.Path.read_bytes, pathlib.Path.read_text, []
 
     def changed(current):
         if current == path:
+            seen.append("read_bytes")
             raise error
         return read(current)
 
-    return mock.patch.object(pathlib.Path, "read_bytes", changed)
+    def changed_text(current, *args, **options):
+        if current == path:
+            seen.append("read_text")
+            raise error
+        return read_text(current, *args, **options)
+
+    with mock.patch.object(pathlib.Path, "read_bytes", changed), \
+            mock.patch.object(pathlib.Path, "read_text", changed_text):
+        yield seen
 
 
 @contextlib.contextmanager
@@ -63,6 +75,142 @@ def changed_file(path, kind):
 class CommandRecordTest(DeliveryTask, unittest.TestCase):
     request = relay_fixture.RelayTimesTest.request
     offered_parent_relay = spent_fixture.SpentEvidenceTest.offered_parent_relay
+
+    def test_launch_last_guard_parent_disk_error_keeps_state_io_before_child(self):
+        from oah import call
+        from oah.capabilities import plan
+
+        request, parent, now = self.request()
+        relay, _ = plan.ingest(self.state_dir, request, capability=request["capability_id"],
+            payload=capability_fixture.RESULT.encode("utf-8"), invocation={"outcome": "ok", "at": request["created_at"],
+                "arguments_digest": "sha256:" + "3" * 64}, now=now)
+        execute, snapshots = call.execute, []
+
+        def changed(prepared, **options):
+            paths = [prepared.run.file_path(name) for name in ("prompt.md", "skills.json", "capabilities.json")]
+            snapshots.append({path: path.read_bytes() for path in paths})
+            with read_fault(parent, OSError(errno.EIO, "fixture parent read failed at launch")) as reads:
+                try:
+                    return execute(prepared, **options)
+                finally:
+                    self.assertTrue(reads)
+
+        with mock.patch.object(call, "execute", changed):
+            code, out, err = cli_result(self.repo, self.env, "call", "claude", "--stage", "initial",
+                "--task", "t1", "--tier", "low", "--parent-inventory", str(parent),
+                "--relay-result", relay["id"], "--json")
+
+        self.assertEqual(code, 69, out + err)
+        self.assertTrue(err.rstrip().splitlines()[-1].startswith("OAH_STATE_IO:"), err)
+        self.assertFalse(self.record.exists())
+        self.assertTrue(snapshots)
+        for snapshot in snapshots:
+            self.assertEqual({path: path.read_bytes() for path in snapshot}, snapshot)
+        self.assertTrue(all(json.loads((run / "result.json").read_bytes())["status"] == "refused"
+                            for run in self.runs()))
+
+    def test_ordinary_last_guard_selection_disk_error_keeps_state_io_before_child(self):
+        from oah import call, call_cli
+        from oah.discovery import policy_digest, providers, tasks
+        from tests import test_fix as fix_fixture, test_skill_delivery as delivery_fixture
+
+        project = fix_fixture.FixProject(self, config="\n[models]\nfetch_scores = false\n")
+        self.upstream("acme/late-io", {"LICENSE": delivery_fixture.MIT_LICENSE,
+            "skills/plain/SKILL.md": delivery_fixture.skill_md("plain", "Check each recorded row.\n")})
+        reviewed = self.reviewed(project.state, "acme/late-io", "skills/plain")
+        tools, execute, snapshots = call_cli.intent_tools(), call.execute, []
+
+        def changed(prepared, **options):
+            self.assertIsNone(prepared.e_digest)
+            packet = call.read_packet(project.repo, project.repo / ".oah/tasks/t1/PACKET.md",
+                                      parse_intent=tools.parse, read_source=tools.read_source)
+            design, _ = call._task_design(project.lease, packet, state_dir=project.state, stage="initial",
+                                           task="t1", engine="codex")
+            basis = call.task_basis(project.lease, design, packet, root=project.repo)
+            (need,) = call.task_needs(basis, stage="initial", policy=policy_digest(providers.settings_of({})),
+                                      needs_file=None)
+            tasks.select(project.state, need, [reviewed["id"]], basis=basis)
+            index = tasks._index_path(project.state)
+            snapshots.append((index, index.read_bytes()))
+            with read_fault(index, OSError(errno.EIO, "fixture selection read failed at launch")) as reads:
+                try:
+                    return execute(prepared, **options)
+                finally:
+                    self.assertTrue(reads)
+
+        with mock.patch.object(call, "execute", changed):
+            code, out, err = cli_result(project.repo, project.env, "call", "codex", "--stage", "initial",
+                "--task", "t1", "--tier", "high", "--override-stage", "--no-rerank", "--json")
+
+        self.assertEqual(code, 69, out + err)
+        self.assertTrue(err.rstrip().splitlines()[-1].startswith("OAH_STATE_IO:"), err)
+        self.assertFalse(project.fix_calls())
+        self.assertTrue(snapshots)
+        for path, before in snapshots:
+            self.assertEqual(path.read_bytes(), before)
+
+    def prepared_parent_relay(self):
+        from oah import call, call_cli
+        from oah.capabilities import plan
+        from oah.secrets import NoKeychain
+
+        request, parent, now = self.request()
+        relay, _ = plan.ingest(self.state_dir, request, capability=request["capability_id"],
+            payload=capability_fixture.RESULT.encode("utf-8"), invocation={"outcome": "ok", "at": request["created_at"],
+                "arguments_digest": "sha256:" + "3" * 64}, now=now)
+        tools = call_cli.intent_tools()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
+            prepared = call.prepare(call.CallRequest(engine="claude", stage="initial", task="t1", tier="low",
+                parent_inventory=str(parent), relay_results=(relay["id"],)), call_cli.load_settings(self.repo),
+                root=self.repo, state_dir=self.state_dir, env=self.env, footer=tools.footer,
+                has_footer=tools.has_footer, keychain=NoKeychain())
+        prepared.run.launch_path.write_text(json.dumps(prepared.to_json()), encoding="utf-8")
+        return prepared, parent
+
+    def test_background_entry_keeps_last_guard_state_io_without_traceback(self):
+        from oah import call
+
+        prepared, parent = self.prepared_parent_relay()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
+                read_fault(parent, OSError(errno.EIO, "fixture parent read failed in background")) as reads, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = call.background_main(str(prepared.run.path))
+
+        self.assertTrue(reads)
+        self.assertEqual(code, 69, out.getvalue() + err.getvalue())
+        self.assertTrue(err.getvalue().rstrip().splitlines()[-1].startswith("OAH_STATE_IO:"), err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertFalse(self.record.exists())
+        self.assertEqual(prepared.run.read()["status"], "refused")
+
+    def test_windows_launcher_state_io_does_not_enter_the_process_retry(self):
+        from oah import call
+
+        prepared, parent = self.prepared_parent_relay()
+        out, err = io.StringIO(), io.StringIO()
+        popen, child = call.subprocess.Popen, []
+
+        def launch(argv, *args, **options):
+            if "creationflags" in options:
+                child.append(argv)
+                raise AssertionError("the fixture runner must not start")
+            return popen(argv, *args, **options)
+
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
+                mock.patch.object(call, "_windows", return_value=True), \
+                mock.patch.object(call, "_paid_dispatch", wraps=call._paid_dispatch) as admitted, \
+                mock.patch.object(call.subprocess, "Popen", launch), \
+                read_fault(parent, OSError(errno.EIO, "fixture parent read failed in launcher")) as reads, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = call.launch_main(str(prepared.run.path))
+
+        self.assertTrue(reads, out.getvalue() + err.getvalue())
+        self.assertEqual(code, 69, out.getvalue() + err.getvalue())
+        self.assertTrue(err.getvalue().rstrip().splitlines()[-1].startswith("OAH_STATE_IO:"), err.getvalue())
+        self.assertEqual(admitted.call_count, 1)
+        self.assertEqual(child, [])
+        self.assertFalse(self.record.exists())
 
     def test_settle_missing_prompt_refuses_stale_and_keeps_the_offer(self):
         _now, run, command = self.offered_parent_relay()
