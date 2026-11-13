@@ -131,17 +131,25 @@ def _plan(args: argparse.Namespace) -> int:
 
 def _relay(args: argparse.Namespace) -> int:
     from oah.capabilities import plan
-    from oah.discovery import boundaries, records
+    from oah.discovery import boundaries, inputs, records
 
     if os.environ.get("OAH_WORKER") == "1":
         raise Refused("OAH_SKILLS_WORKER_REFUSED", "dispatched workers do not run oah capabilities relay; only the "
                       "lead records relay results")
     _info, state = _context()
-    with boundaries.refusals("relay"), records.content(pathlib.Path(args.request)):
-        request = records.read_json(pathlib.Path(args.request))
-        invocation = records.read_json(pathlib.Path(args.invocation))
-        payload = records.read_bytes(pathlib.Path(args.result_file))
-        assert payload is not None
+    def input_json(name):
+        raw = inputs.read_bytes(name, limit=records.LIMIT)
+        if len(raw) > records.LIMIT:
+            raise ValueError("the JSON input exceeds its bounded size")
+        return inputs.json_value(raw, pathlib.Path(name).name)
+
+    try:
+        request = input_json(args.request)
+        invocation = input_json(args.invocation)
+        payload = inputs.read_bytes(args.result_file)
+    except (OSError, ValueError) as exc:
+        raise Refused(USAGE_CODE, f"cannot read the request, invocation or result file ({exc})") from None
+    with boundaries.refusals("relay"):
         record, word = plan.ingest(state, request, capability=args.capability, payload=payload, invocation=invocation,
                                    now=_now())
     if args.json:
@@ -170,7 +178,10 @@ def run(args: argparse.Namespace) -> int:
 
     redact = credential_redactor(os.environ)
     try:
-        return HANDLERS[args.capabilities_command](args)
+        from oah.discovery import boundaries
+
+        with boundaries.command("relay"):
+            return HANDLERS[args.capabilities_command](args)
     except EngineError as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT if exc.code in ("OAH_STATE_IO", "OAH_SKILL_STATE_CORRUPT",

@@ -82,6 +82,7 @@ import oah.intent as oah_intent
 import oah.packet as oah_packet
 from oah import benchmarks, briefs, launchers, models, routing, runs, scoring, skillsel
 from oah.atomic import StorageError
+from oah.discovery import boundaries, inputs as input_files, records
 from oah.engines import claude, codex
 from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, load_rules,
                                 verify_inference)
@@ -734,7 +735,7 @@ def _section_lines(text: str, heading: str) -> list[str]:
 
 
 def _read_text(path: pathlib.Path) -> str:
-    text = path.read_bytes().decode("utf-8")  # bytes, so CRLF stays byte-intact
+    text = input_files.read_bytes(path).decode("utf-8")  # bytes, so CRLF stays byte-intact
     return text[1:] if text.startswith("\ufeff") else text
 
 
@@ -742,14 +743,14 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
                 read_source: Callable[[pathlib.Path], str] | None = None, validate_plan: bool = True) -> Packet:
     """The parts of a packet a call needs. oah.intent (lane P4a) reads the source safely and parses it."""
     try:
-        text = (read_source or _read_text)(path)
-    except Exception as exc:
+        text = input_files.source_text(path, read_source or _read_text)
+    except (OSError, oah_intent.SourceError, ValueError) as exc:
         code = getattr(exc, "code", "OAH_PACKET_UNREADABLE")
         message = str(exc).split(": ", 1)[1] if str(exc).startswith(f"{code}: ") else str(exc)
         raise EngineError(code, f"{message}; check the path given with --packet") from exc
     try:
         intent = parse_intent(text) if parse_intent is not None else None
-    except Exception as exc:
+    except (oah_intent.IntentInvalid, ValueError, TypeError) as exc:
         raise EngineError("OAH_PACKET_INTENT_INVALID", f"{path}: {exc}; fix the packet's OAH_INTENT section "
                           "(`oah packet check` lists the problems)") from exc
     scope = []
@@ -798,15 +799,15 @@ SOURCE_MISMATCH = "OAH_INTENT_SOURCE_MISMATCH"
 
 def _binding_path(state_dir: pathlib.Path, task: str) -> pathlib.Path:
     runs.task_directory(state_dir, task)
-    return runs._contained_path(state_dir, "runs", task, BINDING_NAME)
+    return records.location(state_dir / "runs" / task / BINDING_NAME,
+                            lambda: runs._contained_path(state_dir, "runs", task, BINDING_NAME))
 
 
 def dispatch_binding(state_dir: pathlib.Path, task: str) -> dict | None:
     """The intent source bound at the task's first dispatch, or None."""
-    from oah.atomic import read_json
-
     path = _binding_path(state_dir, task)
-    data = (runs._captured_state(path)[1] if runs._CORRECTION_CAPTURE.get() is not None else read_json(path, None))
+    data = (records.captured_json(path, runs._captured_state) if runs._CORRECTION_CAPTURE.get() is not None
+            else records.read_json(path, required=False))
     return data if isinstance(data, dict) else None
 
 
@@ -847,7 +848,9 @@ def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, 
     try:
         with Store(state_dir).checked(task=task, lease_id=checked_lease.id,
                                       generation=checked_lease.generation) as live:
-            run = runs.Run(id=run_id, task=task, path=runs._contained_path(state_dir, "runs", task, run_id))
+            from oah.discovery.runfiles import Run
+
+            run = Run(id=run_id, task=task, path=runs._contained_path(state_dir, "runs", task, run_id))
             _check_dispatch_lease(live, root or pathlib.Path(live.worktree), stage=run.read()["stage"])
             bound = dispatch_binding(state_dir, task)
             if check_dispatch_binding(bound, packet, task):
@@ -993,12 +996,14 @@ def dispatch_guard(prepared: Prepared, *, env=None):
         return
     from oah.launchers import native
 
-    if os.path.lexists(run.file_path(native.OFFER_NAME)):
+    from oah.discovery import records
+
+    if records.present(run.path / native.OFFER_NAME):
         raise EngineError("OAH_RUN_LAUNCH_INVALID", f"run {prepared.run_id} is a native offer, not a dispatch "
                           "authorization; nothing was launched. Settle it with oah call settle, or prepare a new run "
                           "with oah call")
     try:
-        saved = run._read_json("lease.json")
+        saved = records.run_json(run, "lease.json")
         if not (isinstance(saved, dict) and isinstance(saved.get("id"), str) and saved["id"]
                 and type(saved.get("generation")) is int and saved["generation"] >= 0):
             raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run has no valid checked lease snapshot; "
@@ -1018,9 +1023,9 @@ def dispatch_guard(prepared: Prepared, *, env=None):
             from oah.atomic import StateCorrupt
 
             expected = live.design is not None or live.design_invalid
-            if expected or os.path.lexists(run.file_path(DESIGN_NAME)):  # legacy runs have no design record
+            if expected or records.present(run.path / DESIGN_NAME):
                 try:
-                    design_saved = (run._read_json(DESIGN_NAME) if os.path.lexists(run.file_path(DESIGN_NAME))
+                    design_saved = (records.run_json(run, DESIGN_NAME) if records.present(run.path / DESIGN_NAME)
                                     else None)
                 except (StateCorrupt, ValueError, RecursionError):
                     raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record cannot be read; run oah "
@@ -1097,15 +1102,16 @@ def _admission_refusals():
 
 
 def prepared_e_digest(run) -> str | None:
+    from oah import skillpack
     from oah.discovery import boundaries, preparation, records
 
-    with boundaries.refusals("launch"), records.content(run.path / "skills.json"):
-        saved = records.run_json(run, "skills.json", required=False)
+    with boundaries.refusals("launch"):
+        saved = records.run_json(run, "skills.json", required=False, parse=skillpack.parse_record)
         if saved is None and records.run_json(run, "capabilities.json", required=False) is not None:
-            raise ValueError("managed capabilities need a complete PreparedE record")
+            raise EngineError("OAH_RUN_LAUNCH_INVALID", "managed capabilities need a complete PreparedE record")
         if saved is None or isinstance(saved, dict) and saved.get("prepared_e") is None and not saved.get("bundle"):
             return None
-        return preparation.parse(saved["prepared_e"])["digest"]
+        return saved["prepared_e"]["digest"]
 
 
 def _check_e(prepared, holder, *, publication=None, native_record=None, env=None, before_spend=True,
@@ -1146,7 +1152,7 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
             return
 
     boundary = "freeze" if publication is not None or correction else "settle" if native_record is not None else "launch"
-    with boundaries.refusals(boundary), records.content(prepared.run.path / "skills.json"):
+    with boundaries.refusals(boundary):
         if publication is not None:
             live = publication.e_prepared
             if prepared.e_digest is None and live is None:
@@ -1160,14 +1166,15 @@ def _check_e(prepared, holder, *, publication=None, native_record=None, env=None
                 raise ValueError("the correction's closed E record changed")
         else:
             saved = (frozen.skills if frozen is not None else records.run_json(
-                prepared.run, "skills.json", required=prepared.e_digest is not None))
+                prepared.run, "skills.json", required=prepared.e_digest is not None,
+                parse=lambda data: skillpack.parse_record(data, required=prepared.e_digest is not None)))
             raw = (saved or {}).get("prepared_e")
             if prepared.e_digest is None and raw is None:
-                if (saved or {}).get("bundle") or prepared.run.file_path("capabilities.json").is_file():
-                    raise ValueError("managed content needs a complete PreparedE record; prepare again")
+                if (saved or {}).get("bundle") or records.present(prepared.run.path / "capabilities.json"):
+                    raise EngineError("OAH_RUN_LAUNCH_INVALID", "managed content needs a complete PreparedE record; prepare again")
                 check_absence(saved)
                 return
-            record = frozen.record if frozen is not None else preparation.parse(raw)
+            record = frozen.record if frozen is not None else raw
             frozen_inputs = (frozen.inputs if frozen is not None else capability_plan.frozen_inputs(
                 record, state_dir=state_dir) if not before_spend else None)
             facts = record["facts"]
@@ -1367,17 +1374,23 @@ def task_basis(holder, task_design, packet: Packet, *, root: pathlib.Path):
                            bound=task_design is not None and getattr(task_design, "task", None) is not None)
 
 
-def task_needs(basis, *, stage: str, policy: str, needs_file: str | None) -> list[dict]:
+def task_needs(basis, *, stage: str, policy: str, needs_file: str | None, recorded: bool = False) -> list[dict]:
     """The task's verified needs for one dispatch stage: the lead's file re-resolved, or the ones oah derives."""
-    from oah.discovery import tasks
+    from oah.discovery import inputs, records, tasks
 
     if needs_file:
-        try:
-            with open(needs_file, "rb") as handle:
-                raw = handle.read(tasks.NEEDS_BYTES + 1)
-        except OSError as exc:
-            raise tasks.NeedsInvalid("malformed", f"cannot read the needs file: {exc.strerror or exc}") from None
-        needs = tasks.parse_needs(raw, basis, policy=policy)
+        if recorded:
+            path = pathlib.Path(needs_file)
+            data = records.followed_bytes(path, limit=tasks.NEEDS_BYTES,
+                parse=lambda raw: records._object(records.json_bytes(raw, path), path))
+            needs = tasks.resolve_needs(data, basis, policy=policy)
+        else:
+            try:
+                raw = inputs.read_bytes(needs_file, limit=tasks.NEEDS_BYTES)
+            except OSError as exc:
+                raise tasks.NeedsInvalid("malformed", f"cannot read the needs file: {exc.strerror or exc}") from None
+            needs = tasks.parse_needs(raw, basis, policy=policy)
+        assert needs is not None
     else:
         needs = tasks.derive(basis, dispatch_stage=stage, policy=policy)
     return [item for item in needs if item["dispatch_stage"] == stage]
@@ -1446,7 +1459,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             needs = ([tasks.verify(item, basis, policy=discovery.policy_digest(found_settings))
                       for item in frozen_needs] if frozen_needs is not None else
                      task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings),
-                                needs_file=request.skill_needs))
+                                needs_file=request.skill_needs, recorded=expected is not None))
     search_needs = needs if query_needs is None else query_needs
     delivery_needs = (task_needs(basis, stage=request.stage, policy=discovery.policy_digest(found_settings), needs_file=None)
                       if frozen_needs is not None and basis is not None and basis.design is not None else needs)
@@ -1483,11 +1496,11 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         current_needs = ([tasks.verify(item, live_basis, policy=discovery.policy_digest(current_found))
                           for item in frozen_needs] if frozen_needs is not None else
                          task_needs(live_basis, stage=request.stage, policy=discovery.policy_digest(current_found),
-                                    needs_file=request.skill_needs))
+                                    needs_file=request.skill_needs, recorded=True))
         current_queries = ([tasks.verify(item, live_basis, policy=discovery.policy_digest(current_found))
                             for item in query_needs] if query_needs is not None else [])
         if query_file is not None and task_needs(live_basis, stage=request.stage,
-                policy=discovery.policy_digest(current_found), needs_file=query_file) != list(query_needs):
+                policy=discovery.policy_digest(current_found), needs_file=query_file, recorded=True) != list(query_needs):
             raise tasks.NeedsInvalid("stale", "the search needs file changed; prepare the operation again")
         policy = discovery.policy_digest(current_found)
         identity_needs = original.needs(live_basis, list(current_needs) + current_queries, policy)
@@ -1498,7 +1511,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             parent, loaded = frozen_inputs.parent, frozen_inputs.relays
             relays = [row for row, _text in loaded]
         else:
-            parent = inventory.read_parent(request.parent_inventory, now=current) if request.parent_inventory else None
+            parent = inventory.read_parent(request.parent_inventory, now=current,
+                                           recorded=True) if request.parent_inventory else None
             relays = [capability_plan.load(state_dir, ref, now=current)[0]
                       for ref in sorted(set(request.relay_results))]
         bodies = []
@@ -1540,7 +1554,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                 "request_budget": value.operation.max_queries,
                 "references": digest({"parent": request.parent_inventory, "relay": list(request.relay_results),
                                        "needs": request.skill_needs,
-                                       **({"query_file": skillpack._sha(pathlib.Path(query_file).read_bytes())}
+                                       **({"query_file": records.followed_bytes(pathlib.Path(query_file),
+                                                limit=tasks.NEEDS_BYTES, parse=skillpack._sha)}
                                           if query_file else {})})}
 
     def prepare_e(value):
@@ -1560,7 +1575,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
             items=value.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
             relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
-            frozen=frozen_inputs)
+            frozen=frozen_inputs, parent_recorded=expected is not None)
         needed = bool(value.items or value.not_delivered or capabilities is not None
                       or request.skill_needs is not None or request.parent_inventory or request.relay_results
                       or query_needs is not None)
@@ -1594,7 +1609,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env),
                                 now=dt.datetime.now(dt.timezone.utc), classes=capability_settings["classes"])
         parent = (frozen_inputs.parent if frozen_inputs is not None
-                  else inventory.read_parent(request.parent_inventory, now=dt.datetime.now(dt.timezone.utc))
+                  else inventory.read_parent(request.parent_inventory, now=dt.datetime.now(dt.timezone.utc),
+                                             recorded=True)
                   if request.parent_inventory else None)
         optional_bytes = skill_growth + capability_plan.optional_render_bound(child, parent)
         measurement = budget.measure(profile, text, deferred=deferred,
@@ -1663,7 +1679,8 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
                 holder=holder, task=request.task, task_design=task_design, engine=request.engine, stage=request.stage,
                 items=admitted.items, root=root, env=env, state_dir=state_dir, parent_path=request.parent_inventory,
                 relay_refs=request.relay_results, now=dt.datetime.now(dt.timezone.utc), settings=capability_settings,
-                class_needs=class_needs, class_status=class_status, advise=advise, frozen=frozen_inputs)
+                class_needs=class_needs, class_status=class_status, advise=advise, frozen=frozen_inputs,
+                parent_recorded=True)
 
     early_capabilities = plan_capabilities()[1]  # required capabilities admit here: a missing relay refuses now
     early_block = skillpack.finalize(admitted)[0]  # advice only reorders, so these sizes are final
@@ -1833,17 +1850,13 @@ def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
 def _record_refusal(prepared: Prepared, error: EngineError | StorageError) -> None:
     """Mark only the caller's own run refused; a queued Orca run belongs to the worker that claims it."""
     run = prepared.run
-    if prepared.e_digest is not None and not isinstance(run, runs.WorkerRun):
+    if isinstance(error, boundaries.CommandRefusal) and error.record_path == run.path / "result.json":
+        run.write_logs("", _recorded_error(error, False) + "\n")
+        return
+    if isinstance(run, runs.WorkerRun):
         from oah.discovery import records
 
-        try:
-            if not isinstance(records.run_json(run, "result.json"), dict):
-                raise records.InvalidRecord(run.result_path, records.Issue.CONTENT, "is not a JSON object")
-        except records.InvalidRecord:
-            run.write_logs("", _recorded_error(error, False) + "\n")
-            return
-    if isinstance(run, runs.WorkerRun):
-        data = run.read()
+        data = records.run_json(run, "result.json")
         if data.get("status") != "running" or data.get("pid") != os.getpid():
             if error.code == "OAH_REVIEW_SERIES_BUSY":
                 return  # the lock holder may be the worker that claims this run next
@@ -1856,8 +1869,12 @@ def _record_refusal(prepared: Prepared, error: EngineError | StorageError) -> No
 
 def check_prepared(prepared: Prepared) -> None:
     """Check a queue/launcher handoff; execute checks again at the engine's actual spawn."""
-    with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
-        pass
+    try:
+        with boundaries.command("launch"), _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
+            pass
+    except boundaries.CommandRefusal as exc:
+        _record_refusal(prepared, exc)
+        raise
 
 
 def _check_lease_source(binding, packet: Packet | None, task: str) -> None:
@@ -1957,10 +1974,7 @@ def _argv_tools(argv: Sequence[str]) -> tuple[str, ...]:
 
 
 def _design_bound(prepared: "Prepared") -> bool:
-    try:
-        saved = prepared.run._read_json(DESIGN_NAME) if os.path.lexists(prepared.run.file_path(DESIGN_NAME)) else None
-    except Exception:
-        return True  # an unreadable design record is still a design-bound run
+    saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
     return isinstance(saved, dict) and saved.get("task") is not None
 
 
@@ -1996,13 +2010,10 @@ def _check_design_unchanged(prepared: "Prepared", live, saved: object) -> None:
 
 
 def _design_after(prepared: "Prepared") -> str | None:
-    """After the engine ran: record whether the design moved meanwhile; never raises, never writes the design."""
+    """After the engine ran, record whether its design moved; stored-record refusals keep their category."""
     from oah.design import binding as design
 
-    try:
-        saved = prepared.run._read_json(DESIGN_NAME)
-    except (Exception, RecursionError):
-        saved = None
+    saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
     if not isinstance(saved, dict) or not isinstance(saved.get("task"), dict):
         return None
     try:
@@ -2010,16 +2021,17 @@ def _design_after(prepared: "Prepared") -> str | None:
         judged = design.judge(record, root=pathlib.Path(saved.get("worktree") or prepared.cwd))
         state, fingerprint = judged.state, judged.fingerprint()
         accepted, working = judged.record()["accepted"], judged.record()["working"]
-    except Exception as exc:  # recording what happened must never fail a finished run
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError, OSError, design.DesignError) as exc:
         state, fingerprint, accepted, working = f"unknown({type(exc).__name__})", None, None, None
     changed = fingerprint != saved.get("fingerprint")
+    path = prepared.run.file_path(DESIGN_AFTER_NAME)
     try:
         from oah.atomic import write_json_atomic
 
-        write_json_atomic(prepared.run.file_path(DESIGN_AFTER_NAME),
+        write_json_atomic(path,
                           {"version": 1, "state": state, "fingerprint": fingerprint, "accepted": accepted,
                            "working": working, "changed": changed})
-    except Exception:
+    except OSError:
         pass
     if not changed:
         return None
@@ -2129,7 +2141,9 @@ class Prepared:
         publication = _CORRECTION_PUBLICATION.get()
         if publication is not None and publication.plan.prepared == self:
             return publication.run
-        return runs.Run(id=self.run_id, task=self.task, path=pathlib.Path(self.run_dir))
+        from oah.discovery.runfiles import Run
+
+        return Run(id=self.run_id, task=self.task, path=pathlib.Path(self.run_dir))
 
     def to_json(self) -> dict:
         data = dataclasses.asdict(self)
@@ -2170,8 +2184,11 @@ class _CorrectionSnapshot:
     plan_json: str
 
 
+from oah.discovery.runfiles import Run as _RecordRun
+
+
 @dataclasses.dataclass(frozen=True)
-class _CorrectionRun(runs.Run):
+class _CorrectionRun(_RecordRun):
     """Only dispatcher-authored lifecycle values are read after publication begins."""
 
     record: dict = dataclasses.field(default_factory=dict, kw_only=True, compare=False)
@@ -2427,12 +2444,12 @@ def _correction_inputs(check, *, state, lease_json, bound, packet, config, metad
 def _freeze_e(inputs, *, env):
     from oah.discovery import boundaries, records
 
-    with boundaries.refusals("freeze"), records.content(inputs.state / "skills" / "originals"):
+    with boundaries.command("freeze"), boundaries.refusals("freeze"):
         _freeze_e_checked(inputs, env=env)
 
 
 def _freeze_e_checked(inputs, *, env):
-    from oah import discovery
+    from oah import discovery, skillpack
     from oah.discovery import original, preparation, providers, records
     from oah.capabilities import plan as capability_plan
 
@@ -2453,10 +2470,10 @@ def _freeze_e_checked(inputs, *, env):
         return
     path = runs.task_directory(inputs.state, holder.task) / pointer["run_id"]
     run = runs.Run(path.name, holder.task, path)
-    saved = records.run_json(run, "skills.json")
+    saved = records.run_json(run, "skills.json", parse=lambda data: skillpack.parse_record(data, required=True))
     if not isinstance(saved, dict):
         raise ValueError("the original skills record is missing or not a JSON object")
-    record = preparation.parse(saved.get("prepared_e"))
+    record = saved["prepared_e"]
     if record["digest"] != pointer["digest"]:
         raise ValueError("the original complete preparation differs from its task pointer")
     facts, refs = record["facts"], record["references"]
@@ -2535,6 +2552,7 @@ def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, b
                                  brief_disabled=brief_disabled, env=env, keychain=keychain, admitted=admitted)
 
 
+@boundaries.entry("admission")
 def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
             env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
             parse_intent: Callable[[str], object] | None = None,
@@ -2812,7 +2830,10 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         inputs.run = _CorrectionRun(id=run.id, task=run.task, path=run.path, record=dict(plan.initial_record))
         return plan.prepared
     else:
-        run = runs._create_run(*planned_run)
+        from oah.discovery.runfiles import Run
+
+        planned, record = planned_run
+        run = runs._create_run(Run(planned.id, planned.task, planned.path), record)
     try:
         return _finish_prepare(request, settings, run, plan=plan, **fields)
     except (EngineError, briefs.BriefError) as exc:
@@ -3159,6 +3180,7 @@ def _native_identities(request: CallRequest, basis: _NativeBasis, bundle: Mappin
             "prep_id": prep_id}
 
 
+@boundaries.entry("admission")
 def prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
                    env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
                    parse_intent: Callable[[str], object] | None = None,
@@ -3200,6 +3222,9 @@ def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.P
                               scope=basis.scope, state_dir=state_dir, env=env, keychain=None, brief_disabled=True,
                               now=now)
     run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
+    from oah.discovery.runfiles import Run
+
+    run = Run(run.id, run.task, run.path)
 
     def preview(pack):
         token = native.canary(run.id, pack.bundle["digest"] if pack.bundle else None)
@@ -3278,10 +3303,10 @@ def _prepare_native(request: CallRequest, settings: Settings, *, root: pathlib.P
                           tier=tier, tier_source=tier_source, tier_reasons=reasons, override_stage=request.override_stage,
                           warnings=warnings, launcher={"name": "native", "offer": native.OFFER_NAME},
                           jev_status="unused(native)")
-            run._write_result(dict(run.read(), **fields))
+            run._write_result(dict(records.run_json(run, "result.json"), **fields))
             offer = native.publish_offer(run.path, offer)
         except (EngineError, briefs.BriefError, runs.RunError) as exc:
-            run._write_result(dict(run.read(), status="refused", error=_recorded_error(exc, True), warnings=warnings))
+            run._write_result(dict(records.run_json(run, "result.json"), status="refused", error=_recorded_error(exc, True), warnings=warnings))
             raise
     host = {"tool": "Agent" if request.engine == "claude" else "native-subagent", "params": params}
     return NativeOffer(run.id, str(run.path), offer, message, host, tier, tier_source, tuple(warnings))
@@ -3303,6 +3328,7 @@ def _native_differences(offer: Mapping, current: Mapping) -> list[str]:
     return [label for key, label in names.items() if offer[key] != current[key]]
 
 
+@boundaries.entry("settle")
 def settle_native(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[str, str], settings: Settings,
                   run_id: str, offer_digest: str, host_child_id: str, outcome: str, result_path: pathlib.Path,
                   token: str | None, parse_intent=None, read_source=None,
@@ -3329,14 +3355,14 @@ def settle_native(*, state_dir: pathlib.Path, root: pathlib.Path, env: Mapping[s
                 offer_digest=offer_digest, host_child_id=host_child_id, outcome=outcome, result_path=result_path,
                 token=token, parse_intent=parse_intent, read_source=read_source, now=now)
     except LeaseError as exc:
-        raise EngineError(native.STALE_CODE, f"{exc}; the earlier offer is kept; prepare again") from None
+        raise EngineError(native.STALE_CODE, f"{exc}; the earlier offer is kept; offer again with oah call --launcher native") from None
 
 
 def _native_offer_for_settle(run):
     from oah.discovery import boundaries, records
     from oah.launchers import native
 
-    with boundaries.refusals("settle"), records.content(run.path / native.OFFER_NAME):
+    with boundaries.refusals("settle"):
         offer = native.read_offer(run.path)
         if offer is None:
             result = records.run_json(run, "result.json")
@@ -3352,7 +3378,7 @@ def _settle_native_checked(*, state_dir: pathlib.Path, root: pathlib.Path, env: 
                   now: dt.datetime | None = None) -> NativeSettlement:
     from oah.discovery import boundaries, records
 
-    with boundaries.refusals("settle"), records.content(pathlib.Path(state_dir)):
+    with boundaries.refusals("settle"):
         return _settle_native_operation(state_dir=state_dir, root=root, env=env, settings=settings, run_id=run_id,
             offer_digest=offer_digest, host_child_id=host_child_id, outcome=outcome, result_path=result_path,
             token=token, parse_intent=parse_intent, read_source=read_source, now=now)
@@ -3374,7 +3400,7 @@ def _settle_native_operation(*, state_dir: pathlib.Path, root: pathlib.Path, env
 
     now = now or dt.datetime.now(dt.timezone.utc)
     root = pathlib.Path(root)
-    with boundaries.refusals("settle"), records.content(pathlib.Path(state_dir)):
+    with boundaries.refusals("settle"):
         run = runs.find_run(state_dir, run_id)
         offer = _native_offer_for_settle(run)
     if offer is None:
@@ -3388,14 +3414,14 @@ def _settle_native_operation(*, state_dir: pathlib.Path, root: pathlib.Path, env
     problems = []
     if now >= dt.datetime.fromisoformat(offer["expires_at"].replace("Z", "+00:00")):
         problems.append(f"the offer expired at {offer['expires_at']}")
-    with boundaries.refusals("settle"), records.content(run.path / "skills.json"):
+    with boundaries.refusals("settle"):
         prompt = records.run_text(run)
         assert prompt is not None
         if native.sha(prompt.encode("utf-8")) != offer["message"]["sha256"]:
             problems.append("the run's brief changed after the offer")
         basis = _native_basis(request, settings, root=root, state_dir=state_dir, parse_intent=parse_intent,
                               read_source=read_source)
-        saved = records.run_json(run, "skills.json", required=False)
+        saved = records.run_json(run, "skills.json", required=False, parse=skillpack.parse_record)
         if saved is not None and not isinstance(saved, dict):
             raise ValueError("the offered skills record is not a JSON object")
         e_record = saved.get("prepared_e") if saved is not None else None
@@ -3405,7 +3431,6 @@ def _settle_native_operation(*, state_dir: pathlib.Path, root: pathlib.Path, env
             raise EngineError(native.STALE_CODE, "managed content needs a complete PreparedE record; offer again")
         frozen = None
         if e_record is not None:
-            e_record = preparation.parse(e_record)
             result = records.run_json(run, "result.json")
             frozen = FrozenCheck(saved, e_record, capability_plan.frozen_inputs(e_record, state_dir=state_dir),
                                  result, capabilities, prompt)
@@ -3431,7 +3456,8 @@ def _settle_native_operation(*, state_dir: pathlib.Path, root: pathlib.Path, env
     receiving = native.receiving_record(run.id, offer, bundle, records.run_rows(run, skillpack.READS_NAME),
                                         now=now)
     settlement, receiving, existing = native.record_settlement(run.path, offer, stated, receiving, now)
-    return NativeSettlement(run.id, settlement, receiving, native.read_offer(run.path), existing)
+    updated_offer = {**offer, "state": f"settled-{settlement['outcome']}", "settlement": settlement["id"]}
+    return NativeSettlement(run.id, settlement, receiving, updated_offer, existing)
 
 
 def _iso(moment: dt.datetime) -> str:
@@ -3485,8 +3511,7 @@ def _finish_inline_delivery(prepared: Prepared) -> None:
     if publication is not None:
         saved = json.loads(publication.plan.design_record) if publication.plan.design_record else None
     else:
-        path = prepared.run.file_path(DESIGN_NAME)
-        saved = prepared.run._read_json(DESIGN_NAME) if os.path.lexists(path) else None
+        saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
     if not isinstance(saved, dict) or not saved.get("inline_complete") or saved.get("transport"):
         return
     if publication is None:
@@ -3516,16 +3541,18 @@ def _launch_inputs(prepared, publication):
     from oah.discovery import boundaries, preparation, records
 
     run = prepared.run
-    with boundaries.refusals("launch"), records.content(run.path / "prompt.md"):
+    with boundaries.refusals("launch"):
         if prepared.e_digest is not None:
             result = records.run_json(run, "result.json")
             if not isinstance(result, dict):
                 raise ValueError("the prepared result is not a JSON object")
             if publication is None:
-                saved = records.run_json(run, "skills.json")
+                from oah import skillpack
+
+                saved = records.run_json(run, "skills.json", parse=lambda data: skillpack.parse_record(data, required=True))
                 if not isinstance(saved, dict):
                     raise ValueError("the prepared skills record is not a JSON object")
-                record = preparation.parse(saved["prepared_e"])
+                record = saved["prepared_e"]
                 capability_plan.frozen_inputs(record, state_dir=run.path.parents[2])
                 records.run_json(run, "capabilities.json", required=record["final"]["capability_plan_digest"] is not None)
         bundle = _streamed_skill_bundle(prepared)
@@ -3537,6 +3564,16 @@ def _launch_inputs(prepared, publication):
 
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
+    try:
+        with boundaries.command("launch"):
+            return _execute(prepared, base_env=base_env, rules=rules, redact=redact)
+    except boundaries.CommandRefusal as exc:
+        _record_refusal(prepared, exc)
+        raise
+
+
+def _execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
+             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
     from oah.design.task_context import RootUnavailable
 
@@ -3547,6 +3584,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     publication = _CORRECTION_PUBLICATION.get()
     try:
         skill_bundle, prompt, planned_sink = _launch_inputs(prepared, publication)
+        design_bound = _design_bound(prepared)
     except EngineError as exc:
         _record_refusal(prepared, exc)
         raise
@@ -3556,7 +3594,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         run.file_path("last-message.md")
     reference = _start_reference(prepared, env)
     sink = planned_sink if reference is None else None
-    tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(_design_bound(prepared)))
+    tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(design_bound))
     try:
         result = _run_prepared(prepared, env, prompt, sink=sink)
     except StorageError as exc:
@@ -3746,6 +3784,9 @@ def _conclude_skill_reads(prepared: "Prepared", bundle: Mapping, raw: str, resul
         failure = (f"OAH_ENGINE_FAILED: claude's stream-json output is incomplete ({problem}); this run does not "
                    "count")
     try:
+        from oah.launchers import native
+
+        native.valid_receiving(record, run_id=prepared.run_id)
         write_json_atomic(prepared.run.file_path(skillpack.RECEIVING_NAME), record)
     except OSError as exc:
         failure = (f"OAH_SKILL_RECEIVING_FAILED: the skill reads of run {prepared.run_id} could not be recorded "
@@ -3766,7 +3807,17 @@ def _start_reference(prepared: "Prepared", env: Mapping[str, str]):
 
     reference = None
     try:
-        reference = task_context.ReferenceRun.load(prepared, env, _argv_tools(prepared.argv))
+        saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
+        plan = saved.get("transport") if saved is not None else None
+        if plan is not None:
+            if not isinstance(plan, dict) or plan.get("selection") != task_context.SELECTION:
+                raise DesignError(task_context.REFERENCE_UNAVAILABLE_CODE, "the run's transport plan is malformed; "
+                                  "nothing was launched. Run oah call again")
+            lease = records.run_json(prepared.run, "lease.json")
+            reference = task_context.ReferenceRun(run_dir=prepared.run.path, task=prepared.task,
+                run_id=prepared.run_id, root=pathlib.Path(prepared.cwd), argv=prepared.argv, stage=prepared.stage,
+                cli_version=prepared.cli_version, env=env, tools=_argv_tools(prepared.argv),
+                plan=plan, lease_snapshot=lease or {})
         if reference is not None:
             reference.prepare()
     except (DesignError, LeaseError, OSError) as exc:
@@ -4366,6 +4417,7 @@ def _boot_argv(entry: str, run_dir: str) -> list[str]:
     return [sys.executable, "-c", _BOOT, package_root, entry, run_dir]
 
 
+@boundaries.entry("launch")
 def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                      require_detach: bool = False) -> str:
     """Start a detached runner for a prepared call and return its run id at once.
@@ -4385,14 +4437,12 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     text = launched.stdout.decode("utf-8", errors="replace").strip()
     detail = launched.stderr.decode("utf-8", errors="replace").strip()
     if launched.returncode != 0 or not text.isdigit():
-        if detail.startswith(("OAH_LEASE_CHANGED: ", "OAH_INTENT_NOT_CURRENT: ", "OAH_RUN_LAUNCH_INVALID: ",
-                              "OAH_REVIEW_NEEDS_DECISION: ", "OAH_REVIEW_ROUNDS_EXHAUSTED: ",
-                              "OAH_REVIEW_STATE_INVALID: ", "OAH_REVIEW_SERIES_BUSY: ", "OAH_DESIGN_CHANGED: ")):
-            code, message = detail.split(": ", 1)
-            raise EngineError(code, message)
-        if detail.startswith("OAH_RUN_DETACH_FAILED:"):
-            run.result(status="failed", error=detail)
-            raise EngineError("OAH_RUN_DETACH_FAILED", detail.split(": ", 1)[1])
+        refusal = _launcher_refusal(text)
+        if refusal is not None:
+            saved = records.run_json(run, "result.json")
+            if not isinstance(saved, dict) or saved.get("status") != "refused":
+                _record_refusal(prepared, refusal)
+            raise refusal
         run.result(status="failed", error=f"OAH_RUN_LAUNCH_FAILED: {detail or 'no runner pid'}")
         raise EngineError("OAH_RUN_LAUNCH_FAILED", f"the background runner did not start ({detail or 'no pid'}); "
                           "run the same command without --background")
@@ -4407,72 +4457,101 @@ def _windows() -> bool:
 
 
 def _background_run(run_dir: str) -> runs.Run:
+    from oah.discovery.runfiles import Run
+
     path = pathlib.Path(run_dir)
-    return runs.Run(id=path.name, task=path.parent.name, path=path)
+    return Run(id=path.name, task=path.parent.name, path=path)
 
 
 def launch_main(run_dir: str) -> int:
     try:
         return _launch_main(run_dir)
     except (EngineError, StorageError) as exc:
+        exit_code = getattr(exc, "exit_code", 69 if isinstance(exc, StorageError) else 1)
+        message = str(exc).removeprefix(exc.code + ": ")
+        if len(message) > 8192:
+            message = message[:8192] + "... (diagnostic shortened)"
+        print(json.dumps({"version": 1, "code": exc.code, "exit": exit_code, "message": message}, ensure_ascii=True))
         print(exc, file=sys.stderr)
-        return 69 if isinstance(exc, StorageError) else 1
+        return exit_code
+
+
+def _launcher_refusal(text: str) -> boundaries.CommandRefusal | None:
+    if len(text.encode("utf-8")) > 65_536:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not (isinstance(data, dict) and set(data) == {"version", "code", "exit", "message"}
+            and data["version"] == 1 and type(data["exit"]) is int and data["exit"] in (1, 69)
+            and isinstance(data["code"], str) and re.fullmatch(r"OAH_[A-Z_]+(?:\([a-z-]*\))?", data["code"])
+            and isinstance(data["message"], str)):
+        return None
+    return boundaries.CommandRefusal(data["code"], data["message"], data["exit"])
 
 
 def _launch_main(run_dir: str) -> int:
-    """Entry point of the launcher: start the runner detached, print its pid and exit."""
-    options: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
-                     "close_fds": True}
-    from oah.atomic import read_json
+    prepared = None
+    try:
+        with boundaries.command("launch"):
+            """Entry point of the launcher: start the runner detached, print its pid and exit."""
+            options: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+                             "close_fds": True}
+            from oah.discovery import records
 
-    run = _background_run(run_dir)
-    saved = read_json(run.launch_path, {})
-    require_detach = saved.get("require_detach", False)
-    prepared = Prepared.from_json(saved)
-    argv = _boot_argv("background_main", run_dir)
-    if _windows():
-        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        try:
-            with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
-                child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
-        except StorageError:
-            raise
-        except OSError as exc:
-            if require_detach:
-                print(f"OAH_RUN_DETACH_FAILED: Windows refused job breakaway ({exc}); retry without "
-                      "--require-detach, or use a terminal whose job permits breakaway", file=sys.stderr)
-                return 69
-            warning = (f"OAH_RUN_DETACH_UNVERIFIED: Windows refused job breakaway ({exc}); closing this terminal "
-                       "may stop the run. Keep it open and use oah wait, or retry with --require-detach "
-                       "in a terminal whose job permits breakaway")
-            run.result(detached=runs.UNVERIFIED, warnings=[*run.read().get("warnings", []), warning])
-            print(warning, file=sys.stderr, flush=True)
-            with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
-                child = subprocess.Popen(argv, creationflags=flags, **options)
-        else:
-            run.result(detached="verified")
-    else:
-        with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
-            child = subprocess.Popen(argv, start_new_session=True, **options)
-        run.result(detached="verified")
-    print(child.pid, flush=True)
-    child.returncode = 0  # the runner outlives this launcher on purpose; nothing waits for it here
-    return 0
+            run = _background_run(run_dir)
+            loaded = records.read_json(run.launch_path, parse=lambda row: (row, Prepared.from_json(row)))
+            assert loaded is not None
+            saved, prepared = loaded
+            require_detach = saved.get("require_detach", False)
+            argv = _boot_argv("background_main", run_dir)
+            if _windows():
+                flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                try:
+                    with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
+                        child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
+                except StorageError:
+                    raise
+                except OSError as exc:
+                    if require_detach:
+                        raise boundaries.CommandRefusal("OAH_RUN_DETACH_FAILED", f"Windows refused job breakaway "
+                            f"({exc}); retry without --require-detach, or use a terminal whose job permits breakaway", 69) from None
+                    warning = (f"OAH_RUN_DETACH_UNVERIFIED: Windows refused job breakaway ({exc}); closing this terminal "
+                               "may stop the run. Keep it open and use oah wait, or retry with --require-detach "
+                               "in a terminal whose job permits breakaway")
+                    run.result(detached=runs.UNVERIFIED, warnings=[*run.read().get("warnings", []), warning])
+                    print(warning, file=sys.stderr, flush=True)
+                    with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
+                        child = subprocess.Popen(argv, creationflags=flags, **options)
+                else:
+                    run.result(detached="verified")
+            else:
+                with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
+                    child = subprocess.Popen(argv, start_new_session=True, **options)
+                run.result(detached="verified")
+            print(child.pid, flush=True)
+            child.returncode = 0  # the runner outlives this launcher on purpose; nothing waits for it here
+            return 0
+
+    except EngineError as exc:
+        if prepared is not None:
+            _record_refusal(prepared, exc)
+        raise
 
 
 def background_main(run_dir: str) -> int:
     """Entry point of the detached runner."""
-    from oah.atomic import read_json
+    from oah.discovery import records
 
-    prepared = Prepared.from_json(read_json(_background_run(run_dir).launch_path, None))
     try:
-        execute(prepared)
+        with boundaries.command("launch"):
+            prepared = records.read_json(_background_run(run_dir).launch_path, parse=Prepared.from_json)
+            assert prepared is not None
+            execute(prepared)
     except (EngineError, StorageError) as exc:
         print(exc, file=sys.stderr)
-        return 69 if isinstance(exc, StorageError) else 1
-    except BaseException as exc:
-        prepared.run.result(status="failed", error=f"OAH_RUN_RUNNER_FAILED: {type(exc).__name__}: {exc}")
-        raise
+        return getattr(exc, "exit_code", 69 if isinstance(exc, StorageError) else 1)
     return 0
 
 
@@ -4503,6 +4582,7 @@ def _alive(pid: int) -> bool:
     return True
 
 
+@boundaries.entry("wait")
 def wait(state_dir: pathlib.Path, run_id: str, *, timeout: float = WAIT_LIMIT_S, poll: float = 0.2,
          deadline: float | None = None) -> dict:
     """The final or current record after `timeout` (capped at 9 minutes).
@@ -4510,7 +4590,10 @@ def wait(state_dir: pathlib.Path, run_id: str, *, timeout: float = WAIT_LIMIT_S,
     An optional entry deadline also bounds storage retries and lost-result publication, even when
     timeout is zero. Without it, storage keeps its existing retry budgets.
     """
-    run = runs.find_run(state_dir, run_id, deadline=deadline)
+    from oah.discovery.runfiles import Run
+
+    saved = runs.find_run(state_dir, run_id, deadline=deadline)
+    run = Run(saved.id, saved.task, saved.path, deadline=deadline)
     stop = time.monotonic() + min(max(timeout, 0.0), WAIT_LIMIT_S)
     if deadline is not None:
         stop = min(stop, deadline)

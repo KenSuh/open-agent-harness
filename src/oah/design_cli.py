@@ -166,6 +166,7 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 def run(args: argparse.Namespace) -> int:
     from oah.skillpack import PackRefused
+    from oah.discovery import boundaries
 
     try:
         if os.environ.get("OAH_WORKER") == "1" and args.design_command in WORKER_REFUSED:
@@ -175,7 +176,11 @@ def run(args: argparse.Namespace) -> int:
                               "nothing was changed. Return your work to the dispatcher, who changes, accepts and "
                               "carries designs")
         store = open_store(pathlib.Path.cwd())
-        return HANDLERS[args.design_command](args, store)
+        with boundaries.command("design"):
+            return HANDLERS[args.design_command](args, store)
+    except boundaries.CommandRefusal as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
     except PackRefused as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
@@ -197,6 +202,8 @@ class _Inputs:
         self.stdin_used = False
 
     def read(self, value: str, what: str) -> str:
+        from oah.discovery import inputs
+
         if value == "-":
             if self.stdin_used:
                 raise DesignError(INPUT_INVALID_CODE, "standard input (-) can give only one part")
@@ -210,7 +217,7 @@ class _Inputs:
             except UnicodeDecodeError as exc:
                 raise DesignError(INPUT_INVALID_CODE, f"the {what} text on standard input is not UTF-8") from exc
         try:
-            return read_source(pathlib.Path(value))
+            return inputs.source_text(pathlib.Path(value), read_source)
         except SourceError as exc:
             raise DesignError(INPUT_INVALID_CODE, f"cannot use {value} for the {what}: {exc}") from exc
 
@@ -501,12 +508,13 @@ def _coverage_edit(args: argparse.Namespace, store, project: str, design: str) -
 
     from oah.design import coverage
     from oah.design.sources.state import StateProblem, loads
+    from oah.discovery import inputs
 
     if not args.from_file:
         raise DesignError(INPUT_INVALID_CODE, "coverage edit needs --from EDITS.json (a CoverageEditV1 file)")
     try:
         raw = (sys.stdin.read(coverage.MAX_EDIT_BYTES + 1) if args.from_file == "-"
-               else read_source(pathlib.Path(args.from_file)))
+               else inputs.source_text(pathlib.Path(args.from_file), read_source))
     except SourceError as exc:
         raise coverage.CoverageError(coverage.INVALID_CODE, str(exc)) from None
     if len(raw.encode("utf-8")) > coverage.MAX_EDIT_BYTES:

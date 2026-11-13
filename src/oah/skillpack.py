@@ -1063,22 +1063,41 @@ def parse_bundle(data) -> dict:
     return data
 
 
+def parse_record(data, *, required=False):
+    from oah.discovery import preparation
+
+    record = data.get("prepared_e")
+    if record is not None:
+        preparation.parse(record)
+        if record["final"]["bundle_digest"] != (data.get("bundle") or {}).get("digest"):
+            raise ValueError("the stored bundle differs from its preparation")
+    elif required or data.get("bundle") is not None:
+        raise ValueError("managed skills need a complete PreparedE record")
+    if data.get("bundle") is not None:
+        parse_bundle(data["bundle"])
+    return data
+
+
 def bundle_of(run_dir: pathlib.Path) -> dict | None:
     """The run's SkillBundleV1, or None for a run without one; ValueError when the record cannot be trusted."""
     from oah.discovery import records
 
     path = pathlib.Path(run_dir) / "skills.json"
-    data = records.read_json(path, required=False)
-    bundle = data.get("bundle") if isinstance(data, dict) else None
-    if bundle is None:
-        return None
-    return parse_bundle(bundle)
+    return records.read_json(path, required=False,
+                             parse=lambda data: parse_bundle(data["bundle"]) if data.get("bundle") else None)
 
 
 def oah_read(run_dir: pathlib.Path, item: int, *, at: str) -> tuple[dict, str]:
     """One bundle item's delivered text, read back from the run's own brief, with an oah-mediated read row."""
     from oah.atomic import append_jsonl
     from oah.discovery import records
+    from oah.launchers import native
+
+    receiving = native.read_receiving(run_dir)
+    if receiving is not None:
+        settlement = native.read_settlement(run_dir)
+        native.valid_receiving(receiving, run_id=pathlib.Path(run_dir).name,
+                               receiving_ref=settlement["receiving_ref"] if settlement is not None else None)
 
     bundle = bundle_of(run_dir)
     if bundle is None:

@@ -133,7 +133,7 @@ records, start a new run. A direct API call cannot skip admission.
 
 Original preparation updates a task's pointer in the discovery store's `skills/originals` records and atomic
 `tasks/<task-hash>.json` index. A managed original writes the complete `PreparedE` and publishes its run id and
-content digest. An ordinary original clears an existing pointer for the task during preparation, even if that
+content digest. An ordinary original retires the pointer during preparation without reading the record it replaces, even if that
 ordinary run is later refused or never spent. Corrections and reviews keep
 the pointer as it is. A managed correction reads only the run named by that pointer. A missing pointer when
 managed content is needed, missing or incomplete records, a different digest, or a result without a running,

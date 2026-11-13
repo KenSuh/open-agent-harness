@@ -15,7 +15,7 @@ class Sample:
 
 
 @contextmanager
-def mapped_by(test, boundary, sample):
+def mapped_by(test, boundary, sample, surface=None):
     from oah.discovery import boundaries
 
     mapped, seen = boundaries.mapped, []
@@ -28,6 +28,12 @@ def mapped_by(test, boundary, sample):
     with mock.patch.object(boundaries, "mapped", checked):
         yield
     test.assertTrue(seen, f"the {boundary} table did not handle the supplied {type(sample.error).__name__}")
+    from tests.e_c12_matrix import ROW_REACH
+
+    surface = surface or {'admission': 'process', 'launch': 'process', 'freeze': 'fix', 'settle': 'native',
+                          'relay': 'capabilities', 'skills': 'skills', 'worker': 'orca',
+                          'design': 'coverage', 'wait': 'wait'}[boundary]
+    ROW_REACH.add((boundary, surface, type(sample.error).__name__))
 
 
 def samples(root: pathlib.Path) -> dict[str, Sample]:
@@ -46,7 +52,8 @@ def samples(root: pathlib.Path) -> dict[str, Sample]:
     from oah.scratch import ScratchError
 
     return {
-        "InvalidRecord": Sample(InvalidRecord(root / "fixture.json", Issue.CONTENT, "has invalid fixture data"), ""),
+        "RecordRefusal": Sample(InvalidRecord(root / "fixture.json", Issue.CONTENT, "has invalid fixture data"), ""),
+        "ValueError": Sample(ValueError("fixture live preparation changed"), ""),
         "StateCorrupt": Sample(StateCorrupt("OAH_STATE_CORRUPT: fixture record"), "OAH_STATE_CORRUPT"),
         "StoreProblem": Sample(StoreProblem(root / "fixture.json", "invalid fixture record"), "OAH_SKILL_STATE_CORRUPT"),
         "ConfigError": Sample(ConfigError("OAH_CONFIG_INVALID", "fixture configuration"), "OAH_CONFIG_INVALID"),

@@ -260,8 +260,10 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings, 
     """Rebuild permissions from the dispatch stage carried by argv, checking both saved records."""
     if not isinstance(run, runs.WorkerRun):
         raise runs._launch_invalid()
-    data = run.read()
-    saved = run._read_json("launch.json")
+    from oah.discovery import records
+
+    data = records.run_json(run, "result.json")
+    saved = records.run_json(run, "launch.json")
     if isinstance(saved, dict) and saved.get("cli_version") == runs.UNVERIFIED:
         saved["cli_version"] = None
     launcher = data.get("launcher") or {}
@@ -309,7 +311,7 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings, 
                                     permission_mode=section["permission_mode"], tools=section["tools"],
                                     read_only=stage == "review")
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": run.task}
-    run.bind(data)
+    records.bind_worker(run, data)
     return _WorkerPrepared(**dict(saved, argv=tuple(argv), env_additions=additions,
                                   warnings=tuple(saved["warnings"]), worker_run=run))
 
@@ -429,7 +431,10 @@ def wait(orca: Orca, state_dir: pathlib.Path, run_id: str, *, timeout: float = c
         deadline = min(deadline, limit)
     if getattr(orca, "deadline", None) is not None:
         deadline = min(deadline, orca.deadline)
-    run = runs.find_run(state_dir, run_id, deadline=deadline)
+    from oah.discovery.runfiles import Run
+
+    found = runs.find_run(state_dir, run_id, deadline=deadline)
+    run = Run(found.id, found.task, found.path, deadline=deadline)
     data = None
     try:
         while True:

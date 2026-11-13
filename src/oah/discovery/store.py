@@ -56,10 +56,7 @@ def with_id(record: Mapping) -> dict:
 
 
 def _read(path: pathlib.Path) -> object | None:
-    try:
-        return record_files.read_json(path, required=False, limit=LIMIT)
-    except record_files.InvalidRecord as exc:
-        raise StoreProblem(path, exc.detail) from None
+    return record_files.read_json(path, required=False, limit=LIMIT)
 
 
 def _write_once(path: pathlib.Path, record: Mapping) -> str:

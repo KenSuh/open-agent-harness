@@ -296,15 +296,34 @@ def check_parent(data: object, *, now: dt.datetime) -> dict:
     return dict(inventory)
 
 
-def read_parent(path: str | os.PathLike, *, now: dt.datetime) -> dict:
+def read_parent(path: str | os.PathLike, *, now: dt.datetime, recorded: bool = False) -> dict:
     """The lead's InventoryV1 file; OAH_CAPABILITY_INVENTORY_UNKNOWN (exit 69) when it cannot be read or trusted."""
-    from oah.discovery import records
+    from oah.discovery import inputs, records
+    from oah.design.sources.state import StateProblem, loads
 
+    def checked(value):
+        try:
+            return check_parent(value, now=now)
+        except ValueError as exc:
+            raise CapabilityRefused(INVENTORY_UNKNOWN_CODE, "", f"the parent inventory {path}: {exc}") from None
+
+    source = pathlib.Path(path)
+    if recorded:
+        return records.followed_bytes(source, limit=FILE_LIMIT,
+            parse=lambda raw: checked(records.json_bytes(raw, source)))
     try:
-        with records.content(pathlib.Path(path)):
-            return check_parent(records.read_json(pathlib.Path(path), limit=FILE_LIMIT), now=now)
-    except records.InvalidRecord as exc:
-        raise CapabilityRefused(INVENTORY_UNKNOWN_CODE, "", f"the parent inventory {path}: {exc}") from None
+        raw = inputs.read_bytes(source, limit=FILE_LIMIT)
+        if len(raw) > FILE_LIMIT:
+            raise ValueError("over 1 MiB")
+        data, readable = loads(raw, source.name), True
+    except FileNotFoundError:
+        data, readable = None, True
+    except (OSError, ValueError, StateProblem):
+        data, readable = None, False
+    if data is None:
+        why = "it is missing" if readable else "it is unreadable, over 1 MiB or not JSON"
+        raise CapabilityRefused(INVENTORY_UNKNOWN_CODE, "", f"the parent inventory {path}: {why}")
+    return checked(data)
 
 
 def qualified(record: Mapping, now: dt.datetime) -> bool:

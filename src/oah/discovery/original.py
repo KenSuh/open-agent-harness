@@ -43,8 +43,7 @@ def publish(run, skills: Mapping[str, preparation.Json] | None, *, stage: str) -
     if is_original:
         index = _index(state_dir, run.task)
         if pointer is None:
-            if isinstance(lookup(state_dir, run.task), dict):
-                write_json_atomic(index, {"original": None})
+            write_json_atomic(index, {"original": None})
         else:
             write_json_atomic(index, {"original": pointer["id"]})
 

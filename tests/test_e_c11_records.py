@@ -1,6 +1,7 @@
 # 저장 기록 회귀 시험 — 자기 시험 파일을 바꾸고 거절 코드와 앞선 기록 보존을 확인한다.
 from __future__ import annotations
 
+import builtins
 import datetime as dt
 import dataclasses
 import contextlib
@@ -31,6 +32,7 @@ def relay_paths(state, saved):
 @contextlib.contextmanager
 def read_fault(path, error):
     read, read_text, seen = pathlib.Path.read_bytes, pathlib.Path.read_text, []
+    opened, io_opened = builtins.open, io.open
 
     def changed(current):
         if current == path:
@@ -44,8 +46,17 @@ def read_fault(path, error):
             raise error
         return read_text(current, *args, **options)
 
+    def changed_open(operation, raw, mode='r', *args, **options):
+        if isinstance(raw, (str, bytes, os.PathLike)) and pathlib.Path(os.fsdecode(raw)) == path \
+                and not any(flag in mode for flag in 'wax+'):
+            seen.append('open')
+            raise error
+        return operation(raw, mode, *args, **options)
+
     with mock.patch.object(pathlib.Path, "read_bytes", changed), \
-            mock.patch.object(pathlib.Path, "read_text", changed_text):
+            mock.patch.object(pathlib.Path, "read_text", changed_text), \
+            mock.patch.object(builtins, 'open', lambda *a, **k: changed_open(opened, *a, **k)), \
+            mock.patch.object(io, 'open', lambda *a, **k: changed_open(io_opened, *a, **k)):
         yield seen
 
 
@@ -483,7 +494,9 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                             "--task", "t1", "--tier", "low", "--parent-inventory", str(parent),
                             "--relay-result", relay["id"], "--json")
 
-                    expected = (69, "OAH_STATE_IO:") if kind in ("io", "stat-io") else (1, "OAH_RUN_LAUNCH_INVALID:")
+                    expected = ((69, "OAH_STATE_IO:") if kind in ("io", "stat-io") else
+                                (1, "OAH_SKILL_NOT_DELIVERABLE(changed):") if name == 'prompt.md'
+                                    and kind in ('invalid', 'null') else (1, "OAH_RUN_LAUNCH_INVALID:"))
                     self.assertEqual(code, expected[0], out + err)
                     self.assertTrue(err.rstrip().splitlines()[-1].startswith(expected[1]), err)
                     self.assertNotIn("Traceback", err)
@@ -516,14 +529,13 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
 
         self.assertTrue(delayed)
 
-    def test_relay_reparse_request_refuses_before_reading_its_bytes(self):
+    def test_relay_reparse_user_input_keeps_normal_file_semantics(self):
         request, _parent, _now = self.request()
         source = capability_fixture.write(self.work / "request.json", request)
         payload = capability_fixture.write(self.work / "relay.txt", capability_fixture.RESULT)
         invocation = capability_fixture.write(self.work / "invocation.json", {
             "outcome": "ok", "at": request["created_at"], "arguments_digest": "sha256:" + "3" * 64})
-        earlier, before = source.read_bytes(), files(self.state_dir)
-        lstat, checked = pathlib.Path.lstat, []
+        earlier, lstat, checked = source.read_bytes(), pathlib.Path.lstat, []
 
         def recorded_stat(path):
             if path == source:
@@ -531,36 +543,54 @@ class CommandRecordTest(DeliveryTask, unittest.TestCase):
                 return types.SimpleNamespace(st_mode=stat.S_IFREG, st_size=len(earlier), st_file_attributes=0x400)
             return lstat(path)
 
-        with mock.patch.object(pathlib.Path, "lstat", recorded_stat), read_fault(
-                source, AssertionError("the fixture reparse request must be refused before reading")) as reads:
+        with mock.patch.object(pathlib.Path, "lstat", recorded_stat):
             code, out, err = cli_result(self.repo, self.env, "capabilities", "relay", "--request", str(source),
                 "--capability", request["capability_id"], "--result-file", str(payload), "--invocation", str(invocation))
 
-        self.assertTrue(checked, out + err)
-        self.assertEqual(code, 1, out + err)
-        self.assertTrue(err.startswith("OAH_CAPABILITIES_USAGE:"), err)
-        self.assertNotIn("Traceback", err)
-        self.assertEqual(reads, [])
+        self.assertEqual(checked, [])
+        self.assertEqual(code, 0, out + err)
         self.assertEqual(source.read_bytes(), earlier)
-        self.assertEqual(files(self.state_dir), before)
         self.assertFalse(self.record.exists())
 
-    def test_windows_reparse_prompt_refuses_before_reading_it(self):
+    def test_windows_reparse_stored_relay_blob_refuses_before_reading_it(self):
         _now, run, command = self.offered_parent_relay()
-        prompt, lstat = run / "prompt.md", pathlib.Path.lstat
-        earlier, before = prompt.read_bytes(), files(self.state_dir)
+        saved = json.loads((run / "skills.json").read_bytes())
+        blob = relay_paths(self.state_dir, saved)["relay-blob"]
+        earlier, before, lstat, checked = blob.read_bytes(), files(self.state_dir), pathlib.Path.lstat, []
 
         def recorded_stat(path):
-            if path == prompt:
+            if path == blob:
+                checked.append(path)
                 return types.SimpleNamespace(st_mode=stat.S_IFREG, st_size=len(earlier), st_file_attributes=0x400)
             return lstat(path)
 
         with mock.patch.object(pathlib.Path, "lstat", recorded_stat), read_fault(
-                prompt, AssertionError("a recorded reparse point must be refused before reading")):
+                blob, AssertionError("a stored reparse point must be refused before reading")):
             code, out, err = cli_result(self.repo, self.env, *command)
+
+        self.assertTrue(checked)
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith("OAH_NATIVE_OFFER_STALE:"), err)
+        self.assertEqual(files(self.state_dir), before)
+        self.assertFalse(self.record.exists())
+
+    def test_non_run_stored_record_must_be_a_regular_file(self):
+        _now, run, command = self.offered_parent_relay()
+        saved = json.loads((run / "skills.json").read_bytes())
+        blob = relay_paths(self.state_dir, saved)["relay-blob"]
+        original = blob.read_bytes()
+        backing = self.work / "valid-relay-blob.json"
+        backing.write_bytes(original)
+        blob.unlink()
+        blob.symlink_to(backing)
+        before = files(self.state_dir)
+
+        code, out, err = cli_result(self.repo, self.env, *command)
 
         self.assertEqual(code, 1, out + err)
         self.assertTrue(err.startswith("OAH_NATIVE_OFFER_STALE:"), err)
+        self.assertTrue(blob.is_symlink())
+        self.assertEqual(backing.read_bytes(), original)
         self.assertEqual(files(self.state_dir), before)
         self.assertFalse(self.record.exists())
 

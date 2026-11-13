@@ -119,16 +119,12 @@ def _read(path: pathlib.Path, keys: tuple[str, ...], *, optional: tuple[str, ...
           required: bool = False) -> dict | None:
     from oah.discovery import records
 
-    try:
-        data = records.read_json(path, required=required)
-    except records.InvalidRecord as exc:
-        raise StateCorrupt(f"{StateCorrupt.code}: {path} is not valid UTF-8 JSON ({type(exc).__name__}); oah never "
-                           "resets it, so repair or remove the file by hand") from None
-    if data is None:
-        return None
-    if not isinstance(data, dict) or not set(keys) <= set(data) <= {*keys, *optional} or data.get("version") != 1:
-        raise StateCorrupt(f"{StateCorrupt.code}: {path} is not a version 1 record with exactly its documented keys")
-    return data
+    def checked(data):
+        if not set(keys) <= set(data) <= {*keys, *optional} or data.get("version") != 1:
+            raise ValueError("not a version 1 record with exactly its documented keys")
+        return data
+
+    return records.read_json(path, required=required, parse=checked)
 
 
 def read_offer(run_dir: pathlib.Path) -> dict | None:
@@ -163,9 +159,10 @@ def set_state(run_dir: pathlib.Path, offer: Mapping, state: str, settlement: str
 
 def read_result(path: pathlib.Path) -> bytes:
     """The host child's result as data: never run, at most RESULT_LIMIT bytes, strict UTF-8, no oah marker line."""
+    from oah.discovery import inputs
+
     try:
-        with open(path, "rb") as handle:
-            data = handle.read(RESULT_LIMIT + 1)
+        data = inputs.read_bytes(path, limit=RESULT_LIMIT)
     except OSError as exc:
         raise StorageError(pathlib.Path(path), exc) from exc
     if len(data) > RESULT_LIMIT:
@@ -205,15 +202,24 @@ def read_settlement(run_dir: pathlib.Path, *, required: bool = False) -> dict | 
 
 
 def read_receiving(run_dir: pathlib.Path, *, required: bool = False) -> dict | None:
-    from oah.capabilities.usage import valid_summary
-
     path = pathlib.Path(run_dir) / RECEIVING_NAME
     record = _read(path, RECEIVING_KEYS, optional=("available_usage",), required=required)
-    if record is not None and "available_usage" in record and (
-            not valid_summary(record["available_usage"])
-            or record["id"] != digest({key: value for key, value in record.items() if key != "id"})):
-        raise StateCorrupt(f"{StateCorrupt.code}: {path} does not keep a closed available-usage summary")
+    if record is not None:
+        valid_receiving(record, run_id=pathlib.Path(run_dir).name)
     return record
+
+
+def valid_receiving(record: Mapping, *, run_id: str, receiving_ref: str | None = None) -> None:
+    from oah.capabilities.usage import valid_summary
+
+    if (record.get("run") != run_id or record.get("id") != digest({key: value for key, value in record.items()
+                                                                 if key != "id"})
+            or receiving_ref is not None and record.get("id") != receiving_ref):
+        raise ProtocolRefused(STALE_CODE, "the receiving record no longer matches its run and settlement; "
+                              "the earlier records are kept; offer again with oah call --launcher native")
+    if "available_usage" in record and not valid_summary(record["available_usage"]):
+        raise ProtocolRefused(STALE_CODE, "the receiving record has no closed available-usage summary; "
+                              "the earlier records are kept; offer again with oah call --launcher native")
 
 
 def receiving_record(run_id: str, offer: Mapping, bundle: Mapping | None, reads: Iterable[Mapping], *,
@@ -245,6 +251,7 @@ def record_settlement(run_dir: pathlib.Path, offer: Mapping, stated: Mapping, re
     run_dir = pathlib.Path(run_dir)
     existing = read_settlement(run_dir, required=offer["settlement"] is not None)
     if existing is None:
+        valid_receiving(receiving, run_id=offer["run"])
         write_json_atomic(run_dir / RECEIVING_NAME, dict(receiving))
         settlement = {**stated, "receiving_ref": receiving["id"], "at": iso(now)}
         settlement["id"] = digest(settlement)
@@ -255,6 +262,7 @@ def record_settlement(run_dir: pathlib.Path, offer: Mapping, stated: Mapping, re
         existing = read_settlement(run_dir, required=True)  # another settle won the race; compare with it
     stored_receiving = read_receiving(run_dir, required=True)
     assert existing is not None and stored_receiving is not None
+    valid_receiving(stored_receiving, run_id=offer["run"], receiving_ref=existing["receiving_ref"])
     differs = [key for key in CLAIM_KEYS if existing[key] != stated[key]]
     if differs:
         raise ProtocolRefused(CONFLICT_CODE, f"run {offer['run']} was already settled with another "

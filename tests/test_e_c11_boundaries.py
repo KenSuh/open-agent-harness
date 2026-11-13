@@ -19,6 +19,7 @@ from tests import test_capabilities as capability_fixture
 from tests import test_e_relay_times as relay_fixture
 from tests import test_e_spent_evidence as spent_fixture
 from tests import test_launcher_orca as orca_fixture
+from tests import test_e_prepared as prepared_fixture
 from tests.test_e_c10_boundaries import cli_result, files
 from tests.test_skill_delivery import DeliveryTask
 
@@ -72,7 +73,7 @@ class AdmissionTableTest(DeliveryTask, unittest.TestCase):
                 with self.subTest(boundary="admission", surface=surface, incoming=row.incoming):
                     sample = table_fixture.samples(self.work)[row.incoming]
                     handler = "_prepare_native" if surface == "native" else "_prepare"
-                    with table_fixture.mapped_by(self, "admission", sample), \
+                    with table_fixture.mapped_by(self, "admission", sample, surface), \
                             mock.patch.object(call, handler, side_effect=sample.error):
                         result = cli_result(self.repo, self.env, "call", "claude", "--stage", "initial", "--task",
                                             "t1", "--tier", "low", "--launcher", surface, "--json")
@@ -91,7 +92,7 @@ class OrcaAdmissionTableTest(unittest.TestCase):
         for row in boundaries.TABLE["admission"].rules:
             with self.subTest(boundary="admission", surface="orca", incoming=row.incoming):
                 sample = table_fixture.samples(project.repo)[row.incoming]
-                with table_fixture.mapped_by(self, "admission", sample), \
+                with table_fixture.mapped_by(self, "admission", sample, "orca"), \
                         mock.patch.object(call, "_prepare", side_effect=sample.error):
                     result = cli_result(project.repo, project.env, "call", "codex", "--stage", "initial", "--task",
                         "t1", "--tier", "low", "--override-stage", "--launcher", "orca", "--json")
@@ -265,109 +266,150 @@ class RelayTableTest(DeliveryTask, unittest.TestCase):
         self.assertEqual(files(self.state_dir), before)
 
 
+class ReadTableTest(DeliveryTask, unittest.TestCase):
+    offered_parent_relay = spent_fixture.SpentEvidenceTest.offered_parent_relay
+
+    def test_every_declared_skills_row_reaches_the_read_command(self):
+        from oah import skillpack
+        from oah.discovery import boundaries
+
+        _now, run, _command = self.offered_parent_relay()
+        for row in boundaries.TABLE["skills"].rules:
+            sample = table_fixture.samples(self.work)[row.incoming]
+            with table_fixture.mapped_by(self, "skills", sample), \
+                    mock.patch.object(skillpack, "oah_read", side_effect=sample.error):
+                result = cli_result(self.repo, self.env, "skills", "read", "--run", run.name, "--item", "1")
+            table_fixture.assert_cli(self, result, row, sample)
+            self.assertFalse(self.record.exists())
+
+
+class WorkerTableTest(DeliveryTask, unittest.TestCase):
+    terminals_opened = prepared_fixture.OrcaIdentityTest.terminals_opened
+    orca_state = prepared_fixture.OrcaIdentityTest.orca_state
+    orca_queue = prepared_fixture.OrcaIdentityTest.orca_queue
+
+    def test_every_declared_worker_row_reaches_the_worker_command(self):
+        from oah.discovery import boundaries
+        from oah.launchers import orca
+        from tests import test_e_prepared
+
+        self.build_skills(test_e_prepared.PLAIN)
+        prepared = self.prepare()
+        self.orca_queue(prepared)
+        for row in boundaries.TABLE["worker"].rules:
+            sample = table_fixture.samples(self.work)[row.incoming]
+            with table_fixture.mapped_by(self, "worker", sample), \
+                    mock.patch.object(orca, "worker_prepared", side_effect=sample.error):
+                result = cli_result(self.repo, self.env, "worker-run", prepared.run_id, "--stage", "initial")
+            table_fixture.assert_cli(self, result, row, sample)
+            self.assertEqual(json.loads((prepared.run.path / "result.json").read_bytes())["status"], "refused")
+            self.assertFalse(self.record.exists())
+
+
+class OtherTableTest(DeliveryTask, unittest.TestCase):
+    def test_design_row_reaches_coverage_command(self):
+        from oah.design import coverage
+        from oah.discovery import boundaries
+        from tests.test_skill_delivery import PLAIN
+
+        self.build_skills(PLAIN)
+        for row in boundaries.TABLE['design'].rules:
+            sample = table_fixture.samples(self.work)[row.incoming]
+            with table_fixture.mapped_by(self, 'design', sample), \
+                    mock.patch.object(coverage, 'evaluate', side_effect=sample.error):
+                result = cli_result(self.repo, self.env, 'design', 'coverage', 'acme', 'booking', '--json')
+            table_fixture.assert_cli(self, result, row, sample)
+            self.assertFalse(self.record.exists())
+
+    def test_wait_row_reaches_saved_run_command(self):
+        from oah.discovery import boundaries, records
+        from tests.test_skill_delivery import PLAIN
+
+        self.build_skills(PLAIN)
+        prepared = self.prepare()
+        before = (prepared.run.path / 'result.json').read_bytes()
+        for row in boundaries.TABLE['wait'].rules:
+            sample = table_fixture.samples(self.work)[row.incoming]
+            with table_fixture.mapped_by(self, 'wait', sample), \
+                    mock.patch.object(records, 'run_json', side_effect=sample.error):
+                result = cli_result(self.repo, self.env, 'wait', prepared.run_id, '--timeout-seconds', '30')
+            table_fixture.assert_cli(self, result, row, sample)
+            self.assertEqual((prepared.run.path / 'result.json').read_bytes(), before)
+            self.assertFalse(self.record.exists())
+
+
 CLI_CASES = {"admission": {"process": AdmissionTableTest, "native": AdmissionTableTest, "orca": OrcaAdmissionTableTest},
              "launch": {"process": LaunchTableTest}, "freeze": {"fix": FreezeTableTest},
-             "settle": {"native": SettleTableTest}, "relay": {"capabilities": RelayTableTest}}
+             "settle": {"native": SettleTableTest}, "relay": {"capabilities": RelayTableTest},
+             "skills": {"skills": ReadTableTest}, "worker": {"orca": WorkerTableTest},
+             "design": {"coverage": OtherTableTest}, "wait": {"wait": OtherTableTest}}
 
 
 class BoundaryCompletenessTest(unittest.TestCase):
-    def test_every_direct_typed_mapping_catch_is_declared(self):
-        from oah import call
-        import oah.discovery.boundaries as boundaries
+    def test_category_matrix_matches_every_command_row(self):
+        from oah.discovery import boundaries, records
+        from tests.e_c12_matrix import FAULTS, OWNER_MATRIX, OWNER_RUN_MATRIX, OWNER_KEPT_MATRIX
 
-        tree = ast.parse(inspect.getsource(call))
-        owners = {}
-        for function in tree.body:
-            if not isinstance(function, ast.FunctionDef):
-                continue
-            for node in ast.walk(function):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                        and isinstance(node.func.value, ast.Name) and node.func.value.id == "boundaries" \
-                        and node.func.attr == "mapped" and node.args and isinstance(node.args[0], ast.Constant):
-                    owners[function.name] = node.args[0].value
-        self.assertTrue(owners)
-        kinds, seen = boundaries.error_types(), []
-        for handler in (node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)):
-            calls = [node for statement in handler.body for node in ast.walk(statement)
-                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                     and node.func.id in owners and node.args and isinstance(node.args[0], ast.Name)
-                     and node.args[0].id == handler.name]
-            for node in calls:
-                assert isinstance(node.func, ast.Name)
-                boundary = owners[node.func.id]
-                caught = handler.type.elts if isinstance(handler.type, ast.Tuple) else (handler.type,)
-                for kind in caught:
-                    name = kind.attr if isinstance(kind, ast.Attribute) else kind.id if isinstance(kind, ast.Name) else ""
-                    with self.subTest(boundary=boundary, caught=name, line=handler.lineno):
-                        self.assertIn(name, kinds)
-                        self.assertTrue(any(issubclass(kinds[name], incoming)
-                                            for incoming in boundaries.incoming(boundary)), name)
-                        seen.append((boundary, name))
-        self.assertTrue(seen)
+        issues = (records.Issue.MISSING, records.Issue.NOT_REGULAR, records.Issue.DENIED,
+                  records.Issue.CONTENT, records.Issue.IO)
+        self.assertEqual(set(OWNER_MATRIX), set(boundaries.TABLE))
+        self.assertEqual(set(OWNER_MATRIX), set(OWNER_RUN_MATRIX))
+        self.assertEqual(set(OWNER_MATRIX), set(OWNER_KEPT_MATRIX))
+        for name in boundaries.TABLE:
+            expected = OWNER_MATRIX[name]
+            self.assertEqual(len(expected), len(FAULTS))
+            self.assertEqual(len(OWNER_RUN_MATRIX[name]), len(FAULTS))
+            self.assertEqual(len(OWNER_KEPT_MATRIX[name]), len(FAULTS))
+            for index, issue in enumerate(issues):
+                with self.subTest(command=name, fault=FAULTS[index]):
+                    refusal = boundaries.mapped(name, records.RecordRefusal(pathlib.Path('fixture.json'), issue,
+                        'fixture recorded file failed'))
+                    assert isinstance(refusal, boundaries.CommandRefusal)
+                    self.assertEqual((refusal.code, refusal.exit_code), expected[index])
+                    self.assertTrue(OWNER_RUN_MATRIX[name][index])
+                    self.assertTrue(OWNER_KEPT_MATRIX[name][index])
+
+    def test_every_direct_typed_mapping_catch_is_declared(self):
+        from oah.discovery import boundaries
+        from tests.e_c12_structure import catches
+
+        self.assertEqual(catches(), boundaries.CATCHES)
 
     def test_record_failures_and_every_declared_row_have_cli_cases(self):
-        import oah.discovery.boundaries as boundaries
-        from oah.discovery import records
+        import io
+        from oah.discovery import boundaries
+        from tests.e_c12_matrix import OWNER_RULES, OWNER_SURFACES, ROW_REACH
 
-        self.assertEqual(set(boundaries.TABLE), set(CLI_CASES))
-        factories = table_fixture.samples(pathlib.Path("fixture"))
-        produced = typing.get_args(typing.get_type_hints(records.io_failure)["return"])
-        for boundary, spec in boundaries.TABLE.items():
-            with self.subTest(boundary=boundary):
-                rows = spec.rules
-                self.assertEqual(set(CLI_CASES[boundary]), set(spec.surfaces))
-                self.assertEqual(len(rows), len({row.incoming for row in rows}))
-                kinds = boundaries.incoming(boundary)
-                for error in produced:
-                    self.assertTrue(any(issubclass(error, incoming) for incoming in kinds), error.__name__)
-                for row in rows:
-                    self.assertIn(row.incoming, factories)
-                    for case in CLI_CASES[boundary].values():
-                        self.assertTrue(unittest.defaultTestLoader.getTestCaseNames(case))
+        self.assertEqual(set(boundaries.TABLE), set(OWNER_RULES))
+        for name in boundaries.TABLE:
+            expected = OWNER_RULES[name]
+            self.assertEqual(tuple((row.incoming, row.outward) for row in boundaries.TABLE[name].rules), expected)
+            self.assertEqual(tuple(boundaries.TABLE[name].surfaces), OWNER_SURFACES[name])
+        ROW_REACH.clear()
+        cases = (
+            AdmissionTableTest('test_every_declared_admission_row_reaches_process_and_native_cli'),
+            OrcaAdmissionTableTest('test_every_declared_admission_row_reaches_orca_preparation_cli'),
+            LaunchTableTest('test_every_declared_launch_row_refuses_before_engine'),
+            FreezeTableTest('test_every_declared_freeze_row_refuses_before_correction_child'),
+            SettleTableTest('test_every_declared_settle_row_refuses_without_settlement'),
+            RelayTableTest('test_every_declared_relay_row_refuses_without_store_writes'),
+            ReadTableTest('test_every_declared_skills_row_reaches_the_read_command'),
+            WorkerTableTest('test_every_declared_worker_row_reaches_the_worker_command'),
+            OtherTableTest('test_design_row_reaches_coverage_command'),
+            OtherTableTest('test_wait_row_reaches_saved_run_command'),
+        )
+        out = io.StringIO()
+        result = unittest.TextTestRunner(stream=out).run(unittest.TestSuite(cases))
+        self.assertTrue(result.wasSuccessful(), out.getvalue())
+        expected = {(boundary, surface, incoming) for boundary, rules in OWNER_RULES.items()
+                    for surface in OWNER_SURFACES[boundary] for incoming, _outward in rules}
+        self.assertEqual(ROW_REACH, expected, 'every literal owner row must reach its real CLI mapper')
 
     def test_e_boundaries_use_the_table_instead_of_separate_exception_lists(self):
-        import oah.discovery.boundaries as boundaries
+        from oah.discovery import records
+        from tests.e_c12_structure import architectural_problems
 
-        declared = ((boundary, spec, name) for boundary, spec in boundaries.TABLE.items()
-                    for name in (*spec.handlers, *spec.readers))
-        for boundary, spec, name in declared:
-            module, _, attribute = name.rpartition(".")
-            function = getattr(importlib.import_module(module), attribute)
-            with self.subTest(boundary=boundary, function=name):
-                tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
-                function_node = tree.body[0]
-                self.assertIsInstance(function_node, ast.FunctionDef)
-                assert isinstance(function_node, ast.FunctionDef)
-                pending: list[ast.AST] = list(function_node.body)
-                caught = []
-                while pending:
-                    node = pending.pop()
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                        continue
-                    if isinstance(node, ast.ExceptHandler):
-                        caught.append(ast.unparse(node.type) if node.type else "bare")
-                    pending.extend(ast.iter_child_nodes(node))
-                if name in spec.handlers:
-                    self.assertEqual(caught, [], caught)
-                contexts = [ast.unparse(item.context_expr) for node in ast.walk(function_node)
-                            if isinstance(node, ast.With) for item in node.items]
-                if name in spec.handlers:
-                    self.assertTrue(any(value.startswith("boundaries.refusals(") for value in contexts), contexts)
-                direct: list[str] = []
-                for node in ast.walk(function_node):
-                    if not isinstance(node, ast.Call):
-                        continue
-                    if isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) in (
-                            "records", "record_files"):
-                        eager = [ast.unparse(part) for argument in (*node.args,
-                            *(keyword.value for keyword in node.keywords)) for part in ast.walk(argument)
-                            if isinstance(part, ast.Attribute) and part.attr in (
-                                "file_path", "prompt_path", "result_path")]
-                        self.assertEqual(eager, [], eager)
-                    if isinstance(node.func, ast.Name) and node.func.id == "open":
-                        direct.append(ast.unparse(node))
-                    if isinstance(node.func, ast.Attribute) and node.func.attr in (
-                            "read_bytes", "read_text", "read_json", "_read_json", "open"):
-                        if ast.unparse(node.func.value) not in ("records", "record_files"):
-                            direct.append(ast.unparse(node))
-                self.assertEqual(direct, [], direct)
+        self.assertFalse(issubclass(records.RecordRefusal, (OSError, ValueError)))
+        self.assertEqual({item.value for item in records.Category}, {'stale', 'io'})
+        self.assertFalse(hasattr(records, 'content'))
+        self.assertEqual(architectural_problems(), [])

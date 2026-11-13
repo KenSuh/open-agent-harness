@@ -185,6 +185,7 @@ def run(args: argparse.Namespace) -> int:
     from oah.review.runner import credential_redactor
 
     from oah.discovery import NeedInvalid
+    from oah.engines.effort import EngineError
     from oah.discovery.review import ReviewFailed, SourceUnsupported
     from oah.discovery.tasks import NeedsInvalid
     from oah.discovery.store import StoreProblem
@@ -193,7 +194,16 @@ def run(args: argparse.Namespace) -> int:
 
     redact = credential_redactor(os.environ)
     try:
-        return HANDLERS[args.skills_command](args)
+        from oah.discovery import boundaries
+
+        with boundaries.command("skills"):
+            return HANDLERS[args.skills_command](args)
+    except boundaries.CommandRefusal as exc:
+        print(redact(str(exc)), file=sys.stderr)
+        return exc.exit_code
+    except EngineError as exc:
+        print(redact(str(exc)), file=sys.stderr)
+        return EXIT_REFUSED
     except (Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive) as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT if getattr(exc, "code", "") in ENVIRONMENT_CODES else EXIT_REFUSED
@@ -713,13 +723,13 @@ def _select(args: argparse.Namespace) -> int:
     """A lead's TaskSkillSelectionV1 for one need of a task without a design (DESIGN §4.8)."""
     from oah import discovery
     from oah.atomic import write_text_atomic
-    from oah.discovery import tasks
+    from oah.discovery import inputs, tasks
 
     _lead_only("select")
     info, state, _home = _context()
     _settings, found_settings = _discovery_settings(info)
     try:
-        raw = pathlib.Path(args.needs).read_bytes()[:tasks.NEEDS_BYTES + 1]
+        raw = inputs.read_bytes(args.needs, limit=tasks.NEEDS_BYTES)
         task = json.loads(raw.decode("utf-8")).get("task")
     except (OSError, UnicodeDecodeError, ValueError, AttributeError):
         raise tasks.NeedsInvalid("malformed", f"{args.needs} is not a needs file from oah skills find --task") \

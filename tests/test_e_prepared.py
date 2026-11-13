@@ -151,7 +151,7 @@ class PreparedIdentityTest(DeliveryTask, unittest.TestCase):
 
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo), \
                 mock.patch.object(call.dt, "datetime", Later), \
-                self.assertRaisesRegex(call.EngineError, "OAH_RUN_LAUNCH_INVALID"):
+                self.assertRaisesRegex(call.EngineError, "OAH_SKILL_NOT_DELIVERABLE\\(changed\\).*original preparation evidence expired"):
             call.check_prepared(prepared)
         self.assertEqual(path.read_bytes(), before)
         self.assertFalse(self.record.exists())

@@ -312,7 +312,8 @@ def settings_for(root) -> dict:
 def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: Sequence[Mapping], root, env,
              state_dir: os.PathLike, parent_path: str | None, relay_refs: Sequence[str], now: dt.datetime,
              settings: Mapping, class_needs: Sequence[Mapping] = (), class_status: str | None = None,
-             advise=None, frozen: FrozenInputs | None = None) -> tuple[dict | None, str | None]:
+             advise=None, frozen: FrozenInputs | None = None,
+             parent_recorded: bool = False) -> tuple[dict | None, str | None]:
     """(CapabilityPlanV1, `## Capabilities` block) for one dispatch, or (None, None) when it has no capability needs
     and no relay inputs (the brief then stays byte-identical). CapabilityRefused before anything is spent."""
     from oah import skillpack, skillsel
@@ -323,7 +324,7 @@ def for_task(*, holder, task: str, task_design, engine: str, stage: str, items: 
     child = inventories.child(engine, root=root, env=env, home=skillsel.home_of(env), now=now,
                               classes=settings["classes"])
     if frozen is None:
-        parent = inventories.read_parent(parent_path, now=now) if parent_path else None
+        parent = inventories.read_parent(parent_path, now=now, recorded=parent_recorded) if parent_path else None
         loaded = [load(state_dir, ref, now=now) for ref in sorted(set(relay_refs))]
     else:
         parent, loaded, now = frozen.parent, frozen.relays, frozen.at

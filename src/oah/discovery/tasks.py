@@ -263,6 +263,10 @@ def parse_needs(raw: bytes, basis: TaskBasis, *, policy: str) -> list[dict]:
         data = loads(raw, "needs file")
     except StateProblem as exc:
         raise NeedsInvalid("malformed", exc.detail) from None
+    return resolve_needs(data, basis, policy=policy)
+
+
+def resolve_needs(data: object, basis: TaskBasis, *, policy: str) -> list[dict]:
     if not (isinstance(data, dict) and set(data) == {"version", "task", "needs"} and data["version"] == 1
             and isinstance(data["needs"], list) and 0 < len(data["needs"]) <= NEEDS_LIMIT):
         raise NeedsInvalid("malformed", f"a needs file is {{version: 1, task, needs: [1 to {NEEDS_LIMIT} needs]}}")

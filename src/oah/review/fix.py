@@ -1374,8 +1374,14 @@ def commit_commands(*, task: str, attempt_id: str, receipt: str, finding_ids: Se
 def correct(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keychain=None,
             rules: Sequence[Mapping] | None = None, temp_root: pathlib.Path | None = None) -> Result:
     """Run one Codex correction of the task's latest review; refusals raise ReviewError before any launch."""
-    return _guarded(env, lambda redact: _correct(request, cwd=cwd, env=env, keychain=keychain, rules=rules,
-                                                 temp_root=temp_root, redact=redact), cwd=cwd)
+    from oah.discovery import boundaries
+
+    def operation(redact):
+        with boundaries.command("freeze"):
+            return _correct(request, cwd=cwd, env=env, keychain=keychain, rules=rules,
+                            temp_root=temp_root, redact=redact)
+
+    return _guarded(env, operation, cwd=cwd)
 
 
 def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) -> Result:

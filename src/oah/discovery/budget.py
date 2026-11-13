@@ -99,12 +99,7 @@ def profiles(target: Target, *, now: dt.datetime) -> list[TargetBudgetProfileV1]
     try:
         source = _profile_source(target)
     except OSError as exc:
-        failure = records.io_failure(pathlib.Path("target-profiles.json"), exc)
-        if isinstance(failure, records.InvalidRecord):
-            raise BudgetRefused("target-capacity-unknown", "the pinned qualification source cannot be read") from None
-        if failure is exc:
-            raise
-        raise failure from exc
+        raise records.io_failure(pathlib.Path("target-profiles.json"), exc) from exc
     if len(source.raw) > 65536 or hashlib.sha256(source.raw).hexdigest() != source.sha256:
         raise BudgetRefused("target-capacity-unknown", "the packaged qualification data does not match its pin")
     try:

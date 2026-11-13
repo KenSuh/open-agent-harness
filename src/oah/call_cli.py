@@ -15,6 +15,8 @@ from typing import Callable, NamedTuple
 from oah import briefs, call, launchers, models, routing, runs
 from oah.launchers import native as native_launcher
 from oah.atomic import StateCorrupt, StorageError
+from oah.config import ConfigError
+from oah.discovery import boundaries, inputs, records
 from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
 from oah.lease import LeaseError
@@ -173,11 +175,11 @@ def _snapshot(args: argparse.Namespace) -> dict:
 
 
 def _restore(args: argparse.Namespace, state: pathlib.Path) -> argparse.Namespace:
-    from oah.atomic import read_json
-
     if not re.fullmatch(r"q[0-9a-f]{24}", args.request_id):
         raise EngineError("OAH_REQUEST_INVALID", "invalid request ID; copy the ID from a generated retry command")
-    saved = read_json(runs._contained_path(state, "requests", args.request_id + ".json"), None)
+    name = args.request_id + ".json"
+    path = records.location(state / "requests" / name, lambda: runs._contained_path(state, "requests", name))
+    saved = records.read_json(path, required=False)
     if not isinstance(saved, dict) or saved.get("engine") != args.engine or saved.get("stage") != args.stage:
         raise EngineError("OAH_REQUEST_INVALID", "saved request is missing or has another engine/stage; "
                           "run the original call again to generate a new retry command")
@@ -188,7 +190,9 @@ def _restore(args: argparse.Namespace, state: pathlib.Path) -> argparse.Namespac
 def _read(path: str) -> str:
     if path == "-":
         return sys.stdin.buffer.read().decode("utf-8-sig")
-    return pathlib.Path(path).read_bytes().decode("utf-8-sig")  # bytes keep a stored brief's line endings
+    from oah.discovery import inputs
+
+    return inputs.read_bytes(path).decode("utf-8-sig")
 
 
 def _summary(data: dict) -> str:
@@ -210,14 +214,17 @@ def _report(data: dict, as_json: bool) -> int:
 
 def _print_skills(prepared: call.Prepared) -> None:
     """One line naming the brief's skills and the re-ranker status, from the run folder's skills.json."""
-    from oah.atomic import read_json
-
-    record = read_json(prepared.run.file_path("skills.json"), None)
-    if isinstance(record, dict):
+    def summary(record):
         names = ",".join(skill.get("id", "?") for skill in record.get("skills", [])) or "none"
-        print(f"OAH_SKILLS selected={names} rerank={record.get('rerank')}", file=sys.stderr)
+        return names, record.get("rerank")
+
+    found = records.run_json(prepared.run, "skills.json", required=False, parse=summary)
+    if found is not None:
+        names, rerank = found
+        print(f"OAH_SKILLS selected={names} rerank={rerank}", file=sys.stderr)
 
 
+@boundaries.entry("admission")
 def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
     if args.request_id:
         args = _restore(args, state)
@@ -265,14 +272,14 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         stored_brief=args.stored_brief_text,
         packet=(root / args.packet) if args.packet else None, timeout_s=args.timeout_seconds,
         refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False),
-        parent_inventory=(str(pathlib.Path(args.parent_inventory).resolve())
+        parent_inventory=(str(inputs.location(args.parent_inventory))
                           if getattr(args, "parent_inventory", None) else None),
         relay_results=tuple(getattr(args, "relay_result", None) or ()), route=launcher,
-        skill_needs=(str(pathlib.Path(args.skill_needs).resolve()) if getattr(args, "skill_needs", None) else None))
+        skill_needs=(str(inputs.location(args.skill_needs)) if getattr(args, "skill_needs", None) else None))
     try:
         prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
                                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
-    except Exception:
+    except (EngineError, routing.RoutingError, briefs.BriefError, RunError, LeaseError, ConfigError, StorageError):
         if placement is not None and placement.created:
             print(f"OAH_LAUNCHER_NOTE: the Orca worktree {placement.path} made for this call was kept; reuse it with "
                   f"--worktree {placement.path.name}, or remove it in Orca", file=sys.stderr)
@@ -298,6 +305,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     return _report(call.execute(prepared), args.json)
 
 
+@boundaries.entry("admission")
 def _offer(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, axes: dict) -> int:
     """`--launcher native`: print the exact message and the host's parameters; nothing starts and nothing is spent."""
     if args.background or args.require_detach:
@@ -309,10 +317,10 @@ def _offer(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, ax
         engine=args.engine, stage=args.stage, task=args.task, tier=args.tier, axes=axes,
         override_stage=args.override_stage, round_instructions=args.message, stored_brief=args.stored_brief_text,
         packet=(root / args.packet) if args.packet else None, no_rerank=True,
-        parent_inventory=(str(pathlib.Path(args.parent_inventory).resolve())
+        parent_inventory=(str(inputs.location(args.parent_inventory))
                           if getattr(args, "parent_inventory", None) else None),
         relay_results=tuple(getattr(args, "relay_result", None) or ()),
-        skill_needs=(str(pathlib.Path(args.skill_needs).resolve()) if getattr(args, "skill_needs", None) else None))
+        skill_needs=(str(inputs.location(args.skill_needs)) if getattr(args, "skill_needs", None) else None))
     offered = call.prepare_native(request, load_settings(root), root=root, state_dir=state, env=os.environ,
                                   footer=tools.footer, has_footer=tools.has_footer, parse_intent=tools.parse,
                                   read_source=tools.read_source)
@@ -376,8 +384,12 @@ def _settle(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -
     return EXIT_OK
 
 
+@boundaries.entry("wait")
 def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, *, deadline: float) -> int:
-    current = runs.find_run(state, args.run_id, deadline=deadline).read()
+    from oah.discovery.runfiles import Run
+
+    saved = runs.find_run(state, args.run_id, deadline=deadline)
+    current = Run(saved.id, saved.task, saved.path, deadline=deadline).read()
     launcher = current.get("launcher")
     if isinstance(launcher, dict) and launcher.get("name") == "native":
         print(f"OAH_RUN_NATIVE: run {args.run_id} is a native offer; oah never starts it, so there is nothing to wait "
@@ -409,23 +421,40 @@ def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, *, 
     return EXIT_AGAIN
 
 
+@boundaries.entry("worker")
 def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
     from oah.launchers import orca as orca_launcher
+    from oah.discovery import boundaries, records, runfiles
 
-    with runs.WorkerRun(runs.find_run(state, args.run_id)) as run:
-        data = run.read()
-        launcher = data.get("launcher")
-        if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
-            print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is not a queued Orca run, so nothing "
-                  "was started; start a new run with oah call", file=sys.stderr)
-            return EXIT_REFUSED
-        prepared = orca_launcher.worker_prepared(run, root, load_settings(root), args.stage)
-        call.check_prepared(prepared)
-        run.claim_queued_orca()
-        print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
-              f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
-        call.execute(prepared)
-        return _report(run.read(), False)
+    with runfiles.WorkerRun(runs.find_run(state, args.run_id)) as run:
+        try:
+            with boundaries.command("worker"):
+                data = records.run_json(run, "result.json")
+                launcher = data.get("launcher")
+                if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
+                    print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is not a queued Orca run, so nothing "
+                          "was started; start a new run with oah call", file=sys.stderr)
+                    return EXIT_REFUSED
+                prepared = orca_launcher.worker_prepared(run, root, load_settings(root), args.stage)
+                call.check_prepared(prepared)
+                run.claim_queued_orca()
+                print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
+                      f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
+                call.execute(prepared)
+                return _report(records.run_json(run, "result.json"), False)
+        except EngineError as exc:
+            unreadable_result = getattr(exc, "record_path", None) == run.path / "result.json"
+            if not unreadable_result or exc.code == "OAH_RUN_LAUNCH_INVALID":
+                try:
+                    os.close(run._open_file("worker.claim", os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+                except FileExistsError:
+                    pass
+                else:
+                    if not unreadable_result:
+                        run.result(status="refused", error=str(exc))
+            if unreadable_result:
+                run.write_logs("", call._recorded_error(exc, False) + "\n")
+            raise
 
 
 def _wait_repo_info(cwd: pathlib.Path, deadline: float):
@@ -469,7 +498,7 @@ def run(args: argparse.Namespace) -> int:
         return EXIT_AGAIN
     except EngineError as exc:
         print(exc, file=sys.stderr)
-        return EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED
+        return getattr(exc, "exit_code", EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED)
     except (routing.RoutingError, briefs.BriefError, RunError, LeaseError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
