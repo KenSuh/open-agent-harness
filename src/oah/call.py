@@ -799,8 +799,7 @@ SOURCE_MISMATCH = "OAH_INTENT_SOURCE_MISMATCH"
 
 def _binding_path(state_dir: pathlib.Path, task: str) -> pathlib.Path:
     runs.task_directory(state_dir, task)
-    return records.location(state_dir / "runs" / task / BINDING_NAME,
-                            lambda: runs._contained_path(state_dir, "runs", task, BINDING_NAME))
+    return records.location(state_dir / "runs" / task / BINDING_NAME)
 
 
 def dispatch_binding(state_dir: pathlib.Path, task: str) -> dict | None:

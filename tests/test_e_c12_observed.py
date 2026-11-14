@@ -498,6 +498,43 @@ class ObservedAccessTest(unittest.TestCase):
             self.assertEqual(classified[0], (pathlib.Path(expected.path), 'invalid-content', 1),
                              'the first affected byte read must refuse before a later read can mask it')
 
+    def test_binding_publication_metadata_refuses_at_its_query(self):
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', Clock))
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
+        access = next(row for row in reversed(accesses)
+            if pathlib.Path(row.path).name == 'intent-binding.json' and row.operation in METADATA_OPERATIONS
+            and 'call.py:record_dispatch_binding' in row.chain and 'call.py:dispatch_binding' not in row.chain)
+        for fault in ('not-regular', 'denied', 'eio'):
+            with self.subTest(fault=fault):
+                case.restore()
+                observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault=fault)
+                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01), \
+                        mock.patch('oah.atomic.RETRY_SECONDS', 0.01):
+                    result = case.invoke(observer)
+                self.assertTrue(observer.reached, 'reach the publication metadata query')
+                expected = OWNER_MATRIX['admission'][FAULTS.index(fault)]
+                self.assertEqual(result[0], expected[1], str(result))
+                self.assertIn(expected[0] + ':', result[2])
+                self.assertNotIn('Traceback', result[2])
+                self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+                self.check_run_state(case, observer, 'preparation')
+                for path, raw in observer.retained.items():
+                    if path.name != 'result.json':
+                        self.assertEqual(path.read_bytes(), raw, 'keep every earlier input at the metadata query')
+                print('OS_LOCATION', json.dumps(dict(fault=fault, code=expected[0], exit=result[0],
+                    operation=access.operation, site=access.site, chain=access.chain)), flush=True)
+
     def test_metadata_content_uses_the_first_clean_trace_read(self):
         from oah.discovery import records
 
@@ -515,8 +552,7 @@ class ObservedAccessTest(unittest.TestCase):
         case.scenario('background')
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         ordinal = next(index for index, row in enumerate(accesses)
-            if pathlib.Path(row.path).name == 'intent-binding.json' and row.operation == 'stat'
-            and row.site.endswith('_contained_path:538'))
+            if pathlib.Path(row.path).name == 'intent-binding.json' and row.operation in METADATA_OPERATIONS)
         target = content_read_ordinal(accesses, ordinal)
         self.assertIsNotNone(target)
         assert target is not None

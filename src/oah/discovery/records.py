@@ -120,11 +120,9 @@ def _retry(operation: Callable[[], T], deadline: float | None) -> T:
     return _retry_until(deadline, RETRY_SECONDS, attempt)
 
 
-def location(path: pathlib.Path, resolve: Callable[[], T], *, deadline: float | None = None) -> T:
-    try:
-        return _retry(resolve, deadline)
-    except OSError as exc:
-        raise io_failure(path, exc) from exc
+def location(path: pathlib.Path) -> pathlib.Path:
+    present(path)
+    return path
 
 
 def followed_bytes(path: pathlib.Path, *, limit: int, parse: Callable[[bytes], T]) -> T | None:
@@ -247,8 +245,10 @@ def run_text(run) -> str:
 
     path = run.path / "prompt.md"
     if isinstance(run, WorkerRun) and run._prompt is not None:
-        raw = location(path, run.prompt_path.read_bytes)
-        return _parse(path, raw, limit=None, parse=lambda raw: _text(raw, path))
+        text = _read(path, lambda _source: run.prompt_path.read_bytes(), regular=False,
+                     required=True, limit=None, parse=lambda raw: _text(raw, path))
+        assert text is not None
+        return text
     raw = _read(path, lambda source: run._read_bytes("prompt.md") if isinstance(run, WorkerRun) else source.read_bytes(),
                 required=True, limit=None, resolve=lambda: run.file_path("prompt.md"), parse=lambda raw: _text(raw, path))
     assert raw is not None

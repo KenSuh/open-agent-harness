@@ -178,7 +178,8 @@ def _restore(args: argparse.Namespace, state: pathlib.Path) -> argparse.Namespac
     if not re.fullmatch(r"q[0-9a-f]{24}", args.request_id):
         raise EngineError("OAH_REQUEST_INVALID", "invalid request ID; copy the ID from a generated retry command")
     name = args.request_id + ".json"
-    path = records.location(state / "requests" / name, lambda: runs._contained_path(state, "requests", name))
+    runs._contained_path(state, "requests")
+    path = records.location(state / "requests" / name)
     saved = records.read_json(path, required=False)
     if not isinstance(saved, dict) or saved.get("engine") != args.engine or saved.get("stage") != args.stage:
         raise EngineError("OAH_REQUEST_INVALID", "saved request is missing or has another engine/stage; "

@@ -297,7 +297,6 @@ CATCHES: Final[tuple[tuple[str, str, str], ...]] = (
     ("discovery/records.py", "_text", "UnicodeDecodeError"),
     ("discovery/records.py", "captured_json", "OSError"),
     ("discovery/records.py", "json_bytes", "StateProblem"),
-    ("discovery/records.py", "location", "OSError"),
     ("discovery/review.py", "identity", "SourceError"),
     ("discovery/review.py", "review", "SourceError"),
     ("discovery/review.py", "review", "store.StoreProblem"),
