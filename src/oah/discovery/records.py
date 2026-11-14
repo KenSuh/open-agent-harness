@@ -81,11 +81,16 @@ def _read(path: pathlib.Path, operation: Callable[[pathlib.Path], bytes], *, req
         raise RecordRefusal(path, Issue.CONTENT, str(exc)) from None
     except StateProblem as exc:
         raise RecordRefusal(path, Issue.CONTENT, exc.detail) from None
+    return _parse(path, raw, limit=limit, parse=parse)
+
+
+def _parse(path: pathlib.Path, raw: bytes, *, limit: int | None, parse: Callable[[bytes], T]) -> T:
     try:
         if limit is not None and len(raw) > limit:
             raise RecordRefusal(path, Issue.CONTENT, "exceeds its bounded record size")
         return parse(raw)
-    except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError, StateProblem) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError, RecursionError,
+            StateCorrupt, StateProblem) as exc:
         raise RecordRefusal(path, Issue.CONTENT, f"has invalid content ({exc})") from None
 
 
@@ -169,18 +174,21 @@ def read_json(path: pathlib.Path, *, required: bool = True, limit: int | None = 
     return read_bytes(path, required=required, limit=limit, parse=lambda raw: parse(_object(json_bytes(raw, path), path)))
 
 
-def captured_json(path: pathlib.Path, capture) -> dict[str, Json] | None:
+def captured_json(path: pathlib.Path, capture, *, parse: Callable[[dict[str, Json]], T] = dict) -> T | None:
     def raw(source):
         return capture(source)[0]
 
-    value = _read(path, raw, required=False, limit=None, parse=lambda data: _object(json_bytes(data, path), path))
+    def checked(data):
+        return parse(_object(json_bytes(data, path), path))
+
+    value = _read(path, raw, required=False, limit=None, parse=checked)
     if value is None:
         try:
-            pending = _retry_permission(lambda: raw(path), RETRY_SECONDS)
+            pending = _retry(lambda: raw(path), None)
         except OSError as exc:
             raise io_failure(path, exc) from exc
         if pending is not None:
-            return _object(json_bytes(pending, path), path)
+            return _parse(path, pending, limit=None, parse=checked)
     return value
 
 

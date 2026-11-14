@@ -50,19 +50,27 @@ def publish(run, skills: Mapping[str, preparation.Json] | None, *, stage: str) -
 
 def lookup(state_dir: pathlib.Path, task: str) -> preparation.Record | MissingReason:
     path = _index(state_dir, task)
-    index = store._read(path)
+
+    def checked_index(index):
+        if index != {"original": None} and (set(index) != {"original"} or not preparation._hash(index["original"])):
+            raise ValueError("the task's original pointer index is incomplete")
+        return index
+
+    index = store._read(path, parse=checked_index)
     if index is None:
         return MissingReason.NEVER_WRITTEN
     if index == {"original": None}:
         return MissingReason.RETIRED
-    if not isinstance(index, dict) or set(index) != {"original"} or not preparation._hash(index["original"]):
-        raise store.StoreProblem(path, "the task's original pointer index is incomplete")
-    pointer = store.get_record(state_dir, FOLDER, index["original"])
     from oah.runs import RUN_ID_RE
 
-    if pointer is None or set(pointer) != {"id", "run_id", "digest"} \
-            or not isinstance(pointer["run_id"], str) or not RUN_ID_RE.fullmatch(pointer["run_id"]) \
-            or not preparation._hash(pointer["digest"]):
+    def checked_pointer(pointer):
+        if (set(pointer) != {"id", "run_id", "digest"} or not isinstance(pointer["run_id"], str)
+                or not RUN_ID_RE.fullmatch(pointer["run_id"]) or not preparation._hash(pointer["digest"])):
+            raise ValueError("the original pointer record is incomplete")
+        return pointer
+
+    pointer = store.get_record(state_dir, FOLDER, index["original"], parse=checked_pointer)
+    if pointer is None:
         raise store.StoreProblem(path, "the task's original pointer is missing or incomplete")
     return pointer
 

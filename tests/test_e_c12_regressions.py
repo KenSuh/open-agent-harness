@@ -54,6 +54,23 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
     selected_parent = correction_fixture.FrozenCorrectionTest.selected_parent
     correct = correction_fixture.FrozenCorrectionTest.correct
 
+    def test_skills_find_stage_refusal_keeps_its_code_through_the_cli(self):
+        from oah.routing import RoutingError
+
+        project, _original, _need, _basis = e_c6_fixture.selected_ordinary(self)
+        earlier = {path: path.read_bytes() for path in project.state.rglob('*') if path.is_file()}
+        calls = project.fix_calls()
+        try:
+            result = cli_result(project.repo, project.env, 'skills', 'find', '--task', 't1', '--needs',
+                                str(project.work / 'needs.json'), '--engine', 'codex', '--json')
+        except RoutingError as exc:
+            self.fail(f'the CLI must return the stage refusal instead of raising it: {exc}')
+        self.assertEqual(result[0], 1, str(result))
+        self.assertIn('OAH_STAGE_ENGINE_MISMATCH:', result[2])
+        self.assertNotIn('Traceback', result[2])
+        self.assertEqual(project.fix_calls(), calls)
+        self.assertTrue(all(path.read_bytes() == raw for path, raw in earlier.items()))
+
     def test_expired_preparation_keeps_its_changed_refusal_through_the_cli(self):
         from oah import call
 
@@ -292,6 +309,133 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                     self.assertFalse(case.sent)
                 finally:
                     case.doCleanups()
+
+    def test_finished_run_followup_read_refusal_keeps_the_dispatch_and_terminal_record(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('launch')
+        target = next(access for access in case.observe() if access.phase == 'after-engine' and
+            access.path.endswith('/design.json') and 'call.py:_finish_inline_delivery' in access.chain)
+        for fault in ('denied', 'eio'):
+            with self.subTest(fault=fault):
+                case.restore()
+                observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
+                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True):
+                    result = case.invoke(observer)
+                self.assertTrue(observer.reached)
+                self.assertEqual((case.engine_spawns, case.runner_creations), (1, 0))
+                self.assertEqual(result[0], 69 if fault == 'eio' else 1, str(result))
+                self.assertIn(('OAH_STATE_IO' if fault == 'eio' else 'OAH_RUN_LAUNCH_INVALID') + ':', result[2])
+                self.assertIn('already took place', result[2])
+                self.assertIn('follow-up read failed', result[2])
+                self.assertNotIn('nothing was sent', result[2])
+                saved, = case.storage.glob('runs/t1/r*/result.json')
+                self.assertEqual(json.loads(saved.read_bytes())['status'], 'finished')
+                self.assertEqual(saved.read_bytes(), observer.retained[saved])
+
+    def test_background_followup_read_refusal_keeps_the_created_runner_and_published_queue(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        target = next(access for access in case.observe() if access.phase == 'after-runner' and
+            access.path.endswith('/skills.json') and 'call_cli.py:_print_skills' in access.chain)
+        for fault in ('denied', 'eio'):
+            with self.subTest(fault=fault):
+                case.restore()
+                observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
+                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True):
+                    result = case.invoke(observer)
+                self.assertTrue(observer.reached)
+                self.assertEqual((case.engine_spawns, case.runner_creations), (0, 1))
+                self.assertEqual(result[0], 69, str(result))
+                self.assertIn(('OAH_STATE_IO' if fault == 'eio' else 'OAH_SKILL_STATE_CORRUPT') + ':', result[2])
+                self.assertIn('runner was already created', result[2])
+                self.assertIn('follow-up read failed', result[2])
+                self.assertNotIn('nothing was sent', result[2])
+                saved, = case.storage.glob('runs/t1/r*/result.json')
+                self.assertEqual(json.loads(saved.read_bytes())['status'], 'queued')
+                self.assertEqual(saved.read_bytes(), observer.retained[saved])
+
+    def test_child_followup_refusal_keeps_the_created_runner_and_its_queued_record(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        target = next(access for access in case.observe() if access.phase == 'after-runner' and
+            access.path.endswith('/result.json') and access.operation == 'read' and 'call.py:_launch_main' in access.chain)
+        observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='eio')
+
+        result = case.invoke(observer)
+
+        self.assertTrue(observer.reached)
+        self.assertEqual((case.engine_spawns, case.runner_creations), (0, 1))
+        self.assertEqual(result[0], 69, str(result))
+        self.assertIn('OAH_STATE_IO:', result[2])
+        self.assertIn('runner was already created', result[2])
+        self.assertIn('follow-up read failed', result[2])
+        self.assertNotIn('OAH_RUN_LAUNCH_FAILED:', result[2])
+        saved, = case.storage.glob('runs/t1/r*/result.json')
+        self.assertEqual(json.loads(saved.read_bytes())['status'], 'queued')
+        self.assertEqual(saved.read_bytes(), observer.retained[saved])
+
+    def test_worker_followup_refusal_keeps_the_completed_dispatch_and_record(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('worker')
+        target = next(access for access in case.observe() if access.phase == 'after-engine' and
+            access.path.endswith('/design.json') and access.operation in ('read', 'os.read') and
+            'call.py:_design_after' in access.chain)
+        observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='eio')
+        with mock.patch('tests.e_c12_scenarios.cli_result', cli_result):
+            result = case.invoke(observer)
+
+        self.assertTrue(observer.reached)
+        self.assertEqual((case.engine_spawns, case.runner_creations), (1, 0))
+        self.assertEqual(result[0], 69, str(result))
+        self.assertIn('OAH_STATE_IO:', result[2])
+        self.assertIn('the run already took place', result[2])
+        self.assertIn('the follow-up read failed', result[2])
+        saved = case.run_dir / 'result.json'
+        self.assertEqual(saved.read_bytes(), observer.retained[saved])
+
+    def test_native_offer_and_settlement_identity_parse_uses_the_read_command_category(self):
+        _now, run, settle = self.offered_parent_relay()
+        offer = run / 'native-offer.json'
+        original_offer = offer.read_bytes()
+        for name in ('native-offer.json', 'native-settlement.json'):
+            if name == 'native-settlement.json':
+                offer.write_bytes(original_offer)
+                result = cli_result(self.repo, self.env, *settle)
+                self.assertEqual(result[0], 0, str(result))
+            with self.subTest(record=name):
+                path = run / name
+                data = json.loads(path.read_bytes())
+                data['id'] = 'sha256:' + '0' * 64
+                path.write_text(json.dumps(data), encoding='utf-8')
+                earlier = {file: file.read_bytes() for file in run.iterdir() if file.is_file()}
+
+                result = cli_result(self.repo, self.env, 'skills', 'read', '--run', run.name, '--item', '1')
+
+                self.assertEqual(result[0], 69, str(result))
+                self.assertIn('OAH_SKILLS_IO:', result[2])
+                self.assertNotIn('Traceback', result[2])
+                self.assertFalse(self.record.exists())
+                self.assertEqual({file: file.read_bytes() for file in run.iterdir() if file.is_file()}, earlier)
 
     def test_relay_input_symlinks_are_followed_with_the_base_contract(self):
         request, _parent, _now = self.request()
@@ -701,4 +845,28 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 path = pathlib.Path(observer.failed)
                 self.assertEqual(path.read_bytes(), observer.retained[path])
                 self.assertFalse(case.sent)
+
+    def test_background_launch_record_metadata_is_classified_inside_the_reader(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        target = next(access for access in case.observe() if access.path.endswith('/launch.json') and
+            access.operation == 'stat' and 'call.py:_launch_main' in access.chain)
+        for fault in ('denied', 'eio'):
+            with self.subTest(fault=fault):
+                case.restore()
+                observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
+                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True):
+                    result = case.invoke(observer)
+                self.assertTrue(observer.reached)
+                self.assertEqual(result[0], 69 if fault == 'eio' else 1, str(result))
+                expected = 'OAH_STATE_IO' if fault == 'eio' else 'OAH_RUN_LAUNCH_INVALID'
+                self.assertIn(expected + ':', result[2])
+                self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+                saved, = case.storage.glob('runs/t1/r*/result.json')
+                self.assertEqual(json.loads(saved.read_bytes())['status'], 'refused')
 

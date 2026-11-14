@@ -18,12 +18,13 @@ import hashlib
 import json
 import os
 import pathlib
-from typing import Mapping
+from typing import Callable, Mapping, TypeVar
 
 from oah.atomic import StateCorrupt, write_text_atomic
 from oah.discovery import records as record_files
 
 LIMIT = 1 << 20
+T = TypeVar("T")
 
 
 class StoreProblem(Exception):
@@ -55,14 +56,14 @@ def with_id(record: Mapping) -> dict:
     return {**body, "id": digest(body)}
 
 
-def _read(path: pathlib.Path) -> object | None:
-    return record_files.read_json(path, required=False, limit=LIMIT)
+def _read(path: pathlib.Path, *, parse: Callable[[dict[str, record_files.Json]], T] = dict) -> T | None:
+    return record_files.read_json(path, required=False, limit=LIMIT, parse=parse)
 
 
 def _write_once(path: pathlib.Path, record: Mapping) -> str:
     """Create-only: 'stored', or 'present' when identical bytes are already there; different bytes refuse."""
     data = json.dumps(record, ensure_ascii=False, indent=1, sort_keys=True, allow_nan=False) + "\n"
-    existing = _read(path)
+    existing = _read(path, parse=lambda data: _verified(data, str(record["id"]), path))
     if existing is not None:
         if existing != json.loads(data):
             raise StoreProblem(path, "already holds a different record under the same name")
@@ -76,11 +77,9 @@ def _content_path(folder: pathlib.Path, record_id: str) -> pathlib.Path:
     return folder / hexdigest[:2] / f"{hexdigest}.json"
 
 
-def _verified(record: object, record_id: str, path: pathlib.Path) -> dict | None:
-    if record is None:
-        return None
+def _verified(record: dict[str, record_files.Json], record_id: str, path: pathlib.Path) -> dict[str, record_files.Json]:
     if not isinstance(record, dict) or record.get("id") != record_id or with_id(record)["id"] != record_id:
-        raise StoreProblem(path, "does not match its own digest (changed after it was stored)")
+        raise ValueError("does not match its own digest (changed after it was stored)")
     return record
 
 
@@ -98,7 +97,7 @@ def get_review(state_dir: os.PathLike | str, record_id: str) -> dict | None:
     if not isinstance(record_id, str) or not record_id.startswith("sha256:") or len(record_id) != 71:
         return None
     path = _content_path(root(state_dir) / "reviews", record_id)
-    return _verified(_read(path), record_id, path)
+    return _read(path, parse=lambda data: _verified(data, record_id, path))
 
 
 def reviews(state_dir: os.PathLike | str) -> list[dict]:
@@ -108,7 +107,7 @@ def reviews(state_dir: os.PathLike | str) -> list[dict]:
         return out
     for path in sorted(folder.glob("??/*.json")):
         record_id = "sha256:" + path.stem
-        record = _verified(_read(path), record_id, path)
+        record = _read(path, parse=lambda data: _verified(data, record_id, path))
         if record is not None:
             out.append(record)
     return out
@@ -116,16 +115,14 @@ def reviews(state_dir: os.PathLike | str) -> list[dict]:
 
 def reviews_of(state_dir: os.PathLike | str, locator: str) -> list[dict]:
     """The stored reviews of one source locator (through the index; each record is verified on read)."""
-    index = _read(root(state_dir) / "reviews" / "index.json") or {}
+    index = _read(root(state_dir) / "reviews" / "index.json", parse=_review_index) or {}
     ids = (index.get("by_locator") or {}).get(locator, []) if isinstance(index, dict) else []
     return [record for record_id in ids if (record := get_review(state_dir, record_id)) is not None]
 
 
 def _index_review(state_dir: os.PathLike | str, record: Mapping) -> None:
     path = root(state_dir) / "reviews" / "index.json"
-    index = _read(path) or {"version": 1, "by_name": {}, "by_locator": {}}
-    if not isinstance(index, dict) or set(index) != {"version", "by_name", "by_locator"}:
-        raise StoreProblem(path, "is not a review index")
+    index = _read(path, parse=_review_index) or {"version": 1, "by_name": {}, "by_locator": {}}
     name = (record.get("frontmatter") or {}).get("name") or (record.get("candidate") or {}).get("seed") or "-"
     locator = (record.get("source") or {}).get("locator") or "-"
     for key, value in (("by_name", name), ("by_locator", locator)):
@@ -133,6 +130,18 @@ def _index_review(state_dir: os.PathLike | str, record: Mapping) -> None:
         if record["id"] not in ids:
             ids.append(record["id"])
     write_text_atomic(path, json.dumps(index, ensure_ascii=False, indent=1, sort_keys=True) + "\n")
+
+
+def _review_index(data: dict[str, record_files.Json]) -> dict[str, record_files.Json]:
+    if (set(data) != {"version", "by_name", "by_locator"} or type(data["version"]) is not int
+            or data["version"] != 1):
+        raise ValueError("is not a version 1 review index")
+    for name in ("by_name", "by_locator"):
+        entries = data[name]
+        if not isinstance(entries, dict) or any(not isinstance(values, list) or
+                not all(isinstance(value, str) for value in values) for values in entries.values()):
+            raise ValueError("review index entries must be lists of record ids")
+    return data
 
 
 # Search outcomes -----------------------------------------------------------------------------------------------------
@@ -146,14 +155,18 @@ def put_query(state_dir: os.PathLike | str, record: Mapping) -> None:
     write_text_atomic(path, json.dumps(dict(record), ensure_ascii=False, indent=1, sort_keys=True) + "\n")
 
 
-def get_query(state_dir: os.PathLike | str, ident: str) -> dict | None:
+def get_query(state_dir: os.PathLike | str, ident: str, *,
+              parse: Callable[[dict[str, record_files.Json]], T] = dict) -> T | None:
     if not isinstance(ident, str) or not ident.startswith("sha256:") or len(ident) != 71:
         return None
     path = _content_path(root(state_dir) / "queries", ident)
-    record = _read(path)
-    if record is not None and (not isinstance(record, dict) or record.get("query_id") != ident):
-        raise StoreProblem(path, "is not the search outcome it is named after")
-    return record
+
+    def checked(record: dict[str, record_files.Json]) -> T:
+        if record.get("query_id") != ident:
+            raise ValueError("is not the search outcome it is named after")
+        return parse(record)
+
+    return _read(path, parse=checked)
 
 
 # Source identities ---------------------------------------------------------------------------------------------------
@@ -181,11 +194,16 @@ def remember_identity(state_dir: os.PathLike | str, source_id: str, full: str, f
 
 def _identities(state_dir: os.PathLike | str) -> dict:
     path = root(state_dir) / "identities.json"
-    data = _read(path)
+
+    def checked(data: dict[str, record_files.Json]) -> dict[str, record_files.Json]:
+        if (set(data) != {"version", "sources"} or type(data["version"]) is not int or data["version"] != 1
+                or not isinstance(data["sources"], dict)):
+            raise ValueError("is not a version 1 source identity table")
+        return data
+
+    data = _read(path, parse=checked)
     if data is None:
         return {}
-    if not isinstance(data, dict) or set(data) != {"version", "sources"} or not isinstance(data["sources"], dict):
-        raise StoreProblem(path, "is not a source identity table")
     return data["sources"]
 
 
@@ -197,11 +215,12 @@ def put_record(state_dir: os.PathLike | str, folder: str, record: Mapping) -> tu
     return _write_once(path, record), record
 
 
-def get_record(state_dir: os.PathLike | str, folder: str, record_id: str) -> dict | None:
+def get_record(state_dir: os.PathLike | str, folder: str, record_id: str, *,
+               parse: Callable[[dict[str, record_files.Json]], T] = dict) -> T | None:
     if not isinstance(record_id, str) or not record_id.startswith("sha256:") or len(record_id) != 71:
         return None
     path = root(state_dir) / folder / f"{record_id.split(':', 1)[1]}.json"
-    return _verified(_read(path), record_id, path)
+    return _read(path, parse=lambda data: parse(_verified(data, record_id, path)))
 
 
 def records(state_dir: os.PathLike | str, folder: str) -> list[dict]:
@@ -209,7 +228,7 @@ def records(state_dir: os.PathLike | str, folder: str) -> list[dict]:
     if not path.is_dir():
         return []
     return [record for item in sorted(path.glob("*.json"))
-            if (record := _verified(_read(item), "sha256:" + item.stem, item)) is not None]
+            if (record := _read(item, parse=lambda data: _verified(data, "sha256:" + item.stem, item))) is not None]
 
 
 # The one-time notice -------------------------------------------------------------------------------------------------

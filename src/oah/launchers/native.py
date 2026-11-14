@@ -15,10 +15,13 @@ import json
 import os
 import pathlib
 import secrets
-from typing import Iterable, Mapping
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
-from oah.atomic import StateCorrupt, StorageError, write_json_atomic
+from oah.atomic import StorageError, write_json_atomic
 from oah.engines.effort import EngineError
+
+if TYPE_CHECKING:
+    from oah.discovery.records import Json
 
 OFFER_NAME = "native-offer.json"
 SETTLEMENT_NAME = "native-settlement.json"
@@ -116,26 +119,28 @@ def _create_only(path: pathlib.Path, record: Mapping) -> bool:
 
 
 def _read(path: pathlib.Path, keys: tuple[str, ...], *, optional: tuple[str, ...] = (),
-          required: bool = False) -> dict | None:
+          required: bool = False,
+          parse: Callable[[dict[str, Json]], dict[str, Json]] = dict) -> dict[str, Json] | None:
     from oah.discovery import records
 
-    def checked(data):
+    def checked(data: dict[str, Json]) -> dict[str, Json]:
         if not set(keys) <= set(data) <= {*keys, *optional} or data.get("version") != 1:
             raise ValueError("not a version 1 record with exactly its documented keys")
-        return data
+        return parse(data)
 
     return records.read_json(path, required=required, parse=checked)
 
 
-def read_offer(run_dir: pathlib.Path) -> dict | None:
-    """The run's offer, or None for a run without one; StateCorrupt when the stored offer does not verify."""
+def read_offer(run_dir: pathlib.Path, *, required: bool = False) -> dict | None:
     path = pathlib.Path(run_dir) / OFFER_NAME
-    offer = _read(path, OFFER_KEYS)
-    if offer is not None and (offer["id"] != offer_id(offer) or offer["state"] not in STATES
-                              or offer["run"] != pathlib.Path(run_dir).name):
-        raise StateCorrupt(f"{StateCorrupt.code}: {path} does not match its own id; oah never repairs an offer, so "
-                           "offer again with oah call --launcher native")
-    return offer
+
+    def checked(offer: dict[str, Json]) -> dict[str, Json]:
+        if (offer["id"] != offer_id(offer) or offer["state"] not in STATES
+                or offer["run"] != pathlib.Path(run_dir).name):
+            raise ValueError("the offer does not match its own id, state or run")
+        return offer
+
+    return _read(path, OFFER_KEYS, required=required, parse=checked)
 
 
 def publish_offer(run_dir: pathlib.Path, record: Mapping) -> dict:
@@ -194,19 +199,26 @@ def claim(offer: Mapping, *, host_child_id: str, task_fingerprint: str, result: 
 
 def read_settlement(run_dir: pathlib.Path, *, required: bool = False) -> dict | None:
     path = pathlib.Path(run_dir) / SETTLEMENT_NAME
-    settlement = _read(path, SETTLEMENT_KEYS, required=required)
-    if settlement is not None and settlement["id"] != digest({key: value for key, value in settlement.items()
-                                                              if key != "id"}):
-        raise StateCorrupt(f"{StateCorrupt.code}: {path} does not match its own id")
-    return settlement
+
+    def checked(settlement: dict[str, Json]) -> dict[str, Json]:
+        if settlement["id"] != digest({key: value for key, value in settlement.items() if key != "id"}):
+            raise ValueError("the settlement does not match its own id")
+        return settlement
+
+    return _read(path, SETTLEMENT_KEYS, required=required, parse=checked)
 
 
 def read_receiving(run_dir: pathlib.Path, *, required: bool = False) -> dict | None:
     path = pathlib.Path(run_dir) / RECEIVING_NAME
-    record = _read(path, RECEIVING_KEYS, optional=("available_usage",), required=required)
-    if record is not None:
-        valid_receiving(record, run_id=pathlib.Path(run_dir).name)
-    return record
+
+    def checked(record: dict[str, Json]) -> dict[str, Json]:
+        try:
+            valid_receiving(record, run_id=pathlib.Path(run_dir).name)
+        except ProtocolRefused as exc:
+            raise ValueError(str(exc)) from None
+        return record
+
+    return _read(path, RECEIVING_KEYS, optional=("available_usage",), required=required, parse=checked)
 
 
 def valid_receiving(record: Mapping, *, run_id: str, receiving_ref: str | None = None) -> None:

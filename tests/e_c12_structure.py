@@ -43,6 +43,14 @@ def architectural_problems(root=ROOT):
             if not isinstance(node, ast.Call):
                 continue
             called = ast.unparse(node.func)
+            if path.name != 'records.py' and called in (
+                    'records.RecordRefusal', 'records.InvalidRecord',
+                    'record_files.RecordRefusal', 'record_files.InvalidRecord'):
+                problems.append(f'{path.name}:{node.lineno}: final record refusal constructed outside its owner')
+            if called in ('records.read_json', 'records.read_bytes', 'records.read_text') and node.args:
+                argument = ast.unparse(node.args[0])
+                if any(name in argument for name in ('file_path(', 'prompt_path', 'result_path', 'launch_path')):
+                    problems.append(f'{path.name}:{node.lineno}: record path metadata evaluated before the reader')
             if called.endswith('.content') and called.split('.')[0] in ('records', 'record_files'):
                 problems.append(f'{path.name}:{node.lineno}: caller-wide content wrapper')
             if isinstance(node.func, ast.Attribute) and node.func.attr in (

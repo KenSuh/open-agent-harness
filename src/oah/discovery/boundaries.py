@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 import functools
+import contextvars
 from contextlib import contextmanager
 from typing import Callable, Final, Iterator, Literal, ParamSpec, TypeVar
 
@@ -12,6 +13,43 @@ from oah.engines.effort import EngineError
 Boundary = Literal["admission", "launch", "freeze", "settle", "relay", "skills", "worker", "design", "wait"]
 P = ParamSpec("P")
 T = TypeVar("T")
+Dispatch = Literal["engine", "runner"]
+
+
+@dataclasses.dataclass
+class DispatchFacts:
+    kind: Dispatch | None = None
+
+
+_DISPATCH: contextvars.ContextVar[DispatchFacts | None] = contextvars.ContextVar("oah_e_dispatch", default=None)
+
+
+@contextmanager
+def dispatch_scope() -> Iterator[None]:
+    if _DISPATCH.get() is not None:
+        yield
+        return
+    token = _DISPATCH.set(DispatchFacts())
+    try:
+        yield
+    finally:
+        _DISPATCH.reset(token)
+
+
+def dispatched(kind: Dispatch) -> None:
+    facts = _DISPATCH.get()
+    if facts is not None:
+        facts.kind = kind
+
+
+def dispatch_kind() -> Dispatch | None:
+    facts = _DISPATCH.get()
+    return facts.kind if facts is not None else None
+
+
+def followup_message(kind: Dispatch, message: str) -> str:
+    fact = "the run already took place" if kind == "engine" else "the runner was already created"
+    return f"{fact}; the follow-up read failed: {message}"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -66,7 +104,7 @@ TABLE: Final[dict[Boundary, BoundarySpec]] = {
               Rule("StoreProblem", "preserve"), Rule("OSError", "OAH_STATE_IO")),
         ("oah.capabilities_cli._relay",), ("oah.discovery.store._read",),
         ("relay-record", "relay-blob"), ("capabilities",)),
-    "skills": BoundarySpec((Rule("RecordRefusal", "OAH_SKILLS_IO", exit_code=69),),
+    "skills": BoundarySpec((Rule("RecordRefusal", "OAH_SKILLS_IO", exit_code=69), Rule("RoutingError", "preserve")),
         (), (), ("skills.json", "prompt.md", "skills-receiving.json"), ("skills",)),
     "worker": BoundarySpec((Rule("RecordRefusal", "OAH_RUN_LAUNCH_INVALID"),),
         (), (), (*_RUN_FILES, "launch.json"), ("orca",)),
@@ -142,11 +180,9 @@ CATCHES: Final[tuple[tuple[str, str, str], ...]] = (
     ("call.py", "background_main", "(EngineError, StorageError)"),
     ("call.py", "check_prepared", "EngineError"),
     ("call.py", "dispatch_guard", "(LeaseError, EngineError)"),
-    ("call.py", "dispatch_guard", "(StateCorrupt, ValueError, RecursionError)"),
     ("call.py", "dispatch_guard", "DesignError"),
     ("call.py", "dispatch_guard", "EngineError"),
     ("call.py", "dispatch_guard", "LeaseError"),
-    ("call.py", "dispatch_guard", "ValueError"),
     ("call.py", "execute", "EngineError"),
     ("call.py", "judge_difficulty", "ConfigError"),
     ("call.py", "judge_difficulty", "Exception"),
@@ -236,6 +272,7 @@ CATCHES: Final[tuple[tuple[str, str, str], ...]] = (
     ("discovery/__init__.py", "refresh_links", "reviews.ReviewFailed"),
     ("discovery/attempts.py", "Attempt.request", "(OSError, ValueError)"),
     ("discovery/attempts.py", "Attempt.request", "(OSError, ValueError)"),
+    ("discovery/boundaries.py", "command", "OSError"),
     ("discovery/boundaries.py", "command", "RecordRefusal"),
     ("discovery/boundaries.py", "refusals", "incoming(boundary)"),
     ("discovery/budget.py", "moment", "OverflowError"),
@@ -251,10 +288,9 @@ CATCHES: Final[tuple[tuple[str, str, str], ...]] = (
     ("discovery/original.py", "publish", "(ValueError, KeyError, TypeError, RecursionError)"),
     ("discovery/preparation.py", "parse", "BudgetRefused"),
     ("discovery/preparation_fields.py", "validate", "CapabilityRefused"),
-    ("discovery/providers.py", "_fresh", "(KeyError, ValueError)"),
     ("discovery/providers.py", "parse", "StateProblem"),
     ("discovery/providers.py", "search", "web.WebFailure"),
-    ("discovery/records.py", "_read", "(ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError, StateProblem)"),
+    ("discovery/records.py", "_parse", "(ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError, RecursionError, StateCorrupt, StateProblem)"),
     ("discovery/records.py", "_read", "OSError"),
     ("discovery/records.py", "_read", "StateCorrupt"),
     ("discovery/records.py", "_read", "StateProblem"),
@@ -270,11 +306,11 @@ CATCHES: Final[tuple[tuple[str, str, str], ...]] = (
     ("discovery/runfiles.py", "WorkerRun.__enter__", "BaseException"),
     ("discovery/store.py", "ReviewEvidence.review", "(StoreProblem, StateCorrupt)"),
     ("discovery/store.py", "ReviewEvidence.source", "(SourceError, StateProblem, OSError, ValueError)"),
-    ("discovery/tasks.py", "_fresh_discovery", "ValueError"),
     ("discovery/tasks.py", "parse_needs", "StateProblem"),
     ("launchers/native.py", "_create_only", "FileExistsError"),
     ("launchers/native.py", "_create_only", "OSError"),
     ("launchers/native.py", "_create_only", "OSError"),
+    ("launchers/native.py", "read_receiving.checked", "ProtocolRefused"),
     ("launchers/native.py", "read_result", "OSError"),
     ("launchers/native.py", "read_result", "UnicodeDecodeError"),
     ("launchers/orca.py", "Orca.json", "(OSError, ValueError)"),
@@ -309,7 +345,7 @@ CATCHES: Final[tuple[tuple[str, str, str], ...]] = (
     ("skills_cli.py", "before_mutation", "(CatalogError, ConfigError, FetchError, StageError, SkillError, LeaseError, GitMissing, NotARepo, LockTimeout, StateCorrupt, PendingTransaction, StorageError, OSError, ValueError)"),
     ("skills_cli.py", "run", "(CatalogError, ConfigError, FetchError, SkillError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError)"),
     ("skills_cli.py", "run", "(NeedInvalid, NeedsInvalid, SourceUnsupported)"),
-    ("skills_cli.py", "run", "(Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive)"),
+    ("skills_cli.py", "run", "(Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive, RoutingError)"),
     ("skills_cli.py", "run", "EngineError"),
     ("skills_cli.py", "run", "OSError"),
     ("skills_cli.py", "run", "PackRefused"),
@@ -345,8 +381,10 @@ def incoming(boundary: Boundary) -> tuple[type[Exception], ...]:
 
 
 class CommandRefusal(EngineError):
-    def __init__(self, code: str, message: str, exit_code: int, path: pathlib.Path | None = None) -> None:
+    def __init__(self, code: str, message: str, exit_code: int, path: pathlib.Path | None = None,
+                 dispatched: Dispatch | None = None) -> None:
         self.exit_code, self.record_path = exit_code, path
+        self.dispatched = dispatched
         super().__init__(code, message)
 
 
@@ -357,16 +395,20 @@ def mapped(boundary: Boundary, exc: Exception) -> Exception:
     from oah.discovery.records import Category, RecordRefusal
 
     if isinstance(exc, RecordRefusal):
+        happened = dispatch_kind()
         match exc.category:
             case Category.IO:
-                return CommandRefusal("OAH_STATE_IO", str(exc), 69, exc.path)
+                message = followup_message(happened, str(exc)) if happened is not None else str(exc)
+                return CommandRefusal("OAH_STATE_IO", message, 69, exc.path, happened)
             case Category.STALE:
                 row = next(row for row in TABLE[boundary].rules if row.incoming == "RecordRefusal")
                 remedy = ("offer again with oah call --launcher native" if boundary == "settle" else
                           "start a new run with oah call" if boundary == "worker" else "prepare again")
-                return CommandRefusal(row.outward,
-                    f"{exc}; nothing was sent and the earlier record is kept; {remedy}",
-                    row.exit_code if row.exit_code is not None else 69 if boundary == "admission" else 1, exc.path)
+                message = (followup_message(happened, f"{exc}; {remedy}") if happened is not None else
+                           f"{exc}; nothing was sent and the earlier record is kept; {remedy}")
+                return CommandRefusal(row.outward, message,
+                    row.exit_code if row.exit_code is not None else 69 if boundary == "admission" else 1,
+                    exc.path, happened)
 
     kinds = error_types()
     row = next(row for row in TABLE[boundary].rules if isinstance(exc, kinds[row.incoming]))
@@ -374,7 +416,12 @@ def mapped(boundary: Boundary, exc: Exception) -> Exception:
         return exc
     if row.outward == "OAH_STATE_IO":
         assert isinstance(exc, OSError)
-        return exc if isinstance(exc, StorageError) else StorageError(pathlib.Path(exc.filename or "."), exc)
+        failure = exc if isinstance(exc, StorageError) else StorageError(pathlib.Path(exc.filename or "."), exc)
+        happened = dispatch_kind()
+        if happened is not None:
+            return CommandRefusal("OAH_STATE_IO", followup_message(happened,
+                str(failure).removeprefix("OAH_STATE_IO: ")), 69, dispatched=happened)
+        return failure
     if row.outward == "preserve" and isinstance(exc, (EngineError, ScratchError)):
         return exc
     code = getattr(exc, "code", "OAH_SKILLS_BUDGET_EXCEEDED" if isinstance(exc, BudgetRefused) else "")
@@ -397,10 +444,15 @@ def mapped(boundary: Boundary, exc: Exception) -> Exception:
 def command(boundary: Boundary) -> Iterator[None]:
     from oah.discovery.records import RecordRefusal
 
-    try:
-        yield
-    except RecordRefusal as exc:
-        raise mapped(boundary, exc) from None
+    with dispatch_scope():
+        try:
+            yield
+        except RecordRefusal as exc:
+            raise mapped(boundary, exc) from None
+        except OSError as exc:
+            if dispatch_kind() is None or not any(row.incoming == "OSError" for row in TABLE[boundary].rules):
+                raise
+            raise mapped(boundary, exc) from None
 
 
 def entry(boundary: Boundary) -> Callable[[Callable[P, T]], Callable[P, T]]:

@@ -94,7 +94,7 @@ OWNER_RULES = {
         ('EngineError', 'OAH_NATIVE_OFFER_STALE'), ('ValueError', 'OAH_NATIVE_OFFER_STALE'), ('OSError', 'OAH_STATE_IO')),
     'relay': (('RecordRefusal', 'OAH_CAPABILITIES_USAGE'), ('CapabilityRefused', 'preserve'),
               ('StoreProblem', 'preserve'), ('OSError', 'OAH_STATE_IO')),
-    'skills': (('RecordRefusal', 'OAH_SKILLS_IO'),),
+    'skills': (('RecordRefusal', 'OAH_SKILLS_IO'), ('RoutingError', 'preserve')),
     'worker': (('RecordRefusal', 'OAH_RUN_LAUNCH_INVALID'),),
     'design': (('RecordRefusal', 'OAH_SKILL_STATE_CORRUPT'),),
     'wait': (('RecordRefusal', 'OAH_RUN_CORRUPT'),),
@@ -105,3 +105,51 @@ ROW_REACH = set()
 OWNER_SURFACES = {'admission': ('process', 'native', 'orca'), 'launch': ('process',), 'freeze': ('fix',),
                   'settle': ('native',), 'relay': ('capabilities',), 'skills': ('skills',), 'worker': ('orca',),
                   'design': ('coverage',), 'wait': ('wait',)}
+
+AFTER_MATRIX = {
+    ('launch', 'after-engine'): (
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_STATE_IO', 69, 'at-access-kept', 'inputs-at-access', 1, 0)),
+    ('launch', 'after-runner'): (
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_STATE_IO', 69, 'at-access-kept', 'inputs-at-access', 0, 1)),
+    ('admission', 'after-runner'): (
+        ('OAH_SKILL_STATE_CORRUPT', 69, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_SKILL_STATE_CORRUPT', 69, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_SKILL_STATE_CORRUPT', 69, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_SKILL_STATE_CORRUPT', 69, 'at-access-kept', 'inputs-at-access', 0, 1),
+        ('OAH_STATE_IO', 69, 'at-access-kept', 'inputs-at-access', 0, 1)),
+    ('worker', 'after-engine'): (
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept', 'inputs-at-access', 1, 0),
+        ('OAH_STATE_IO', 69, 'at-access-kept', 'inputs-at-access', 1, 0)),
+}
+
+SUCCESS_DISPATCH = {
+    'admission': (1, 0), 'admission-native': (0, 0), 'admission-orca': (0, 1),
+    'admission-needs': (1, 0), 'admission-saved': (1, 0), 'launch': (1, 0), 'background': (0, 1),
+    'worker': (1, 0), 'freeze': (1, 0), 'settle': (0, 0), 'settle-retry': (0, 0),
+    'skills': (0, 0), 'skills-receiving': (0, 0), 'skills-repeat': (0, 0), 'skills-plan': (0, 0),
+    'skills-read-review': (0, 0), 'skills-candidates': (0, 0), 'skills-review': (0, 0),
+    'skills-select': (0, 0), 'skills-find': (0, 0), 'capabilities-plan': (0, 0),
+    'relay': (0, 0), 'design': (0, 0), 'wait': (0, 0),
+}
+
+OUTPUT_MATRIX = {
+    'ignored-address': (('', 0), ('', 0), ('', 0)),
+    'address-only': (('', 0), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
+    'launch-read-after-address': (('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_STATE_IO', 69)),
+    'launch-address-before-read': (('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
+    'admission-read-after-address': (('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_STATE_IO', 69)),
+    'admission-address-before-read': (('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
+    'optional-summary-before-launch': (('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_STATE_IO', 69)),
+    'captured-result': (('OAH_FIX_STATE_CHANGED', 1), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
+}

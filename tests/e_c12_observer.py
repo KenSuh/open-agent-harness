@@ -11,6 +11,7 @@ import re
 import stat
 import traceback
 from unittest import mock
+from typing import Callable
 
 
 @dataclasses.dataclass(frozen=True)
@@ -24,6 +25,10 @@ class Access:
     chain: tuple[str, ...]
     input_owned: bool
     present: bool
+    phase: str = 'before'
+    engine_spawns: int = 0
+    runner_creations: int = 0
+    claim_present: bool = False
 
 
 class ObservedFiles:
@@ -45,6 +50,7 @@ class ObservedFiles:
                              if re.fullmatch(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', pathlib.Path(path).parent.name)}
         self.failed = None
         self.retained = {}
+        self.phase: Callable[[], tuple[str, int, int]] = lambda: ('before', 0, 0)
 
     def path(self, raw, dir_fd=None):
         if isinstance(raw, int):
@@ -80,10 +86,10 @@ class ObservedFiles:
         if not self.active or not self.selected(path):
             return None
         frames = traceback.extract_stack(limit=35)
-        owned = any(frame.filename.endswith('/discovery/records.py') for frame in frames)
-        input_owned = any(frame.filename.endswith('/discovery/inputs.py') for frame in frames)
-        callers = [frame for frame in frames if '/src/oah/' in frame.filename
-                   and not frame.filename.endswith('/discovery/records.py')]
+        owned = any(frame.filename.replace('\\', '/').endswith('/discovery/records.py') for frame in frames)
+        input_owned = any(frame.filename.replace('\\', '/').endswith('/discovery/inputs.py') for frame in frames)
+        callers = [frame for frame in frames if '/src/oah/' in frame.filename.replace('\\', '/')
+                   and not frame.filename.replace('\\', '/').endswith('/discovery/records.py')]
         site = ':'.join((pathlib.Path(callers[-1].filename).name, callers[-1].name,
                          str(callers[-1].lineno))) if callers else 'outside-oah'
         existing = path in self.initial or any(path.startswith(folder + os.sep) for folder in self.earlier_runs)
@@ -97,7 +103,14 @@ class ObservedFiles:
         occurrence = self.counts.get(key, 0) + 1
         self.counts[key] = occurrence
         chain = tuple(pathlib.Path(frame.filename).name + ':' + frame.name for frame in callers)
-        access = Access(path, operation, site, owned, existing, occurrence, chain, input_owned, present)
+        phase, engine_spawns, runner_creations = self.phase()
+        try:
+            self.raw_lstat(os.path.join(os.path.dirname(path), 'worker.claim'))
+            claim_present = True
+        except FileNotFoundError:
+            claim_present = False
+        access = Access(path, operation, site, owned, existing, occurrence, chain, input_owned, present,
+                        phase, engine_spawns, runner_creations, claim_present)
         self.accesses.append(access)
         if self.target is not None and (self.key(access), access.operation, access.site, access.occurrence) == (
                 self.key(self.target), self.target.operation, self.target.site, self.target.occurrence):

@@ -186,6 +186,8 @@ def run(args: argparse.Namespace) -> int:
 
     from oah.discovery import NeedInvalid
     from oah.engines.effort import EngineError
+    from oah.routing import RoutingError
+    from oah.discovery import boundaries
     from oah.discovery.review import ReviewFailed, SourceUnsupported
     from oah.discovery.tasks import NeedsInvalid
     from oah.discovery.store import StoreProblem
@@ -194,9 +196,7 @@ def run(args: argparse.Namespace) -> int:
 
     redact = credential_redactor(os.environ)
     try:
-        from oah.discovery import boundaries
-
-        with boundaries.command("skills"):
+        with boundaries.command("skills"), boundaries.refusals("skills"):
             return HANDLERS[args.skills_command](args)
     except boundaries.CommandRefusal as exc:
         print(redact(str(exc)), file=sys.stderr)
@@ -204,7 +204,7 @@ def run(args: argparse.Namespace) -> int:
     except EngineError as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_REFUSED
-    except (Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive) as exc:
+    except (Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive, RoutingError) as exc:
         print(redact(str(exc)), file=sys.stderr)
         return EXIT_ENVIRONMENT if getattr(exc, "code", "") in ENVIRONMENT_CODES else EXIT_REFUSED
     except (NeedInvalid, NeedsInvalid, SourceUnsupported) as exc:

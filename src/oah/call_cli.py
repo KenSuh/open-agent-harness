@@ -287,7 +287,16 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
     if orca is not None:
-        info = orca_launcher.start(orca, prepared, placement)["launcher"]
+        class DispatchingOrca(orca_launcher.Orca):
+            def json(self, *arguments: str, timeout: float = orca_launcher.CLI_TIMEOUT) -> dict:
+                result = super().json(*arguments, timeout=timeout)
+                if arguments[:2] == ("terminal", "create"):
+                    boundaries.dispatched("runner")
+                return result
+
+        tracked = DispatchingOrca(orca.base, orca.version, orca.env, orca.deadline)
+        with boundaries.command("launch"):
+            info = orca_launcher.start(tracked, prepared, placement)["launcher"]
         _print_skills(prepared)
         print(f"OAH_RUN_STARTED run={prepared.run_id} launcher=orca terminal={info['terminal']} "
               f"worktree={info['worktree']}", file=sys.stdout if args.background else sys.stderr)

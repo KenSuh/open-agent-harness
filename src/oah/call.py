@@ -806,9 +806,28 @@ def _binding_path(state_dir: pathlib.Path, task: str) -> pathlib.Path:
 def dispatch_binding(state_dir: pathlib.Path, task: str) -> dict | None:
     """The intent source bound at the task's first dispatch, or None."""
     path = _binding_path(state_dir, task)
-    data = (records.captured_json(path, runs._captured_state) if runs._CORRECTION_CAPTURE.get() is not None
-            else records.read_json(path, required=False))
+    data = (records.captured_json(path, runs._captured_state, parse=_parse_dispatch_binding)
+            if runs._CORRECTION_CAPTURE.get() is not None
+            else records.read_json(path, required=False, parse=_parse_dispatch_binding))
     return data if isinstance(data, dict) else None
+
+
+def _parse_dispatch_binding(data):
+    if (not isinstance(data.get("source"), str) or not data["source"]
+            or not isinstance(data.get("id"), str) or not oah_intent.ID_RE.fullmatch(data["id"])
+            or type(data.get("revision")) is not int or data["revision"] < 1
+            or not isinstance(data.get("digest"), str) or not oah_intent.DIGEST_RE.fullmatch(data["digest"])
+            or not isinstance(data.get("history", []), list)):
+        raise ValueError("the dispatch binding needs its source, id, revision, digest and history")
+    return data
+
+
+def _parse_lease_snapshot(saved):
+    if (not isinstance(saved.get("id"), str) or not saved["id"] or type(saved.get("generation")) is not int
+            or saved["generation"] < 0):
+        raise ValueError("the lease snapshot needs its id and generation")
+    oah_intent.Binding.from_json(saved.get("intent"))
+    return saved
 
 
 def check_dispatch_binding(bound: dict | None, packet: Packet, task: str) -> bool:
@@ -1003,16 +1022,7 @@ def dispatch_guard(prepared: Prepared, *, env=None):
                           "authorization; nothing was launched. Settle it with oah call settle, or prepare a new run "
                           "with oah call")
     try:
-        saved = records.run_json(run, "lease.json")
-        if not (isinstance(saved, dict) and isinstance(saved.get("id"), str) and saved["id"]
-                and type(saved.get("generation")) is int and saved["generation"] >= 0):
-            raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run has no valid checked lease snapshot; "
-                              "run oah call again to prepare it from the current lease")
-        try:
-            oah_intent.Binding.from_json(saved.get("intent"))
-        except ValueError:
-            raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run has no valid checked intent binding; "
-                              "run oah call again to prepare it from the current lease") from None
+        saved = records.run_json(run, "lease.json", parse=_parse_lease_snapshot)
         store = Store(run.path.parents[2])
         with store.checked(task=prepared.task, lease_id=saved["id"], generation=saved["generation"]) as live:
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
@@ -1020,16 +1030,9 @@ def dispatch_guard(prepared: Prepared, *, env=None):
             _task_dispatch_gate(run.path.parents[2], prepared.task, pathlib.Path(live.worktree), stage=prepared.stage,
                                 record=rounds._PAID_SPAWN.get(), run_id=prepared.run_id)
             # The judgement closest to the spawn: local Git and file reads only, under the short launch lock.
-            from oah.atomic import StateCorrupt
-
             expected = live.design is not None or live.design_invalid
             if expected or records.present(run.path / DESIGN_NAME):
-                try:
-                    design_saved = (records.run_json(run, DESIGN_NAME) if records.present(run.path / DESIGN_NAME)
-                                    else None)
-                except (StateCorrupt, ValueError, RecursionError):
-                    raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record cannot be read; run oah "
-                                      "call again to prepare it from the current design") from None
+                design_saved = _read_design(prepared)
                 _check_design_unchanged(prepared, live, design_saved)
             _check_skill_bundle(prepared, run, live.id, env=env)
             _check_e(prepared, live, env=env)
@@ -1850,6 +1853,9 @@ def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
 def _record_refusal(prepared: Prepared, error: EngineError | StorageError) -> None:
     """Mark only the caller's own run refused; a queued Orca run belongs to the worker that claims it."""
     run = prepared.run
+    if boundaries.dispatch_kind() is not None or (
+            isinstance(error, boundaries.CommandRefusal) and error.dispatched is not None):
+        return
     if isinstance(error, boundaries.CommandRefusal) and error.record_path == run.path / "result.json":
         run.write_logs("", _recorded_error(error, False) + "\n")
         return
@@ -1867,6 +1873,7 @@ def _record_refusal(prepared: Prepared, error: EngineError | StorageError) -> No
     run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
 
 
+@boundaries.entry("launch")
 def check_prepared(prepared: Prepared) -> None:
     """Check a queue/launcher handoff; execute checks again at the engine's actual spawn."""
     try:
@@ -1974,7 +1981,7 @@ def _argv_tools(argv: Sequence[str]) -> tuple[str, ...]:
 
 
 def _design_bound(prepared: "Prepared") -> bool:
-    saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
+    saved = _read_design(prepared)
     return isinstance(saved, dict) and saved.get("task") is not None
 
 
@@ -1982,9 +1989,22 @@ def _design_check_record(saved: object, digest_only: bool) -> dict:
     keys = ("version", "state", "fingerprint", "task") if not digest_only else ("version", "state", "fingerprint")
     if not (isinstance(saved, dict) and all(name in saved for name in keys) and saved.get("version") in (1, 2)
             and isinstance(saved.get("fingerprint"), str)):
-        raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record is missing or malformed; run oah call "
-                          "again to prepare it from the current design")
+        raise ValueError("the run's design record is missing or malformed")
+    if not digest_only and saved["task"] is not None:
+        from oah.design import binding as design
+
+        design.TaskBinding.from_json(saved["task"])
+    if saved.get("transport") is not None:
+        from oah.design import task_context
+
+        if not isinstance(saved["transport"], dict) or saved["transport"].get("selection") != task_context.SELECTION:
+            raise ValueError("the run's transport plan is malformed")
     return saved
+
+
+def _read_design(prepared: "Prepared") -> dict | None:
+    return records.run_json(prepared.run, DESIGN_NAME, required=False,
+        parse=lambda data: _design_check_record(data, digest_only=not prepared.retain_worker_text))
 
 
 def _check_design_unchanged(prepared: "Prepared", live, saved: object) -> None:
@@ -1997,7 +2017,6 @@ def _check_design_unchanged(prepared: "Prepared", live, saved: object) -> None:
             raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run was prepared without the design its lease now follows; "
                               "nothing was launched. Run oah call again")
         return
-    saved = _design_check_record(saved, digest_only=not prepared.retain_worker_text)
     judged = lease_design(live, prepared.run.path.parents[2])
     if judged.state == "unbound":
         judged = design.judge(None, root=pathlib.Path(live.worktree),
@@ -2013,7 +2032,7 @@ def _design_after(prepared: "Prepared") -> str | None:
     """After the engine ran, record whether its design moved; stored-record refusals keep their category."""
     from oah.design import binding as design
 
-    saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
+    saved = _read_design(prepared)
     if not isinstance(saved, dict) or not isinstance(saved.get("task"), dict):
         return None
     try:
@@ -3368,7 +3387,7 @@ def _native_offer_for_settle(run):
             result = records.run_json(run, "result.json")
             if isinstance(result, dict) and isinstance(result.get("launcher"), dict) \
                     and result["launcher"].get("name") == "native":
-                raise records.InvalidRecord(run.path / native.OFFER_NAME, records.Issue.MISSING, "is missing")
+                return native.read_offer(run.path, required=True)
         return offer
 
 
@@ -3511,7 +3530,7 @@ def _finish_inline_delivery(prepared: Prepared) -> None:
     if publication is not None:
         saved = json.loads(publication.plan.design_record) if publication.plan.design_record else None
     else:
-        saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
+        saved = _read_design(prepared)
     if not isinstance(saved, dict) or not saved.get("inline_complete") or saved.get("transport"):
         return
     if publication is None:
@@ -3562,6 +3581,7 @@ def _launch_inputs(prepared, publication):
         return bundle, prompt, _capability_sink(prepared, bundle, plan)
 
 
+@boundaries.entry("launch")
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     try:
@@ -3602,6 +3622,9 @@ def _execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         _record_refusal(prepared, exc)
         raise
     except (OSError, ValueError, subprocess.SubprocessError, RootUnavailable) as exc:
+        if isinstance(exc, OSError) and boundaries.dispatch_kind() is not None:
+            _end_reference_failed(reference)
+            raise boundaries.mapped("launch", exc) from None
         observation_failure = _conclude_observation(prepared, sink)
         if prepared.retain_worker_text:
             run.write_logs("", "")
@@ -3807,13 +3830,10 @@ def _start_reference(prepared: "Prepared", env: Mapping[str, str]):
 
     reference = None
     try:
-        saved = records.run_json(prepared.run, DESIGN_NAME, required=False)
+        saved = _read_design(prepared)
         plan = saved.get("transport") if saved is not None else None
         if plan is not None:
-            if not isinstance(plan, dict) or plan.get("selection") != task_context.SELECTION:
-                raise DesignError(task_context.REFERENCE_UNAVAILABLE_CODE, "the run's transport plan is malformed; "
-                                  "nothing was launched. Run oah call again")
-            lease = records.run_json(prepared.run, "lease.json")
+            lease = records.run_json(prepared.run, "lease.json", parse=_parse_lease_snapshot)
             reference = task_context.ReferenceRun(run_dir=prepared.run.path, task=prepared.task,
                 run_id=prepared.run_id, root=pathlib.Path(prepared.cwd), argv=prepared.argv, stage=prepared.stage,
                 cli_version=prepared.cli_version, env=env, tools=_argv_tools(prepared.argv),
@@ -4317,6 +4337,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str, *, si
                     # Windows omits the executable; keep spawn errors out of the lease's state-I/O wrapper.
                     raise subprocess.SubprocessError(f"cannot launch {prepared.argv[0]}: {exc}. "
                                                      "Check the executable path and permissions, then retry") from None
+                boundaries.dispatched("engine")
                 if reference is not None:
                     reference.child = child
                 if job is not None:
@@ -4439,6 +4460,9 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     if launched.returncode != 0 or not text.isdigit():
         refusal = _launcher_refusal(text)
         if refusal is not None:
+            if refusal.dispatched is not None:
+                boundaries.dispatched(refusal.dispatched)
+                raise refusal
             saved = records.run_json(run, "result.json")
             if not isinstance(saved, dict) or saved.get("status") != "refused":
                 _record_refusal(prepared, refusal)
@@ -4446,6 +4470,7 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
         run.result(status="failed", error=f"OAH_RUN_LAUNCH_FAILED: {detail or 'no runner pid'}")
         raise EngineError("OAH_RUN_LAUNCH_FAILED", f"the background runner did not start ({detail or 'no pid'}); "
                           "run the same command without --background")
+    boundaries.dispatched("runner")
     if detail:
         print(detail, file=sys.stderr)
     run.result(status="queued", pid=int(text))
@@ -4463,6 +4488,7 @@ def _background_run(run_dir: str) -> runs.Run:
     return Run(id=path.name, task=path.parent.name, path=path)
 
 
+@boundaries.entry("launch")
 def launch_main(run_dir: str) -> int:
     try:
         return _launch_main(run_dir)
@@ -4471,7 +4497,8 @@ def launch_main(run_dir: str) -> int:
         message = str(exc).removeprefix(exc.code + ": ")
         if len(message) > 8192:
             message = message[:8192] + "... (diagnostic shortened)"
-        print(json.dumps({"version": 1, "code": exc.code, "exit": exit_code, "message": message}, ensure_ascii=True))
+        print(json.dumps({"version": 1, "code": exc.code, "exit": exit_code, "message": message,
+                          "dispatched": boundaries.dispatch_kind()}, ensure_ascii=True))
         print(exc, file=sys.stderr)
         return exit_code
 
@@ -4483,12 +4510,22 @@ def _launcher_refusal(text: str) -> boundaries.CommandRefusal | None:
         data = json.loads(text)
     except ValueError:
         return None
-    if not (isinstance(data, dict) and set(data) == {"version", "code", "exit", "message"}
+    if not (isinstance(data, dict) and set(data) == {"version", "code", "exit", "message", "dispatched"}
             and data["version"] == 1 and type(data["exit"]) is int and data["exit"] in (1, 69)
             and isinstance(data["code"], str) and re.fullmatch(r"OAH_[A-Z_]+(?:\([a-z-]*\))?", data["code"])
             and isinstance(data["message"], str)):
         return None
-    return boundaries.CommandRefusal(data["code"], data["message"], data["exit"])
+    happened: boundaries.Dispatch | None
+    match data["dispatched"]:
+        case "engine":
+            happened = "engine"
+        case "runner":
+            happened = "runner"
+        case None:
+            happened = None
+        case _:
+            return None
+    return boundaries.CommandRefusal(data["code"], data["message"], data["exit"], dispatched=happened)
 
 
 def _launch_main(run_dir: str) -> int:
@@ -4501,7 +4538,7 @@ def _launch_main(run_dir: str) -> int:
             from oah.discovery import records
 
             run = _background_run(run_dir)
-            loaded = records.read_json(run.launch_path, parse=lambda row: (row, Prepared.from_json(row)))
+            loaded = records.run_json(run, "launch.json", parse=lambda row: (row, Prepared.from_json(row)))
             assert loaded is not None
             saved, prepared = loaded
             require_detach = saved.get("require_detach", False)
@@ -4511,6 +4548,7 @@ def _launch_main(run_dir: str) -> int:
                 try:
                     with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                         child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
+                        boundaries.dispatched("runner")
                 except StorageError:
                     raise
                 except OSError as exc:
@@ -4524,11 +4562,13 @@ def _launch_main(run_dir: str) -> int:
                     print(warning, file=sys.stderr, flush=True)
                     with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                         child = subprocess.Popen(argv, creationflags=flags, **options)
+                        boundaries.dispatched("runner")
                 else:
                     run.result(detached="verified")
             else:
                 with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                     child = subprocess.Popen(argv, start_new_session=True, **options)
+                boundaries.dispatched("runner")
                 run.result(detached="verified")
             print(child.pid, flush=True)
             child.returncode = 0  # the runner outlives this launcher on purpose; nothing waits for it here
@@ -4546,7 +4586,7 @@ def background_main(run_dir: str) -> int:
 
     try:
         with boundaries.command("launch"):
-            prepared = records.read_json(_background_run(run_dir).launch_path, parse=Prepared.from_json)
+            prepared = records.run_json(_background_run(run_dir), "launch.json", parse=Prepared.from_json)
             assert prepared is not None
             execute(prepared)
     except (EngineError, StorageError) as exc:

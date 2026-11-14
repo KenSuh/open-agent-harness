@@ -356,24 +356,35 @@ def _discovery_index_path(state_dir) -> pathlib.Path:
 
 
 def _discovery_index(state_dir) -> dict:
-    data = store._read(_discovery_index_path(state_dir))
+    data = store._read(_discovery_index_path(state_dir), parse=_need_index)
     if data is None:
         return {}
-    if not isinstance(data, dict) or set(data) != {"version", "needs"} or not isinstance(data["needs"], dict):
-        raise store.StoreProblem(_discovery_index_path(state_dir), "is not a task discovery index")
     return data["needs"]
+
+
+def _need_index(data):
+    if (set(data) != {"version", "needs"} or type(data["version"]) is not int or data["version"] != 1
+            or not isinstance(data["needs"], dict)):
+        raise ValueError("is not a version 1 task need index")
+    return data
 
 
 def _fresh_discovery(state_dir, item: Mapping, selection: Mapping | None, now: dt.datetime) -> dict | None:
     """The need's last stored discovery while it is unexpired, under the same policy and selection."""
     record_id = _discovery_index(state_dir).get(item["id"])
-    record = store.get_record(state_dir, DISCOVERY, record_id) if record_id else None
-    if record is None or record.get("policy_digest") != item["policy_digest"] \
-            or record.get("selection_ref") != (selection["id"] if selection is not None else None):
+
+    def checked(record):
+        expires = dt.datetime.fromisoformat(record["expires_at"])
+        if expires.utcoffset() is None:
+            raise ValueError("a stored discovery expiry needs a timezone")
+        return record, expires
+
+    loaded = store.get_record(state_dir, DISCOVERY, record_id, parse=checked) if record_id else None
+    if loaded is None:
         return None
-    try:
-        expires = dt.datetime.fromisoformat(str(record.get("expires_at")))
-    except ValueError:
+    record, expires = loaded
+    if record.get("policy_digest") != item["policy_digest"] \
+            or record.get("selection_ref") != (selection["id"] if selection is not None else None):
         return None
     return record if now.astimezone(dt.timezone.utc) < expires else None
 
@@ -467,11 +478,9 @@ def _index_path(state_dir) -> pathlib.Path:
 
 
 def _index(state_dir) -> dict:
-    data = store._read(_index_path(state_dir))
+    data = store._read(_index_path(state_dir), parse=_need_index)
     if data is None:
         return {}
-    if not isinstance(data, dict) or set(data) != {"version", "needs"} or not isinstance(data["needs"], dict):
-        raise store.StoreProblem(_index_path(state_dir), "is not a task selection index")
     return data["needs"]
 
 

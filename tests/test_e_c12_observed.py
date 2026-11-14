@@ -10,7 +10,8 @@ import re
 import unittest
 from unittest import mock
 
-from tests.e_c12_matrix import FAULTS, INPUT_MATRIX, OWNER_MATRIX, OWNER_RUN_MATRIX, OWNER_KEPT_MATRIX
+from tests.e_c12_matrix import (FAULTS, INPUT_MATRIX, OWNER_MATRIX, OWNER_RUN_MATRIX, OWNER_KEPT_MATRIX,
+                                AFTER_MATRIX, SUCCESS_DISPATCH, OUTPUT_MATRIX)
 from tests.e_c12_observer import ObservedFiles
 from tests.e_c12_scenarios import Scenario
 
@@ -266,6 +267,35 @@ ADDITIONAL_FILES: dict[str, tuple[FileRule, ...]] = {
 }
 for command, rows in ADDITIONAL_FILES.items():
     FILE_MATRIX[command] += rows
+
+for command in ('admission', 'admission-saved', 'worker'):
+    FILE_MATRIX[command] += (FileRule('runs/*/{new-run}/design-after.json') if command != 'worker' else
+                            FileRule('runs/*/{original-run}/design-after.json'),)
+for command in ('admission', 'admission-saved'):
+    FILE_MATRIX[command] += (FileRule('runs/*/{new-run}/last-message.md'),
+                            FileRule('runs/*/{new-run}/native-offer.json', False, ('', 0)))
+FILE_MATRIX['launch'] = FILE_MATRIX['admission']
+FILE_MATRIX['background'] = tuple(rule for rule in FILE_MATRIX['admission']
+    if not rule.pattern.endswith(('/design-after.json', '/last-message.md'))) + (
+        FileRule('runs/*/{new-run}/launch.json'),)
+FILE_MATRIX['admission-orca'] += (FileRule('runs/*/{new-run}/launch.json'),
+                                FileRule('runs/*/{new-run}/native-offer.json', False, ('', 0)))
+FILE_MATRIX['admission-needs'] += (FileRule('runs/*/{new-run}/capabilities.json', False, ('', 0)),
+    FileRule('runs/*/{new-run}/design.json', False, ('', 0)),
+    FileRule('runs/*/{new-run}/native-offer.json', False, ('', 0)))
+FILE_MATRIX['freeze'] += (FileRule('runs/*/{new-run}/correction.json'),)
+
+for command, rows in FILE_MATRIX.items():
+    FILE_MATRIX[command] = tuple(dataclasses.replace(rule,
+        recorded_when=(*rule.recorded_when, 'call.py:capture', 'call.py:_check_e'))
+        if rule.input_id == 'parent-inventory' else dataclasses.replace(rule, required=True, absent=None,
+        absent_by_context=((*rule.absent_by_context, ('call_cli.py:_print_skills', ('', 0)))))
+        if rule.pattern.endswith('/skills.json') and command in (
+            'admission', 'admission-needs', 'admission-saved', 'launch', 'background', 'admission-orca') else
+        dataclasses.replace(rule, absent_by_context=((*rule.absent_by_context,
+            ('call.py:_design_after', ('', 0)), ('call.py:_finish_inline_delivery', ('', 0)))))
+        if rule.pattern.endswith('/design.json') and command in (
+            'admission', 'admission-saved', 'launch', 'worker') else rule for rule in rows)
 FILE_MATRIX['skills-repeat'] = (
     FileRule('runs/*/{original-run}/skills.json', False, ('OAH_SKILL_UNMANAGED_RUN', 1)),
     FileRule('runs/*/{original-run}/prompt.md'),
@@ -291,13 +321,26 @@ EXCLUDED_PATHS = (('skills/sources/*', 'lane C design sources',
 def excluded_access(name, access, state):
     path = label(access, state)
     for pattern, owner, reason in EXCLUDED_PATHS:
-        if fnmatch.fnmatchcase(path, pattern):
+        if not access.owned and fnmatch.fnmatchcase(path, pattern):
             return owner, reason
     if pathlib.Path(access.path).name == 'skills-reads.jsonl' and 'atomic.py:append_jsonl' in access.chain:
         return 'B atomic append validation', 'the shared append helper keeps its existing read contract'
-    if not access.owned and access.operation in ('stat', 'lstat') and 'runs.py:result' in access.chain:
+    metadata = not access.owned and access.operation in ('stat', 'lstat') and 'runs.py:_contained_path' in access.chain
+    if metadata and pathlib.Path(access.path).name == 'launch.json' and any(
+            context in access.chain for context in ('call.py:_launch_main', 'call.py:background_main')):
+        return None
+    if metadata and 'runs.py:result' in access.chain and 'runs.py:_write_result' not in access.chain:
         return 'B run result update', 'pre-update metadata check; EACCES classification remains a B follow-up'
-    if not access.owned and access.operation in ('stat', 'lstat') and (
+    if metadata and name == 'freeze' and any(context in access.chain for context in (
+            'call.py:_write_result', 'fix.py:_end')):
+        if pathlib.Path(access.path).name == 'correction.json' and 'fix.py:_end' in access.chain:
+            return 'B correction manifest', 'required output address check at final settlement'
+        return 'B correction optional output', 'optional diagnostic writer keeps the base settlement outcome'
+    if metadata and 'call.py:_design_after' in access.chain:
+        return 'B design after output', 'write-only design-after address check'
+    if metadata and 'call.py:_finish_inline_delivery' in access.chain:
+        return 'B design delivery output', 'write-only design receiving address check'
+    if metadata and (
             any(context in access.chain for context in ('runs.py:_create_run', 'runs.py:write_prompt',
                 'runs.py:_write_text', 'runs.py:_write_result', 'runs.py:launch_path'))
             or pathlib.Path(access.path).name == 'skills.json' and any(context in access.chain for context in (
@@ -314,6 +357,65 @@ def excluded_access(name, access, state):
     return None
 
 
+OUTPUT_OWNERS = {
+    'B run publication/output validation', 'B run result update', 'B design after output',
+    'B design delivery output', 'B correction manifest', 'B correction optional output',
+    'B atomic append validation',
+}
+
+
+def output_row(name, access, path, owner):
+    strict = access.site == 'runs.py:_contained_path:538'
+    filename = pathlib.Path(path).name
+    address = 'address-only' if strict else 'ignored-address'
+    launch = 'launch-address-before-read' if strict else 'launch-read-after-address'
+    admission = 'admission-address-before-read' if strict else 'admission-read-after-address'
+    if owner == 'B atomic append validation':
+        return 'address-only'
+    if owner == 'B correction optional output':
+        return 'ignored-address' if access.phase == 'after-engine' else 'captured-result'
+    if owner in ('B correction manifest', 'B design delivery output'):
+        return address
+    if owner == 'B design after output':
+        return launch
+    if '/.' in path and '.tmp/' in path or filename == 'last-message.md' or (
+            filename == 'launch.json' and name == 'admission-orca') or (
+            name == 'freeze' and filename != 'result.json'):
+        return 'address-only' if filename == 'last-message.md' and name == 'admission-needs' else address
+    if name == 'admission-native':
+        return address
+    if owner == 'B run result update':
+        if name == 'freeze':
+            return 'captured-result'
+        return admission if any(context in access.chain for context in (
+            'call.py:_finish_prepare', 'call.py:_prepare_native')) else launch
+    if filename == 'result.json':
+        if access.phase != 'before':
+            if name == 'background':
+                return 'launch-address-before-read'
+            return launch if name == 'worker' else address
+        if name == 'freeze':
+            return 'captured-result'
+        return admission if any(context in access.chain for context in (
+            'call.py:_finish_prepare', 'call.py:_prepare_native')) else launch
+    if strict:
+        return 'launch-address-before-read'
+    if filename == 'skills.json' and name in ('admission', 'launch', 'admission-needs', 'admission-saved'):
+        return 'optional-summary-before-launch'
+    return 'launch-read-after-address'
+
+
+def boundary_at(name, access):
+    if name in ('admission', 'admission-native', 'admission-orca', 'admission-needs', 'admission-saved',
+                'launch', 'background', 'worker'):
+        if any(context in access.chain for context in (
+                'call.py:check_prepared', 'call.py:execute', 'call.py:start_background', 'call.py:_launch_main',
+                'orca.py:start')):
+            return 'launch'
+        return 'worker' if name == 'worker' else 'admission'
+    return BOUNDARY[name]
+
+
 def label(access, state):
     path = pathlib.Path(access.path)
     relative = path.relative_to(state).as_posix() if path.is_relative_to(state) else path.name
@@ -322,9 +424,16 @@ def label(access, state):
 
 
 class ObservedAccessTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.completed = {}
+        cls.output_cells = set()
+
     def test_observed_accesses_have_declared_owners(self):
         self.assertEqual(set(BOUNDARY), set(FILE_MATRIX))
         self.assertEqual(set(OWNER_MATRIX), set(BOUNDARY.values()))
+        phases, outputs = set(), set()
+        self.assertEqual(set(SUCCESS_DISPATCH), set(BOUNDARY))
         for name in BOUNDARY:
             with self.subTest(command=name):
                 case = Scenario('scenario')
@@ -344,6 +453,11 @@ class ObservedAccessTest(unittest.TestCase):
                         owned = access.input_owned if rule.is_input(access) else access.owned
                         self.assertTrue(owned or excluded_access(name, access, case.storage),
                                         f'{name}: stored read outside owner: {access}')
+                        excluded = excluded_access(name, access, case.storage)
+                        if excluded:
+                            outputs.add((excluded[0], access.phase))
+                        elif not rule.is_input(access):
+                            phases.add((boundary_at(name, access), access.phase))
                         for context, _outcome in FILE_MATRIX[name][index].absent_by_context:
                             if context in access.chain:
                                 contexts.add((index, context))
@@ -352,12 +466,22 @@ class ObservedAccessTest(unittest.TestCase):
                                                for context, _outcome in rule.absent_by_context})
                 finally:
                     case.doCleanups()
+        self.assertEqual(phases, {(name, 'before') for name in OWNER_MATRIX} | set(AFTER_MATRIX))
+        self.assertEqual(outputs, {
+            ('B atomic append validation', 'before'), ('B correction manifest', 'after-engine'),
+            ('B correction optional output', 'before'), ('B correction optional output', 'after-engine'),
+            ('B design after output', 'after-engine'),
+            ('B design delivery output', 'after-engine'), ('B run publication/output validation', 'before'),
+            ('B run publication/output validation', 'after-engine'),
+            ('B run publication/output validation', 'after-runner'),
+            ('B run result update', 'before'), ('B run result update', 'after-engine'),
+            ('B run result update', 'after-runner'), ('lane C design sources', 'before'),
+            ('review/fix publication', 'before'), ('review/fix publication', 'after-engine')})
 
-    def check_run_state(self, case, observer, name, fault):
-        status = OWNER_RUN_MATRIX[BOUNDARY[name]][FAULTS.index(fault)]
+    def check_run_state(self, case, observer, status):
         paths = list(case.storage.glob('runs/*/r*/result.json'))
         retained = {path: raw for path, raw in observer.retained.items() if path.name == 'result.json'}
-        if status == 'kept':
+        if status in ('kept', 'at-access-kept'):
             self.assertEqual(set(paths), set(retained))
             for path, raw in retained.items():
                 if str(path) != observer.failed:
@@ -374,6 +498,9 @@ class ObservedAccessTest(unittest.TestCase):
             self.assertTrue(paths)
             for path in paths:
                 if str(path) != observer.failed:
+                    if path in case.before and json.loads(case.before[path]).get('status') == 'finished':
+                        self.assertEqual(path.read_bytes(), case.before[path])
+                        continue
                     saved = json.loads(path.read_bytes())
                     self.assertEqual(saved['status'], 'refused')
         elif status == 'original-kept':
@@ -401,6 +528,7 @@ class ObservedAccessTest(unittest.TestCase):
         case.scenario(name)
         accesses = case.observe()
         self.assertTrue(accesses)
+        self.assertEqual((case.engine_spawns, case.runner_creations), SUCCESS_DISPATCH[name])
         reached, specified, contexts = set(), set(), set()
         for ordinal, access in enumerate(accesses):
             path = label(access, case.storage)
@@ -428,26 +556,46 @@ class ObservedAccessTest(unittest.TestCase):
                                 retry_window.enter_context(mock.patch(module + '.RETRY_SECONDS', 0.01))
                         result = case.invoke(observer)
                     self.assertTrue(observer.reached, 'the named OS access must be reached')
+                    self.assertEqual({(row.phase, row.engine_spawns, row.runner_creations)
+                                      for row in observer.reached},
+                                     {(access.phase, access.engine_spawns, access.runner_creations)})
                     reached.add((ordinal, fault))
-                    codes = [code for code in re.findall(r'OAH_[A-Z_]+(?:\([^\n:]+\))?:', result[1] + result[2])
-                             if code not in ('OAH_STAGE_OVERRIDDEN:', 'OAH_MODEL_UNKNOWN_FAMILY:')]
-                    code = codes[-1][:-1] if codes else ''
+                    codes = [code for code in re.findall(r'(?m)^(OAH_[A-Z_]+(?:\([^\n:]+\))?):', result[2])
+                             if code not in ('OAH_STAGE_OVERRIDDEN', 'OAH_MODEL_UNKNOWN_FAMILY', 'OAH_FIX_STARTED',
+                                             'OAH_FIX_APPLIED')]
+                    code = codes[0] if result[0] and codes else ''
                     print('OS_CASE', json.dumps(dict(command=name, path=path, operation=access.operation,
                         site=access.site, occurrence=access.occurrence, fault=fault, code=code,
-                        exit=result[0], excluded=excluded, input=rule.input_id if initial_input else None)), flush=True)
+                        exit=result[0], phase=access.phase, engine_spawns=case.engine_spawns,
+                        runner_creations=case.runner_creations, boundary=boundary_at(name, access),
+                        excluded=excluded, input=rule.input_id if initial_input else None)), flush=True)
                     if excluded:
-                        if excluded[0] == 'B run result update':
-                            self.assertEqual((code, result[0]), ('OAH_RUN_LAUNCH_INVALID', 1) if fault == 'missing'
-                                             else ('OAH_STATE_IO', 69), str(result))
-                            self.assertFalse(case.sent)
-                        if excluded[0] in ('B atomic append validation', 'B run publication/output validation'):
-                            self.assertEqual(result[0], 0 if fault == 'missing' else 69, str(result))
-                            if fault != 'missing':
-                                self.assertEqual(code, 'OAH_STATE_IO', str(result))
-                                self.assertFalse(case.sent)
+                        if excluded[0] in OUTPUT_OWNERS:
+                            row = output_row(name, access, path, excluded[0])
+                            expected = OUTPUT_MATRIX[row][('missing', 'denied', 'eio').index(fault)]
+                            self.assertEqual((code, result[0]), expected, str(result))
+                            self.__class__.output_cells.add((row, fault))
+                        self.assertEqual((case.engine_spawns, case.runner_creations),
+                            SUCCESS_DISPATCH[name] if result[0] == 0 else
+                            (access.engine_spawns, access.runner_creations), 'no dispatch after an output fault')
+                        if access.phase != 'before' and result[0]:
+                            self.check_run_state(case, observer, 'at-access-kept')
+                        for earlier, raw in observer.retained.items():
+                            if earlier.name == 'result.json' and json.loads(raw).get('status') == 'finished':
+                                self.assertEqual(earlier.read_bytes(), raw, 'keep the earlier finished record')
                         continue
-                    expected = rule.absent if fault == 'missing' and not rule.required else OWNER_MATRIX[
-                        BOUNDARY[name]][FAULTS.index(fault)]
+                    boundary = boundary_at(name, access)
+                    if access.phase == 'before':
+                        expected = OWNER_MATRIX[boundary][FAULTS.index(fault)]
+                        run_policy = OWNER_RUN_MATRIX[boundary][FAULTS.index(fault)]
+                        kept_policy = OWNER_KEPT_MATRIX[boundary][FAULTS.index(fault)]
+                        dispatches = (0, 0)
+                    else:
+                        outward, exit_code, run_policy, kept_policy, engines, runners = AFTER_MATRIX[
+                            boundary, access.phase][FAULTS.index(fault)]
+                        expected, dispatches = (outward, exit_code), (engines, runners)
+                    if fault == 'missing' and not rule.required:
+                        expected = rule.absent
                     if fault == 'missing':
                         expected = next((outcome for context, outcome in rule.absent_by_context
                                          if context in access.chain), expected)
@@ -459,28 +607,38 @@ class ObservedAccessTest(unittest.TestCase):
                     if initial_input and fault != 'eio':
                         self.assertNotIn('the recorded ', result[2])
                     if result[0]:
-                        self.check_run_state(case, observer, name, fault)
+                        self.check_run_state(case, observer, run_policy)
+                        self.assertEqual((case.engine_spawns, case.runner_creations), dispatches,
+                                         'the refusal must not cause another dispatch')
+                        if access.phase != 'before':
+                            self.assertIn('the run already took place' if access.phase == 'after-engine' else
+                                          'the runner was already created', result[2])
+                            self.assertIn('the follow-up read failed', result[2])
+                            self.assertNotIn('nothing was sent', result[2])
+                            self.assertNotIn('nothing was launched', result[2])
                         if name == 'freeze':
                             assert case.project is not None
                             self.assertEqual(case.project.fix_calls(), case.child_calls)
-                        else:
-                            self.assertFalse(case.sent, 'the command must send nothing')
+                    else:
+                        self.assertEqual((case.engine_spawns, case.runner_creations), SUCCESS_DISPATCH[name])
                     for earlier, raw in observer.retained.items():
+                        if not result[0]:
+                            continue
                         if earlier.is_relative_to(case.storage) and any(fnmatch.fnmatchcase(
                                 earlier.relative_to(case.storage).as_posix(), pattern)
                                 for pattern, _owner, _reason in EXCLUDED_PATHS):
                             continue
-                        if earlier.name == 'result.json' and str(earlier) != observer.failed:
+                        if access.phase == 'before' and earlier.name == 'result.json' and str(earlier) != observer.failed:
                             continue
                         injected_content = fault == 'invalid-content' and observer.failed == str(earlier) and \
                             access.operation in ('stat', 'lstat', 'fstat', 'os.open')
                         self.assertEqual(earlier.read_bytes(), b'\xff' if injected_content else raw,
                                          f'{name}: keep the earlier {earlier.name}')
-                    self.assertEqual(OWNER_KEPT_MATRIX[BOUNDARY[name]][FAULTS.index(fault)], 'inputs-at-access')
-                    if name == 'worker' and result[0] and pathlib.Path(access.path).name != 'result.json':
+                    self.assertEqual(kept_policy, 'inputs-at-access')
+                    if name == 'worker' and access.phase == 'before' and result[0] and pathlib.Path(access.path).name != 'result.json':
                         self.assertEqual(json.loads((case.run_dir / 'result.json').read_bytes())['status'], 'refused')
-                    if name == 'worker' and pathlib.Path(access.path).name == 'result.json':
-                        self.assertEqual((case.run_dir / 'worker.claim').exists(), fault != 'eio')
+                    if name == 'worker' and access.phase == 'before' and pathlib.Path(access.path).name == 'result.json':
+                        self.assertEqual((case.run_dir / 'worker.claim').exists(), access.claim_present or fault != 'eio')
                         raw = (case.run_dir / 'result.json').read_bytes()
                         expected_raw = b'\xff' if fault == 'invalid-content' and access.operation in ('stat', 'lstat', 'fstat', 'os.open') \
                             else case.before[case.run_dir / 'result.json']
@@ -493,6 +651,7 @@ class ObservedAccessTest(unittest.TestCase):
                           for fault in (('missing', 'denied', 'eio') if
                               excluded_access(name, access, case.storage) else FAULTS)}
         self.assertEqual(reached, expected_cells, 'every observed access and every fault cell needs a reached case')
+        self.__class__.completed[name] = dict(accesses=len(accesses), cells=len(reached))
 
     def test_process_admission_observed_files(self):
         self.exercise('admission')
@@ -565,3 +724,9 @@ class ObservedAccessTest(unittest.TestCase):
 
     def test_wait_observed_files(self):
         self.exercise('wait')
+
+    def test_z_all_commands_have_reached_every_observed_fault_cell(self):
+        self.assertEqual(set(self.completed), set(BOUNDARY), 'each command must finish its reached-access checks')
+        self.assertEqual(self.output_cells, {(row, fault) for row in OUTPUT_MATRIX
+                                           for fault in ('missing', 'denied', 'eio')})
+        print('OS_COVERAGE', json.dumps(self.completed, sort_keys=True), flush=True)

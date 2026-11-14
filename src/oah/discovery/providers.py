@@ -145,14 +145,6 @@ class Search:
         return dataclasses.asdict(self)
 
 
-def _fresh(record: Mapping, now: dt.datetime, hours: float) -> bool:
-    try:
-        checked = dt.datetime.fromisoformat(str(record["checked_at"]))
-    except (KeyError, ValueError):
-        return False
-    return record.get("outcome") in SUCCESS and now - checked < dt.timedelta(hours=hours)
-
-
 def cached(query: str, *, state_dir, settings: Mapping, now: dt.datetime, origin: str = "template",
            choice: str | None = None, admitted=None) -> Search | None:
     """The fresh stored success for this exact query, when the external search is on; it sends nothing."""
@@ -162,8 +154,19 @@ def cached(query: str, *, state_dir, settings: Mapping, now: dt.datetime, origin
     if not settings["enabled"] or settings["provider"] != PROVIDER:
         return None
     query_id = store.query_id(PROVIDER, query, PARSER)
-    record = store.get_query(state_dir, query_id)
-    if record is None or not _fresh(record, now, float(settings["cache_hours"])):
+
+    def checked(record):
+        stamp = dt.datetime.fromisoformat(record["checked_at"])
+        if (stamp.utcoffset() is None or not isinstance(record["outcome"], str)
+                or not isinstance(record["detail"], str) or not isinstance(record["hits"], list)):
+            raise ValueError("the stored search needs its timestamp, outcome, detail and hit list")
+        return record, stamp
+
+    loaded = store.get_query(state_dir, query_id, parse=checked)
+    if loaded is None:
+        return None
+    record, stamp = loaded
+    if record.get("outcome") not in SUCCESS or now - stamp >= dt.timedelta(hours=float(settings["cache_hours"])):
         return None
     return Search(PROVIDER, query, query_id, record["outcome"], record["detail"], list(record["hits"]),
                   record["checked_at"], cached=True, origin=origin, choice=choice)

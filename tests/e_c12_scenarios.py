@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import argparse
 import io
 import json
@@ -48,6 +49,8 @@ class Scenario(e_c9_fixture.CorrectionFixture):
         self.before = {}
         self.child_calls = []
         self.sent = False
+        self.engine_spawns = 0
+        self.runner_creations = 0
 
     def valid(self):
         from oah.capabilities import plan
@@ -197,6 +200,9 @@ class Scenario(e_c9_fixture.CorrectionFixture):
         roots = set((*self.saved_roots, self.storage))
         self.saved_roots = sorted(path for path in roots if not any(
             path != other and path.is_relative_to(other) for other in roots))
+        self.remember()
+
+    def remember(self):
         self.backup = make_tmp_dir(self) / 'snapshot'
         for index, path in enumerate(self.saved_roots):
             shutil.copytree(path, self.backup / str(index))
@@ -222,53 +228,47 @@ class Scenario(e_c9_fixture.CorrectionFixture):
     def invoke(self, observer):
         from oah import call
 
-        real_execute, real_background, real_popen, real_run = (call.execute, call.start_background,
-                                                              subprocess.Popen, subprocess.run)
+        real_popen, real_run = subprocess.Popen, subprocess.run
         self.sent = False
-        observer.active = self.name not in ('launch', 'background')
-
-        def execute(prepared, **options):
-            if self.name in ('admission', 'admission-native', 'admission-saved', 'admission-needs'):
-                observer.active = False
-            elif self.name == 'launch':
-                observer.active = True
-            return real_execute(prepared, **options)
+        self.engine_spawns = self.runner_creations = 0
+        observer.active = True
+        observer.phase = lambda: ('after-engine' if self.engine_spawns else
+            'after-runner' if self.runner_creations else 'before', self.engine_spawns, self.runner_creations)
 
         def popen(argv, *args, **options):
             if self.name == 'background' and len(argv) >= 2 and argv[-2] == 'background_main':
-                return types.SimpleNamespace(pid=123456, returncode=None)
-            if options.get('stdin') == subprocess.PIPE and any(
-                    'call.py' in frame.filename and frame.name == '_run_prepared'
-                    for frame in traceback.extract_stack()):
+                self.runner_creations += 1
                 self.sent = True
-                observer.active = False
-            return real_popen(argv, *args, **options)
-
-        def background(prepared, **options):
-            observer.active = True
-            return real_background(prepared, **options)
+                return types.SimpleNamespace(pid=123456, returncode=None)
+            engine = options.get('stdin') == subprocess.PIPE and any(
+                    'call.py' in frame.filename and frame.name == '_run_prepared'
+                    for frame in traceback.extract_stack())
+            child = real_popen(argv, *args, **options)
+            if engine:
+                self.engine_spawns += 1
+                self.sent = True
+            return child
 
         def launch(argv, *args, **options):
             if len(argv) >= 2 and argv[-2] == 'launch_main':
                 out, err = io.StringIO(), io.StringIO()
-                observer.active = True
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    code = call.launch_main(argv[-1])
-                observer.active = True
+                    code = contextvars.Context().run(call.launch_main, argv[-1])
                 return subprocess.CompletedProcess(argv, code, out.getvalue().encode(), err.getvalue().encode())
             return real_run(argv, *args, **options)
 
         from oah.launchers import orca
 
-        real_orca_start = orca.start
+        real_orca_json = orca.Orca.json
 
-        def orca_start(*args, **options):
-            if self.name == 'admission-orca':
-                observer.active = False
-            return real_orca_start(*args, **options)
+        def orca_json(client, *args, **options):
+            result = real_orca_json(client, *args, **options)
+            if args[:2] == ('terminal', 'create'):
+                self.runner_creations += 1
+                self.sent = True
+            return result
 
-        with observer, mock.patch.object(call, 'execute', execute), mock.patch.object(call, 'start_background', background), \
-                mock.patch.object(orca, 'start', orca_start), \
+        with observer, mock.patch.object(orca.Orca, 'json', orca_json), \
                 mock.patch.object(subprocess, 'Popen', popen), \
                 mock.patch.object(subprocess, 'run', launch):
             return cli_result(self.root, self.environment, *self.command)
