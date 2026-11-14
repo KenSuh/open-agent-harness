@@ -248,6 +248,51 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.assertGreaterEqual(len(seen), 2)
         self.assertEqual(code, 0, str(result) + err)
 
+    def test_freeze_transient_permission_at_captured_binding_retries_then_succeeds(self):
+        project, _original, _now, _parent, _relay = self.selected_parent(relay=True)
+        project.queue_fix({'write': {'src/app.py': "print('corrected')\n"}})
+        target = project.state / 'runs/t1/intent-binding.json'
+        read, reached = Path.read_bytes, []
+
+        def transient(path):
+            capturing = any(frame.name == '_captured_state' and frame.filename.endswith('/oah/runs.py')
+                            for frame in traceback.extract_stack())
+            if path == target and capturing:
+                reached.append(str(path))
+                if len(reached) == 1:
+                    raise PermissionError(errno.EACCES, 'fixture transient captured binding read denial', str(path))
+            return read(path)
+
+        with mock.patch.object(Path, 'read_bytes', transient):
+            code, result, error = self.correct(project, dt.datetime.now(dt.timezone.utc))
+
+        self.assertGreaterEqual(len(reached), 2, 'the captured read must retry the same transient denial')
+        self.assertEqual(code, 0, str(result) + error)
+
+    def test_prepared_handoff_refusals_are_recorded_before_a_child(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        for name in ('launch', 'background'):
+            with self.subTest(command=name):
+                case = Scenario('scenario')
+                case.setUp()
+                try:
+                    case.scenario(name)
+                    target = next(access for access in case.observe() if access.path.endswith('/native-offer.json'))
+                    observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='invalid-content')
+
+                    result = case.invoke(observer)
+
+                    self.assertTrue(observer.reached)
+                    self.assertEqual(result[0], 1, str(result))
+                    self.assertIn('OAH_RUN_LAUNCH_INVALID:', result[2])
+                    saved, = case.storage.glob('runs/t1/r*/result.json')
+                    self.assertEqual(json.loads(saved.read_bytes())['status'], 'refused')
+                    self.assertFalse(case.sent)
+                finally:
+                    case.doCleanups()
+
     def test_relay_input_symlinks_are_followed_with_the_base_contract(self):
         request, _parent, _now = self.request()
         source = capabilities.write(self.work / "request.json", request)

@@ -1872,7 +1872,7 @@ def check_prepared(prepared: Prepared) -> None:
     try:
         with boundaries.command("launch"), _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
             pass
-    except boundaries.CommandRefusal as exc:
+    except EngineError as exc:
         _record_refusal(prepared, exc)
         raise
 
@@ -3567,7 +3567,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     try:
         with boundaries.command("launch"):
             return _execute(prepared, base_env=base_env, rules=rules, redact=redact)
-    except boundaries.CommandRefusal as exc:
+    except EngineError as exc:
         _record_refusal(prepared, exc)
         raise
 

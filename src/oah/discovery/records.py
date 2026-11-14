@@ -100,11 +100,19 @@ def present(path: pathlib.Path) -> bool:
 
 
 def _retry(operation: Callable[[], T], deadline: float | None) -> T:
+    def attempt() -> T:
+        try:
+            return operation()
+        except StorageError as exc:
+            if isinstance(exc.__cause__, PermissionError):
+                raise exc.__cause__ from None
+            raise
+
     if deadline is None:
-        return _retry_permission(operation, RETRY_SECONDS)
+        return _retry_permission(attempt, RETRY_SECONDS)
     from oah.runs import _retry_until
 
-    return _retry_until(deadline, RETRY_SECONDS, operation)
+    return _retry_until(deadline, RETRY_SECONDS, attempt)
 
 
 def location(path: pathlib.Path, resolve: Callable[[], T], *, deadline: float | None = None) -> T:
