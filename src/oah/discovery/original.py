@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Mapping
 
 from oah.atomic import write_json_atomic
-from oah.discovery import preparation, store, tasks
+from oah.discovery import preparation, records, store, tasks
 from oah.engines.effort import EngineError
 
 FOLDER = "originals"
@@ -42,9 +42,9 @@ def publish(run, skills: Mapping[str, preparation.Json] | None, *, stage: str) -
         write_json_atomic(run.file_path("skills.json"), skills)
     if is_original:
         index = _index(state_dir, run.task)
-        if pointer is None:
+        if pointer is None and records.present(index):
             write_json_atomic(index, {"original": None})
-        else:
+        elif pointer is not None:
             write_json_atomic(index, {"original": pointer["id"]})
 
 

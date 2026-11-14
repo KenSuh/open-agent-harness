@@ -93,6 +93,22 @@ class PreparationContextTest(DeliveryTask, unittest.TestCase):
 
 
 class OrdinaryContextTest(unittest.TestCase):
+    def test_an_unmanaged_initial_does_not_create_an_original_pointer(self):
+        from tests.test_call import Project
+        from tests.test_e_c10_boundaries import cli_result
+
+        project = Project(self, config="\n[models]\nfetch_scores=false\n")
+        project.bind()
+
+        code, out, err = cli_result(project.repo, project.env, "call", "claude", "--stage", "initial",
+                                    "--task", "t1", "--tier", "low", "--no-rerank", "--json")
+
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(json.loads(out)["status"], "finished")
+        self.assertEqual(list(project.state.glob("skills/originals/tasks/*.json")), [])
+        prompt = project.state / "runs" / "t1" / project.runs()[0] / "prompt.md"
+        self.assertEqual(project.recorded()["stdin"], prompt.read_text(encoding="utf-8"))
+
     def test_A5_non_intent_packet_parse_change_does_not_add_an_unmanaged_launch_refusal(self):
         from oah import call
         from tests.test_call import Project
