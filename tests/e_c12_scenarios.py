@@ -3,10 +3,12 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import argparse
+import hashlib
 import io
 import json
 import os
 import pathlib
+import secrets
 import shutil
 import subprocess
 import sys
@@ -231,6 +233,14 @@ class Scenario(e_c9_fixture.CorrectionFixture):
         real_popen, real_run = subprocess.Popen, subprocess.run
         self.sent = False
         self.engine_spawns = self.runner_creations = 0
+        nonce = 0
+
+        def token_hex(size=32):
+            nonlocal nonce
+            nonce += 1
+            raw = hashlib.sha256(f'{self.name}:{nonce}'.encode('utf-8')).hexdigest()
+            return (raw * ((size * 2 + len(raw) - 1) // len(raw)))[:size * 2]
+
         observer.active = True
         observer.phase = lambda: ('after-engine' if self.engine_spawns else
             'after-runner' if self.runner_creations else 'before', self.engine_spawns, self.runner_creations)
@@ -268,15 +278,18 @@ class Scenario(e_c9_fixture.CorrectionFixture):
                 self.sent = True
             return result
 
-        with observer, mock.patch.object(orca.Orca, 'json', orca_json), \
+        with observer, mock.patch.object(secrets, 'token_hex', token_hex), \
+                mock.patch.object(orca.Orca, 'json', orca_json), \
                 mock.patch.object(subprocess, 'Popen', popen), \
                 mock.patch.object(subprocess, 'run', launch):
             return cli_result(self.root, self.environment, *self.command)
 
-    def observe(self):
+    def observe(self, check_success=None):
         observer = ObservedFiles(self.storage, extra=self.extra)
         result = self.invoke(observer)
         self.assertEqual(result[0], 0, str(result))
         self.assertTrue(observer.accesses)
+        if check_success is not None:
+            check_success(observer)
         self.restore()
         return observer.accesses

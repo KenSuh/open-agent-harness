@@ -143,6 +143,21 @@ SUCCESS_DISPATCH = {
     'relay': (0, 0), 'design': (0, 0), 'wait': (0, 0),
 }
 
+SUCCESS_RUN_MATRIX = {
+    'admission': 'new-finished', 'admission-native': 'new-prepared', 'admission-orca': 'new-queued',
+    'admission-needs': 'new-finished', 'admission-saved': 'new-finished', 'launch': 'new-finished',
+    'background': 'new-queued', 'worker': 'worker-finished', 'freeze': 'new-finished',
+    'settle': 'kept', 'settle-retry': 'kept', 'skills': 'kept', 'skills-receiving': 'kept',
+    'skills-repeat': 'kept', 'skills-plan': 'kept', 'skills-read-review': 'kept',
+    'skills-candidates': 'kept', 'skills-review': 'kept', 'skills-select': 'kept', 'skills-find': 'kept',
+    'capabilities-plan': 'kept', 'relay': 'kept', 'design': 'kept', 'wait': 'kept',
+}
+
+SUCCESS_KEPT_RUN_FILES = (
+    'prompt.md', 'skills.json', 'capabilities.json', 'lease.json', 'native-settlement.json',
+    'skills-receiving.json',
+)
+
 OUTPUT_MATRIX = {
     'ignored-address': (('', 0), ('', 0), ('', 0)),
     'address-only': (('', 0), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),

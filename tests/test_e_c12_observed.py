@@ -4,6 +4,7 @@ import dataclasses
 import contextlib
 import datetime as dt
 import fnmatch
+import hashlib
 import json
 import pathlib
 import re
@@ -11,7 +12,8 @@ import unittest
 from unittest import mock
 
 from tests.e_c12_matrix import (FAULTS, INPUT_MATRIX, OWNER_MATRIX, OWNER_RUN_MATRIX, OWNER_KEPT_MATRIX,
-                                AFTER_MATRIX, SUCCESS_DISPATCH, OUTPUT_MATRIX)
+                                AFTER_MATRIX, SUCCESS_DISPATCH, SUCCESS_RUN_MATRIX, SUCCESS_KEPT_RUN_FILES,
+                                OUTPUT_MATRIX)
 from tests.e_c12_observer import ObservedFiles
 from tests.e_c12_scenarios import Scenario
 
@@ -21,7 +23,7 @@ class FileRule:
     pattern: str
     required: bool = True
     absent: tuple[str, int] | None = None
-    absent_by_context: tuple[tuple[str, tuple[str, int]], ...] = ()
+    absent_by_context: tuple[tuple[str | tuple[str, ...], tuple[str, int] | tuple[str, int, str]], ...] = ()
     input_id: str | None = None
     input_when: tuple[str, ...] = ()
     recorded_when: tuple[str, ...] = ()
@@ -30,45 +32,71 @@ class FileRule:
         return self.input_id is not None and not any(context in access.chain for context in self.recorded_when) \
             and (not self.input_when or any(context in access.chain for context in self.input_when))
 
+    def absence(self, access):
+        return next(((context, outcome) for context, outcome in self.absent_by_context
+                     if (context in access.chain if isinstance(context, str) else
+                         all(part in access.chain for part in context))), (None, self.absent))
+
 
 FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
     'admission': (
         FileRule('parent.json', input_id='parent-inventory', input_when=('plan.py:for_task', 'inputs.py:location'),
                  recorded_when=('call.py:plan_capabilities',)),
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
+             ('tasks.py:prepare_task', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
         FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
-        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
-        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
+        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('call.py:_launch_inputs', ('OAH_RUN_LAUNCH_INVALID', 1)))),
+        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('call.py:_launch_inputs', ('OAH_RUN_LAUNCH_INVALID', 1)))),
         FileRule('runs/*/{new-run}/result.json'), FileRule('runs/*/{new-run}/skills.json', False, ('', 0))),
     'admission-native': (
         FileRule('parent.json', input_id='parent-inventory', input_when=('plan.py:for_task', 'inputs.py:location'),
                  recorded_when=('call.py:plan_capabilities',)),
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
+             ('tasks.py:prepare_task', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)))),
         FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
-        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
-        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
+        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
         FileRule('runs/*/{new-run}/result.json')),
     'admission-orca': (
         FileRule('parent.json', input_id='parent-inventory',
                  input_when=('plan.py:for_task', 'inputs.py:location'), recorded_when=('call.py:plan_capabilities',)),
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
+             ('tasks.py:prepare_task', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
         FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
-        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
-        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
+        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
         FileRule('runs/*/{new-run}/result.json')),
     'admission-needs': (
         FileRule('needs.json', input_id='skill-needs', recorded_when=('call.py:capture',)),
         FileRule('runs/*/intent-binding.json', False, ('', 0)),
-        FileRule('skills/task-selections/index.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1)),
-        FileRule('skills/task-selections/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1)),
+        FileRule('skills/task-selections/index.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             (('call.py:capture', 'call.py:_check_e'), ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('call.py:capture', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1, 'new-refused')))),
+        FileRule('skills/task-selections/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             (('call.py:capture', 'call.py:_check_e'), ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('call.py:capture', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1, 'new-refused')))),
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('plan.py:needs_of', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
         FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
         FileRule('runs/*/{new-run}/result.json'), FileRule('runs/*/{new-run}/skills.json', False, ('', 0))),
@@ -77,11 +105,17 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
         FileRule('parent.json', input_id='parent-inventory',
                  input_when=('plan.py:for_task', 'inputs.py:location'), recorded_when=('call.py:plan_capabilities',)),
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
+             ('tasks.py:prepare_task', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
         FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
-        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
-        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
+        FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('call.py:_launch_inputs', ('OAH_RUN_LAUNCH_INVALID', 1)))),
+        FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
+            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+             ('call.py:_launch_inputs', ('OAH_RUN_LAUNCH_INVALID', 1)))),
         FileRule('runs/*/{new-run}/result.json'), FileRule('runs/*/{new-run}/skills.json', False, ('', 0))),
     'launch': (
         FileRule('parent.json'), FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
@@ -278,6 +312,10 @@ FILE_MATRIX['launch'] = FILE_MATRIX['admission']
 FILE_MATRIX['background'] = tuple(rule for rule in FILE_MATRIX['admission']
     if not rule.pattern.endswith(('/design-after.json', '/last-message.md'))) + (
         FileRule('runs/*/{new-run}/launch.json'),)
+FILE_MATRIX['background'] = tuple(dataclasses.replace(rule,
+    absent_by_context=tuple(row for row in rule.absent_by_context if row[0] != 'call.py:_launch_inputs'))
+    if rule.pattern in ('skills/relays/*.json', 'skills/relay-payloads/*.json') else rule
+    for rule in FILE_MATRIX['background'])
 FILE_MATRIX['admission-orca'] += (FileRule('runs/*/{new-run}/launch.json'),
                                 FileRule('runs/*/{new-run}/native-offer.json', False, ('', 0)))
 FILE_MATRIX['admission-needs'] += (FileRule('runs/*/{new-run}/capabilities.json', False, ('', 0)),
@@ -289,7 +327,8 @@ for command, rows in FILE_MATRIX.items():
     FILE_MATRIX[command] = tuple(dataclasses.replace(rule,
         recorded_when=(*rule.recorded_when, 'call.py:capture', 'call.py:_check_e'))
         if rule.input_id == 'parent-inventory' else dataclasses.replace(rule, required=True, absent=None,
-        absent_by_context=((*rule.absent_by_context, ('call_cli.py:_print_skills', ('', 0)))))
+        absent_by_context=((*rule.absent_by_context, ('call_cli.py:_print_skills',
+            ('', 0) if command == 'admission-orca' else ('OAH_RUN_LAUNCH_INVALID', 1)))))
         if rule.pattern.endswith('/skills.json') and command in (
             'admission', 'admission-needs', 'admission-saved', 'launch', 'background', 'admission-orca') else
         dataclasses.replace(rule, absent_by_context=((*rule.absent_by_context,
@@ -434,13 +473,14 @@ class ObservedAccessTest(unittest.TestCase):
         self.assertEqual(set(OWNER_MATRIX), set(BOUNDARY.values()))
         phases, outputs = set(), set()
         self.assertEqual(set(SUCCESS_DISPATCH), set(BOUNDARY))
+        self.assertEqual(set(SUCCESS_RUN_MATRIX), set(BOUNDARY))
         for name in BOUNDARY:
             with self.subTest(command=name):
                 case = Scenario('scenario')
                 case.setUp()
                 try:
                     case.scenario(name)
-                    accesses = case.observe()
+                    accesses = case.observe(lambda observer: self.check_success(case, observer))
                     paths, contexts = set(), set()
                     for access in accesses:
                         path = label(access, case.storage)
@@ -458,9 +498,9 @@ class ObservedAccessTest(unittest.TestCase):
                             outputs.add((excluded[0], access.phase))
                         elif not rule.is_input(access):
                             phases.add((boundary_at(name, access), access.phase))
-                        for context, _outcome in FILE_MATRIX[name][index].absent_by_context:
-                            if context in access.chain:
-                                contexts.add((index, context))
+                        context, _outcome = rule.absence(access)
+                        if context is not None:
+                            contexts.add((index, context))
                     self.assertEqual(paths, set(range(len(FILE_MATRIX[name]))))
                     self.assertEqual(contexts, {(index, context) for index, rule in enumerate(FILE_MATRIX[name])
                                                for context, _outcome in rule.absent_by_context})
@@ -494,6 +534,12 @@ class ObservedAccessTest(unittest.TestCase):
                         self.assertEqual(path.read_bytes(), raw, 'keep the earlier completed run')
                     else:
                         self.assertIn(json.loads(path.read_bytes())['status'], (json.loads(raw)['status'], 'refused'))
+        elif status == 'new-refused':
+            self.assertEqual(len(set(paths) - retained.keys()), 1)
+            for path, raw in retained.items():
+                self.assertEqual(path.read_bytes(), raw, 'keep every earlier result')
+            new = next(iter(set(paths) - retained.keys()))
+            self.assertEqual(json.loads(new.read_bytes())['status'], 'refused')
         elif status == 'refused-or-unreadable-result-kept':
             self.assertTrue(paths)
             for path in paths:
@@ -513,6 +559,89 @@ class ObservedAccessTest(unittest.TestCase):
         else:
             self.assertIn(status, ('refused-or-stale-result-claimed', 'refused-or-unreadable-result-unclaimed'))
 
+    def check_success(self, case, observer, excluded=None):
+        previous = {path: raw for path, raw in case.before.items() if path.name == 'result.json'}
+        current = set(case.storage.glob('runs/*/r*/result.json'))
+        policy = SUCCESS_RUN_MATRIX[case.name]
+        if excluded is not None and excluded[0] == 'B correction optional output' and \
+                pathlib.Path(observer.failed).name == 'result.json':
+            policy = 'new-prepared'
+        if policy == 'kept':
+            self.assertEqual(current, set(previous), 'a successful read must not allocate a run')
+        elif policy == 'worker-finished':
+            self.assertEqual(current, set(previous))
+            self.assertEqual(json.loads((case.run_dir / 'result.json').read_bytes())['status'], 'finished')
+        else:
+            self.assertTrue(policy.startswith('new-'))
+            self.assertEqual(len(current - previous.keys()), 1, 'the CLI publishes exactly one new run')
+            self.assertTrue(previous.keys() <= current, 'keep every earlier run')
+            new = next(iter(current - previous.keys()))
+            self.assertEqual(json.loads(new.read_bytes())['status'], policy.removeprefix('new-'))
+        for path, raw in previous.items():
+            if policy != 'worker-finished' or path != case.run_dir / 'result.json':
+                self.assertEqual(path.read_bytes(), raw, 'keep the earlier result on optional success')
+        for path, raw in case.before.items():
+            if not path.is_relative_to(case.storage / 'runs'):
+                continue
+            kept_input = path.name in SUCCESS_KEPT_RUN_FILES or \
+                path.name in ('design.json', 'launch.json') and not (
+                    case.name == 'worker' and path.parent == case.run_dir) or \
+                path.name == 'native-offer.json' and case.name not in ('settle', 'settle-retry')
+            if kept_input:
+                self.assertEqual(path.read_bytes(), raw, 'keep the earlier run input on optional success')
+        kept = 0
+        for path, raw in {**case.before, **observer.retained}.items():
+            immutable = path.stem == hashlib.sha256(raw).hexdigest()
+            try:
+                data = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                data = None
+            if isinstance(data, dict):
+                for key in ('id', 'digest'):
+                    expected = 'sha256:' + hashlib.sha256(json.dumps(
+                        {name: value for name, value in data.items() if name != key}, sort_keys=True,
+                        separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest()
+                    immutable |= data.get(key) == expected and path.stem == expected[7:]
+            if immutable:
+                self.assertEqual(path.read_bytes(), raw, 'keep the earlier content-addressed record')
+                kept += 1
+        for path in case.extra:
+            if path in observer.retained:
+                self.assertEqual(path.read_bytes(), observer.retained[path], 'keep the named input file')
+        print('OS_SUCCESS', json.dumps(dict(command=case.name, policy=policy,
+            earlier_results=len(previous), immutable_records=kept)), flush=True)
+
+    def test_optional_summary_missing_file_refuses_at_the_required_launch_read(self):
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class FixtureClock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', FixtureClock))
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('admission')
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
+        lookups = [row for row in accesses if pathlib.Path(row.path).name == 'skills.json'
+                   and 'call_cli.py:_print_skills' in row.chain]
+        self.assertTrue(lookups, 'observe the summary lookup on this platform')
+        access = next((row for row in lookups if row.operation == 'lstat'), lookups[0])
+        observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault='missing')
+        code, out, err = case.invoke(observer)
+        self.assertTrue(observer.reached, 'the summary path lookup must be reached')
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith('OAH_RUN_LAUNCH_INVALID:'), err)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+        self.check_run_state(case, observer, 'refused-or-unreadable-result-kept')
+        failed = observer.failed
+        assert isinstance(failed, str)
+        saved = pathlib.Path(failed)
+        self.assertEqual(saved.read_bytes(), observer.retained[saved])
+
     def exercise(self, name):
         now = dt.datetime.now(dt.timezone.utc)
 
@@ -526,7 +655,7 @@ class ObservedAccessTest(unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         case.scenario(name)
-        accesses = case.observe()
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
         self.assertTrue(accesses)
         self.assertEqual((case.engine_spawns, case.runner_creations), SUCCESS_DISPATCH[name])
         reached, specified, contexts = set(), set(), set()
@@ -537,9 +666,6 @@ class ObservedAccessTest(unittest.TestCase):
             index = min(matched)
             specified.add(index)
             rule = FILE_MATRIX[name][index]
-            for context, _outcome in rule.absent_by_context:
-                if context in access.chain:
-                    contexts.add((index, context))
             excluded = excluded_access(name, access, case.storage)
             initial_input = rule.is_input(access)
             owned = access.input_owned if initial_input else access.owned
@@ -559,6 +685,8 @@ class ObservedAccessTest(unittest.TestCase):
                     self.assertEqual({(row.phase, row.engine_spawns, row.runner_creations)
                                       for row in observer.reached},
                                      {(access.phase, access.engine_spawns, access.runner_creations)})
+                    self.assertEqual({row.chain for row in observer.reached}, {access.chain},
+                                     'reach the same recorded read purpose as the control run')
                     reached.add((ordinal, fault))
                     codes = [code for code in re.findall(r'(?m)^(OAH_[A-Z_]+(?:\([^\n:]+\))?):', result[2])
                              if code not in ('OAH_STAGE_OVERRIDDEN', 'OAH_MODEL_UNKNOWN_FAMILY', 'OAH_FIX_STARTED',
@@ -568,6 +696,7 @@ class ObservedAccessTest(unittest.TestCase):
                         site=access.site, occurrence=access.occurrence, fault=fault, code=code,
                         exit=result[0], phase=access.phase, engine_spawns=case.engine_spawns,
                         runner_creations=case.runner_creations, boundary=boundary_at(name, access),
+                        chain=access.chain, absent_context=rule.absence(access)[0] if fault == 'missing' else None,
                         excluded=excluded, input=rule.input_id if initial_input else None)), flush=True)
                     if excluded:
                         if excluded[0] in OUTPUT_OWNERS:
@@ -583,6 +712,8 @@ class ObservedAccessTest(unittest.TestCase):
                         for earlier, raw in observer.retained.items():
                             if earlier.name == 'result.json' and json.loads(raw).get('status') == 'finished':
                                 self.assertEqual(earlier.read_bytes(), raw, 'keep the earlier finished record')
+                        if not result[0]:
+                            self.check_success(case, observer, excluded)
                         continue
                     boundary = boundary_at(name, access)
                     if access.phase == 'before':
@@ -594,15 +725,19 @@ class ObservedAccessTest(unittest.TestCase):
                         outward, exit_code, run_policy, kept_policy, engines, runners = AFTER_MATRIX[
                             boundary, access.phase][FAULTS.index(fault)]
                         expected, dispatches = (outward, exit_code), (engines, runners)
-                    if fault == 'missing' and not rule.required:
-                        expected = rule.absent
+                    context, absent = rule.absence(access) if fault == 'missing' else (None, None)
                     if fault == 'missing':
-                        expected = next((outcome for context, outcome in rule.absent_by_context
-                                         if context in access.chain), expected)
+                        if not rule.required or context is not None:
+                            assert absent is not None
+                            expected = absent[:2]
+                            if len(absent) == 3:
+                                run_policy = absent[2]
                     if initial_input:
                         assert rule.input_id is not None
                         expected = INPUT_MATRIX[rule.input_id][FAULTS.index(fault)]
                     self.assertEqual((code, result[0]), expected, str(result))
+                    if fault == 'missing' and context is not None:
+                        contexts.add((index, context))
                     self.assertNotIn('Traceback', result[2])
                     if initial_input and fault != 'eio':
                         self.assertNotIn('the recorded ', result[2])
@@ -621,6 +756,7 @@ class ObservedAccessTest(unittest.TestCase):
                             self.assertEqual(case.project.fix_calls(), case.child_calls)
                     else:
                         self.assertEqual((case.engine_spawns, case.runner_creations), SUCCESS_DISPATCH[name])
+                        self.check_success(case, observer)
                     for earlier, raw in observer.retained.items():
                         if not result[0]:
                             continue

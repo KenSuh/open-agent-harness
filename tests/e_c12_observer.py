@@ -85,21 +85,24 @@ class ObservedFiles:
     def observe(self, path, operation):
         if not self.active or not self.selected(path):
             return None
-        frames = traceback.extract_stack(limit=35)
+        existing = path in self.initial or any(path.startswith(folder + os.sep) for folder in self.earlier_runs)
+        normalized = path if existing else re.sub(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', '{new-run}', path)
+        if self.target is not None and path != self.failed and (normalized, operation) != (
+                self.key(self.target), self.target.operation):
+            return None
+        frames = traceback.extract_stack()
         owned = any(frame.filename.replace('\\', '/').endswith('/discovery/records.py') for frame in frames)
         input_owned = any(frame.filename.replace('\\', '/').endswith('/discovery/inputs.py') for frame in frames)
         callers = [frame for frame in frames if '/src/oah/' in frame.filename.replace('\\', '/')
                    and not frame.filename.replace('\\', '/').endswith('/discovery/records.py')]
         site = ':'.join((pathlib.Path(callers[-1].filename).name, callers[-1].name,
                          str(callers[-1].lineno))) if callers else 'outside-oah'
-        existing = path in self.initial or any(path.startswith(folder + os.sep) for folder in self.earlier_runs)
         try:
             self.raw_lstat(path)
             present = True
         except FileNotFoundError:
             present = False
-        key = (path if existing else re.sub(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', '{new-run}', path),
-               operation, site)
+        key = (normalized, operation, site)
         occurrence = self.counts.get(key, 0) + 1
         self.counts[key] = occurrence
         chain = tuple(pathlib.Path(frame.filename).name + ':' + frame.name for frame in callers)
@@ -115,13 +118,18 @@ class ObservedFiles:
         if self.target is not None and (self.key(access), access.operation, access.site, access.occurrence) == (
                 self.key(self.target), self.target.operation, self.target.site, self.target.occurrence):
             self.reached.append(access)
-            for previous in self.initial | {item.path for item in self.accesses}:
-                if self.selected(previous):
-                    try:
-                        with self.raw_open(previous, 'rb') as handle:
-                            self.retained[pathlib.Path(previous)] = handle.read()
-                    except FileNotFoundError:
-                        continue
+            self.active = False
+            try:
+                current = {str(item) for item in pathlib.Path(self.state).rglob('*') if item.is_file()}
+                for previous in self.initial | current:
+                    if self.selected(previous):
+                        try:
+                            with self.raw_open(previous, 'rb') as handle:
+                                self.retained[pathlib.Path(previous)] = handle.read()
+                        except FileNotFoundError:
+                            continue
+            finally:
+                self.active = True
             self.failed = path
         if self.failed == path:
             number = {'missing': errno.ENOENT, 'not-regular': errno.EISDIR, 'denied': errno.EACCES,
