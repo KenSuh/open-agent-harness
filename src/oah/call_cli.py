@@ -433,12 +433,12 @@ def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, *, 
 @boundaries.entry("worker")
 def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
     from oah.launchers import orca as orca_launcher
-    from oah.discovery import boundaries, records, runfiles
+    from oah.discovery import boundaries, runfiles
 
     with runfiles.WorkerRun(runs.find_run(state, args.run_id)) as run:
         try:
             with boundaries.command("worker"):
-                data = records.run_json(run, "result.json")
+                data = run.read()
                 launcher = data.get("launcher")
                 if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
                     print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is not a queued Orca run, so nothing "
@@ -450,8 +450,8 @@ def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pat
                 print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
                       f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
                 call.execute(prepared)
-                return _report(records.run_json(run, "result.json"), False)
-        except EngineError as exc:
+                return _report(run.read(), False)
+        except boundaries.CommandRefusal as exc:
             unreadable_result = getattr(exc, "record_path", None) == run.path / "result.json"
             if not unreadable_result or exc.code == "OAH_RUN_LAUNCH_INVALID":
                 try:

@@ -246,6 +246,9 @@ def run_text(run) -> str:
     from oah.runs import WorkerRun
 
     path = run.path / "prompt.md"
+    if isinstance(run, WorkerRun) and run._prompt is not None:
+        raw = location(path, run.prompt_path.read_bytes)
+        return _parse(path, raw, limit=None, parse=lambda raw: _text(raw, path))
     raw = _read(path, lambda source: run._read_bytes("prompt.md") if isinstance(run, WorkerRun) else source.read_bytes(),
                 required=True, limit=None, resolve=lambda: run.file_path("prompt.md"), parse=lambda raw: _text(raw, path))
     assert raw is not None
