@@ -178,7 +178,7 @@ CATCHES: Final[tuple[tuple[str, str, str], ...]] = (
     ("call.py", "advise", "Exception"),
     ("call.py", "advise", "ImportError"),
     ("call.py", "background_main", "(EngineError, StorageError)"),
-    ("call.py", "check_prepared", "EngineError"),
+    ("call.py", "check_prepared", "boundaries.CommandRefusal"),
     ("call.py", "dispatch_guard", "(LeaseError, EngineError)"),
     ("call.py", "dispatch_guard", "DesignError"),
     ("call.py", "dispatch_guard", "EngineError"),

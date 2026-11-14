@@ -1879,7 +1879,7 @@ def check_prepared(prepared: Prepared) -> None:
     try:
         with boundaries.command("launch"), _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
             pass
-    except EngineError as exc:
+    except boundaries.CommandRefusal as exc:
         _record_refusal(prepared, exc)
         raise
 
