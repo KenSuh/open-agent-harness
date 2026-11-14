@@ -54,6 +54,54 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
     selected_parent = correction_fixture.FrozenCorrectionTest.selected_parent
     correct = correction_fixture.FrozenCorrectionTest.correct
 
+    def test_frozen_correction_does_not_read_its_new_result_before_launch(self):
+        from oah import call
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('freeze')
+        execute, changed = call.execute, []
+        observer = ObservedFiles(case.storage, extra=case.extra)
+        selected_file, executing = observer.selected, False
+
+        def selected(path):
+            return executing and selected_file(path)
+
+        def after_freeze(prepared, **options):
+            nonlocal executing
+            self.assertIsNotNone(call._CORRECTION_PUBLICATION.get())
+            path = prepared.run.path / 'result.json'
+            path.write_bytes(b'\xff')
+            changed.append(path)
+            executing = True
+            try:
+                return execute(prepared, **options)
+            finally:
+                executing = False
+
+        with mock.patch.object(call, 'execute', after_freeze), mock.patch.object(observer, 'selected', selected):
+            result = case.invoke(observer)
+        self.assertEqual(len(changed), 1, 'change only the newly published correction result at execute entry')
+        self.assertEqual(result[0], 1, str(result))
+        self.assertIn('OAH_FIX_STATE_CHANGED:', result[2])
+        self.assertNotIn('Traceback', result[2])
+        self.assertEqual((case.engine_spawns, case.runner_creations), (1, 0),
+                         'launch exactly once from the frozen values before the B publication comparison')
+        self.assertEqual(changed[0].read_bytes(), b'\xff', 'keep the changed correction output')
+        for path, raw in case.before.items():
+            if path.suffix == '.jsonl':
+                self.assertTrue(path.read_bytes().startswith(raw), 'keep each earlier history record when appending the start')
+            else:
+                self.assertEqual(path.read_bytes(), raw, f'keep the earlier {path.name}')
+        payloads = [row for row in observer.accesses if pathlib.Path(row.path).name == 'result.json'
+                    and row.operation in ('open', 'read', 'os.open', 'os.read')]
+        self.assertEqual(payloads, [], 'the frozen launch must not reopen its new result')
+        print('FROZEN_RESULT', json.dumps(dict(exit=result[0], code='OAH_FIX_STATE_CHANGED',
+            engines=case.engine_spawns, runners=case.runner_creations, result_payload_reads=len(payloads))), flush=True)
+
     def test_skills_find_stage_refusal_keeps_its_code_through_the_cli(self):
         from oah.routing import RoutingError
 

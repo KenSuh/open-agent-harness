@@ -3560,7 +3560,7 @@ def _launch_inputs(prepared, publication):
 
     run = prepared.run
     with boundaries.refusals("launch"):
-        if prepared.e_digest is not None:
+        if prepared.e_digest is not None and publication is None:
             result = records.run_json(run, "result.json")
             if not isinstance(result, dict):
                 raise ValueError("the prepared result is not a JSON object")

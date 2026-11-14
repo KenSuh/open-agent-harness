@@ -171,10 +171,5 @@ SUCCESS_KEPT_RUN_FILES = (
 OUTPUT_MATRIX = {
     'ignored-address': (('', 0), ('', 0), ('', 0)),
     'address-only': (('', 0), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
-    'launch-read-after-address': (('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_STATE_IO', 69)),
-    'launch-address-before-read': (('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
-    'admission-read-after-address': (('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_STATE_IO', 69)),
-    'admission-address-before-read': (('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
-    'optional-summary-before-launch': (('OAH_RUN_LAUNCH_INVALID', 1), ('OAH_SKILL_STATE_CORRUPT', 69), ('OAH_STATE_IO', 69)),
     'captured-result': (('OAH_FIX_STATE_CHANGED', 1), ('OAH_STATE_IO', 69), ('OAH_STATE_IO', 69)),
 }

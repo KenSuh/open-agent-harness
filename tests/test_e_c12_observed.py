@@ -362,13 +362,13 @@ def excluded_access(name, access, state):
     if metadata and pathlib.Path(access.path).name == 'launch.json' and any(
             context in access.chain for context in ('call.py:_launch_main', 'call.py:background_main')):
         return None
-    if metadata and 'runs.py:result' in access.chain and 'runs.py:_write_result' not in access.chain:
-        return 'B run result update', 'pre-update metadata check; EACCES classification remains a B follow-up'
     if metadata and name == 'freeze' and any(context in access.chain for context in (
             'call.py:_write_result', 'fix.py:_end')):
         if pathlib.Path(access.path).name == 'correction.json' and 'fix.py:_end' in access.chain:
             return 'B correction manifest', 'required output address check at final settlement'
         return 'B correction optional output', 'optional diagnostic writer keeps the base settlement outcome'
+    if metadata and 'runs.py:result' in access.chain and 'runs.py:_write_result' not in access.chain:
+        return 'B run result update', 'pre-update metadata check; EACCES classification remains a B follow-up'
     if metadata and 'call.py:_design_after' in access.chain:
         return 'B design after output', 'write-only design-after address check'
     if metadata and 'call.py:_finish_inline_delivery' in access.chain:
@@ -393,8 +393,12 @@ def excluded_access(name, access, state):
 OUTPUT_OWNERS = {
     'B run publication/output validation', 'B run result update', 'B design after output',
     'B design delivery output', 'B correction manifest', 'B correction optional output',
-    'B atomic append validation',
+    'B atomic append validation', 'review/fix publication',
 }
+ADDRESS_OWNERS = OUTPUT_OWNERS - {
+    'B atomic append validation', 'B correction optional output', 'B run result update',
+    'review/fix publication'}
+QUERY_PREFIX_OWNERS = ADDRESS_OWNERS | {'B run result update', 'B correction optional output'}
 
 PRESENCE_MATRIX = {'native-offer-at-handoff': ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept')}
 METADATA_OPERATIONS = frozenset(('stat', 'lstat', 'exists', 'is_file', 'fstat'))
@@ -414,43 +418,46 @@ def presence_admission(access, fault):
         pathlib.Path(access.path).name == 'native-offer.json' and 'call.py:check_prepared' in access.chain
 
 
-def output_row(name, access, path, owner):
+def output_row(access, owner):
     strict = access.site == 'runs.py:_contained_path:538'
-    filename = pathlib.Path(path).name
-    address = 'address-only' if strict else 'ignored-address'
-    launch = 'launch-address-before-read' if strict else 'launch-read-after-address'
-    admission = 'admission-address-before-read' if strict else 'admission-read-after-address'
     if owner == 'B atomic append validation':
         return 'address-only'
     if owner == 'B correction optional output':
         return 'ignored-address' if access.phase == 'after-engine' else 'captured-result'
-    if owner in ('B correction manifest', 'B design delivery output'):
-        return address
-    if owner == 'B design after output':
-        return launch
-    if '/.' in path and '.tmp/' in path or filename == 'last-message.md' or (
-            filename == 'launch.json' and name == 'admission-orca') or (
-            name == 'freeze' and filename != 'result.json'):
-        return 'address-only' if filename == 'last-message.md' and name == 'admission-needs' else address
-    if name == 'admission-native':
-        return address
-    if owner == 'B run result update':
-        if name == 'freeze':
-            return 'captured-result'
-        return admission if any(context in access.chain for context in (
-            'call.py:_finish_prepare', 'call.py:_prepare_native')) else launch
-    if filename == 'result.json':
-        if access.phase != 'before':
-            return launch if name == 'worker' else address
-        if name == 'freeze':
-            return 'captured-result'
-        return admission if any(context in access.chain for context in (
-            'call.py:_finish_prepare', 'call.py:_prepare_native')) else launch
-    if strict:
-        return 'launch-address-before-read'
-    if filename == 'skills.json' and name in ('admission', 'launch', 'admission-needs', 'admission-saved'):
-        return 'optional-summary-before-launch'
-    return 'launch-read-after-address'
+    if owner in ('B run result update', 'review/fix publication'):
+        return 'captured-result'
+    if owner not in ADDRESS_OWNERS:
+        raise AssertionError('an observed output address needs its literal owner')
+    return 'address-only' if strict else 'ignored-address'
+
+
+def output_reader_ordinal(accesses, ordinal, rule, owners, fault):
+    access = accesses[ordinal]
+    owner = owners[ordinal]
+    if owner is None or owner[0] not in QUERY_PREFIX_OWNERS or \
+            fault != 'missing' and access.site == 'runs.py:_contained_path:538':
+        return None
+    later = [index for index in range(ordinal + 1, len(accesses)) if accesses[index].path == access.path]
+    if fault != 'missing':
+        return next((index for index in later
+            if accesses[index].owned and not rule.is_input(accesses[index]) or
+            owners[index] is not None and owners[index][0] in OUTPUT_OWNERS
+            and (owners[index][0] == 'review/fix publication'
+                 or accesses[index].site == 'runs.py:_contained_path:538')
+            and OUTPUT_MATRIX[output_row(accesses[index], owners[index][0])][
+                ('missing', 'denied', 'eio').index(fault)] != ('', 0)), None)
+    later = [index for index in later if accesses[index].owned and not rule.is_input(accesses[index])
+             or owners[index] is not None and owners[index][0] == 'review/fix publication']
+    payload = next((index for index in later if accesses[index].operation in BYTE_OPERATIONS
+        and (owners[index] is not None or rule.required and rule.absence(accesses[index])[0] is None
+             or rule.absence(accesses[index])[1] is not None
+             and rule.absence(accesses[index])[1][1] != 0)), None)
+    if payload is None:
+        return None
+    return next(index for index in later if index <= payload
+                and accesses[index].reader_scope == accesses[payload].reader_scope
+                and (accesses[payload].owned or accesses[index].chain == accesses[payload].chain
+                     and accesses[index].site == accesses[payload].site))
 
 
 def boundary_at(name, access):
@@ -462,6 +469,41 @@ def boundary_at(name, access):
             return 'launch'
         return 'worker' if name == 'worker' else 'admission'
     return BOUNDARY[name]
+
+
+@dataclasses.dataclass(frozen=True)
+class OwnerOutcome:
+    expected: tuple[str, int]
+    run_policy: str
+    kept_policy: str
+    dispatches: tuple[int, int]
+    absent_context: str | tuple[str, ...] | None
+
+
+def owner_outcome(name, access, fault, rule):
+    boundary = boundary_at(name, access)
+    if access.phase == 'before':
+        expected = OWNER_MATRIX[boundary][FAULTS.index(fault)]
+        run_policy = OWNER_RUN_MATRIX[boundary][FAULTS.index(fault)]
+        kept_policy = OWNER_KEPT_MATRIX[boundary][FAULTS.index(fault)]
+        dispatches = (0, 0)
+    else:
+        outward, exit_code, run_policy, kept_policy, engines, runners = AFTER_MATRIX[
+            boundary, access.phase][FAULTS.index(fault)]
+        expected, dispatches = (outward, exit_code), (engines, runners)
+    context, absent = rule.absence(access) if fault == 'missing' else (None, None)
+    if fault == 'missing' and (not rule.required or context is not None):
+        assert absent is not None
+        expected = absent[:2]
+        if len(absent) == 3:
+            run_policy = absent[2]
+    if rule.is_input(access):
+        assert rule.input_id is not None
+        expected = INPUT_MATRIX[rule.input_id][FAULTS.index(fault)]
+    if presence_admission(access, fault):
+        outward, exit_code, run_policy = PRESENCE_MATRIX['native-offer-at-handoff']
+        expected = (outward, exit_code)
+    return OwnerOutcome(expected, run_policy, kept_policy, dispatches, context)
 
 
 def label(access, state):
@@ -497,6 +539,75 @@ class ObservedAccessTest(unittest.TestCase):
             self.assertTrue(classified, 'the first invalid byte read must be classified by the record owner')
             self.assertEqual(classified[0], (pathlib.Path(expected.path), 'invalid-content', 1),
                              'the first affected byte read must refuse before a later read can mask it')
+
+    def assert_output_query(self, observer, expected):
+        self.assertTrue(observer.followup_reached, 'reach the required reader bound by the healthy trace')
+        self.assertEqual(ObservedFiles.query_key(observer.followup_reached[0]),
+                         ObservedFiles.query_key(expected), 'reach that exact reader purpose and phase')
+
+    def test_output_address_before_a_required_read_uses_that_reader_owner(self):
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', Clock))
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
+        owners = [excluded_access(case.name, row, case.storage) for row in accesses]
+        ordinal = next(index for index, row in enumerate(accesses)
+            if pathlib.Path(row.path).name == 'result.json' and row.operation == 'stat'
+            and row.site == 'runs.py:_contained_path:538' and row.phase == 'after-runner'
+            and 'runs.py:_write_result' in row.chain and 'call.py:_launch_main' in row.chain)
+        access, rule = accesses[ordinal], FileRule('runs/*/{new-run}/result.json')
+        owner = excluded_access(case.name, access, case.storage)
+        assert owner is not None
+        reader = output_reader_ordinal(accesses, ordinal, rule, owners, 'missing')
+        self.assertIsNotNone(reader, 'the background child write requires a later parent result read')
+        assert reader is not None
+        query = accesses[reader]
+        self.assertIn('call.py:start_background', query.chain)
+        self.assertNotIn('call.py:_launch_main', query.chain, 'bind the required parent read')
+        for fault in ('missing', 'denied', 'eio'):
+            with self.subTest(fault=fault):
+                case.restore()
+                routed = output_reader_ordinal(accesses, ordinal, rule, owners, fault)
+                observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault=fault,
+                    followup=accesses[routed] if routed is not None else None)
+                with mock.patch('oah.runs.RETRY_SECONDS', 0.01), mock.patch('oah.atomic.RETRY_SECONDS', 0.01):
+                    result = case.invoke(observer)
+                self.assertTrue(observer.reached)
+                expected = owner_outcome(case.name, query, fault, rule).expected if routed is not None else \
+                    OUTPUT_MATRIX['address-only'][('missing', 'denied', 'eio').index(fault)]
+                self.assertEqual(result[0], expected[1], str(result))
+                self.assertIn(expected[0] + ':', result[2])
+                self.assertNotIn('Traceback', result[2])
+                self.assertEqual((case.engine_spawns, case.runner_creations), (0, 1))
+                if routed is not None:
+                    self.assert_output_query(observer, query)
+                    for path, raw in observer.followup_retained.items():
+                        self.assertEqual(path.read_bytes(), raw, 'keep each record at the later required query')
+                else:
+                    self.check_run_state(case, observer, 'at-access-kept')
+                print('OS_OUTPUT_QUERY', json.dumps(dict(fault=fault, code=expected[0], exit=result[0],
+                    bound_reader=None if routed is None else dict(operation=query.operation, site=query.site,
+                        chain=query.chain, reader_scope=query.reader_scope, phase=query.phase))), flush=True)
+        case.restore()
+        observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault='missing', persistent=False)
+        result = case.invoke(observer)
+        self.assertTrue(observer.reached)
+        self.assertEqual(result[0], 0, str(result))
+        self.assertNotIn('Traceback', result[2])
+        self.assertTrue(any(ObservedFiles.query_key(row) == ObservedFiles.query_key(query)
+                            for row in observer.accesses), 'the address-only control still reaches the healthy parent read')
+        self.check_success(case, observer, owner)
+        self.assertEqual((case.engine_spawns, case.runner_creations), (0, 1))
+        print('OS_OUTPUT_QUERY', json.dumps(dict(fault='address-only-missing', code='', exit=result[0])), flush=True)
 
     def test_binding_publication_metadata_refuses_at_its_query(self):
         now = dt.datetime.now(dt.timezone.utc)
@@ -674,7 +785,7 @@ class ObservedAccessTest(unittest.TestCase):
                         self.check_success(case, observer, owner)
                     print('OS_OUTPUT_ADDRESS', json.dumps(dict(operation=operation, fault=fault,
                         code=expected[0], exit=result[0], chain=access.chain)), flush=True)
-                    self.assertEqual(output_row(case.name, access, label(access, case.storage), owner[0]),
+                    self.assertEqual(output_row(access, owner[0]),
                                      expected_row, 'a final output write keeps the owner address row')
 
     def test_observed_accesses_have_declared_owners(self):
@@ -690,6 +801,7 @@ class ObservedAccessTest(unittest.TestCase):
                 try:
                     case.scenario(name)
                     accesses = case.observe(lambda observer: self.check_success(case, observer))
+                    owners = [excluded_access(name, row, case.storage) for row in accesses]
                     paths, contexts = set(), set()
                     for ordinal, access in enumerate(accesses):
                         path = label(access, case.storage)
@@ -705,6 +817,12 @@ class ObservedAccessTest(unittest.TestCase):
                         excluded = excluded_access(name, access, case.storage)
                         if excluded:
                             outputs.add((excluded[0], access.phase))
+                            if excluded[0] in QUERY_PREFIX_OWNERS:
+                                reader = output_reader_ordinal(accesses, ordinal, rule, owners, 'missing')
+                                if reader is not None:
+                                    query_owner = owners[reader]
+                                    self.assertTrue(query_owner is None or query_owner[0] == 'review/fix publication',
+                                                    'the required query needs its own direct missing cell')
                         elif not rule.is_input(access):
                             phases.add((boundary_at(name, access), access.phase))
                         context, _outcome = rule.absence(access)
@@ -732,9 +850,10 @@ class ObservedAccessTest(unittest.TestCase):
             ('B run result update', 'after-runner'), ('lane C design sources', 'before'),
             ('review/fix publication', 'before'), ('review/fix publication', 'after-engine')})
 
-    def check_run_state(self, case, observer, status, *, at_content=False):
+    def check_run_state(self, case, observer, status, *, at_content=False, at_followup=False):
         paths = list(case.storage.glob('runs/*/r*/result.json'))
-        snapshot = observer.content_retained if at_content else observer.retained
+        snapshot = observer.followup_retained if at_followup else \
+            observer.content_retained if at_content else observer.retained
         retained = {path: raw for path, raw in snapshot.items() if path.name == 'result.json'}
         if status in ('kept', 'at-access-kept'):
             self.assertEqual(set(paths), set(retained))
@@ -873,9 +992,11 @@ class ObservedAccessTest(unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario(name)
         accesses = case.observe(lambda observer: self.check_success(case, observer))
+        owners = [excluded_access(name, row, case.storage) for row in accesses]
         self.assertTrue(accesses)
         self.assertEqual((case.engine_spawns, case.runner_creations), SUCCESS_DISPATCH[name])
         reached, specified, contexts, content_links, direct_content = set(), set(), set(), set(), set()
+        output_links, direct_missing = set(), set()
         content_targets = {index: content_read_ordinal(accesses, index) for index, row in enumerate(accesses)
                            if row.operation in METADATA_OPERATIONS}
         for ordinal, access in enumerate(accesses):
@@ -895,9 +1016,23 @@ class ObservedAccessTest(unittest.TestCase):
                                   occurrence=access.occurrence, fault=fault):
                     target = content_targets.get(ordinal) if fault == 'invalid-content' else None
                     routed = fault == 'invalid-content' and access.operation in METADATA_OPERATIONS and target is not None
-                    outcome_access = accesses[target] if routed and target is not None else access
+                    query = output_reader_ordinal(accesses, ordinal, rule, owners, fault) if excluded else None
+                    outcome_access = accesses[query] if query is not None else \
+                        accesses[target] if routed and target is not None else access
                     outcome_input = rule.is_input(outcome_access)
                     route = None
+                    output_route = None
+                    if query is not None:
+                        query_owner = owners[query]
+                        if fault == 'missing':
+                            self.assertTrue(query_owner is None or query_owner[0] == 'review/fix publication',
+                                            'the required reader needs a direct missing cell')
+                        output_route = dict(kind='first-required-query' if fault == 'missing' else 'first-later-query',
+                            ordinal=query, operation=outcome_access.operation, site=outcome_access.site,
+                            reader_scope=outcome_access.reader_scope, phase=outcome_access.phase,
+                            boundary=boundary_at(name, outcome_access),
+                            owner=query_owner,
+                            absent_context=rule.absence(outcome_access)[0] if fault == 'missing' else None)
                     if fault == 'invalid-content' and access.operation in METADATA_OPERATIONS:
                         route = dict(kind='first-clean-byte-read' if routed else 'metadata-presence',
                             ordinal=target, operation=outcome_access.operation, site=outcome_access.site,
@@ -908,7 +1043,7 @@ class ObservedAccessTest(unittest.TestCase):
                                               'the clean byte read needs its own direct content cell')
                     case.restore()
                     observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault=fault,
-                                             defer_content=routed)
+                                             defer_content=routed, followup=outcome_access if query is not None else None)
                     classified = []
                     constructor = records.RecordRefusal.__init__
 
@@ -932,27 +1067,64 @@ class ObservedAccessTest(unittest.TestCase):
                                      'reach the same recorded read purpose as the control run')
                     if routed:
                         self.assert_content_read(observer, outcome_access, classified)
+                    if query is not None:
+                        self.assert_output_query(observer, outcome_access)
                     reached.add((ordinal, fault))
                     codes = [code for code in re.findall(r'(?m)^(OAH_[A-Z_]+(?:\([^\n:]+\))?):', result[2])
                              if code not in ('OAH_STAGE_OVERRIDDEN', 'OAH_MODEL_UNKNOWN_FAMILY', 'OAH_FIX_STARTED',
                                              'OAH_FIX_APPLIED')]
                     code = codes[0] if result[0] and codes else ''
-                    print('OS_CASE', json.dumps(dict(command=name, path=path, operation=access.operation,
+                    print('OS_CASE', json.dumps(dict(command=name, ordinal=ordinal, path=path, operation=access.operation,
                         site=access.site, occurrence=access.occurrence, fault=fault, code=code,
                         exit=result[0], phase=access.phase, engine_spawns=case.engine_spawns,
                         runner_creations=case.runner_creations, boundary=boundary_at(name, outcome_access),
                         fault_boundary=boundary_at(name, access),
                         chain=access.chain, absent_context=rule.absence(access)[0] if fault == 'missing' else None,
-                        content_route=route,
+                        content_route=route, output_route=output_route,
                         admission='native-offer-at-handoff' if presence_admission(access, fault) else None,
                         excluded=excluded, input=rule.input_id if outcome_input else None,
                         fault_input=rule.input_id if initial_input else None)), flush=True)
                     if excluded:
+                        if query is not None:
+                            if owners[query] is not None:
+                                query_owner = owners[query]
+                                assert query_owner is not None
+                                row = output_row(outcome_access, query_owner[0])
+                                self.assertEqual((code, result[0]),
+                                    OUTPUT_MATRIX[row][('missing', 'denied', 'eio').index(fault)], str(result))
+                                self.assertEqual((case.engine_spawns, case.runner_creations),
+                                    (outcome_access.engine_spawns, outcome_access.runner_creations),
+                                    'the later required query keeps its own refusal and dispatch phase')
+                                if outcome_access.phase != 'before':
+                                    self.check_run_state(case, observer, 'at-access-kept', at_followup=True)
+                                for earlier, raw in observer.followup_retained.items():
+                                    self.assertEqual(earlier.read_bytes(), raw,
+                                                     'keep each earlier record at the later owner query')
+                                if fault == 'missing':
+                                    output_links.add((ordinal, query))
+                                continue
+                            outcome = owner_outcome(name, outcome_access, fault, rule)
+                            self.assertEqual((code, result[0]), outcome.expected, str(result))
+                            self.assertNotIn('Traceback', result[2])
+                            self.assertEqual((case.engine_spawns, case.runner_creations), outcome.dispatches,
+                                             'no dispatch after the bound required query')
+                            self.check_run_state(case, observer, outcome.run_policy, at_followup=True)
+                            self.assertEqual(outcome.kept_policy, 'inputs-at-access')
+                            for earlier, raw in observer.followup_retained.items():
+                                if outcome_access.phase == 'before' and earlier.name == 'result.json' \
+                                        and str(earlier) != observer.failed:
+                                    continue
+                                self.assertEqual(earlier.read_bytes(), raw, 'keep each earlier record at the bound query')
+                            if fault == 'missing':
+                                output_links.add((ordinal, query))
+                            continue
                         if excluded[0] in OUTPUT_OWNERS:
-                            row = output_row(name, access, path, excluded[0])
+                            row = output_row(access, excluded[0])
                             expected = OUTPUT_MATRIX[row][('missing', 'denied', 'eio').index(fault)]
                             self.assertEqual((code, result[0]), expected, str(result))
                             self.__class__.output_cells.add((row, fault))
+                            if fault == 'missing' and excluded[0] == 'review/fix publication':
+                                direct_missing.add(ordinal)
                         self.assertEqual((case.engine_spawns, case.runner_creations),
                             SUCCESS_DISPATCH[name] if result[0] == 0 else
                             (access.engine_spawns, access.runner_creations), 'no dispatch after an output fault')
@@ -964,34 +1136,16 @@ class ObservedAccessTest(unittest.TestCase):
                         if not result[0]:
                             self.check_success(case, observer, excluded)
                         continue
-                    boundary = boundary_at(name, outcome_access)
-                    if outcome_access.phase == 'before':
-                        expected = OWNER_MATRIX[boundary][FAULTS.index(fault)]
-                        run_policy = OWNER_RUN_MATRIX[boundary][FAULTS.index(fault)]
-                        kept_policy = OWNER_KEPT_MATRIX[boundary][FAULTS.index(fault)]
-                        dispatches = (0, 0)
-                    else:
-                        outward, exit_code, run_policy, kept_policy, engines, runners = AFTER_MATRIX[
-                            boundary, outcome_access.phase][FAULTS.index(fault)]
-                        expected, dispatches = (outward, exit_code), (engines, runners)
-                    context, absent = rule.absence(access) if fault == 'missing' else (None, None)
-                    if fault == 'missing':
-                        if not rule.required or context is not None:
-                            assert absent is not None
-                            expected = absent[:2]
-                            if len(absent) == 3:
-                                run_policy = absent[2]
-                    if outcome_input:
-                        assert rule.input_id is not None
-                        expected = INPUT_MATRIX[rule.input_id][FAULTS.index(fault)]
-                    if presence_admission(access, fault):
-                        outward, exit_code, run_policy = PRESENCE_MATRIX['native-offer-at-handoff']
-                        expected = (outward, exit_code)
+                    outcome = owner_outcome(name, outcome_access, fault, rule)
+                    expected, run_policy, kept_policy, dispatches, context = (
+                        outcome.expected, outcome.run_policy, outcome.kept_policy, outcome.dispatches, outcome.absent_context)
                     self.assertEqual((code, result[0]), expected, str(result))
                     if presence_admission(access, fault):
                         self.__class__.presence_cells.add('native-offer-at-handoff')
                     if fault == 'missing' and context is not None:
                         contexts.add((index, context))
+                    if fault == 'missing':
+                        direct_missing.add(ordinal)
                     if fault == 'invalid-content' and access.operation in BYTE_OPERATIONS:
                         direct_content.add(ordinal)
                     if routed:
@@ -1046,6 +1200,8 @@ class ObservedAccessTest(unittest.TestCase):
         self.assertEqual(reached, expected_cells, 'every observed access and every fault cell needs a reached case')
         self.assertTrue({target for _source, target in content_links} <= direct_content,
                         'each clean byte read selected by metadata content needs its own reached direct content cell')
+        self.assertTrue({target for _source, target in output_links} <= direct_missing,
+                        'each required query selected by an output address needs its own reached direct missing cell')
         self.__class__.completed[name] = dict(accesses=len(accesses), cells=len(reached))
 
     def test_process_admission_observed_files(self):

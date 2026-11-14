@@ -30,14 +30,19 @@ class Access:
     runner_creations: int = 0
     claim_present: bool = False
     file_occurrence: int = 0
+    reader_scope: tuple[str, ...] = ()
 
 
 class ObservedFiles:
-    def __init__(self, state, *, extra=(), fault=None, target=None, defer_content=False):
+    def __init__(self, state, *, extra=(), fault=None, target=None, defer_content=False,
+                 followup=None, persistent=True):
         self.state = os.path.abspath(state)
         self.extra = {os.path.abspath(path) for path in extra}
         self.fault, self.target = fault, target
         self.defer_content = defer_content
+        self.followup, self.persistent = followup, persistent
+        self.followup_reached = []
+        self.followup_retained = {}
         self.accesses = []
         self.counts = {}
         self.file_counts = {}
@@ -55,6 +60,7 @@ class ObservedFiles:
         self.earlier_runs = {str(pathlib.Path(path).parent) for path in self.initial
                              if re.fullmatch(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', pathlib.Path(path).parent.name)}
         self.failed = None
+        self.observed_path = None
         self.retained = {}
         self.phase: Callable[[], tuple[str, int, int]] = lambda: ('before', 0, 0)
 
@@ -88,6 +94,11 @@ class ObservedFiles:
         return access.path if access.existing else re.sub(
             r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', '{new-run}', access.path)
 
+    @classmethod
+    def query_key(cls, access):
+        return (cls.key(access), access.operation, access.site, access.chain, access.reader_scope,
+                access.phase, access.engine_spawns, access.runner_creations)
+
     def snapshot(self):
         self.active = False
         try:
@@ -117,10 +128,16 @@ class ObservedFiles:
         file_key = (normalized, operation)
         file_occurrence = self.file_counts.get(file_key, 0) + 1
         self.file_counts[file_key] = file_occurrence
-        if self.target is not None and path != self.failed and (normalized, operation) != (
+        if self.target is not None and path != self.observed_path and (normalized, operation) != (
                 self.key(self.target), self.target.operation):
             return None
         frames = traceback.extract_stack()
+        read_at = next((index for index, frame in enumerate(frames)
+            if frame.filename.replace('\\', '/').endswith('/discovery/records.py')
+            and frame.name == '_read'), None)
+        reader_scope = tuple(pathlib.Path(frame.filename).name + ':' + frame.name + ':' + str(frame.lineno)
+            for frame in frames[:read_at + 1] if '/src/oah/' in frame.filename.replace('\\', '/')) \
+            if read_at is not None else ()
         owned = any(frame.filename.replace('\\', '/').endswith('/discovery/records.py') for frame in frames)
         input_owned = any(frame.filename.replace('\\', '/').endswith('/discovery/inputs.py') for frame in frames)
         callers = [frame for frame in frames if '/src/oah/' in frame.filename.replace('\\', '/')
@@ -143,14 +160,21 @@ class ObservedFiles:
         except FileNotFoundError:
             claim_present = False
         access = Access(path, operation, site, owned, existing, occurrence, chain, input_owned, present,
-                        phase, engine_spawns, runner_creations, claim_present, file_occurrence)
+                        phase, engine_spawns, runner_creations, claim_present, file_occurrence, reader_scope)
         self.accesses.append(access)
+        if self.followup is not None and self.reached and self.query_key(access) == self.query_key(self.followup):
+            self.followup_reached.append(access)
+            if len(self.followup_reached) == 1:
+                self.followup_retained = self.snapshot()
         if self.target is not None and (self.key(access), access.operation, access.site, access.occurrence) == (
                 self.key(self.target), self.target.operation, self.target.site, self.target.occurrence):
             self.reached.append(access)
             self.retained = self.snapshot()
             self.failed = path
+            self.observed_path = path
         if self.failed == path:
+            if not self.persistent:
+                self.failed = None
             number = {'missing': errno.ENOENT, 'not-regular': errno.EISDIR, 'denied': errno.EACCES,
                       'eio': errno.EIO}.get(self.fault or '')
             if number is not None:
