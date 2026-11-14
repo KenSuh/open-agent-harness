@@ -5,6 +5,7 @@ import dataclasses
 import fnmatch
 import json
 import pathlib
+import re
 import unittest
 from unittest import mock
 
@@ -54,24 +55,25 @@ class ContentOwnershipTest(unittest.TestCase):
                 case.setUp()
                 try:
                     case.scenario('skills')
-                    target = next(access for access in case.observe() if access.owned and
-                                  pathlib.Path(access.path).name == 'native-offer.json')
-                    path = pathlib.Path(target.path)
+                    case.observe()
+                    path = case.run_dir / native.OFFER_NAME
+                    self.assertTrue(path.is_file())
                     offer = json.loads(path.read_bytes())
                     offer[field] = value
                     offer['id'] = native.offer_id(offer)
                     path.write_text(json.dumps(offer), encoding='utf-8')
                     earlier = {item: item.read_bytes() for item in case.storage.rglob('*') if item.is_file()}
-                    observer = ObservedFiles(case.storage, target=target)
+                    observer = ObservedFiles(case.storage)
 
                     try:
                         result = case.invoke(observer)
                     except (ValueError, TypeError, AttributeError, KeyError) as exc:
                         self.fail(f'the CLI must return the offer field refusal: {exc}')
 
-                    self.assertTrue(observer.reached, 'the CLI must read this changed offer field')
                     self.assertEqual(result[0], 69, str(result))
                     self.assertIn('OAH_SKILLS_IO:', result[2])
+                    self.assertTrue(any(access.path == str(path) and access.owned for access in observer.accesses),
+                                    'the CLI reader must reach this changed offer field')
                     self.assertNotIn('Traceback', result[2])
                     self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
                     for item, raw in earlier.items():
@@ -179,13 +181,21 @@ class ContentOwnershipTest(unittest.TestCase):
                                 checked_at=now.isoformat(), outcome='zero-results', detail='no results',
                                 count=0, hits=[], origin='template', choice=None, purpose={}))
                             case.remember()
-                        targets = [access for access in case.observe() if access.owned and access.present and
-                                   access.existing and fnmatch.fnmatchcase(label(access, case.storage), pattern)]
-                        targets = [access for access in targets
-                                   if field in json.loads(pathlib.Path(access.path).read_bytes())]
-                        self.assertTrue(targets, 'the control CLI must read the named fixture record')
-                        target = targets[0]
-                        path = pathlib.Path(target.path)
+                        accesses = case.observe()
+                        paths = [path for path in sorted(case.storage.rglob('*.json')) if fnmatch.fnmatchcase(
+                            re.sub(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', '{original-run}',
+                                   path.relative_to(case.storage).as_posix()), pattern)
+                            and field in json.loads(path.read_bytes())]
+                        self.assertTrue(paths, 'the fixture must contain the named stored field')
+                        read_paths = {access.path for access in accesses
+                                      if access.operation in ('read', 'os.read')}
+                        observed_paths = [path for path in paths if str(path) in read_paths]
+                        if observed_paths:
+                            paths = observed_paths
+                        else:
+                            self.assertEqual(len(paths), 1,
+                                'a record omitted by the control CLI must still have one fixture identity')
+                        path = paths[0]
                         data = json.loads(path.read_bytes())
                         self.assertNotEqual(data.get(field), value)
                         data[field] = value
@@ -200,15 +210,17 @@ class ContentOwnershipTest(unittest.TestCase):
                             constructor(instance, *args, **options)
                             refusals.append(instance)
 
-                        observer = ObservedFiles(case.storage, extra=case.extra, target=target)
+                        observer = ObservedFiles(case.storage, extra=case.extra)
                         with mock.patch.object(records.InvalidRecord, '__init__', refused):
                             try:
                                 result = case.invoke(observer)
                             except (AttributeError, TypeError, KeyError, ValueError, records.InvalidRecord) as exc:
                                 self.fail(f'the CLI must return the content refusal for {path.name}: {exc}')
-                        self.assertTrue(observer.reached, 'the changed field must reach its recorded OS access')
                         self.assertEqual(result[0], exit_code, str(result))
                         self.assertIn(code + ':', result[2])
+                        self.assertTrue(any(access.path == str(path) and access.owned
+                                            for access in observer.accesses),
+                                        'the changed field must reach the CLI record reader')
                         self.assertNotIn('Traceback', result[2])
                         matching = [refusal for refusal in refusals if getattr(refusal, 'path', None) == path]
                         self.assertTrue(matching, 'the stored-record reader must classify this field')

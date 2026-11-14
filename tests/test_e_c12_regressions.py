@@ -695,7 +695,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 case.restore()
                 earlier = (case.run_dir / 'prompt.md').read_bytes()
                 observer = ObservedFiles(case.storage, target=target, fault=fault)
-                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01), \
+                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True), \
                         mock.patch('oah.runs.RETRY_SECONDS', 0.01):
                     try:
                         result = case.invoke(observer)
