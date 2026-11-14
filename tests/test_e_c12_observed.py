@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import builtins
 import contextlib
 import datetime as dt
 import fnmatch
@@ -8,6 +9,7 @@ import hashlib
 import json
 import pathlib
 import re
+import traceback
 import unittest
 from unittest import mock
 
@@ -396,7 +398,7 @@ OUTPUT_OWNERS = {
 
 PRESENCE_MATRIX = {'native-offer-at-handoff': ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept')}
 METADATA_OPERATIONS = frozenset(('stat', 'lstat', 'exists', 'is_file', 'fstat'))
-BYTE_OPERATIONS = frozenset(('open', 'read', 'os.open', 'os.read'))
+BYTE_OPERATIONS = frozenset(('read', 'os.read'))
 
 
 def content_read_ordinal(accesses, ordinal):
@@ -534,6 +536,68 @@ class ObservedAccessTest(unittest.TestCase):
                         self.assertEqual(path.read_bytes(), raw, 'keep every earlier input at the metadata query')
                 print('OS_LOCATION', json.dumps(dict(fault=fault, code=expected[0], exit=result[0],
                     operation=access.operation, site=access.site, chain=access.chain)), flush=True)
+
+    def test_virtual_byte_fault_does_not_change_the_file_during_later_metadata(self):
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', Clock))
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
+        access = next(row for row in accesses
+            if pathlib.Path(row.path).name == 'result.json' and row.operation == 'open'
+            and 'call.py:_launch_main' in row.chain and 'call.py:_check_e' in row.chain)
+        observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault='invalid-content')
+        opened, writes = builtins.open, []
+
+        def writing(raw, mode='r', *args, **options):
+            if raw in (access.path, pathlib.Path(access.path)) and isinstance(mode, str) and 'w' in mode:
+                writes.append([pathlib.Path(frame.filename).name + ':' + frame.name
+                               for frame in traceback.extract_stack()[-5:]])
+            return opened(raw, mode, *args, **options)
+
+        with mock.patch.object(builtins, 'open', writing):
+            result = case.invoke(observer)
+        self.assertTrue(observer.reached)
+        self.assertEqual(result[0], 1, str(result))
+        self.assertIn('OAH_RUN_LAUNCH_INVALID:', result[2])
+        self.assertNotIn('Traceback', result[2])
+        self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+        print('OS_CONTENT_INJECTION', json.dumps(dict(path=label(access, case.storage),
+            operation=access.operation, site=access.site, writes=writes)), flush=True)
+        self.assertEqual(writes, [], 'a virtual byte fault must not write the file through later metadata')
+        self.assertEqual(observer.content_writes, {})
+        self.assertEqual(pathlib.Path(access.path).read_bytes(), observer.retained[pathlib.Path(access.path)],
+                         'keep the earlier file when only the returned read bytes were changed')
+
+    def test_physical_content_fault_records_the_bytes_the_fixture_wrote(self):
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('worker')
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
+        access = next(row for row in accesses
+            if pathlib.Path(row.path).name == 'result.json' and row.operation == 'os.open')
+        observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault='invalid-content')
+        result = case.invoke(observer)
+        self.assertTrue(observer.reached)
+        self.assertEqual(result[0], 1, str(result))
+        self.assertIn('OAH_RUN_LAUNCH_INVALID:', result[2])
+        self.assertNotIn('Traceback', result[2])
+        self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+        self.assertEqual(observer.content_writes, {access.path: b'\xff'},
+                         'record only the bytes deliberately written by this fixture')
+        self.assertEqual(pathlib.Path(access.path).read_bytes(), b'\xff', 'keep the changed recorded bytes')
+        self.assertTrue((pathlib.Path(access.path).parent / 'worker.claim').is_file())
+        print('OS_CONTENT_WRITES', json.dumps(dict(path=label(access, case.storage),
+            operation=access.operation, bytes=observer.content_writes[access.path].hex())), flush=True)
 
     def test_metadata_content_uses_the_first_clean_trace_read(self):
         from oah.discovery import records
@@ -924,9 +988,7 @@ class ObservedAccessTest(unittest.TestCase):
                             continue
                         if access.phase == 'before' and earlier.name == 'result.json' and str(earlier) != observer.failed:
                             continue
-                        injected_content = fault == 'invalid-content' and observer.failed == str(earlier) and \
-                            access.operation in ('stat', 'lstat', 'fstat', 'os.open') and not observer.defer_content
-                        self.assertEqual(earlier.read_bytes(), b'\xff' if injected_content else raw,
+                        self.assertEqual(earlier.read_bytes(), observer.content_writes.get(str(earlier), raw),
                                          f'{name}: keep the earlier {earlier.name}')
                     self.assertEqual(kept_policy, 'inputs-at-access')
                     if name == 'worker' and outcome_access.phase == 'before' and result[0] and \
@@ -935,9 +997,8 @@ class ObservedAccessTest(unittest.TestCase):
                     if name == 'worker' and access.phase == 'before' and pathlib.Path(access.path).name == 'result.json':
                         self.assertEqual((case.run_dir / 'worker.claim').exists(), access.claim_present or fault != 'eio')
                         raw = (case.run_dir / 'result.json').read_bytes()
-                        expected_raw = b'\xff' if fault == 'invalid-content' and not observer.defer_content and \
-                            access.operation in ('stat', 'lstat', 'fstat', 'os.open') \
-                            else case.before[case.run_dir / 'result.json']
+                        expected_raw = observer.content_writes.get(str(case.run_dir / 'result.json'),
+                            case.before[case.run_dir / 'result.json'])
                         self.assertEqual(raw, expected_raw, 'the queued label is historical for this refused claim')
         self.assertEqual(specified, set(range(len(FILE_MATRIX[name]))), 'each literal file row needs an observed case')
         self.assertEqual(contexts, {(index, context) for index, rule in enumerate(FILE_MATRIX[name])

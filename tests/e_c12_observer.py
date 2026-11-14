@@ -44,6 +44,7 @@ class ObservedFiles:
         self.reached = []
         self.content_accesses = []
         self.content_retained = {}
+        self.content_writes = {}
         self.active = True
         self.descriptors = {}
         self.replaced_read = set()
@@ -103,6 +104,11 @@ class ObservedFiles:
         finally:
             self.active = True
 
+    def write_content(self, path, replacement):
+        with self.raw_open(path, 'wb') as handle:
+            handle.write(replacement)
+        self.content_writes[path] = replacement
+
     def observe(self, path, operation):
         if not self.active or not self.selected(path):
             return None
@@ -151,9 +157,11 @@ class ObservedFiles:
                 kind = PermissionError if self.fault == 'denied' else OSError
                 raise kind(number, 'fixture stored-record access failed', path)
             if self.fault == 'invalid-content':
-                if self.defer_content and operation not in ('open', 'read', 'os.open', 'os.read'):
+                byte_operations = ('open', 'read', 'os.open', 'os.read')
+                if operation not in byte_operations and (self.defer_content or self.target is not None
+                        and self.target.operation in byte_operations):
                     return None
-                if operation in ('open', 'read', 'os.open', 'os.read'):
+                if operation in ('read', 'os.read'):
                     self.content_accesses.append(access)
                     if len(self.content_accesses) == 1:
                         self.content_retained = self.snapshot()
@@ -169,8 +177,8 @@ class ObservedFiles:
         owner = self
 
         class Reader:
-            def __init__(self, handle, path):
-                self.handle, self.path = handle, path
+            def __init__(self, handle, path, mode):
+                self.handle, self.path, self.mode = handle, path, mode
 
             def __enter__(self):
                 self.handle.__enter__()
@@ -185,25 +193,23 @@ class ObservedFiles:
             def read(self, *args):
                 replacement = owner.observe(self.path, 'read')
                 if replacement is not None:
-                    return replacement if 'b' in self.handle.mode else replacement.decode('utf-8')
+                    return replacement if 'b' in self.mode else replacement.decode('utf-8')
                 return self.handle.read(*args)
 
         def opened(operation, raw, mode='r', *args, **kwargs):
             path = self.path(raw)
             reading = isinstance(mode, str) and not any(flag in mode for flag in 'wax+')
-            replacement = self.observe(path, 'open') if reading else None
-            if replacement is not None:
-                return io.BytesIO(replacement) if 'b' in mode else io.StringIO(replacement.decode('utf-8'))
+            if reading:
+                self.observe(path, 'open')
             handle = operation(raw, mode, *args, **kwargs)
-            return Reader(handle, path) if reading and self.selected(path) else handle
+            return Reader(handle, path, mode) if reading and self.selected(path) else handle
 
         def stated(operation, raw, *args, **kwargs):
             path = self.path(raw, kwargs.get('dir_fd'))
             replacement = self.observe(path, 'stat' if operation is real_stat else 'lstat')
             if replacement is not None and path is not None:
                 pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-                with real_open(path, 'wb') as handle:
-                    handle.write(replacement)
+                self.write_content(path, replacement)
             return operation(raw, *args, **kwargs)
 
         def os_open(raw, flags, *args, **kwargs):
@@ -211,8 +217,7 @@ class ObservedFiles:
             if not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
                 replacement = self.observe(path, 'os.open')
                 if replacement is not None and path is not None:
-                    with real_open(path, 'wb') as handle:
-                        handle.write(replacement)
+                    self.write_content(path, replacement)
             descriptor = real_os(raw, flags, *args, **kwargs)
             if path is not None:
                 self.descriptors[descriptor] = path
@@ -231,8 +236,7 @@ class ObservedFiles:
             path = self.path(descriptor)
             replacement = self.observe(path, 'fstat')
             if replacement is not None and path is not None:
-                with real_open(path, 'wb') as handle:
-                    handle.write(replacement)
+                self.write_content(path, replacement)
             return real_fstat(descriptor)
 
         def close(descriptor):
