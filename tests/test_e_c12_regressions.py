@@ -121,15 +121,16 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('freeze')
         accesses = case.observe()
-        targets = [row for row in accesses if row.owned and row.operation == 'open'
-                   and 'call.py:execute' in row.chain and row.phase == 'before']
+        targets = [row for row in accesses if row.operation == 'open'
+                   and 'call.py:execute' in row.chain and 'call.py:_run_prepared' in row.chain
+                   and row.phase == 'before']
         self.assertEqual(len(targets), 4, 'reach the binding, selection index, selection and review rechecks')
         for target in targets:
             for fault in ('denied', 'invalid-content', 'eio'):
                 with self.subTest(path=Path(target.path).name, fault=fault):
                     case.restore()
                     observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
-                    with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01), \
+                    with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True), \
                             mock.patch('oah.runs.RETRY_SECONDS', 0.01), mock.patch('oah.atomic.RETRY_SECONDS', 0.01):
                         result = case.invoke(observer)
                     self.assertTrue(observer.reached, 'reach the named frozen-launch OS access')
