@@ -402,6 +402,13 @@ OUTPUT_OWNERS = {
     'B atomic append validation',
 }
 
+PRESENCE_MATRIX = {'native-offer-at-handoff': ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept')}
+
+
+def presence_admission(access, fault):
+    return fault == 'invalid-content' and not access.present and \
+        pathlib.Path(access.path).name == 'native-offer.json' and 'call.py:check_prepared' in access.chain
+
 
 def output_row(name, access, path, owner):
     strict = access.site == 'runs.py:_contained_path:538'
@@ -467,6 +474,7 @@ class ObservedAccessTest(unittest.TestCase):
     def setUpClass(cls):
         cls.completed = {}
         cls.output_cells = set()
+        cls.presence_cells = set()
 
     def test_observed_accesses_have_declared_owners(self):
         self.assertEqual(set(BOUNDARY), set(FILE_MATRIX))
@@ -697,6 +705,7 @@ class ObservedAccessTest(unittest.TestCase):
                         exit=result[0], phase=access.phase, engine_spawns=case.engine_spawns,
                         runner_creations=case.runner_creations, boundary=boundary_at(name, access),
                         chain=access.chain, absent_context=rule.absence(access)[0] if fault == 'missing' else None,
+                        admission='native-offer-at-handoff' if presence_admission(access, fault) else None,
                         excluded=excluded, input=rule.input_id if initial_input else None)), flush=True)
                     if excluded:
                         if excluded[0] in OUTPUT_OWNERS:
@@ -735,7 +744,12 @@ class ObservedAccessTest(unittest.TestCase):
                     if initial_input:
                         assert rule.input_id is not None
                         expected = INPUT_MATRIX[rule.input_id][FAULTS.index(fault)]
+                    if presence_admission(access, fault):
+                        outward, exit_code, run_policy = PRESENCE_MATRIX['native-offer-at-handoff']
+                        expected = (outward, exit_code)
                     self.assertEqual((code, result[0]), expected, str(result))
+                    if presence_admission(access, fault):
+                        self.__class__.presence_cells.add('native-offer-at-handoff')
                     if fault == 'missing' and context is not None:
                         contexts.add((index, context))
                     self.assertNotIn('Traceback', result[2])
@@ -771,7 +785,8 @@ class ObservedAccessTest(unittest.TestCase):
                         self.assertEqual(earlier.read_bytes(), b'\xff' if injected_content else raw,
                                          f'{name}: keep the earlier {earlier.name}')
                     self.assertEqual(kept_policy, 'inputs-at-access')
-                    if name == 'worker' and access.phase == 'before' and result[0] and pathlib.Path(access.path).name != 'result.json':
+                    if name == 'worker' and access.phase == 'before' and result[0] and \
+                            pathlib.Path(access.path).name != 'result.json' and not presence_admission(access, fault):
                         self.assertEqual(json.loads((case.run_dir / 'result.json').read_bytes())['status'], 'refused')
                     if name == 'worker' and access.phase == 'before' and pathlib.Path(access.path).name == 'result.json':
                         self.assertEqual((case.run_dir / 'worker.claim').exists(), access.claim_present or fault != 'eio')
@@ -863,6 +878,7 @@ class ObservedAccessTest(unittest.TestCase):
 
     def test_z_all_commands_have_reached_every_observed_fault_cell(self):
         self.assertEqual(set(self.completed), set(BOUNDARY), 'each command must finish its reached-access checks')
+        self.assertEqual(self.presence_cells, set(PRESENCE_MATRIX), 'each presence admission row must be reached')
         self.assertEqual(self.output_cells, {(row, fault) for row in OUTPUT_MATRIX
                                            for fault in ('missing', 'denied', 'eio')})
         print('OS_COVERAGE', json.dumps(self.completed, sort_keys=True), flush=True)

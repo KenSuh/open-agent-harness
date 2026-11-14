@@ -297,16 +297,21 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 try:
                     case.scenario(name)
                     target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'native-offer.json')
-                    observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='invalid-content')
+                    for fault, expected, exit_code in (('denied', 'OAH_RUN_LAUNCH_INVALID', 1),
+                                                       ('eio', 'OAH_STATE_IO', 69)):
+                        with self.subTest(fault=fault):
+                            case.restore()
+                            observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
+                            with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True):
+                                result = case.invoke(observer)
 
-                    result = case.invoke(observer)
-
-                    self.assertTrue(observer.reached)
-                    self.assertEqual(result[0], 1, str(result))
-                    self.assertIn('OAH_RUN_LAUNCH_INVALID:', result[2])
-                    saved, = case.storage.glob('runs/t1/r*/result.json')
-                    self.assertEqual(json.loads(saved.read_bytes())['status'], 'refused')
-                    self.assertFalse(case.sent)
+                            self.assertTrue(observer.reached)
+                            self.assertEqual(result[0], exit_code, str(result))
+                            self.assertIn(expected + ':', result[2])
+                            self.assertNotIn('Traceback', result[2])
+                            saved, = case.storage.glob('runs/t1/r*/result.json')
+                            self.assertEqual(json.loads(saved.read_bytes())['status'], 'refused')
+                            self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
                 finally:
                     case.doCleanups()
 

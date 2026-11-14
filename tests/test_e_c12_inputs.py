@@ -28,6 +28,42 @@ class InputContractTest(DeliveryTask, unittest.TestCase):
     request = test_e_relay_times.RelayTimesTest.request
     offered_parent_relay = test_e_spent_evidence.SpentEvidenceTest.offered_parent_relay
 
+    def test_native_offer_presence_keeps_its_admission_refusal_and_existing_record(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', Clock))
+        for name in ('background', 'admission-orca', 'worker'):
+            with self.subTest(command=name):
+                case = Scenario('scenario')
+                case.setUp()
+                try:
+                    case.scenario(name)
+                    access = next(row for row in case.observe() if pathlib.Path(row.path).name == 'native-offer.json'
+                                  and not row.present and 'call.py:check_prepared' in row.chain)
+                    observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault='invalid-content')
+                    code, out, err = case.invoke(observer)
+                    self.assertTrue(observer.reached)
+                    self.assertEqual(code, 1, out + err)
+                    self.assertIn('OAH_RUN_LAUNCH_INVALID:', err)
+                    self.assertIn('not a dispatch authorization', err)
+                    self.assertNotIn('Traceback', err)
+                    self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+                    for path, raw in observer.retained.items():
+                        self.assertEqual(path.read_bytes(), raw, 'keep the existing admission record')
+                    failed = observer.failed
+                    assert isinstance(failed, str)
+                    self.assertEqual(pathlib.Path(failed).read_bytes(), b'\xff')
+                finally:
+                    case.doCleanups()
+
     def test_recorded_parent_expiry_keeps_its_live_capability_refusal(self):
         from oah.capabilities import inventory, plan
 
