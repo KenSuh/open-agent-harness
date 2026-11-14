@@ -77,8 +77,8 @@ class RelayTimesTest(DeliveryTask, unittest.TestCase):
 
                 refused = self.oah(*command)
 
-                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-                self.assertIn("OAH_CAPABILITY_RELAY_REQUIRED(invalid)", refused.stderr)
+                self.assertEqual(refused.returncode, 69, refused.stdout + refused.stderr)
+                self.assertTrue(refused.stderr.startswith("OAH_SKILL_STATE_CORRUPT:"), refused.stderr)
                 self.assertNotIn("Traceback", refused.stderr)
                 self.assertEqual(path.read_bytes(), before)
                 self.assertEqual(self.runs(), [])
