@@ -404,6 +404,7 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
 
     def test_a_damaged_skills_record_refuses_at_the_launch_check(self):
         from oah import call
+        from oah.discovery import preparation, store
 
         self.build_skills(PLAIN)
         prepared = self.prepare()
@@ -424,12 +425,21 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         # A re-sealed record that breaks one wire rule (a body moved to a reference) is refused just the same.
         bundle = json.loads(json.dumps(data["bundle"]))
         bundle["items"][0]["mode"] = "reference"
-        record.write_text(json.dumps(dict(data, bundle=reseal(bundle))), encoding="utf-8")
+        bundle = reseal(bundle)
+        prepared_record = json.loads(json.dumps(data["prepared_e"]))
+        prepared_record["final"]["bundle_digest"] = bundle["digest"]
+        prepared_record["digest"] = store.digest({key: value for key, value in prepared_record.items()
+                                                  if key != "digest"})
+        preparation.parse(prepared_record)
+        record.write_text(json.dumps(dict(data, bundle=bundle, prepared_e=prepared_record)), encoding="utf-8")
+        wire_bytes = record.read_bytes()
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
             with self.assertRaises(call.EngineError) as caught:
                 call.check_prepared(prepared)
         self.assertEqual(caught.exception.code, "OAH_RUN_LAUNCH_INVALID")
-        self.assertIn("inline", str(caught.exception))
+        self.assertIn("a skill body is always inline; only its files go by reference", str(caught.exception))
+        self.assertEqual(record.read_bytes(), wire_bytes)
+        self.assertFalse(self.record.exists())
 
     def test_a_different_installed_copy_falls_back_to_the_reviewed_body_or_refuses_without_it(self):
         self.build_skills(PLAIN)

@@ -46,6 +46,44 @@ CONTENT_CASES = (
 
 
 class ContentOwnershipTest(unittest.TestCase):
+    def test_falsey_bundle_fields_use_the_complete_record_validator(self):
+        from oah.discovery import records
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('skills')
+        path = case.run_dir / 'skills.json'
+        saved = json.loads(path.read_bytes())
+        constructor = records.InvalidRecord.__init__
+        for value in (None, False, 0, 0.0, '', [], {}):
+            with self.subTest(value=value):
+                case.restore()
+                path.write_text(json.dumps(dict(saved, bundle=value)), encoding='utf-8')
+                earlier = {item: item.read_bytes() for item in case.storage.rglob('*') if item.is_file()}
+                classified = []
+
+                def classified_record(instance, target, *args, **options):
+                    classified.append(target)
+                    constructor(instance, target, *args, **options)
+
+                observer = ObservedFiles(case.storage)
+                with mock.patch.object(records.InvalidRecord, '__init__', classified_record):
+                    code, out, err = case.invoke(observer)
+                self.assertEqual(code, 69, out + err)
+                self.assertTrue(err.startswith('OAH_SKILLS_IO:'), err)
+                self.assertIn(path, classified, 'the record owner must classify its changed bundle field')
+                self.assertTrue(any(access.path == str(path) and access.owned for access in observer.accesses))
+                self.assertNotIn('Traceback', err)
+                self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+                for item, raw in earlier.items():
+                    self.assertEqual(item.read_bytes(), raw, 'keep the earlier fixture record')
+                print('CONTENT_BUNDLE', json.dumps(dict(value=value, code='OAH_SKILLS_IO',
+                    exit=69, reached=True)), flush=True)
+        case.restore()
+        code, out, err = case.invoke(ObservedFiles(case.storage))
+        self.assertEqual(code, 0, out + err)
+
     def test_offer_fields_use_the_read_command_category_with_a_matching_offer_id(self):
         from oah.launchers import native
 

@@ -1079,12 +1079,11 @@ def parse_record(data, *, required=False):
 
 
 def bundle_of(run_dir: pathlib.Path) -> dict | None:
-    """The run's SkillBundleV1, or None for a run without one; ValueError when the record cannot be trusted."""
+    """The validated bundle, or None when the run has no managed bundle."""
     from oah.discovery import records
 
     path = pathlib.Path(run_dir) / "skills.json"
-    return records.read_json(path, required=False,
-                             parse=lambda data: parse_bundle(data["bundle"]) if data.get("bundle") else None)
+    return records.read_json(path, required=False, parse=lambda data: parse_record(data).get("bundle"))
 
 
 def oah_read(run_dir: pathlib.Path, item: int, *, at: str) -> tuple[dict, str]:
