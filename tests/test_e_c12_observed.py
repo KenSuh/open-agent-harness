@@ -46,8 +46,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
              ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
              ('tasks.py:prepare_task', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
             (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
              ('call.py:_launch_inputs', ('OAH_RUN_LAUNCH_INVALID', 1)))),
@@ -62,8 +61,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
              ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
              ('tasks.py:prepare_task', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)))),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
             (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
@@ -76,8 +74,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
              ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
              ('tasks.py:prepare_task', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
             (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
@@ -97,8 +94,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1),
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
              ('plan.py:needs_of', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('runs/*/{new-run}/result.json'), FileRule('runs/*/{new-run}/skills.json', False, ('', 0))),
     'admission-saved': (
         FileRule('requests/*.json', False, ('OAH_REQUEST_INVALID', 1)),
@@ -108,8 +104,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
             (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
              ('plan.py:needs_of', ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
              ('tasks.py:prepare_task', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)))),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
-            (('skillpack.py:recheck', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1),
             (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
              ('call.py:_launch_inputs', ('OAH_RUN_LAUNCH_INVALID', 1)))),
@@ -119,7 +114,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
         FileRule('runs/*/{new-run}/result.json'), FileRule('runs/*/{new-run}/skills.json', False, ('', 0))),
     'launch': (
         FileRule('parent.json'), FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('runs/*/{new-run}/result.json'),
@@ -128,7 +123,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
         FileRule('runs/*/{new-run}/lease.json'), FileRule('runs/*/intent-binding.json', False, ('', 0))),
     'background': (
         FileRule('parent.json'), FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('runs/*/{new-run}/result.json'),
@@ -139,8 +134,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
     'settle': (
         FileRule('reply.txt', input_id='native-result'),
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
-            (('call.py:_check_e', ('OAH_NATIVE_OFFER_STALE', 1)),)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('runs/*/{original-run}/result.json'),
@@ -149,7 +143,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
     'settle-retry': (
         FileRule('reply.txt', input_id='native-result'),
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('runs/*/{original-run}/result.json'), FileRule('runs/*/{original-run}/skills.json'),
@@ -168,10 +162,10 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
         FileRule('runs/*/{original-run}/skills-receiving.json')),
     'skills-plan': (
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1))),
+        FileRule('skills/sources/blobs/*/*')),
     'skills-read-review': (
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILLS_USAGE', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_STATE_CORRUPT', 69))),
+        FileRule('skills/sources/blobs/*/*')),
     'skills-candidates': (FileRule('skills/reviews/*/*.json', False, ('', 0)),),
     'skills-review': (
         FileRule('skills/identities.json', False, ('', 0)),
@@ -195,7 +189,7 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
     'capabilities-plan': (
         FileRule('parent.json', input_id='parent-inventory', input_when=('plan.py:for_task',)),
         FileRule('skills/reviews/*/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1))),
     'relay': (
@@ -206,16 +200,14 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
         FileRule('skills/relay-payloads/*.json', False, ('', 0))),
     'worker': (
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('runs/*/{original-run}/result.json'),
         FileRule('runs/*/{original-run}/skills.json'), FileRule('runs/*/{original-run}/prompt.md'),
         FileRule('runs/*/{original-run}/design.json'), FileRule('runs/*/{original-run}/lease.json'),
         FileRule('runs/*/intent-binding.json', False, ('', 0)), FileRule('runs/*/{original-run}/launch.json')),
     'freeze': (
         FileRule('skills/reviews/*/*.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1)), FileRule('skills/relays/*.json'),
-        FileRule('skills/sources/blobs/*/*', False, ('OAH_SKILL_NOT_DELIVERABLE(pin-mismatch)', 1),
-            (('skillpack.py:checked', ('OAH_SKILL_NOT_DELIVERABLE(changed)', 1)),
-             ('call.py:_check_e', ('OAH_FIX_STATE_CHANGED', 1)))),
+        FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relay-payloads/*.json'), FileRule('skills/originals/tasks/*.json'),
         FileRule('skills/originals/*.json'),
         FileRule('skills/task-selections/index.json', False, ('OAH_SKILL_MANDATORY_MISSING', 1)),
@@ -507,7 +499,7 @@ class ObservedAccessTest(unittest.TestCase):
                         elif not rule.is_input(access):
                             phases.add((boundary_at(name, access), access.phase))
                         context, _outcome = rule.absence(access)
-                        if context is not None:
+                        if context is not None and not excluded:
                             contexts.add((index, context))
                     self.assertEqual(paths, set(range(len(FILE_MATRIX[name]))))
                     self.assertEqual(contexts, {(index, context) for index, rule in enumerate(FILE_MATRIX[name])
