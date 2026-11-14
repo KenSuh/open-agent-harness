@@ -326,7 +326,7 @@ for command, rows in FILE_MATRIX.items():
         recorded_when=(*rule.recorded_when, 'call.py:capture', 'call.py:_check_e'))
         if rule.input_id == 'parent-inventory' else dataclasses.replace(rule, required=True, absent=None,
         absent_by_context=((*rule.absent_by_context, ('call_cli.py:_print_skills',
-            ('', 0) if command == 'admission-orca' else ('OAH_RUN_LAUNCH_INVALID', 1)))))
+            ('', 0) if command in ('admission-orca', 'background') else ('OAH_RUN_LAUNCH_INVALID', 1)))))
         if rule.pattern.endswith('/skills.json') and command in (
             'admission', 'admission-needs', 'admission-saved', 'launch', 'background', 'admission-orca') else
         dataclasses.replace(rule, absent_by_context=((*rule.absent_by_context,
