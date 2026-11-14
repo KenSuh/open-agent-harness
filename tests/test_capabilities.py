@@ -468,7 +468,6 @@ class RelayFlowTest(DeliveryTask, unittest.TestCase):
         for text in (prompt, json.dumps(recorded)):
             self.assertNotIn(PLANTED, text)
 
-        # The isolated review never takes a relay; a changed payload refuses as tampered.
         review = self.call("codex", "review", "--parent-inventory", str(lead), "--relay-result", relay)
         self.assertEqual(review.returncode, 1)
         self.assertTrue(review.stderr.startswith("OAH_CAPABILITY_UNSUPPORTED(review-isolated)"), review.stderr)
@@ -476,9 +475,15 @@ class RelayFlowTest(DeliveryTask, unittest.TestCase):
         record = self.state_dir / "skills" / "relays" / f"{hexdigest}.json"
         record.write_text(record.read_text(encoding="utf-8").replace('"cooperative"', '"host-observed"'),
                           encoding="utf-8")
+        earlier = record.read_bytes()
+        previous_runs = self.runs()
         tampered = self.call("claude", "initial", "--parent-inventory", str(lead), "--relay-result", relay)
-        self.assertEqual(tampered.returncode, 1)
-        self.assertTrue(tampered.stderr.startswith("OAH_CAPABILITY_RELAY_REQUIRED(tampered)"), tampered.stderr)
+        self.assertEqual(tampered.returncode, 69)
+        self.assertTrue(tampered.stderr.startswith("OAH_SKILL_STATE_CORRUPT:"), tampered.stderr)
+        self.assertNotIn("Traceback", tampered.stderr)
+        self.assertEqual(record.read_bytes(), earlier)
+        self.assertEqual(self.runs(), previous_runs)
+        self.assertFalse(self.record.exists())
 
     def test_a_configured_name_cannot_carry_a_required_need_on_codex(self):
         self.build_skills(DOCS)
@@ -641,7 +646,13 @@ class RelayIdentityTest(DeliveryTask, unittest.TestCase):
                           .read_text(encoding="utf-8"))["payload"]["blob_ref"]
         stored = self.state_dir / "skills" / "relay-payloads" / f"{blob.split(':', 1)[1]}.json"
         stored.write_text(stored.read_text(encoding="utf-8").replace("guides", "pages"), encoding="utf-8")
-        self.assert_relay_refused(self.dispatch(lead, lookup, search), "tampered")
+        earlier = stored.read_bytes()
+        damaged = self.dispatch(lead, lookup, search)
+        self.assertEqual(damaged.returncode, 69, damaged.stderr)
+        self.assertTrue(damaged.stderr.startswith("OAH_SKILL_STATE_CORRUPT:"), damaged.stderr)
+        self.assertNotIn("Traceback", damaged.stderr)
+        self.assertEqual(stored.read_bytes(), earlier)
+        self.assertFalse(self.record.exists())
         # Two results that each fail to load give the same first refusal in either flag order.
         answers = {self.dispatch(lead, *relays).stderr.split(":", 1)[0]
                    for relays in ((failed["denied"], search), (search, failed["denied"]))}

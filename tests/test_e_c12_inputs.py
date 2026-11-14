@@ -33,7 +33,7 @@ class InputContractTest(DeliveryTask, unittest.TestCase):
         def denied(raw, *args, **options):
             target = isinstance(raw, (str, bytes, os.PathLike)) and pathlib.Path(os.fsdecode(raw)).name == 'prompt.md'
             writing = target and any(frame.f_code.co_name == 'write_prompt' and
-                frame.f_code.co_filename.endswith('/oah/runs.py') for frame, _line in traceback.walk_stack(None))
+                frame.f_code.co_filename.replace('\\', '/').endswith('/oah/runs.py') for frame, _line in traceback.walk_stack(None))
             if writing:
                 reached.append(str(raw))
                 raise PermissionError(errno.EACCES, 'fixture new prompt output metadata denied', str(raw))
@@ -71,7 +71,7 @@ class InputContractTest(DeliveryTask, unittest.TestCase):
             reached = []
 
             def opened(raw, *args, **options):
-                at_packet = any(frame.name == 'read_packet' and frame.filename.endswith('/oah/call.py')
+                at_packet = any(frame.name == 'read_packet' and frame.filename.replace('\\', '/').endswith('/oah/call.py')
                                 for frame in traceback.extract_stack())
                 if at_packet and isinstance(raw, (str, bytes, os.PathLike)) and pathlib.Path(os.fsdecode(raw)) == target:
                     reached.append(str(raw))
@@ -96,7 +96,7 @@ class InputContractTest(DeliveryTask, unittest.TestCase):
             reached = []
 
             def changed(raw, *args, **options):
-                recheck = any(frame.name == 'task_basis' and frame.filename.endswith('/oah/call.py')
+                recheck = any(frame.name == 'task_basis' and frame.filename.replace('\\', '/').endswith('/oah/call.py')
                               for frame in traceback.extract_stack())
                 if recheck and isinstance(raw, (str, bytes, os.PathLike)) and pathlib.Path(os.fsdecode(raw)) == target:
                     reached.append(str(raw))

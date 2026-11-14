@@ -15,6 +15,7 @@ Records are data. Nothing here installs, executes or delivers anything.
 from __future__ import annotations
 
 import hashlib
+import datetime as dt
 import json
 import os
 import pathlib
@@ -164,6 +165,20 @@ def get_query(state_dir: os.PathLike | str, ident: str, *,
     def checked(record: dict[str, record_files.Json]) -> T:
         if record.get("query_id") != ident:
             raise ValueError("is not the search outcome it is named after")
+        hits, purpose = record.get("hits"), record.get("purpose", {})
+        count, stamp = record.get("count"), record.get("checked_at")
+        if (type(record.get("version")) is not int or record["version"] != 1
+                or not all(isinstance(record.get(key), str) for key in (
+                    "provider", "query", "parser", "outcome", "detail"))
+                or not isinstance(purpose, dict) or type(count) is not int or count < 0
+                or not isinstance(hits, list) or any(not isinstance(hit, dict) or
+                    not all(isinstance(hit.get(key), str) for key in ("name", "source")) for hit in hits)
+                or not isinstance(stamp, str)):
+            raise ValueError("the search outcome has incomplete query, purpose, hit or timestamp fields")
+        checked_at = dt.datetime.fromisoformat(stamp)
+        if checked_at.utcoffset() is None:
+            raise ValueError("the search timestamp needs a UTC offset")
+        checked_at.astimezone(dt.timezone.utc)
         return parse(record)
 
     return _read(path, parse=checked)
@@ -196,9 +211,14 @@ def _identities(state_dir: os.PathLike | str) -> dict:
     path = root(state_dir) / "identities.json"
 
     def checked(data: dict[str, record_files.Json]) -> dict[str, record_files.Json]:
+        entries = data.get("sources")
         if (set(data) != {"version", "sources"} or type(data["version"]) is not int or data["version"] != 1
-                or not isinstance(data["sources"], dict)):
+                or not isinstance(entries, dict)):
             raise ValueError("is not a version 1 source identity table")
+        if any(not isinstance(entry, dict) or set(entry) != {"full", "fields"}
+                or not isinstance(entry.get("full"), str) or not isinstance(entry.get("fields"), dict)
+                for entry in entries.values()):
+            raise ValueError("each source identity needs its full digest and field object")
         return data
 
     data = _read(path, parse=checked)

@@ -272,7 +272,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         read, reached = Path.read_bytes, []
 
         def transient(path):
-            capturing = any(frame.name == '_captured_state' and frame.filename.endswith('/oah/runs.py')
+            capturing = any(frame.name == '_captured_state' and frame.filename.replace('\\', '/').endswith('/oah/runs.py')
                             for frame in traceback.extract_stack())
             if path == target and capturing:
                 reached.append(str(path))
@@ -296,7 +296,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 case.setUp()
                 try:
                     case.scenario(name)
-                    target = next(access for access in case.observe() if access.path.endswith('/native-offer.json'))
+                    target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'native-offer.json')
                     observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='invalid-content')
 
                     result = case.invoke(observer)
@@ -319,7 +319,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('launch')
         target = next(access for access in case.observe() if access.phase == 'after-engine' and
-            access.path.endswith('/design.json') and 'call.py:_finish_inline_delivery' in access.chain)
+            pathlib.Path(access.path).name == 'design.json' and 'call.py:_finish_inline_delivery' in access.chain)
         for fault in ('denied', 'eio'):
             with self.subTest(fault=fault):
                 case.restore()
@@ -346,7 +346,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('background')
         target = next(access for access in case.observe() if access.phase == 'after-runner' and
-            access.path.endswith('/skills.json') and 'call_cli.py:_print_skills' in access.chain)
+            pathlib.Path(access.path).name == 'skills.json' and 'call_cli.py:_print_skills' in access.chain)
         for fault in ('denied', 'eio'):
             with self.subTest(fault=fault):
                 case.restore()
@@ -373,7 +373,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('background')
         target = next(access for access in case.observe() if access.phase == 'after-runner' and
-            access.path.endswith('/result.json') and access.operation == 'read' and 'call.py:_launch_main' in access.chain)
+            pathlib.Path(access.path).name == 'result.json' and access.operation == 'read' and 'call.py:_launch_main' in access.chain)
         observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='eio')
 
         result = case.invoke(observer)
@@ -398,7 +398,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('worker')
         target = next(access for access in case.observe() if access.phase == 'after-engine' and
-            access.path.endswith('/design.json') and access.operation in ('read', 'os.read') and
+            pathlib.Path(access.path).name == 'design.json' and access.operation in ('read', 'os.read') and
             'call.py:_design_after' in access.chain)
         observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='eio')
         with mock.patch('tests.e_c12_scenarios.cli_result', cli_result):
@@ -644,6 +644,37 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.assertTrue(retried.stderr.startswith('OAH_NATIVE_OFFER_STALE:'), retried.stderr)
         self.assertEqual({path.name: path.read_bytes() for path in first.iterdir() if path.is_file()}, before)
 
+    def test_worker_prompt_faults_keep_the_command_category_and_retire_the_queue(self):
+        from oah.discovery import records
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('worker')
+        target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'prompt.md'
+                      and access.operation in ('read', 'os.read'))
+        for fault in ('missing', 'denied', 'eio'):
+            with self.subTest(fault=fault):
+                case.restore()
+                earlier = (case.run_dir / 'prompt.md').read_bytes()
+                observer = ObservedFiles(case.storage, target=target, fault=fault)
+                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01), \
+                        mock.patch('oah.runs.RETRY_SECONDS', 0.01):
+                    try:
+                        result = case.invoke(observer)
+                    except records.InvalidRecord as exc:
+                        self.fail(f'the CLI must return the prompt refusal: {exc}')
+                self.assertTrue(observer.reached)
+                expected = ('OAH_STATE_IO', 69) if fault == 'eio' else ('OAH_RUN_LAUNCH_INVALID', 1)
+                self.assertEqual(result[0], expected[1], str(result))
+                self.assertIn(expected[0] + ':', result[2])
+                self.assertNotIn('Traceback', result[2])
+                self.assertEqual(json.loads((case.run_dir / 'result.json').read_bytes())['status'], 'refused')
+                self.assertEqual((case.run_dir / 'prompt.md').read_bytes(), earlier)
+                self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+
     def test_worker_unreadable_result_retires_only_stale_queues(self):
         from oah import runs
         from tests.e_c12_scenarios import Scenario
@@ -789,7 +820,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('freeze')
         accesses = case.observe()
-        target = next(access for access in accesses if access.path.endswith('/intent-binding.json'))
+        target = next(access for access in accesses if pathlib.Path(access.path).name == 'intent-binding.json')
         earlier = pathlib.Path(target.path).read_bytes()
         assert case.project is not None
         for fault in ('missing', 'not-regular', 'denied', 'eio'):
@@ -821,7 +852,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         case.scenario('background')
-        target = next(access for access in case.observe() if access.path.endswith('/launch.json')
+        target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'launch.json'
                       and access.operation == 'read' and any(context in access.chain for context in (
                           'call.py:_launch_main', 'call.py:launch_main')))
         for fault in ('missing', 'not-regular', 'denied', 'invalid-content', 'eio'):
@@ -854,7 +885,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         case.scenario('background')
-        target = next(access for access in case.observe() if access.path.endswith('/launch.json') and
+        target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'launch.json' and
             access.operation == 'stat' and 'call.py:_launch_main' in access.chain)
         for fault in ('denied', 'eio'):
             with self.subTest(fault=fault):

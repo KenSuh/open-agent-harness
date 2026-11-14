@@ -124,7 +124,8 @@ def _read(path: pathlib.Path, keys: tuple[str, ...], *, optional: tuple[str, ...
     from oah.discovery import records
 
     def checked(data: dict[str, Json]) -> dict[str, Json]:
-        if not set(keys) <= set(data) <= {*keys, *optional} or data.get("version") != 1:
+        if not set(keys) <= set(data) <= {*keys, *optional} or type(data.get("version")) is not int \
+                or data["version"] != 1:
             raise ValueError("not a version 1 record with exactly its documented keys")
         return parse(data)
 
@@ -138,6 +139,28 @@ def read_offer(run_dir: pathlib.Path, *, required: bool = False) -> dict | None:
         if (offer["id"] != offer_id(offer) or offer["state"] not in STATES
                 or offer["run"] != pathlib.Path(run_dir).name):
             raise ValueError("the offer does not match its own id, state or run")
+        task, target, message = offer["task"], offer["target"], offer["message"]
+        if not isinstance(task, dict) or not isinstance(target, dict) or not isinstance(message, dict):
+            raise ValueError("the offer's task, target and message must be objects")
+        lease = task.get("lease")
+        if not isinstance(lease, dict):
+            raise ValueError("the offer needs its lease snapshot")
+        generation, size = lease.get("generation"), message.get("bytes")
+        if (not all(isinstance(task.get(key), str) and task[key]
+                           for key in ("dispatch_stage", "kind", "risk"))
+                or not all(isinstance(target.get(key), str) and target[key]
+                           for key in ("engine", "profile_id", "model", "effort"))
+                or type(generation) is not int or generation < 0 or not isinstance(message.get("sha256"), str)
+                or type(size) is not int or size < 0):
+            raise ValueError("the offer's task, target and message fields are incomplete")
+        for name in ("created_at", "expires_at"):
+            value = offer[name]
+            if not isinstance(value, str):
+                raise ValueError("the offer timestamps must be ISO strings")
+            stamp = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if stamp.utcoffset() is None:
+                raise ValueError("the offer timestamps need UTC offsets")
+            stamp.astimezone(dt.timezone.utc)
         return offer
 
     return _read(path, OFFER_KEYS, required=required, parse=checked)

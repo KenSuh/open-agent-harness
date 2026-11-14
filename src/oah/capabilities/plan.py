@@ -469,22 +469,27 @@ def load(state_dir: os.PathLike, ref: str, *, now: dt.datetime) -> tuple[dict, s
     """A stored relay result and its payload text, verified against their digests and the request's expiry."""
     from oah.discovery import store
 
-    try:
-        record = store.get_record(state_dir, RELAYS, ref)
-        if record is not None:
-            expires = check_result(record)
-            blob = store.get_record(state_dir, PAYLOADS, record["payload"]["blob_ref"])
-        else:
-            blob = None
-    except store.StoreProblem as exc:
-        raise CapabilityRefused(RELAY_REQUIRED_CODE, "tampered", f"relay result {ref}: {exc}") from None
-    except (ValueError, RecursionError):
-        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay does not contain valid JSON data") from None
-    if record is None or blob is None:
+    def checked_relay(data):
+        try:
+            expires = check_result(data)
+        except CapabilityRefused as exc:
+            raise ValueError(exc.message) from None
+        return data, expires
+
+    def checked_blob(blob):
+        if set(blob) != {"id", "version", "text"} or blob["version"] != 1 or not isinstance(blob["text"], str):
+            raise ValueError("the stored relay payload is not text")
+        return blob
+
+    loaded = store.get_record(state_dir, RELAYS, ref, parse=checked_relay)
+    if loaded is None:
         raise CapabilityRefused(RELAY_REQUIRED_CODE, "missing", f"no stored relay result {ref}; store it with oah "
                                 "capabilities relay")
-    if set(blob) != {"id", "version", "text"} or blob["version"] != 1 or not isinstance(blob["text"], str):
-        raise CapabilityRefused(RELAY_REQUIRED_CODE, "invalid", "the stored relay payload is not text")
+    record, expires = loaded
+    blob = store.get_record(state_dir, PAYLOADS, record["payload"]["blob_ref"], parse=checked_blob)
+    if blob is None:
+        raise CapabilityRefused(RELAY_REQUIRED_CODE, "missing", f"no stored relay result {ref}; store it with oah "
+                                "capabilities relay")
     text = blob["text"]
     if "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest() != record["payload"]["sha256"] \
             or len(text.encode("utf-8")) != record["payload"]["bytes"]:

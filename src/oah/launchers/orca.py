@@ -262,10 +262,30 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings, 
         raise runs._launch_invalid()
     from oah.discovery import records
 
-    data = records.run_json(run, "result.json")
-    saved = records.run_json(run, "launch.json")
-    if isinstance(saved, dict) and saved.get("cli_version") == runs.UNVERIFIED:
-        saved["cli_version"] = None
+    def checked_result(data):
+        launcher = data.get("launcher") or {}
+        if (data.get("engine") not in call.routing.ENGINES or data.get("stage") not in call.routing.STAGES
+                or not isinstance(launcher, dict) or "command" in data or "read_only" in data
+                or "launch_digest" in launcher):
+            raise ValueError("the queued result has invalid engine, stage or launcher fields")
+        return data
+
+    def checked_launch(saved):
+        if saved.get("cli_version") == runs.UNVERIFIED:
+            saved["cli_version"] = None
+        if (not all(isinstance(saved.get(key), str) and saved[key] for key in (
+                    "engine", "stage", "model", "launch_effort"))
+                or saved.get("cli_version") is not None and (not isinstance(saved["cli_version"], str)
+                                                             or not saved["cli_version"])
+                or not isinstance(saved.get("warnings"), list)
+                or not all(isinstance(warning, str) for warning in saved["warnings"])
+                or type(saved.get("timeout_s")) not in (int, float) or not math.isfinite(saved["timeout_s"])
+                or saved["timeout_s"] <= 0):
+            raise ValueError("the queued launch has invalid model, effort, version, warning or timeout fields")
+        return saved
+
+    data = records.run_json(run, "result.json", parse=checked_result)
+    saved = records.run_json(run, "launch.json", parse=checked_launch)
     launcher = data.get("launcher") or {}
 
     def invalid() -> runs.RunError:
@@ -284,18 +304,9 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings, 
     if (not isinstance(saved, dict) or set(saved) != set(expected) or
             any(saved[key] != value for key, value in expected.items()) or
             data.get("run_id") != run.id or data.get("task") != run.task or
-            data.get("engine") not in call.routing.ENGINES or stage not in call.routing.STAGES or
+            stage not in call.routing.STAGES or
             data.get("stage") != stage or
-            data.get("cwd") != str(root) or launcher.get("worktree") != str(root) or
-            "command" in data or "read_only" in data or "launch_digest" in launcher or
-            not all(isinstance(saved[key], str) and saved[key] for key in (
-                "engine", "stage", "model", "launch_effort")) or
-            saved["cli_version"] is not None and (not isinstance(saved["cli_version"], str) or
-                                                  not saved["cli_version"]) or
-            not isinstance(saved["warnings"], list) or
-            not all(isinstance(warning, str) for warning in saved["warnings"]) or
-            type(saved["timeout_s"]) not in (int, float) or not math.isfinite(saved["timeout_s"]) or
-            saved["timeout_s"] <= 0):
+            data.get("cwd") != str(root) or launcher.get("worktree") != str(root)):
         raise invalid()
     engine = data["engine"]
     call.routing.check_stage(engine, stage, settings.stages,

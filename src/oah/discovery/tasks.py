@@ -366,6 +366,9 @@ def _need_index(data):
     if (set(data) != {"version", "needs"} or type(data["version"]) is not int or data["version"] != 1
             or not isinstance(data["needs"], dict)):
         raise ValueError("is not a version 1 task need index")
+    if any(not isinstance(value, str) or not _DIGEST.fullmatch(value)
+           for pair in data["needs"].items() for value in pair):
+        raise ValueError("task need index entries must be need and record digests")
     return data
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import dataclasses
 import fnmatch
 import json
 import pathlib
@@ -16,9 +17,15 @@ from tests.test_e_c10_boundaries import cli_result
 CONTENT_CASES = (
     ('skills-read-review', 'skills/reviews/*/*.json', 'status', [], 'OAH_SKILLS_IO', 69),
     ('skills-candidates', 'skills/queries/*/*.json', 'query_id', 'sha256:' + '0' * 64, 'OAH_SKILLS_IO', 69),
+    ('skills-candidates', 'skills/queries/*/*.json', 'purpose', [], 'OAH_SKILLS_IO', 69),
+    ('skills-candidates', 'skills/queries/*/*.json', 'hits', [0], 'OAH_SKILLS_IO', 69),
+    ('skills-candidates', 'skills/queries/*/*.json', 'query', [], 'OAH_SKILLS_IO', 69),
+    ('skills-candidates', 'skills/queries/*/*.json', 'checked_at', 'changed', 'OAH_SKILLS_IO', 69),
     ('skills-review', 'skills/reviews/index.json', 'by_locator', [], 'OAH_SKILLS_IO', 69),
     ('skills-review', 'skills/identities.json', 'sources', [], 'OAH_SKILLS_IO', 69),
+    ('skills-review', 'skills/identities.json', 'sources', {'changed': []}, 'OAH_SKILLS_IO', 69),
     ('skills-select', 'skills/task-selections/index.json', 'needs', [], 'OAH_SKILLS_IO', 69),
+    ('skills-select', 'skills/task-selections/index.json', 'needs', {'changed': []}, 'OAH_SKILLS_IO', 69),
     ('skills-select', 'skills/task-selections/*.json', 'review_ids', [], 'OAH_SKILLS_IO', 69),
     ('admission-needs', 'skills/task-discovery/index.json', 'needs', [], 'OAH_SKILL_STATE_CORRUPT', 69),
     ('admission-needs', 'skills/task-discovery/*.json', 'outcome', [], 'OAH_SKILL_STATE_CORRUPT', 69),
@@ -32,10 +39,101 @@ CONTENT_CASES = (
     ('admission-needs', 'runs/*/intent-binding.json', 'revision', [], 'OAH_SKILL_STATE_CORRUPT', 69),
     ('worker', 'runs/*/{original-run}/lease.json', 'generation', [], 'OAH_RUN_LAUNCH_INVALID', 1),
     ('worker', 'runs/*/{original-run}/design.json', 'version', [], 'OAH_RUN_LAUNCH_INVALID', 1),
+    ('worker', 'runs/*/{original-run}/launch.json', 'warnings', 'changed', 'OAH_RUN_LAUNCH_INVALID', 1),
+    ('worker', 'runs/*/{original-run}/result.json', 'stage', [], 'OAH_RUN_LAUNCH_INVALID', 1),
 )
 
 
 class ContentOwnershipTest(unittest.TestCase):
+    def test_offer_fields_use_the_read_command_category_with_a_matching_offer_id(self):
+        from oah.launchers import native
+
+        for field, value in (('expires_at', 'changed'), ('target', []), ('task', [])):
+            with self.subTest(field=field):
+                case = Scenario('scenario')
+                case.setUp()
+                try:
+                    case.scenario('skills')
+                    target = next(access for access in case.observe() if access.owned and
+                                  pathlib.Path(access.path).name == 'native-offer.json')
+                    path = pathlib.Path(target.path)
+                    offer = json.loads(path.read_bytes())
+                    offer[field] = value
+                    offer['id'] = native.offer_id(offer)
+                    path.write_text(json.dumps(offer), encoding='utf-8')
+                    earlier = {item: item.read_bytes() for item in case.storage.rglob('*') if item.is_file()}
+                    observer = ObservedFiles(case.storage, target=target)
+
+                    try:
+                        result = case.invoke(observer)
+                    except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                        self.fail(f'the CLI must return the offer field refusal: {exc}')
+
+                    self.assertTrue(observer.reached, 'the CLI must read this changed offer field')
+                    self.assertEqual(result[0], 69, str(result))
+                    self.assertIn('OAH_SKILLS_IO:', result[2])
+                    self.assertNotIn('Traceback', result[2])
+                    self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+                    for item, raw in earlier.items():
+                        self.assertEqual(item.read_bytes(), raw, 'keep the earlier fixture record')
+                    print('CONTENT_OFFER', json.dumps(dict(field=field, code='OAH_SKILLS_IO',
+                        exit=69, reached=True)), flush=True)
+                finally:
+                    case.doCleanups()
+
+    def test_relay_and_payload_schema_fields_use_the_reader_category_with_matching_content_ids(self):
+        from oah.discovery import store
+
+        for field in ('invocation.arguments_digest', 'payload.text'):
+            with self.subTest(field=field):
+                case = Scenario('scenario')
+                case.setUp()
+                try:
+                    case.scenario('admission')
+                    accesses = case.observe()
+                    relay_id = case.command[case.command.index('--relay-result') + 1]
+                    relay_path = case.storage / 'skills/relays' / (relay_id.removeprefix('sha256:') + '.json')
+                    relay = json.loads(relay_path.read_bytes())
+                    target_path = relay_path
+                    payload_id = None
+                    if field == 'invocation.arguments_digest':
+                        relay['invocation']['arguments_digest'] = 'sha256:abc'
+                    else:
+                        target_path = case.storage / 'skills/relay-payloads' / (
+                            relay['payload']['blob_ref'].removeprefix('sha256:') + '.json')
+                        blob = json.loads(target_path.read_bytes())
+                        blob['text'] = 0
+                        _word, blob = store.put_record(case.storage, 'relay-payloads', blob)
+                        payload_id = blob['id']
+                        relay['payload']['blob_ref'] = payload_id
+                    target = next(access for access in accesses if access.owned and
+                                  access.path == str(target_path))
+                    _word, relay = store.put_record(case.storage, 'relays', relay)
+                    case.command[case.command.index('--relay-result') + 1] = relay['id']
+                    changed_id = payload_id or relay['id']
+                    target_path = target_path.with_name(changed_id.removeprefix('sha256:') + '.json')
+                    case.remember()
+                    earlier = {path: path.read_bytes() for path in case.storage.rglob('*') if path.is_file()}
+                    observer = ObservedFiles(case.storage, extra=case.extra,
+                        target=dataclasses.replace(target, path=str(target_path)))
+
+                    try:
+                        result = case.invoke(observer)
+                    except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                        self.fail(f'the CLI must return the relay field refusal: {exc}')
+
+                    self.assertTrue(observer.reached, 'the CLI must read the changed field with its matching id')
+                    self.assertEqual(result[0], 69, str(result))
+                    self.assertIn('OAH_SKILL_STATE_CORRUPT:', result[2])
+                    self.assertNotIn('Traceback', result[2])
+                    self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+                    for path, raw in earlier.items():
+                        self.assertEqual(path.read_bytes(), raw, 'keep the earlier fixture record')
+                    print('CONTENT_RELAY', json.dumps(dict(field=field, code='OAH_SKILL_STATE_CORRUPT',
+                        exit=69, reached=True)), flush=True)
+                finally:
+                    case.doCleanups()
+
     def test_own_record_fields_refuse_inside_the_reader_before_the_cli_can_continue(self):
         from oah.discovery import records
 
@@ -119,10 +217,12 @@ class ContentOwnershipTest(unittest.TestCase):
                         if case.project is not None:
                             self.assertEqual(case.project.fix_calls(), case.child_calls)
                         for item, raw in earlier.items():
-                            if command == 'worker' and item == case.run_dir / 'result.json':
+                            if command == 'worker' and item == case.run_dir / 'result.json' and item != path:
                                 self.assertEqual(json.loads(item.read_bytes())['status'], 'refused')
                                 continue
                             self.assertEqual(item.read_bytes(), raw, f'keep the earlier {item.name}')
+                        if command == 'worker' and path == case.run_dir / 'result.json':
+                            self.assertTrue((case.run_dir / 'worker.claim').exists())
                         reached.add(ordinal)
                         print('CONTENT_CASE', json.dumps(dict(command=command, path=pattern, field=field,
                             code=code, exit=exit_code, reached=True)), flush=True)

@@ -156,13 +156,13 @@ What it costs you: no inventory refresh is needed; correction uses the original 
 Stored E records use one read rule: missing files, non-regular files (including Windows reparse points), permission
 denial and invalid content give the command's stale-record refusal. Correction freeze gives `OAH_FIX_STATE_CHANGED`,
 native settlement gives `OAH_NATIVE_OFFER_STALE`, and a prepared launch records `OAH_RUN_LAUNCH_INVALID` before a
-child starts. Other storage errors, such as a disk read failure, keep `OAH_STATE_IO`. Valid use costs nothing extra;
+child starts. Other storage errors, such as a disk read failure, keep `OAH_STATE_IO`. If a later read fails after a
+run starts or a background runner is created, the error says so and keeps the recorded result. Valid use costs nothing extra;
 a damaged task folder has fewer message variants to interpret.
 
 Relay ingestion validates the full arguments digest and every stored time as ISO-8601 with a time zone before
-storing anything. A malformed
-time in an existing relay also gives `OAH_CAPABILITY_RELAY_REQUIRED(invalid)` before an ordinary child or native
-offer. After spend, settlement and correction bind the lease id; renewing that same lease does not invalidate
+storing anything. An existing relay with malformed times follows the stored-record rule above. After spend,
+settlement and correction bind the lease id; renewing that same lease does not invalidate
 the original. Pre-spend checks still compare the full lease identity. What it costs you: no new step for valid
 times or lease renewal; an invalid relay time is refused where it is recorded.
 

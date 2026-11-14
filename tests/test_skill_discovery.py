@@ -828,7 +828,6 @@ class CoverageLinkTest(DiscoveryRepo, unittest.TestCase):
         (link,) = [item for item in data["data"]["skills"] if item.get("seed") == "S1"]
         self.assertEqual((link["status"], link["pin"]["commit"]), ("linked", s1["source"]["commit"]))
 
-        # Unlinking keeps the required need, which then blocks; a tampered review makes a link unavailable.
         unlink = {"op": "unlink-skill", "stage": "data", "need_id": s1_need, "skill": s1["frontmatter"]["name"],
                   "reason": "try another skill"}
         out, _, _ = self.edit([unlink])
@@ -841,7 +840,13 @@ class CoverageLinkTest(DiscoveryRepo, unittest.TestCase):
         path.write_text(path.read_text(encoding="utf-8").replace("auth-implementation-patterns guidance",
                                                                  "auth-implementation-patterns advice"),
                         encoding="utf-8")
-        self.assertEqual(self.skills_of()["W1"]["status"], "unavailable")
+        changed = path.read_bytes()
+        code, out, err = self.oah("design", "coverage", "acme", "booking", "--json")
+        self.assertEqual(code, 69, err)
+        self.assertEqual(out, "")
+        self.assertTrue(err.startswith("OAH_SKILL_STATE_CORRUPT:"), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(path.read_bytes(), changed)
 
     def test_ineligible_or_user_only_reviews_cannot_be_linked(self):
         self.upstream("supabase/agent-skills", {"skills/supabase-postgres-best-practices/SKILL.md":
