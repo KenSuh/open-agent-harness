@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import builtins
 import contextlib
+import datetime as dt
 import errno
 import hashlib
 import io
+import json
 import os
 import pathlib
 import re
@@ -25,6 +27,36 @@ from tests.helpers import make_tmp_dir
 class InputContractTest(DeliveryTask, unittest.TestCase):
     request = test_e_relay_times.RelayTimesTest.request
     offered_parent_relay = test_e_spent_evidence.SpentEvidenceTest.offered_parent_relay
+
+    def test_recorded_parent_expiry_keeps_its_live_capability_refusal(self):
+        from oah.capabilities import inventory, plan
+
+        request, parent, now = self.request()
+        relay, _ = plan.ingest(self.state_dir, request, capability=request['capability_id'],
+            payload=test_capabilities.RESULT.encode('utf-8'), invocation={'outcome': 'ok',
+            'at': request['created_at'], 'arguments_digest': 'sha256:' + '3' * 64}, now=now)
+        earlier = parent.read_bytes()
+        expires = dt.datetime.fromisoformat(json.loads(earlier)['expires_at'])
+        read_parent, reached = inventory.read_parent, []
+
+        def expired(path, *, now: dt.datetime, **options):
+            if any(frame.name == 'capture' and pathlib.Path(frame.filename).name == 'call.py'
+                   for frame in traceback.extract_stack()):
+                reached.append(path)
+                now = expires
+            return read_parent(path, now=now, **options)
+
+        with mock.patch.object(inventory, 'read_parent', expired):
+            result = cli_result(self.repo, self.env, 'call', 'claude', '--stage', 'initial', '--task', 't1',
+                '--tier', 'low', '--parent-inventory', str(parent), '--relay-result', relay['id'], '--json')
+
+        self.assertTrue(reached)
+        self.assertEqual(result[0], 69, str(result))
+        self.assertIn('OAH_CAPABILITY_INVENTORY_UNKNOWN:', result[2])
+        self.assertIn("the inventory's evidence has expired", result[2])
+        self.assertNotIn('Traceback', result[2])
+        self.assertEqual(parent.read_bytes(), earlier)
+        self.assertFalse(self.record.exists())
 
     def test_new_run_output_metadata_keeps_the_storage_io_contract(self):
         self.build_skills(PLAIN)

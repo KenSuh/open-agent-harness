@@ -555,6 +555,41 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 self.assertEqual(result[0], 69, result)
                 self.assertTrue(result[2].rstrip().splitlines()[-1].startswith('OAH_STATE_IO:'), result)
 
+    def test_recorded_parent_schema_refusal_is_classified_inside_the_reader(self):
+        from oah.capabilities import inventory
+        from oah.discovery import records
+
+        _request, parent, relay = self.valid()
+        read_parent, reached, refusals = inventory.read_parent, [], []
+        constructor = records.InvalidRecord.__init__
+
+        def changed(path, **options):
+            if not reached and any(frame.name == 'capture' and Path(frame.filename).name == 'call.py'
+                                   for frame in traceback.extract_stack()):
+                saved = json.loads(parent.read_bytes())
+                saved['digest'] = 'sha256:' + '0' * 64
+                parent.write_text(json.dumps(saved), encoding='utf-8')
+                reached.append(parent.read_bytes())
+            return read_parent(path, **options)
+
+        def refused(instance, *args, **options):
+            constructor(instance, *args, **options)
+            refusals.append(instance)
+
+        with mock.patch.object(inventory, 'read_parent', changed), \
+                mock.patch.object(records.InvalidRecord, '__init__', refused):
+            result = cli_result(self.repo, self.env, 'call', 'claude', '--stage', 'initial', '--task', 't1',
+                '--tier', 'low', '--parent-inventory', str(parent), '--relay-result', relay['id'], '--json')
+
+        self.assertTrue(reached, 'the fixture changes its digest only at the saved-input capture step')
+        self.assertEqual(result[0], 69, str(result))
+        self.assertIn('OAH_SKILL_STATE_CORRUPT:', result[2])
+        self.assertNotIn('Traceback', result[2])
+        self.assertTrue(any(getattr(refusal, 'path', None) == parent and
+                            not isinstance(refusal, (OSError, ValueError)) for refusal in refusals))
+        self.assertEqual(parent.read_bytes(), reached[0])
+        self.assertFalse(self.record.exists())
+
     def test_capability_stat_denial_without_prepared_identity_uses_stale(self):
         from oah import call
         from tests import test_fix

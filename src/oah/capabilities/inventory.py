@@ -260,8 +260,7 @@ def _time(value: object, what: str) -> dt.datetime:
     return moment
 
 
-def check_parent(data: object, *, now: dt.datetime) -> dict:
-    """A validated parent-reported InventoryV1; ValueError names the first problem."""
+def _parent_fields(data: object) -> tuple[dict[str, object], dt.datetime]:
     inventory = _closed(data, INVENTORY_KEYS, "the inventory")
     if inventory["version"] != 1 or inventory["completeness"] not in COMPLETENESS:
         raise ValueError("the inventory has version 1 and completeness complete, partial or unobservable")
@@ -291,26 +290,38 @@ def check_parent(data: object, *, now: dt.datetime) -> dict:
             raise ValueError(f"inventory entry {record['id']} does not match its entry_digest")
     if inventory["digest"] != inventory_digest(inventory):
         raise ValueError("the inventory does not match its digest")
+    return dict(inventory), expires
+
+
+def _parent_current(inventory: dict[str, object], expires: dt.datetime, *, now: dt.datetime) -> dict[str, object]:
     if expires <= now:
         raise ValueError("the inventory's evidence has expired; read the tools again and write a new inventory")
-    return dict(inventory)
+    return inventory
+
+
+def check_parent(data: object, *, now: dt.datetime) -> dict:
+    """A validated parent-reported InventoryV1; ValueError names the first problem."""
+    inventory, expires = _parent_fields(data)
+    return _parent_current(inventory, expires, now=now)
 
 
 def read_parent(path: str | os.PathLike, *, now: dt.datetime, recorded: bool = False) -> dict:
-    """The lead's InventoryV1 file; OAH_CAPABILITY_INVENTORY_UNKNOWN (exit 69) when it cannot be read or trusted."""
     from oah.discovery import inputs, records
     from oah.design.sources.state import StateProblem, loads
 
-    def checked(value):
+    def checked(value, expires=None):
         try:
-            return check_parent(value, now=now)
+            return (check_parent(value, now=now) if expires is None else
+                    _parent_current(value, expires, now=now))
         except ValueError as exc:
             raise CapabilityRefused(INVENTORY_UNKNOWN_CODE, "", f"the parent inventory {path}: {exc}") from None
 
     source = pathlib.Path(path)
     if recorded:
-        return records.followed_bytes(source, limit=FILE_LIMIT,
-            parse=lambda raw: checked(records.json_bytes(raw, source)))
+        saved = records.followed_bytes(source, limit=FILE_LIMIT,
+            parse=lambda raw: _parent_fields(records.json_bytes(raw, source)))
+        assert saved is not None
+        return checked(*saved)
     try:
         raw = inputs.read_bytes(source, limit=FILE_LIMIT)
         if len(raw) > FILE_LIMIT:
