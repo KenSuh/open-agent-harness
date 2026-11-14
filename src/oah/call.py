@@ -3584,7 +3584,11 @@ def _launch_inputs(prepared, publication):
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     try:
-        with boundaries.command("launch"):
+        publication = _CORRECTION_PUBLICATION.get()
+        boundary: boundaries.Boundary = (
+            "freeze" if publication is not None and publication.plan is not None
+            and publication.plan.prepared == prepared else "launch")
+        with boundaries.command(boundary):
             return _execute(prepared, base_env=base_env, rules=rules, redact=redact)
     except EngineError as exc:
         _record_refusal(prepared, exc)

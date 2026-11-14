@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import stat
+import sys
 import traceback
 from unittest import mock
 from typing import Callable
@@ -43,6 +44,8 @@ class ObservedFiles:
         self.followup, self.persistent = followup, persistent
         self.followup_reached = []
         self.followup_retained = {}
+        self.record_refusals = []
+        self.publication_diagnostics = []
         self.accesses = []
         self.counts = {}
         self.file_counts = {}
@@ -276,6 +279,37 @@ class ObservedFiles:
         self.stack.enter_context(mock.patch.object(os, 'close', close))
         self.stack.enter_context(mock.patch.object(os, 'stat', lambda *a, **k: stated(real_stat, *a, **k)))
         self.stack.enter_context(mock.patch.object(os, 'lstat', lambda *a, **k: stated(real_lstat, *a, **k)))
+        records = sys.modules.get('oah.discovery.records')
+        if records is not None and hasattr(records, 'RecordRefusal'):
+            read_record = records._read
+
+            def recorded(*args, **kwargs):
+                try:
+                    return read_record(*args, **kwargs)
+                except records.RecordRefusal as exc:
+                    self.record_refusals.append(dict(path=self.path(exc.path), category=str(exc.category),
+                        issue=str(exc.issue), access_count=len(self.accesses)))
+                    raise
+
+            self.stack.enter_context(mock.patch.object(records, '_read', recorded))
+        fix = sys.modules.get('oah.review.fix')
+        if fix is not None:
+            diagnostic = fix._error_diagnostic
+
+            def diagnosed(exc):
+                trace = traceback.extract_tb(exc.__traceback__)
+                stack = traceback.extract_stack()
+                if isinstance(exc, OSError) and any(frame.name == '_publication'
+                        and frame.filename.replace('\\', '/').endswith('/review/fix.py') for frame in trace) \
+                        and any(frame.name == '_guarded'
+                        and frame.filename.replace('\\', '/').endswith('/review/fix.py') for frame in stack):
+                    self.publication_diagnostics.append(dict(path=self.path(exc.filename),
+                        exception=type(exc).__name__, errno=exc.errno, access_count=len(self.accesses),
+                        trace=[dict(file=pathlib.Path(frame.filename).name, function=frame.name, line=frame.lineno)
+                               for frame in trace if '/src/oah/' in frame.filename.replace('\\', '/')]))
+                return diagnostic(exc)
+
+            self.stack.enter_context(mock.patch.object(fix, '_error_diagnostic', diagnosed))
         return self
 
     def __exit__(self, *args):

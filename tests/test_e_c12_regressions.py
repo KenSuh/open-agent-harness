@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 from pathlib import Path
+import re
 import subprocess
 import sys
 import traceback
@@ -101,6 +102,70 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.assertEqual(payloads, [], 'the frozen launch must not reopen its new result')
         print('FROZEN_RESULT', json.dumps(dict(exit=result[0], code='OAH_FIX_STATE_CHANGED',
             engines=case.engine_spawns, runners=case.runner_creations, result_payload_reads=len(payloads))), flush=True)
+
+    def test_frozen_launch_record_faults_reach_the_first_correction_entry(self):
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+        from tests.test_e_c12_observed import frozen_publication_transit
+
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', Clock))
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('freeze')
+        accesses = case.observe()
+        targets = [row for row in accesses if row.owned and row.operation == 'open'
+                   and 'call.py:execute' in row.chain and row.phase == 'before']
+        self.assertEqual(len(targets), 4, 'reach the binding, selection index, selection and review rechecks')
+        for target in targets:
+            for fault in ('denied', 'invalid-content', 'eio'):
+                with self.subTest(path=Path(target.path).name, fault=fault):
+                    case.restore()
+                    observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
+                    with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01), \
+                            mock.patch('oah.runs.RETRY_SECONDS', 0.01), mock.patch('oah.atomic.RETRY_SECONDS', 0.01):
+                        result = case.invoke(observer)
+                    self.assertTrue(observer.reached, 'reach the named frozen-launch OS access')
+                    code, exit_code = ('OAH_STATE_IO', 69) if fault == 'eio' else ('OAH_FIX_STATE_CHANGED', 1)
+                    codes = [value for value in re.findall(
+                        r'(?m)^(OAH_[A-Z_]+(?:\([^\n:]+\))?):', result[2])
+                        if value not in ('OAH_FIX_STARTED', 'OAH_FIX_APPLIED')]
+                    actual = (codes[0] if result[0] and codes else '', result[0])
+                    self.assertTrue(observer.record_refusals, 'E must raise its final refusal before publication')
+                    first = observer.record_refusals[0]
+                    self.assertEqual((first['path'], first['category']),
+                        (observer.observed_path, 'io' if fault == 'eio' else 'stale'))
+                    transit = frozen_publication_transit(observer, target, fault, (code, exit_code), actual)
+                    if transit is not None:
+                        code, exit_code = 'OAH_STATE_IO', 69
+                    self.assertEqual(result[0], exit_code, str(result))
+                    self.assertIn(code + ':', result[2])
+                    self.assertNotIn('Traceback', result[2])
+                    self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+                    for path, raw in observer.retained.items():
+                        actual_raw = path.read_bytes()
+                        if transit is not None:
+                            self.assertEqual(actual_raw, raw, 'keep every record when B masks the refusal')
+                        elif path.suffix == '.jsonl':
+                            self.assertTrue(actual_raw.startswith(raw), 'keep every earlier history entry when settling')
+                        elif path.name == 'result.json' and path not in case.before:
+                            before_result, after_result = json.loads(raw), json.loads(actual_raw)
+                            identity = ('run_id', 'task', 'engine', 'stage')
+                            self.assertEqual({key: after_result[key] for key in identity},
+                                             {key: before_result[key] for key in identity},
+                                             'B may settle this new run without replacing its identity')
+                        else:
+                            self.assertEqual(actual_raw, raw, 'keep every earlier file at the named recheck')
+                    print('FROZEN_QUERY', json.dumps(dict(path=Path(target.path).name, fault=fault,
+                        code=code, exit=exit_code, engines=case.engine_spawns,
+                        runners=case.runner_creations, transit_exclusion=transit)), flush=True)
 
     def test_skills_find_stage_refusal_keeps_its_code_through_the_cli(self):
         from oah.routing import RoutingError

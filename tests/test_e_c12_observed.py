@@ -506,6 +506,28 @@ def owner_outcome(name, access, fault, rule):
     return OwnerOutcome(expected, run_policy, kept_policy, dispatches, context)
 
 
+def frozen_publication_transit(observer, access, fault, expected, actual):
+    if actual == expected or not access.owned or access.phase != 'before' \
+            or 'call.py:execute' not in access.chain or 'fix.py:_run' not in access.chain:
+        return None
+    refusals = [row for row in observer.record_refusals if row['path'] == observer.observed_path]
+    diagnostics = [row for row in observer.publication_diagnostics if row['path'] == observer.observed_path]
+    if not refusals or not diagnostics:
+        return None
+    first = refusals[0]
+    assert first['category'] == ('io' if fault == 'eio' else 'stale'), 'E must raise its final category first'
+    rereads = [(index, row) for index, row in enumerate(observer.accesses)
+               if row.path == observer.observed_path and 'fix.py:_publication' in row.chain
+               and row.operation in ('open', 'read') and index >= first['access_count']]
+    assert rereads and diagnostics[0]['access_count'] > rereads[0][0], \
+        'the B storage diagnostic must follow a re-read of that same captured file'
+    assert actual == ('OAH_STATE_IO', 69), 'Q20 allows only the independently measured B storage outcome'
+    return dict(owner='B terminal publication transit', expected_base=['OAH_STATE_IO', 69],
+                first_refusal=first, publication_reread=dict(index=rereads[0][0],
+                    operation=rereads[0][1].operation, site=rereads[0][1].site,
+                    chain=rereads[0][1].chain), diagnostic=diagnostics[0])
+
+
 def label(access, state):
     path = pathlib.Path(access.path)
     relative = path.relative_to(state).as_posix() if path.is_relative_to(state) else path.name
@@ -1074,6 +1096,9 @@ class ObservedAccessTest(unittest.TestCase):
                              if code not in ('OAH_STAGE_OVERRIDDEN', 'OAH_MODEL_UNKNOWN_FAMILY', 'OAH_FIX_STARTED',
                                              'OAH_FIX_APPLIED')]
                     code = codes[0] if result[0] and codes else ''
+                    outcome = owner_outcome(name, outcome_access, fault, rule) if not excluded else None
+                    transit = frozen_publication_transit(observer, outcome_access, fault, outcome.expected,
+                        (code, result[0])) if name == 'freeze' and outcome is not None else None
                     print('OS_CASE', json.dumps(dict(command=name, ordinal=ordinal, path=path, operation=access.operation,
                         site=access.site, occurrence=access.occurrence, fault=fault, code=code,
                         exit=result[0], phase=access.phase, engine_spawns=case.engine_spawns,
@@ -1081,6 +1106,7 @@ class ObservedAccessTest(unittest.TestCase):
                         fault_boundary=boundary_at(name, access),
                         chain=access.chain, absent_context=rule.absence(access)[0] if fault == 'missing' else None,
                         content_route=route, output_route=output_route,
+                        transit_exclusion=transit,
                         admission='native-offer-at-handoff' if presence_admission(access, fault) else None,
                         excluded=excluded, input=rule.input_id if outcome_input else None,
                         fault_input=rule.input_id if initial_input else None)), flush=True)
@@ -1136,9 +1162,11 @@ class ObservedAccessTest(unittest.TestCase):
                         if not result[0]:
                             self.check_success(case, observer, excluded)
                         continue
-                    outcome = owner_outcome(name, outcome_access, fault, rule)
+                    assert outcome is not None
                     expected, run_policy, kept_policy, dispatches, context = (
                         outcome.expected, outcome.run_policy, outcome.kept_policy, outcome.dispatches, outcome.absent_context)
+                    if transit is not None:
+                        expected = ('OAH_STATE_IO', 69)
                     self.assertEqual((code, result[0]), expected, str(result))
                     if presence_admission(access, fault):
                         self.__class__.presence_cells.add('native-offer-at-handoff')
