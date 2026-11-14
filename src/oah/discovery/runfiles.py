@@ -1,34 +1,32 @@
 # 실행 기록 어댑터 — 기존 실행 수명 규칙을 쓰고 저장 기록 읽기만 공통 소유자로 보낸다.
 from __future__ import annotations
 
+import os
+
 from oah import runs
 from oah.discovery import records
 
 
 class Run(runs.Run):
-    def file_path(self, name: str):
-        resolve = super().file_path
-        return records.location(self.path / name, lambda: resolve(name), deadline=self.deadline)
-
     def _read_json(self, name: str):
         return records.run_json(self, name)
 
 
 class WorkerRun(runs.WorkerRun):
-    def file_path(self, name: str):
-        resolve = super().file_path
-        return records.location(self.path / name, lambda: resolve(name), deadline=self.deadline)
+    def __enter__(self):
+        runs._contained_path(self.path.parents[2], "runs", self.task, self.id)
+        self._fd = runs._open_worker_directory(self.path)
+        try:
+            self._identity = os.fstat(self._fd)
+            self._check_directory()
+        except BaseException:
+            os.close(self._fd)
+            self._fd = None
+            raise
+        return self
 
     def _read_json(self, name: str):
-        def checked(data):
-            if name == "result.json" and (data.get("run_id") != self.id or data.get("task") != self.task
-                    or self._validated is not None and any(data.get(key) != self._validated.get(key) for key in (
-                        "engine", "stage", "created_at", "cwd", "resolved_model", "launch_effort", "cli_version",
-                        "override_stage"))):
-                raise runs._launch_invalid()
-            return data
-
-        return records.run_json(self, name, parse=checked)
+        return records.run_json(self, name)
 
     def bind(self, data: dict[str, records.Json]) -> None:
         records.bind_worker(self, data)

@@ -1093,11 +1093,7 @@ def oah_read(run_dir: pathlib.Path, item: int, *, at: str) -> tuple[dict, str]:
     from oah.discovery import records
     from oah.launchers import native
 
-    receiving = native.read_receiving(run_dir)
-    if receiving is not None:
-        settlement = native.read_settlement(run_dir)
-        native.valid_receiving(receiving, run_id=pathlib.Path(run_dir).name,
-                               receiving_ref=settlement["receiving_ref"] if settlement is not None else None)
+    native.receiving_for_read(run_dir)
 
     bundle = bundle_of(run_dir)
     if bundle is None:

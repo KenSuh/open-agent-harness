@@ -30,7 +30,7 @@ class FileRule:
             and (not self.input_when or any(context in access.chain for context in self.input_when))
 
 
-FILE_MATRIX = {
+FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
     'admission': (
         FileRule('parent.json', input_id='parent-inventory', input_when=('plan.py:for_task', 'inputs.py:location'),
                  recorded_when=('call.py:plan_capabilities',)),
@@ -123,10 +123,12 @@ FILE_MATRIX = {
         FileRule('runs/*/{original-run}/native-settlement.json'),
         FileRule('runs/*/{original-run}/skills-receiving.json')),
     'skills': (FileRule('runs/*/{original-run}/skills.json', False, ('OAH_SKILL_UNMANAGED_RUN', 1)),
-               FileRule('runs/*/{original-run}/prompt.md')),
+               FileRule('runs/*/{original-run}/prompt.md'),
+               FileRule('runs/*/{original-run}/native-offer.json', False, ('', 0))),
     'skills-receiving': (
         FileRule('runs/*/{original-run}/skills.json', False, ('OAH_SKILL_UNMANAGED_RUN', 1)),
         FileRule('runs/*/{original-run}/prompt.md'),
+        FileRule('runs/*/{original-run}/native-offer.json', False, ('', 0)),
         FileRule('runs/*/{original-run}/native-settlement.json'),
         FileRule('runs/*/{original-run}/skills-receiving.json')),
     'skills-plan': (
@@ -191,13 +193,95 @@ FILE_MATRIX = {
     'wait': (FileRule('runs/*/{original-run}/result.json'),),
 }
 
+ADDITIONAL_FILES: dict[str, tuple[FileRule, ...]] = {
+    'admission': (
+        FileRule('runs/*/.{new-run}.tmp/result.json'), FileRule('runs/*/intent-binding.json', False, ('', 0)),
+        FileRule('runs/*/{new-run}/capabilities.json'), FileRule('runs/*/{new-run}/design.json'),
+        FileRule('runs/*/{new-run}/lease.json'), FileRule('runs/*/{new-run}/prompt.md'),
+        FileRule('skills/originals/*.json', False, ('', 0)),
+        FileRule('skills/task-discovery/index.json', False, ('', 0)),
+        FileRule('skills/task-discovery/*.json', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'admission-native': (
+        FileRule('runs/*/.{new-run}.tmp/result.json'), FileRule('runs/*/intent-binding.json', False, ('', 0)),
+        FileRule('runs/*/{new-run}/capabilities.json'), FileRule('runs/*/{new-run}/design.json'),
+        FileRule('runs/*/{new-run}/prompt.md'), FileRule('runs/*/{new-run}/skills.json'),
+        FileRule('skills/originals/*.json', False, ('', 0)),
+        FileRule('skills/task-discovery/index.json', False, ('', 0)),
+        FileRule('skills/task-discovery/*.json', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'admission-orca': (
+        FileRule('runs/*/.{new-run}.tmp/result.json'), FileRule('runs/*/intent-binding.json', False, ('', 0)),
+        FileRule('runs/*/{new-run}/capabilities.json'), FileRule('runs/*/{new-run}/design.json'),
+        FileRule('runs/*/{new-run}/lease.json'), FileRule('runs/*/{new-run}/prompt.md'),
+        FileRule('runs/*/{new-run}/skills.json'), FileRule('skills/originals/*.json', False, ('', 0)),
+        FileRule('skills/task-discovery/index.json', False, ('', 0)),
+        FileRule('skills/task-discovery/*.json', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'admission-needs': (
+        FileRule('runs/*/.{new-run}.tmp/result.json'), FileRule('runs/*/{new-run}/last-message.md'),
+        FileRule('runs/*/{new-run}/lease.json'), FileRule('runs/*/{new-run}/prompt.md'),
+        FileRule('skills/originals/*.json', False, ('', 0))),
+    'admission-saved': (
+        FileRule('runs/*/.{new-run}.tmp/result.json'), FileRule('runs/*/intent-binding.json', False, ('', 0)),
+        FileRule('runs/*/{new-run}/capabilities.json'), FileRule('runs/*/{new-run}/design.json'),
+        FileRule('runs/*/{new-run}/lease.json'), FileRule('runs/*/{new-run}/prompt.md'),
+        FileRule('skills/originals/*.json', False, ('', 0)),
+        FileRule('skills/task-discovery/index.json', False, ('', 0)),
+        FileRule('skills/task-discovery/*.json', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'launch': (
+        FileRule('runs/*/{new-run}/last-message.md'),
+        FileRule('runs/*/{new-run}/native-offer.json', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'background': (FileRule('runs/*/{new-run}/native-offer.json', False, ('', 0)),
+                   FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'settle': (FileRule('runs/*/intent-binding.json', False, ('', 0)),
+        FileRule('runs/*/{original-run}/native-settlement.json', False, ('', 0)),
+        FileRule('runs/*/{original-run}/skills-reads.jsonl', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'settle-retry': (FileRule('runs/*/intent-binding.json', False, ('', 0)),
+        FileRule('runs/*/{original-run}/skills-reads.jsonl', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'skills': (FileRule('runs/*/{original-run}/native-settlement.json', False, ('', 0)),
+        FileRule('runs/*/{original-run}/skills-receiving.json', False, ('', 0)),
+        FileRule('runs/*/{original-run}/skills-reads.jsonl', False, ('', 0))),
+    'skills-receiving': (FileRule('runs/*/{original-run}/skills-reads.jsonl', False, ('', 0)),),
+    'skills-plan': (FileRule('runs/*/intent-binding.json', False, ('', 0)),
+                   FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'skills-read-review': (FileRule('skills/reads/*.json', False, ('', 0)),),
+    'skills-candidates': (FileRule('skills/queries/*/*.json', False, ('', 0)),),
+    'skills-review': (FileRule('skills/sources/observations/*/*.json'),),
+    'skills-find': (FileRule('skills/task-discovery/index.json', False, ('', 0)),
+                   FileRule('skills/task-discovery/*.json', False, ('', 0))),
+    'capabilities-plan': (FileRule('runs/*/intent-binding.json', False, ('', 0)),
+                         FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'worker': (FileRule('runs/*/{original-run}/capabilities.json', False, ('', 0)),
+        FileRule('runs/*/{original-run}/last-message.md'),
+        FileRule('runs/*/{original-run}/native-offer.json', False, ('', 0)),
+        FileRule('skills/task-selections/index.json', False, ('', 0))),
+    'freeze': (FileRule('runs/*/.{new-run}.tmp/result.json'), FileRule('runs/*/{new-run}/design.json'),
+        FileRule('runs/*/{new-run}/last-message.md'), FileRule('runs/*/{new-run}/lease.json'),
+        FileRule('runs/*/{new-run}/prompt.md'), FileRule('runs/*/{new-run}/skills.json')),
+}
+for command, rows in ADDITIONAL_FILES.items():
+    FILE_MATRIX[command] += rows
+FILE_MATRIX['skills-repeat'] = (
+    FileRule('runs/*/{original-run}/skills.json', False, ('OAH_SKILL_UNMANAGED_RUN', 1)),
+    FileRule('runs/*/{original-run}/prompt.md'),
+    FileRule('runs/*/{original-run}/native-offer.json', False, ('', 0)),
+    FileRule('runs/*/{original-run}/native-settlement.json'),
+    FileRule('runs/*/{original-run}/skills-receiving.json'),
+    FileRule('runs/*/{original-run}/skills-reads.jsonl', False, ('', 0)))
+
 BOUNDARY = {'admission': 'admission', 'admission-native': 'admission', 'admission-orca': 'admission',
             'admission-needs': 'admission', 'admission-saved': 'admission', 'launch': 'launch',
             'background': 'launch', 'settle': 'settle', 'skills': 'skills', 'relay': 'relay',
             'worker': 'worker', 'freeze': 'freeze', 'design': 'design', 'wait': 'wait'}
 BOUNDARY.update({'skills-plan': 'skills', 'skills-read-review': 'skills', 'skills-candidates': 'skills',
                  'skills-review': 'skills', 'skills-select': 'skills', 'skills-find': 'skills',
-                 'capabilities-plan': 'relay', 'settle-retry': 'settle', 'skills-receiving': 'skills'})
+                 'capabilities-plan': 'relay', 'settle-retry': 'settle', 'skills-receiving': 'skills',
+                 'skills-repeat': 'skills'})
 EXCLUDED = {'freeze': ('fix.py:_publication:', 'review/fix publication',
                       'comparison of already-captured bytes owned by review/fix publication')}
 EXCLUDED_PATHS = (('skills/sources/*', 'lane C design sources',
@@ -209,6 +293,22 @@ def excluded_access(name, access, state):
     for pattern, owner, reason in EXCLUDED_PATHS:
         if fnmatch.fnmatchcase(path, pattern):
             return owner, reason
+    if pathlib.Path(access.path).name == 'skills-reads.jsonl' and 'atomic.py:append_jsonl' in access.chain:
+        return 'B atomic append validation', 'the shared append helper keeps its existing read contract'
+    if not access.owned and access.operation in ('stat', 'lstat') and 'runs.py:result' in access.chain:
+        return 'B run result update', 'pre-update metadata check; EACCES classification remains a B follow-up'
+    if not access.owned and access.operation in ('stat', 'lstat') and (
+            any(context in access.chain for context in ('runs.py:_create_run', 'runs.py:write_prompt',
+                'runs.py:_write_text', 'runs.py:_write_result', 'runs.py:launch_path'))
+            or pathlib.Path(access.path).name == 'skills.json' and any(context in access.chain for context in (
+                'original.py:publish', 'call.py:publish_run'))
+            or not access.present and pathlib.Path(access.path).name in ('capabilities.json', 'design.json', 'lease.json')
+                and any(context in access.chain for context in ('call.py:_finish_prepare',
+                    'call.py:_prepare_native', 'call.py:publish_run'))
+            or not access.present and pathlib.Path(access.path).name == 'lease.json' and
+                'call.py:record_dispatch_binding' in access.chain
+            or pathlib.Path(access.path).name == 'last-message.md'):
+        return 'B run publication/output validation', 'write-only path check, not a read of recorded bytes'
     if name in EXCLUDED and access.site.startswith(EXCLUDED[name][0]):
         return EXCLUDED[name][1:]
     return None
@@ -336,6 +436,15 @@ class ObservedAccessTest(unittest.TestCase):
                         site=access.site, occurrence=access.occurrence, fault=fault, code=code,
                         exit=result[0], excluded=excluded, input=rule.input_id if initial_input else None)), flush=True)
                     if excluded:
+                        if excluded[0] == 'B run result update':
+                            self.assertEqual((code, result[0]), ('OAH_RUN_LAUNCH_INVALID', 1) if fault == 'missing'
+                                             else ('OAH_STATE_IO', 69), str(result))
+                            self.assertFalse(case.sent)
+                        if excluded[0] in ('B atomic append validation', 'B run publication/output validation'):
+                            self.assertEqual(result[0], 0 if fault == 'missing' else 69, str(result))
+                            if fault != 'missing':
+                                self.assertEqual(code, 'OAH_STATE_IO', str(result))
+                                self.assertFalse(case.sent)
                         continue
                     expected = rule.absent if fault == 'missing' and not rule.required else OWNER_MATRIX[
                         BOUNDARY[name]][FAULTS.index(fault)]
@@ -417,6 +526,9 @@ class ObservedAccessTest(unittest.TestCase):
 
     def test_skills_receiving_observed_files(self):
         self.exercise('skills-receiving')
+
+    def test_skills_repeat_read_observed_files(self):
+        self.exercise('skills-repeat')
 
     def test_skills_plan_observed_files(self):
         self.exercise('skills-plan')

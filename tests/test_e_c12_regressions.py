@@ -23,13 +23,13 @@ from tests.test_skill_delivery import DeliveryTask, PLAIN
 
 
 @contextlib.contextmanager
-def input_fault(target, reached):
+def input_fault(target, reached, detail='fixture input read failed at the named recheck'):
     read, text, opened, io_opened = Path.read_bytes, Path.read_text, builtins.open, io.open
 
     def fault(operation, path, *args, **kwargs):
         if isinstance(path, (str, bytes, os.PathLike)) and Path(os.fsdecode(path)) == target:
             reached.append(str(path))
-            raise OSError(errno.EIO, 'fixture input read failed at the named recheck', str(path))
+            raise OSError(errno.EIO, detail, str(path))
         return operation(path, *args, **kwargs)
 
     with mock.patch.object(Path, 'read_bytes', lambda path: fault(read, path)), \
@@ -289,8 +289,13 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         return prepared, parent
 
     def test_background_parent_preserves_launcher_state_io(self):
-        from oah import call
         _request, parent, record = self.valid()
+        for detail in ('fixture launcher read failed', '\U0001f600' * 8192):
+            with self.subTest(diagnostic_bytes=len(detail.encode('utf-8'))):
+                self.check_background_refusal(parent, record, detail)
+
+    def check_background_refusal(self, parent, record, detail):
+        from oah import call
         run_command, popen = call.subprocess.run, call.subprocess.Popen
         observations = []
         reached = []
@@ -298,7 +303,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         def launch(argv, *args, **kwargs):
             if isinstance(argv, (list, tuple)) and len(argv) >= 2 and argv[-2] == 'launch_main':
                 out, err = io.StringIO(), io.StringIO()
-                with input_fault(parent, reached), \
+                with input_fault(parent, reached, detail), \
                         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = call.launch_main(argv[-1])
                 observations.append({'launcher_rc': code, 'launcher_stdout': out.getvalue(),
@@ -316,7 +321,9 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 '--tier', 'low', '--parent-inventory', str(parent), '--relay-result', record['id'],
                 '--background', '--json'])
         states = [json.loads((run / 'result.json').read_bytes()) for run in self.runs()]
-        print('BACKGROUND_PARENT', json.dumps({'observed': observations, 'cli': result,
+        print('BACKGROUND_PARENT', json.dumps({'observed': [{'launcher_rc': item['launcher_rc'],
+            'launcher_bytes': len(item['launcher_stdout'].encode('utf-8'))} for item in observations],
+            'cli': [result[0], result[1], result[2][:300]],
             'records': [{'status': item['status'], 'error': item.get('error')} for item in states],
             'read_reached': bool(reached), 'engine_ran': self.record.exists()}), file=sys.__stdout__, flush=True)
         self.assertTrue(reached)
@@ -483,6 +490,73 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                     self.assertEqual(retried[0], 1, str(retried))
                     self.assertIn('OAH_RUN_NOT_QUEUED:', retried[2])
                     self.assertFalse(case.record.exists())
+
+    def test_worker_result_metadata_refusal_retires_only_stale_queues(self):
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('worker')
+        target = case.run_dir / 'result.json'
+        earlier = target.read_bytes()
+        lstat, stat = os.lstat, os.stat
+        for number in (errno.ENOENT, errno.EACCES, errno.EIO):
+            with self.subTest(errno=number):
+                case.restore()
+                reached = []
+
+                def changed(operation, raw, *args, **options):
+                    if isinstance(raw, (str, bytes, os.PathLike)) and Path(os.fsdecode(raw)) == target:
+                        reached.append(str(raw))
+                        kind = PermissionError if number == errno.EACCES else OSError
+                        raise kind(number, 'fixture result metadata cannot be read', str(target))
+                    return operation(raw, *args, **options)
+
+                with mock.patch.object(os, 'lstat', lambda *args, **options: changed(lstat, *args, **options)), \
+                        mock.patch.object(os, 'stat', lambda *args, **options: changed(stat, *args, **options)), \
+                        mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01):
+                    result = cli_result(case.root, case.environment, *case.command)
+                self.assertTrue(reached)
+                code = 'OAH_STATE_IO' if number == errno.EIO else 'OAH_RUN_LAUNCH_INVALID'
+                self.assertEqual(result[0], 69 if number == errno.EIO else 1, str(result))
+                self.assertTrue(result[2].startswith(code + ':'), str(result))
+                self.assertEqual((case.run_dir / 'worker.claim').exists(), number != errno.EIO)
+                self.assertTrue((case.run_dir / 'stderr.log').is_file())
+                self.assertIn(code, (case.run_dir / 'stderr.log').read_text(encoding='utf-8'))
+                self.assertEqual(target.read_bytes(), earlier)
+                self.assertFalse(case.record.exists())
+
+    def test_worker_result_identity_and_link_refusals_keep_the_record_and_retire_the_queue(self):
+        from tests.e_c12_scenarios import Scenario
+
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('worker')
+        target = case.run_dir / 'result.json'
+        for field in ('run_id', 'task', 'linked-file'):
+            with self.subTest(field=field):
+                case.restore()
+                if field == 'linked-file':
+                    source = case.work / 'saved-result.json'
+                    source.write_bytes(target.read_bytes())
+                    target.unlink()
+                    target.symlink_to(source)
+                else:
+                    data = json.loads(target.read_bytes())
+                    data[field] = 'different-recorded-value'
+                    target.write_text(json.dumps(data), encoding='utf-8')
+                earlier = target.read_bytes()
+
+                result = cli_result(case.root, case.environment, *case.command)
+
+                self.assertEqual(result[0], 1, str(result))
+                self.assertTrue(result[2].startswith('OAH_RUN_LAUNCH_INVALID:'), str(result))
+                self.assertTrue((case.run_dir / 'worker.claim').is_file())
+                self.assertEqual(target.read_bytes(), earlier)
+                self.assertEqual(target.is_symlink(), field == 'linked-file')
+                self.assertFalse(case.record.exists())
 
     def test_worker_result_directory_is_kept_and_its_queue_is_retired(self):
         from tests.e_c12_scenarios import Scenario

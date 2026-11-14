@@ -63,12 +63,15 @@ class Scenario(e_c9_fixture.CorrectionFixture):
 
         self.name = name
         self.extra = []
-        if name in ('settle', 'settle-retry', 'skills', 'skills-receiving'):
+        if name in ('settle', 'settle-retry', 'skills', 'skills-receiving', 'skills-repeat'):
             _now, run, command = self.offered_parent_relay()
-            if name in ('settle-retry', 'skills-receiving'):
+            if name in ('settle-retry', 'skills-receiving', 'skills-repeat'):
                 settled = cli_result(self.repo, self.env, *command)
                 self.assertEqual(settled[0], 0, str(settled))
             self.command = command if name in ('settle', 'settle-retry') else ['skills', 'read', '--run', run.name, '--item', '1']
+            if name == 'skills-repeat':
+                read = cli_result(self.repo, self.env, *self.command)
+                self.assertEqual(read[0], 0, str(read))
             self.run_dir = run
             if name in ('settle', 'settle-retry'):
                 self.extra = [pathlib.Path(command[command.index('--result-file') + 1])]

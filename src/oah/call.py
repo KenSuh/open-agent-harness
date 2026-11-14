@@ -1352,8 +1352,8 @@ def task_basis(holder, task_design, packet: Packet, *, root: pathlib.Path):
     from oah.discovery import tasks
 
     try:
-        text = oah_intent.read_source(pathlib.Path(root) / packet.source)
-    except Exception as exc:  # the source helpers raise their own coded errors
+        text = input_files.source_text(pathlib.Path(root) / packet.source, oah_intent.read_source)
+    except oah_intent.SourceError as exc:
         raise tasks.NeedsInvalid("stale", f"the packet cannot be read again ({exc})") from None
     section = briefs.raw_section(text)
     if (packet.intent is None or section is None or packet.section is None
@@ -4477,7 +4477,7 @@ def launch_main(run_dir: str) -> int:
 
 
 def _launcher_refusal(text: str) -> boundaries.CommandRefusal | None:
-    if len(text.encode("utf-8")) > 65_536:
+    if len(text.encode("utf-8")) > 131_072:
         return None
     try:
         data = json.loads(text)

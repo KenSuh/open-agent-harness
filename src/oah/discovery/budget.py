@@ -94,7 +94,7 @@ def _hash(value: object) -> bool:
 
 
 def profiles(target: Target, *, now: dt.datetime) -> list[TargetBudgetProfileV1]:
-    from oah.discovery import records
+    from oah.discovery import inputs, records
 
     try:
         source = _profile_source(target)
@@ -103,7 +103,7 @@ def profiles(target: Target, *, now: dt.datetime) -> list[TargetBudgetProfileV1]
     if len(source.raw) > 65536 or hashlib.sha256(source.raw).hexdigest() != source.sha256:
         raise BudgetRefused("target-capacity-unknown", "the packaged qualification data does not match its pin")
     try:
-        data = records.json_bytes(source.raw, pathlib.Path("target-profiles.json"))
+        data = inputs.json_value(source.raw, "target-profiles.json")
         if not isinstance(data, dict) or set(data) != {"version", "profiles"} or type(data["version"]) is not int \
                 or data["version"] != 1 \
                 or not isinstance(data["profiles"], list) or len(data["profiles"]) > 32:

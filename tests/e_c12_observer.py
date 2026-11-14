@@ -23,6 +23,7 @@ class Access:
     occurrence: int
     chain: tuple[str, ...]
     input_owned: bool
+    present: bool
 
 
 class ObservedFiles:
@@ -40,6 +41,8 @@ class ObservedFiles:
         self.raw_lstat = os.lstat
         self.raw_open = builtins.open
         self.initial = {os.path.abspath(path) for path in pathlib.Path(state).rglob('*') if path.is_file()} | self.extra
+        self.earlier_runs = {str(pathlib.Path(path).parent) for path in self.initial
+                             if re.fullmatch(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', pathlib.Path(path).parent.name)}
         self.failed = None
         self.retained = {}
 
@@ -66,7 +69,7 @@ class ObservedFiles:
         try:
             return not stat.S_ISDIR(self.raw_lstat(path).st_mode)
         except FileNotFoundError:
-            return False
+            return True
 
     @staticmethod
     def key(access):
@@ -83,21 +86,29 @@ class ObservedFiles:
                    and not frame.filename.endswith('/discovery/records.py')]
         site = ':'.join((pathlib.Path(callers[-1].filename).name, callers[-1].name,
                          str(callers[-1].lineno))) if callers else 'outside-oah'
-        existing = path in self.initial
+        existing = path in self.initial or any(path.startswith(folder + os.sep) for folder in self.earlier_runs)
+        try:
+            self.raw_lstat(path)
+            present = True
+        except FileNotFoundError:
+            present = False
         key = (path if existing else re.sub(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', '{new-run}', path),
                operation, site)
         occurrence = self.counts.get(key, 0) + 1
         self.counts[key] = occurrence
         chain = tuple(pathlib.Path(frame.filename).name + ':' + frame.name for frame in callers)
-        access = Access(path, operation, site, owned, existing, occurrence, chain, input_owned)
+        access = Access(path, operation, site, owned, existing, occurrence, chain, input_owned, present)
         self.accesses.append(access)
         if self.target is not None and (self.key(access), access.operation, access.site, access.occurrence) == (
                 self.key(self.target), self.target.operation, self.target.site, self.target.occurrence):
             self.reached.append(access)
             for previous in self.initial | {item.path for item in self.accesses}:
                 if self.selected(previous):
-                    with self.raw_open(previous, 'rb') as handle:
-                        self.retained[pathlib.Path(previous)] = handle.read()
+                    try:
+                        with self.raw_open(previous, 'rb') as handle:
+                            self.retained[pathlib.Path(previous)] = handle.read()
+                    except FileNotFoundError:
+                        continue
             self.failed = path
         if self.failed == path:
             number = {'missing': errno.ENOENT, 'not-regular': errno.EISDIR, 'denied': errno.EACCES,
@@ -150,6 +161,7 @@ class ObservedFiles:
             path = self.path(raw, kwargs.get('dir_fd'))
             replacement = self.observe(path, 'stat' if operation is real_stat else 'lstat')
             if replacement is not None and path is not None:
+                pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
                 with real_open(path, 'wb') as handle:
                     handle.write(replacement)
             return operation(raw, *args, **kwargs)
@@ -158,7 +170,7 @@ class ObservedFiles:
             path = self.path(raw, kwargs.get('dir_fd'))
             if not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
                 replacement = self.observe(path, 'os.open')
-                if replacement is not None:
+                if replacement is not None and path is not None:
                     with real_open(path, 'wb') as handle:
                         handle.write(replacement)
             descriptor = real_os(raw, flags, *args, **kwargs)
@@ -178,7 +190,7 @@ class ObservedFiles:
         def fstat(descriptor):
             path = self.path(descriptor)
             replacement = self.observe(path, 'fstat')
-            if replacement is not None:
+            if replacement is not None and path is not None:
                 with real_open(path, 'wb') as handle:
                     handle.write(replacement)
             return real_fstat(descriptor)

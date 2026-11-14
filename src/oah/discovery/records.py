@@ -61,14 +61,14 @@ def _read(path: pathlib.Path, operation: Callable[[pathlib.Path], bytes], *, req
           deadline: float | None = None) -> T | None:
     def access() -> bytes:
         nonlocal path
-        if resolve is not None:
-            path = resolve()
         if regular:
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                 raise InvalidRecord(path, Issue.NOT_REGULAR, "is not a regular file")
             if limit is not None and info.st_size > limit:
                 raise InvalidRecord(path, Issue.CONTENT, "exceeds its bounded record size")
+        if resolve is not None:
+            path = resolve()
         return operation(path)
     try:
         raw = _retry(access, deadline)
@@ -107,7 +107,7 @@ def _retry(operation: Callable[[], T], deadline: float | None) -> T:
     return _retry_until(deadline, RETRY_SECONDS, operation)
 
 
-def location(path: pathlib.Path, resolve: Callable[[], pathlib.Path], *, deadline: float | None = None) -> pathlib.Path:
+def location(path: pathlib.Path, resolve: Callable[[], T], *, deadline: float | None = None) -> T:
     try:
         return _retry(resolve, deadline)
     except OSError as exc:
@@ -198,8 +198,19 @@ def run_json(run, name: str, *, required: bool = True,
     path = run.path / name
     limit = LIMIT if name == "skills.json" else None
     operation = lambda source: run._read_bytes(name) if isinstance(run, WorkerRun) else source.read_bytes()
+
+    def checked(raw):
+        data = _object(json_bytes(raw, path), path)
+        if isinstance(run, WorkerRun) and name == "result.json" and (
+                data.get("run_id") != run.id or data.get("task") != run.task or
+                run._validated is not None and any(data.get(key) != run._validated.get(key) for key in (
+                    "engine", "stage", "created_at", "cwd", "resolved_model", "launch_effort", "cli_version",
+                    "override_stage"))):
+            raise ValueError("the saved result identity changed")
+        return parse(data)
+
     return _read(path, operation, required=required, limit=limit, resolve=lambda: run.file_path(name),
-                 parse=lambda raw: parse(_object(json_bytes(raw, path), path)), deadline=getattr(run, "deadline", None))
+                 parse=checked, deadline=getattr(run, "deadline", None))
 
 
 def run_rows(run, name: str) -> list[dict[str, Json]]:

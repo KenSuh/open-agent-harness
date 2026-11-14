@@ -222,6 +222,16 @@ def valid_receiving(record: Mapping, *, run_id: str, receiving_ref: str | None =
                               "the earlier records are kept; offer again with oah call --launcher native")
 
 
+def receiving_for_read(run_dir: pathlib.Path) -> dict | None:
+    offer = read_offer(run_dir)
+    settlement = read_settlement(run_dir, required=offer is not None and offer["settlement"] is not None)
+    receiving = read_receiving(run_dir, required=settlement is not None)
+    if receiving is not None:
+        valid_receiving(receiving, run_id=pathlib.Path(run_dir).name,
+                        receiving_ref=settlement["receiving_ref"] if settlement is not None else None)
+    return receiving
+
+
 def receiving_record(run_id: str, offer: Mapping, bundle: Mapping | None, reads: Iterable[Mapping], *,
                      now: dt.datetime) -> dict:
     """ReceivingRecordV1 for a settled offer: inline texts were parent-attested; reads are only oah-mediated ones."""
