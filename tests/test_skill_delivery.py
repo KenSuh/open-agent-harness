@@ -410,14 +410,17 @@ class InstalledCopyTest(DeliveryTask, unittest.TestCase):
         record = pathlib.Path(prepared.run_dir) / "skills.json"
         data = json.loads(record.read_text(encoding="utf-8"))
         record.write_text(json.dumps(dict(data, bundle={"version": 1, "items": "none"})), encoding="utf-8")
+        earlier = record.read_bytes()
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.chdir(self.repo):
             with self.assertRaises(call.EngineError) as caught:
                 call.check_prepared(prepared)
         self.assertEqual(caught.exception.code, "OAH_RUN_LAUNCH_INVALID")
         read = self.oah("skills", "read", "--run", pathlib.Path(prepared.run_dir).name, "--item", "1")
-        self.assertEqual(read.returncode, 1)
-        self.assertIn("OAH_SKILL_UNMANAGED_RUN", read.stderr)
+        self.assertEqual(read.returncode, 69, read.stdout + read.stderr)
+        self.assertTrue(read.stderr.startswith("OAH_SKILLS_IO:"), read.stderr)
         self.assertNotIn("Traceback", read.stderr)
+        self.assertEqual(record.read_bytes(), earlier)
+        self.assertFalse(self.record.exists())
         # A re-sealed record that breaks one wire rule (a body moved to a reference) is refused just the same.
         bundle = json.loads(json.dumps(data["bundle"]))
         bundle["items"][0]["mode"] = "reference"
