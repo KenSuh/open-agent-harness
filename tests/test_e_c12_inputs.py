@@ -8,6 +8,7 @@ import io
 import os
 import pathlib
 import re
+import sys
 import traceback
 import unittest
 from unittest import mock
@@ -135,7 +136,9 @@ class InputContractTest(DeliveryTask, unittest.TestCase):
             with self.subTest(role=role, fault=fault), contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(builtins, 'open', lambda *a, **k: changed(opened, *a, **k)))
                 stack.enter_context(mock.patch.object(io, 'open', lambda *a, **k: changed(io_opened, *a, **k)))
-                stack.enter_context(mock.patch('oah.discovery.inputs.RETRY_SECONDS', 0.01))
+                loaded_inputs = sys.modules.get('oah.discovery.inputs')
+                if loaded_inputs is not None:
+                    stack.enter_context(mock.patch.object(loaded_inputs, 'RETRY_SECONDS', 0.01))
                 result = cli_result(root, env, *command)
                 self.assertTrue(reached, 'the command must read its named input')
                 observed.add(fault)

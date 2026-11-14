@@ -18,8 +18,17 @@ from unittest import mock
 from tests import e_c6_fixture, test_capabilities as capabilities
 from tests import test_e_relay_times as relays, test_e_spent_evidence as spent
 from tests import test_e_prepared as prepared_fixture, test_e_frozen_correction as correction_fixture
-from tests.test_e_c10_boundaries import cli_result
+from tests.test_e_c10_boundaries import cli_result as recorded_cli_result
 from tests.test_skill_delivery import DeliveryTask, PLAIN
+
+
+def cli_result(*args, **options):
+    from oah.discovery import records
+
+    try:
+        return recorded_cli_result(*args, **options)
+    except records.InvalidRecord as exc:
+        raise AssertionError(f'the CLI must return its typed refusal instead of raising {type(exc).__name__}: {exc}') from exc
 
 
 @contextlib.contextmanager
@@ -481,6 +490,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 self.assertTrue(result[2].startswith(expected + ':'), str(result))
                 self.assertEqual(target.read_bytes(), earlier)
                 self.assertEqual((case.run_dir / 'worker.claim').exists(), fault != 'eio')
+                self.assertTrue((case.run_dir / 'stderr.log').is_file())
                 self.assertIn(expected, (case.run_dir / 'stderr.log').read_text(encoding='utf-8'))
                 self.assertFalse(case.record.exists())
                 retried = cli_result(case.root, case.environment, *case.command)
@@ -515,7 +525,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
 
                 with mock.patch.object(os, 'lstat', lambda *args, **options: changed(lstat, *args, **options)), \
                         mock.patch.object(os, 'stat', lambda *args, **options: changed(stat, *args, **options)), \
-                        mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01):
+                        mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True):
                     result = cli_result(case.root, case.environment, *case.command)
                 self.assertTrue(reached)
                 code = 'OAH_STATE_IO' if number == errno.EIO else 'OAH_RUN_LAUNCH_INVALID'
@@ -623,13 +633,17 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('background')
         target = next(access for access in case.observe() if access.path.endswith('/launch.json')
-                      and access.operation == 'read' and 'call.py:_launch_main' in access.chain)
+                      and access.operation == 'read' and any(context in access.chain for context in (
+                          'call.py:_launch_main', 'call.py:launch_main')))
         for fault in ('missing', 'not-regular', 'denied', 'invalid-content', 'eio'):
             with self.subTest(fault=fault):
                 case.restore()
                 observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
-                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01):
-                    result = case.invoke(observer)
+                with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True):
+                    try:
+                        result = case.invoke(observer)
+                    except KeyError as exc:
+                        self.fail(f'the launch record read must return a typed refusal instead of raising KeyError: {exc}')
                 self.assertTrue(observer.reached)
                 expected = 'OAH_STATE_IO' if fault == 'eio' else 'OAH_RUN_LAUNCH_INVALID'
                 self.assertEqual(result[0], 69 if fault == 'eio' else 1, str(result))
