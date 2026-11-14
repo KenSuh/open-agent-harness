@@ -441,8 +441,6 @@ def output_row(name, access, path, owner):
             'call.py:_finish_prepare', 'call.py:_prepare_native')) else launch
     if filename == 'result.json':
         if access.phase != 'before':
-            if name == 'background':
-                return 'launch-address-before-read'
             return launch if name == 'worker' else address
         if name == 'freeze':
             return 'captured-result'
@@ -640,6 +638,44 @@ class ObservedAccessTest(unittest.TestCase):
         self.assertNotIn('Traceback', err)
         self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
         self.check_run_state(case, observer, OWNER_RUN_MATRIX['launch'][FAULTS.index('invalid-content')])
+
+    def test_post_runner_result_write_keeps_the_output_address_contract(self):
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
+        for operation in ('stat', 'lstat'):
+            access = next(row for row in reversed(accesses)
+                if pathlib.Path(row.path).name == 'result.json' and row.operation == operation
+                and row.phase == 'after-runner' and 'runs.py:_write_result' in row.chain
+                and (operation != 'stat' or row.site == 'runs.py:_contained_path:538'))
+            owner = excluded_access(case.name, access, case.storage)
+            self.assertEqual(owner, ('B run publication/output validation',
+                                    'write-only path check, not a read of recorded bytes'))
+            expected_row = 'address-only' if operation == 'stat' else 'ignored-address'
+            for index, fault in enumerate(('missing', 'denied', 'eio')):
+                with self.subTest(operation=operation, fault=fault):
+                    case.restore()
+                    observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault=fault)
+                    with mock.patch('oah.runs.RETRY_SECONDS', 0.01), \
+                            mock.patch('oah.atomic.RETRY_SECONDS', 0.01):
+                        result = case.invoke(observer)
+                    self.assertTrue(observer.reached, 'reach the final output address after runner creation')
+                    expected = OUTPUT_MATRIX[expected_row][index]
+                    self.assertEqual(result[0], expected[1], str(result))
+                    if expected[0]:
+                        self.assertIn(expected[0] + ':', result[2])
+                    self.assertNotIn('Traceback', result[2])
+                    self.assertEqual((case.engine_spawns, case.runner_creations), (0, 1))
+                    if result[0]:
+                        self.check_run_state(case, observer, 'at-access-kept')
+                    else:
+                        self.check_success(case, observer, owner)
+                    print('OS_OUTPUT_ADDRESS', json.dumps(dict(operation=operation, fault=fault,
+                        code=expected[0], exit=result[0], chain=access.chain)), flush=True)
+                    self.assertEqual(output_row(case.name, access, label(access, case.storage), owner[0]),
+                                     expected_row, 'a final output write keeps the owner address row')
 
     def test_observed_accesses_have_declared_owners(self):
         self.assertEqual(set(BOUNDARY), set(FILE_MATRIX))
