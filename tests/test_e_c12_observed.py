@@ -395,6 +395,16 @@ OUTPUT_OWNERS = {
 }
 
 PRESENCE_MATRIX = {'native-offer-at-handoff': ('OAH_RUN_LAUNCH_INVALID', 1, 'at-access-kept')}
+METADATA_OPERATIONS = frozenset(('stat', 'lstat', 'exists', 'is_file', 'fstat'))
+BYTE_OPERATIONS = frozenset(('open', 'read', 'os.open', 'os.read'))
+
+
+def content_read_ordinal(accesses, ordinal):
+    access = accesses[ordinal]
+    if access.operation not in METADATA_OPERATIONS:
+        return ordinal
+    return next((index for index in range(ordinal + 1, len(accesses))
+                 if accesses[index].path == access.path and accesses[index].operation in BYTE_OPERATIONS), None)
 
 
 def presence_admission(access, fault):
@@ -462,11 +472,74 @@ def label(access, state):
 
 
 class ObservedAccessTest(unittest.TestCase):
+    """Change one fixture file at an observed access and assert its literal owner rule.
+
+    For metadata content changes, choose the first later byte read from the clean
+    trace before injection, require that exact read with no intervening byte read,
+    and require its own direct content cell. With no later read, assert the
+    existing presence rule. The faulted outcome never supplies an expected row.
+    """
     @classmethod
     def setUpClass(cls):
         cls.completed = {}
         cls.output_cells = set()
         cls.presence_cells = set()
+
+    def assert_content_read(self, observer, expected, classified):
+        self.assertTrue(observer.content_accesses, 'the fault must reach the clean trace byte read')
+        actual = observer.content_accesses[0]
+        self.assertEqual((actual.path, actual.operation, actual.site, actual.file_occurrence, actual.chain,
+                          actual.phase, actual.engine_spawns, actual.runner_creations),
+                         (expected.path, expected.operation, expected.site, expected.file_occurrence, expected.chain,
+                          expected.phase, expected.engine_spawns, expected.runner_creations),
+                         'reach the first clean byte read without another byte read in between')
+        if expected.owned and not expected.input_owned:
+            self.assertTrue(classified, 'the first invalid byte read must be classified by the record owner')
+            self.assertEqual(classified[0], (pathlib.Path(expected.path), 'invalid-content', 1),
+                             'the first affected byte read must refuse before a later read can mask it')
+
+    def test_metadata_content_uses_the_first_clean_trace_read(self):
+        from oah.discovery import records
+
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class FixtureClock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', FixtureClock))
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('background')
+        accesses = case.observe(lambda observer: self.check_success(case, observer))
+        ordinal = next(index for index, row in enumerate(accesses)
+            if pathlib.Path(row.path).name == 'intent-binding.json' and row.operation == 'stat'
+            and row.site.endswith('_contained_path:538') and 'call.py:record_dispatch_binding' in row.chain
+            and 'call.py:dispatch_binding' not in row.chain)
+        target = content_read_ordinal(accesses, ordinal)
+        self.assertIsNotNone(target)
+        assert target is not None
+        expected = accesses[target]
+        self.assertEqual(boundary_at(case.name, expected), 'launch')
+        observer = ObservedFiles(case.storage, extra=case.extra, target=accesses[ordinal], fault='invalid-content')
+        classified = []
+        constructor = records.RecordRefusal.__init__
+
+        def classified_record(instance, path, issue, detail):
+            if path == pathlib.Path(expected.path) and issue == records.Issue.CONTENT:
+                classified.append((path, str(issue), len(observer.content_accesses)))
+            constructor(instance, path, issue, detail)
+
+        with mock.patch.object(records.RecordRefusal, '__init__', classified_record):
+            code, out, err = case.invoke(observer)
+        self.assertTrue(observer.reached)
+        self.assert_content_read(observer, expected, classified)
+        self.assertEqual((code, 'OAH_RUN_LAUNCH_INVALID:' in err), (1, True), out + err)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+        self.check_run_state(case, observer, OWNER_RUN_MATRIX['launch'][FAULTS.index('invalid-content')])
 
     def test_observed_accesses_have_declared_owners(self):
         self.assertEqual(set(BOUNDARY), set(FILE_MATRIX))
@@ -482,7 +555,7 @@ class ObservedAccessTest(unittest.TestCase):
                     case.scenario(name)
                     accesses = case.observe(lambda observer: self.check_success(case, observer))
                     paths, contexts = set(), set()
-                    for access in accesses:
+                    for ordinal, access in enumerate(accesses):
                         path = label(access, case.storage)
                         matched = [index for index, rule in enumerate(FILE_MATRIX[name])
                                    if fnmatch.fnmatchcase(path, rule.pattern)]
@@ -501,6 +574,11 @@ class ObservedAccessTest(unittest.TestCase):
                         context, _outcome = rule.absence(access)
                         if context is not None and not excluded:
                             contexts.add((index, context))
+                        if access.operation in METADATA_OPERATIONS and not excluded:
+                            target = content_read_ordinal(accesses, ordinal)
+                            if target is not None:
+                                self.assertIsNone(excluded_access(name, accesses[target], case.storage),
+                                                  'the selected clean byte read needs its own direct content cell')
                     self.assertEqual(paths, set(range(len(FILE_MATRIX[name]))))
                     self.assertEqual(contexts, {(index, context) for index, rule in enumerate(FILE_MATRIX[name])
                                                for context, _outcome in rule.absent_by_context})
@@ -518,9 +596,10 @@ class ObservedAccessTest(unittest.TestCase):
             ('B run result update', 'after-runner'), ('lane C design sources', 'before'),
             ('review/fix publication', 'before'), ('review/fix publication', 'after-engine')})
 
-    def check_run_state(self, case, observer, status):
+    def check_run_state(self, case, observer, status, *, at_content=False):
         paths = list(case.storage.glob('runs/*/r*/result.json'))
-        retained = {path: raw for path, raw in observer.retained.items() if path.name == 'result.json'}
+        snapshot = observer.content_retained if at_content else observer.retained
+        retained = {path: raw for path, raw in snapshot.items() if path.name == 'result.json'}
         if status in ('kept', 'at-access-kept'):
             self.assertEqual(set(paths), set(retained))
             for path, raw in retained.items():
@@ -643,6 +722,8 @@ class ObservedAccessTest(unittest.TestCase):
         self.assertEqual(saved.read_bytes(), observer.retained[saved])
 
     def exercise(self, name):
+        from oah.discovery import records
+
         now = dt.datetime.now(dt.timezone.utc)
 
         class FixtureClock(dt.datetime):
@@ -658,7 +739,9 @@ class ObservedAccessTest(unittest.TestCase):
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         self.assertTrue(accesses)
         self.assertEqual((case.engine_spawns, case.runner_creations), SUCCESS_DISPATCH[name])
-        reached, specified, contexts = set(), set(), set()
+        reached, specified, contexts, content_links, direct_content = set(), set(), set(), set(), set()
+        content_targets = {index: content_read_ordinal(accesses, index) for index, row in enumerate(accesses)
+                           if row.operation in METADATA_OPERATIONS}
         for ordinal, access in enumerate(accesses):
             path = label(access, case.storage)
             matched = [index for index, rule in enumerate(FILE_MATRIX[name]) if fnmatch.fnmatchcase(path, rule.pattern)]
@@ -674,9 +757,32 @@ class ObservedAccessTest(unittest.TestCase):
             for fault in faults:
                 with self.subTest(command=name, path=path, access=access.operation, site=access.site,
                                   occurrence=access.occurrence, fault=fault):
+                    target = content_targets.get(ordinal) if fault == 'invalid-content' else None
+                    routed = fault == 'invalid-content' and access.operation in METADATA_OPERATIONS and target is not None
+                    outcome_access = accesses[target] if routed and target is not None else access
+                    outcome_input = rule.is_input(outcome_access)
+                    route = None
+                    if fault == 'invalid-content' and access.operation in METADATA_OPERATIONS:
+                        route = dict(kind='first-clean-byte-read' if routed else 'metadata-presence',
+                            ordinal=target, operation=outcome_access.operation, site=outcome_access.site,
+                            file_occurrence=outcome_access.file_occurrence, phase=outcome_access.phase,
+                            boundary=boundary_at(name, outcome_access))
+                        if routed:
+                            self.assertIsNone(excluded_access(name, outcome_access, case.storage),
+                                              'the clean byte read needs its own direct content cell')
                     case.restore()
                     observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault=fault)
+                    classified = []
+                    constructor = records.RecordRefusal.__init__
+
+                    def classified_record(instance, target_path, issue, detail):
+                        if target_path == pathlib.Path(outcome_access.path) and issue == records.Issue.CONTENT:
+                            classified.append((target_path, str(issue), len(observer.content_accesses)))
+                        constructor(instance, target_path, issue, detail)
+
                     with contextlib.ExitStack() as retry_window:
+                        if routed:
+                            retry_window.enter_context(mock.patch.object(records.RecordRefusal, '__init__', classified_record))
                         if fault == 'denied':
                             for module in ('oah.discovery.records', 'oah.discovery.inputs', 'oah.runs', 'oah.atomic'):
                                 retry_window.enter_context(mock.patch(module + '.RETRY_SECONDS', 0.01))
@@ -687,6 +793,8 @@ class ObservedAccessTest(unittest.TestCase):
                                      {(access.phase, access.engine_spawns, access.runner_creations)})
                     self.assertEqual({row.chain for row in observer.reached}, {access.chain},
                                      'reach the same recorded read purpose as the control run')
+                    if routed:
+                        self.assert_content_read(observer, outcome_access, classified)
                     reached.add((ordinal, fault))
                     codes = [code for code in re.findall(r'(?m)^(OAH_[A-Z_]+(?:\([^\n:]+\))?):', result[2])
                              if code not in ('OAH_STAGE_OVERRIDDEN', 'OAH_MODEL_UNKNOWN_FAMILY', 'OAH_FIX_STARTED',
@@ -695,10 +803,13 @@ class ObservedAccessTest(unittest.TestCase):
                     print('OS_CASE', json.dumps(dict(command=name, path=path, operation=access.operation,
                         site=access.site, occurrence=access.occurrence, fault=fault, code=code,
                         exit=result[0], phase=access.phase, engine_spawns=case.engine_spawns,
-                        runner_creations=case.runner_creations, boundary=boundary_at(name, access),
+                        runner_creations=case.runner_creations, boundary=boundary_at(name, outcome_access),
+                        fault_boundary=boundary_at(name, access),
                         chain=access.chain, absent_context=rule.absence(access)[0] if fault == 'missing' else None,
+                        content_route=route,
                         admission='native-offer-at-handoff' if presence_admission(access, fault) else None,
-                        excluded=excluded, input=rule.input_id if initial_input else None)), flush=True)
+                        excluded=excluded, input=rule.input_id if outcome_input else None,
+                        fault_input=rule.input_id if initial_input else None)), flush=True)
                     if excluded:
                         if excluded[0] in OUTPUT_OWNERS:
                             row = output_row(name, access, path, excluded[0])
@@ -716,15 +827,15 @@ class ObservedAccessTest(unittest.TestCase):
                         if not result[0]:
                             self.check_success(case, observer, excluded)
                         continue
-                    boundary = boundary_at(name, access)
-                    if access.phase == 'before':
+                    boundary = boundary_at(name, outcome_access)
+                    if outcome_access.phase == 'before':
                         expected = OWNER_MATRIX[boundary][FAULTS.index(fault)]
                         run_policy = OWNER_RUN_MATRIX[boundary][FAULTS.index(fault)]
                         kept_policy = OWNER_KEPT_MATRIX[boundary][FAULTS.index(fault)]
                         dispatches = (0, 0)
                     else:
                         outward, exit_code, run_policy, kept_policy, engines, runners = AFTER_MATRIX[
-                            boundary, access.phase][FAULTS.index(fault)]
+                            boundary, outcome_access.phase][FAULTS.index(fault)]
                         expected, dispatches = (outward, exit_code), (engines, runners)
                     context, absent = rule.absence(access) if fault == 'missing' else (None, None)
                     if fault == 'missing':
@@ -733,7 +844,7 @@ class ObservedAccessTest(unittest.TestCase):
                             expected = absent[:2]
                             if len(absent) == 3:
                                 run_policy = absent[2]
-                    if initial_input:
+                    if outcome_input:
                         assert rule.input_id is not None
                         expected = INPUT_MATRIX[rule.input_id][FAULTS.index(fault)]
                     if presence_admission(access, fault):
@@ -744,15 +855,19 @@ class ObservedAccessTest(unittest.TestCase):
                         self.__class__.presence_cells.add('native-offer-at-handoff')
                     if fault == 'missing' and context is not None:
                         contexts.add((index, context))
+                    if fault == 'invalid-content' and access.operation in BYTE_OPERATIONS:
+                        direct_content.add(ordinal)
+                    if routed:
+                        content_links.add((ordinal, target))
                     self.assertNotIn('Traceback', result[2])
-                    if initial_input and fault != 'eio':
+                    if outcome_input and fault != 'eio':
                         self.assertNotIn('the recorded ', result[2])
                     if result[0]:
-                        self.check_run_state(case, observer, run_policy)
+                        self.check_run_state(case, observer, run_policy, at_content=routed)
                         self.assertEqual((case.engine_spawns, case.runner_creations), dispatches,
                                          'the refusal must not cause another dispatch')
-                        if access.phase != 'before':
-                            self.assertIn('the run already took place' if access.phase == 'after-engine' else
+                        if outcome_access.phase != 'before':
+                            self.assertIn('the run already took place' if outcome_access.phase == 'after-engine' else
                                           'the runner was already created', result[2])
                             self.assertIn('the follow-up read failed', result[2])
                             self.assertNotIn('nothing was sent', result[2])
@@ -777,7 +892,7 @@ class ObservedAccessTest(unittest.TestCase):
                         self.assertEqual(earlier.read_bytes(), b'\xff' if injected_content else raw,
                                          f'{name}: keep the earlier {earlier.name}')
                     self.assertEqual(kept_policy, 'inputs-at-access')
-                    if name == 'worker' and access.phase == 'before' and result[0] and \
+                    if name == 'worker' and outcome_access.phase == 'before' and result[0] and \
                             pathlib.Path(access.path).name != 'result.json' and not presence_admission(access, fault):
                         self.assertEqual(json.loads((case.run_dir / 'result.json').read_bytes())['status'], 'refused')
                     if name == 'worker' and access.phase == 'before' and pathlib.Path(access.path).name == 'result.json':
@@ -794,6 +909,8 @@ class ObservedAccessTest(unittest.TestCase):
                           for fault in (('missing', 'denied', 'eio') if
                               excluded_access(name, access, case.storage) else FAULTS)}
         self.assertEqual(reached, expected_cells, 'every observed access and every fault cell needs a reached case')
+        self.assertTrue({target for _source, target in content_links} <= direct_content,
+                        'each clean byte read selected by metadata content needs its own reached direct content cell')
         self.__class__.completed[name] = dict(accesses=len(accesses), cells=len(reached))
 
     def test_process_admission_observed_files(self):

@@ -29,6 +29,7 @@ class Access:
     engine_spawns: int = 0
     runner_creations: int = 0
     claim_present: bool = False
+    file_occurrence: int = 0
 
 
 class ObservedFiles:
@@ -38,7 +39,10 @@ class ObservedFiles:
         self.fault, self.target = fault, target
         self.accesses = []
         self.counts = {}
+        self.file_counts = {}
         self.reached = []
+        self.content_accesses = []
+        self.content_retained = {}
         self.active = True
         self.descriptors = {}
         self.replaced_read = set()
@@ -82,11 +86,30 @@ class ObservedFiles:
         return access.path if access.existing else re.sub(
             r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', '{new-run}', access.path)
 
+    def snapshot(self):
+        self.active = False
+        try:
+            retained = {}
+            current = {str(item) for item in pathlib.Path(self.state).rglob('*') if item.is_file()}
+            for previous in self.initial | current:
+                if self.selected(previous):
+                    try:
+                        with self.raw_open(previous, 'rb') as handle:
+                            retained[pathlib.Path(previous)] = handle.read()
+                    except FileNotFoundError:
+                        continue
+            return retained
+        finally:
+            self.active = True
+
     def observe(self, path, operation):
         if not self.active or not self.selected(path):
             return None
         existing = path in self.initial or any(path.startswith(folder + os.sep) for folder in self.earlier_runs)
         normalized = path if existing else re.sub(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', '{new-run}', path)
+        file_key = (normalized, operation)
+        file_occurrence = self.file_counts.get(file_key, 0) + 1
+        self.file_counts[file_key] = file_occurrence
         if self.target is not None and path != self.failed and (normalized, operation) != (
                 self.key(self.target), self.target.operation):
             return None
@@ -113,23 +136,12 @@ class ObservedFiles:
         except FileNotFoundError:
             claim_present = False
         access = Access(path, operation, site, owned, existing, occurrence, chain, input_owned, present,
-                        phase, engine_spawns, runner_creations, claim_present)
+                        phase, engine_spawns, runner_creations, claim_present, file_occurrence)
         self.accesses.append(access)
         if self.target is not None and (self.key(access), access.operation, access.site, access.occurrence) == (
                 self.key(self.target), self.target.operation, self.target.site, self.target.occurrence):
             self.reached.append(access)
-            self.active = False
-            try:
-                current = {str(item) for item in pathlib.Path(self.state).rglob('*') if item.is_file()}
-                for previous in self.initial | current:
-                    if self.selected(previous):
-                        try:
-                            with self.raw_open(previous, 'rb') as handle:
-                                self.retained[pathlib.Path(previous)] = handle.read()
-                        except FileNotFoundError:
-                            continue
-            finally:
-                self.active = True
+            self.retained = self.snapshot()
             self.failed = path
         if self.failed == path:
             number = {'missing': errno.ENOENT, 'not-regular': errno.EISDIR, 'denied': errno.EACCES,
@@ -138,6 +150,10 @@ class ObservedFiles:
                 kind = PermissionError if self.fault == 'denied' else OSError
                 raise kind(number, 'fixture stored-record access failed', path)
             if self.fault == 'invalid-content':
+                if operation in ('open', 'read', 'os.open', 'os.read'):
+                    self.content_accesses.append(access)
+                    if len(self.content_accesses) == 1:
+                        self.content_retained = self.snapshot()
                 return b'\xff'
         return None
 

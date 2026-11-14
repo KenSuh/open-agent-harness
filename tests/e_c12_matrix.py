@@ -1,3 +1,13 @@
+"""Literal owner decisions, independent of the production boundary table.
+
+A test changes one fixture file at a recorded OS access. OS errors use that
+query's command and phase. Invalid bytes set at a metadata query use the first
+later byte read of the same file in the clean trace, recorded before injection.
+The faulted command must reach that exact read with no intervening byte read;
+that clean read also needs its own reached direct invalid-content cell. With no
+later clean byte read, the existing query/presence rule must be asserted. The
+faulted result never chooses an expected row. A parser-bypass mutation must fail.
+"""
 from __future__ import annotations
 
 FAULTS = ('missing', 'not-regular', 'denied', 'invalid-content', 'eio')
