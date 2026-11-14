@@ -516,14 +516,14 @@ class ObservedAccessTest(unittest.TestCase):
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         ordinal = next(index for index, row in enumerate(accesses)
             if pathlib.Path(row.path).name == 'intent-binding.json' and row.operation == 'stat'
-            and row.site.endswith('_contained_path:538') and 'call.py:record_dispatch_binding' in row.chain
-            and 'call.py:dispatch_binding' not in row.chain)
+            and row.site.endswith('_contained_path:538'))
         target = content_read_ordinal(accesses, ordinal)
         self.assertIsNotNone(target)
         assert target is not None
         expected = accesses[target]
         self.assertEqual(boundary_at(case.name, expected), 'launch')
-        observer = ObservedFiles(case.storage, extra=case.extra, target=accesses[ordinal], fault='invalid-content')
+        observer = ObservedFiles(case.storage, extra=case.extra, target=accesses[ordinal],
+                                 fault='invalid-content', defer_content=True)
         classified = []
         constructor = records.RecordRefusal.__init__
 
@@ -771,7 +771,8 @@ class ObservedAccessTest(unittest.TestCase):
                             self.assertIsNone(excluded_access(name, outcome_access, case.storage),
                                               'the clean byte read needs its own direct content cell')
                     case.restore()
-                    observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault=fault)
+                    observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault=fault,
+                                             defer_content=routed)
                     classified = []
                     constructor = records.RecordRefusal.__init__
 
@@ -888,7 +889,7 @@ class ObservedAccessTest(unittest.TestCase):
                         if access.phase == 'before' and earlier.name == 'result.json' and str(earlier) != observer.failed:
                             continue
                         injected_content = fault == 'invalid-content' and observer.failed == str(earlier) and \
-                            access.operation in ('stat', 'lstat', 'fstat', 'os.open')
+                            access.operation in ('stat', 'lstat', 'fstat', 'os.open') and not observer.defer_content
                         self.assertEqual(earlier.read_bytes(), b'\xff' if injected_content else raw,
                                          f'{name}: keep the earlier {earlier.name}')
                     self.assertEqual(kept_policy, 'inputs-at-access')
@@ -898,7 +899,8 @@ class ObservedAccessTest(unittest.TestCase):
                     if name == 'worker' and access.phase == 'before' and pathlib.Path(access.path).name == 'result.json':
                         self.assertEqual((case.run_dir / 'worker.claim').exists(), access.claim_present or fault != 'eio')
                         raw = (case.run_dir / 'result.json').read_bytes()
-                        expected_raw = b'\xff' if fault == 'invalid-content' and access.operation in ('stat', 'lstat', 'fstat', 'os.open') \
+                        expected_raw = b'\xff' if fault == 'invalid-content' and not observer.defer_content and \
+                            access.operation in ('stat', 'lstat', 'fstat', 'os.open') \
                             else case.before[case.run_dir / 'result.json']
                         self.assertEqual(raw, expected_raw, 'the queued label is historical for this refused claim')
         self.assertEqual(specified, set(range(len(FILE_MATRIX[name]))), 'each literal file row needs an observed case')

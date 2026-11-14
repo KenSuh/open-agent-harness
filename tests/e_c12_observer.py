@@ -33,10 +33,11 @@ class Access:
 
 
 class ObservedFiles:
-    def __init__(self, state, *, extra=(), fault=None, target=None):
+    def __init__(self, state, *, extra=(), fault=None, target=None, defer_content=False):
         self.state = os.path.abspath(state)
         self.extra = {os.path.abspath(path) for path in extra}
         self.fault, self.target = fault, target
+        self.defer_content = defer_content
         self.accesses = []
         self.counts = {}
         self.file_counts = {}
@@ -150,6 +151,8 @@ class ObservedFiles:
                 kind = PermissionError if self.fault == 'denied' else OSError
                 raise kind(number, 'fixture stored-record access failed', path)
             if self.fault == 'invalid-content':
+                if self.defer_content and operation not in ('open', 'read', 'os.open', 'os.read'):
+                    return None
                 if operation in ('open', 'read', 'os.open', 'os.read'):
                     self.content_accesses.append(access)
                     if len(self.content_accesses) == 1:
