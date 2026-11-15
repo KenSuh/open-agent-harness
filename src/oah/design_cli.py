@@ -1,4 +1,4 @@
-# 설계 명령 — oah design project/new/save/accept/status/show/context/check/reconcile/recover/task/carry 의 인자, 입력 읽기, 출력 형식, 종료 코드를 맡는다.
+# 설계 명령 — oah design project/new/save/accept/status/show/context/check/coverage/reconcile/recover/task/carry 의 인자, 입력 읽기, 출력 형식, 종료 코드를 맡는다.
 from __future__ import annotations
 
 import argparse
@@ -100,6 +100,25 @@ def register(commands: argparse._SubParsersAction) -> None:
     check.add_argument("--digest", required=True)
     check.add_argument("--accepted", action="store_true", help="compare with the accepted revision instead")
 
+    coverage = sub.add_parser("coverage", help="the nine design stages: status, re-checks, skills and gaps "
+                              "(reads only), or `coverage edit` to build a new coverage part",
+                              usage="oah design coverage P D [--revision N | --accepted] [--json] [--check] "
+                              "[--next]\n"
+                              "       oah design coverage edit P D --from EDITS.json [--lang en|ko] [--out FILE]",
+                              description="Reads only. `edit` writes nothing to the design: it prints the new coverage "
+                              "part and the exact `oah design save` command that stores it.")
+    coverage.add_argument("words", nargs="+", metavar="[edit] P D", help="the project and design, after `edit` to "
+                          "build a new part")
+    coverage.add_argument("--revision", type=int, help="read this revision instead of the current one")
+    coverage.add_argument("--accepted", action="store_true", help="read the accepted revision")
+    coverage.add_argument("--json", action="store_true")
+    coverage.add_argument("--check", action="store_true", help="exit 1 (OAH_COVERAGE_INCOMPLETE) unless complete")
+    coverage.add_argument("--next", action="store_true", help="the stage to work on next: the first frontier "
+                          "stage, or the one Jev chose among two or more (current revision only)")
+    coverage.add_argument("--from", dest="from_file", metavar="EDITS.json", help="edit: a CoverageEditV1 file")
+    coverage.add_argument("--lang", choices=("en", "ko"), help="edit: the language of the human section")
+    coverage.add_argument("--out", help="edit: write the new part to this new file instead of standard output")
+
     reconcile = sub.add_parser("reconcile", help="rewrite the design pages and lists from the records")
     reconcile.add_argument("project", nargs="?")
     reconcile.add_argument("design", nargs="?")
@@ -146,6 +165,9 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    from oah.skillpack import PackRefused
+    from oah.discovery import boundaries
+
     try:
         if os.environ.get("OAH_WORKER") == "1" and args.design_command in WORKER_REFUSED:
             from oah.design.binding import WORKER_REFUSED_CODE
@@ -154,7 +176,14 @@ def run(args: argparse.Namespace) -> int:
                               "nothing was changed. Return your work to the dispatcher, who changes, accepts and "
                               "carries designs")
         store = open_store(pathlib.Path.cwd())
-        return HANDLERS[args.design_command](args, store)
+        with boundaries.command("design"):
+            return HANDLERS[args.design_command](args, store)
+    except boundaries.CommandRefusal as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+    except PackRefused as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_REFUSED
     except WikiError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
@@ -173,6 +202,8 @@ class _Inputs:
         self.stdin_used = False
 
     def read(self, value: str, what: str) -> str:
+        from oah.discovery import inputs
+
         if value == "-":
             if self.stdin_used:
                 raise DesignError(INPUT_INVALID_CODE, "standard input (-) can give only one part")
@@ -186,7 +217,7 @@ class _Inputs:
             except UnicodeDecodeError as exc:
                 raise DesignError(INPUT_INVALID_CODE, f"the {what} text on standard input is not UTF-8") from exc
         try:
-            return read_source(pathlib.Path(value))
+            return inputs.source_text(pathlib.Path(value), read_source)
         except SourceError as exc:
             raise DesignError(INPUT_INVALID_CODE, f"cannot use {value} for the {what}: {exc}") from exc
 
@@ -342,6 +373,184 @@ def _check(args: argparse.Namespace, store) -> int:
     error = DesignError(CHECK_CODES[state], f"{binding.line()} is {state}: {reason}")
     print(error, file=sys.stderr)
     return error.exit_code
+
+
+def _coverage_evidence(store):
+    """Reviewed skills and verified source snapshots in this clone's state folder (`oah skills review` writes them)."""
+    from oah.discovery.store import ReviewEvidence
+
+    return ReviewEvidence(store.state)
+
+
+def _quote(arg: str) -> str:
+    import shlex
+    import subprocess
+
+    return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
+
+
+def _stage_advisor(store, view, snapshot):
+    """design-stage/v1 over the frontier (DESIGN §7.1): each option is an opaque `oN` with only its stage label, and
+    the design's own text is the one authored field, so nothing is sent unless send_design_text is on. The answer is
+    applied only after the judge's recheck against the same frontier, revision and text."""
+
+    from oah import skillpack
+
+    admitted = skillpack.inspect((view.project, view.design, snapshot.revision, snapshot.digest),
+                                 max_queries=1, root=store.root)
+
+    def advise(options: dict) -> dict:
+        import hashlib
+
+        from oah.config import load_config
+        from oah.design.model import DESIGN_PART
+        from oah.discovery import review as reviews
+        from oah.rerank import DEFAULTS as RERANK_DEFAULTS, judge
+
+        config = load_config(store.root).section("rerank", RERANK_DEFAULTS)
+        sources = reviews.skill_sources(store.state, [])  # no public slice is read; the judge wants its policy
+        policy = sources.policy_digest()
+        data = snapshot.texts[DESIGN_PART].encode("utf-8")
+        size = min(len(data), judge.FIELD_BYTES)
+        while 0 < size < len(data) and data[size] & 0xC0 == 0x80:
+            size -= 1  # never cut a character
+        try:
+            fields = [(f"{key}:stage", judge.label("design-stage", stage)) for key, stage in options.items()]
+            fields.append(("context", judge.design_field(view, f"part:{DESIGN_PART}", 0, size)))
+        except judge.JudgeError:
+            return {"status": "unused(scope)", "applied": False, "choice": None, "reason": "scope"}
+        input_ref = "sha256:" + hashlib.sha256(json.dumps(
+            {"frontier": list(options.values()), "revision": snapshot.revision, "digest": snapshot.digest},
+            sort_keys=True).encode("utf-8")).hexdigest()
+        request = judge.Request("design-stage", "design-stage/v1", tuple(fields), tuple(options), input_ref=input_ref)
+        result = judge.judge(request, config=config, policy=policy, sources=sources, view=view, env=os.environ,
+                             state_dir=store.state, budget=judge.Budget(1), admitted=admitted)
+        if not result.status.startswith("used"):
+            return {"status": result.status, "applied": False, "choice": None, "reason": None}
+        applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, view=view,
+                              request=request, policy=policy, admitted=admitted)
+        chosen = applied.applied and applied.outcomes.get("outcome") == "chosen"
+        return {"status": result.status, "applied": chosen, "choice": applied.outcomes.get("choice") if chosen else None,
+                "reason": None if chosen else (applied.outcomes.get("outcome") if applied.applied else applied.reason)}
+
+    return advise
+
+
+def _coverage(args: argparse.Namespace, store) -> int:
+    from oah.design import coverage
+    from oah.design.model import check_id
+
+    words = args.words
+    editing = len(words) == 3 and words[0] == "edit"
+    if not editing and len(words) != 2:
+        raise DesignError(INPUT_INVALID_CODE, "use `oah design coverage P D` or `oah design coverage edit P D --from "
+                          "EDITS.json`")
+    project, design = check_id(words[-2]), check_id(words[-1], "design")
+    if editing:
+        if args.revision is not None or args.accepted or args.json or args.check or args.next:
+            raise DesignError(INPUT_INVALID_CODE, "coverage edit takes --from, --lang and --out only")
+        return _coverage_edit(args, store, project, design)
+    if args.from_file or args.lang or args.out:
+        raise DesignError(INPUT_INVALID_CODE, "--from, --lang and --out belong to `oah design coverage edit`")
+    if args.revision is not None and args.accepted:
+        raise DesignError(INPUT_INVALID_CODE, "give --revision or --accepted, not both")
+    if args.next and (args.revision is not None or args.accepted):
+        raise DesignError(INPUT_INVALID_CODE, "--next reads the current revision only")
+    context = store.context(project, design)
+    if args.accepted:
+        if context.accepted is None:
+            raise DesignError(NOT_FOUND_CODE, f"{project}/{design} has no accepted revision yet")
+        snapshot, source = context.accepted, "accepted"
+    elif args.revision is not None:
+        snapshot, source = store.snapshot(project, design, args.revision), "revision"
+    else:
+        snapshot, source = context.current, "current"
+    record = coverage.read(snapshot.texts)
+    report = coverage.evaluate(record, snapshot.texts, evidence=_coverage_evidence(store))
+    data = {"project": project, "design": design, "revision": snapshot.revision, "digest": snapshot.digest,
+            "source": source, **report}
+    if args.next:
+        from oah.design.sources.view import view_of
+
+        data["next"] = coverage.choose_stage(report, advise=_stage_advisor(store, view_of(context), snapshot))
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        lines = [f"OAH_COVERAGE {project}/{design} r{snapshot.revision} {snapshot.digest} ({source}) "
+                 f"complete={'yes' if report['complete'] else 'no'}"]
+        for stage in report["stages"]:
+            extra = []
+            if stage["recheck"]:
+                extra.append("re-check: " + ", ".join(stage["recheck_reasons"]))
+            if stage["open"]:
+                extra.append("open: " + ", ".join(stage["open"]))
+            lines.append(f"  {stage['id']:<10} {stage['status']:<15} {'; '.join(extra)}".rstrip())
+        lines.append("frontier: " + (", ".join(report["frontier"]) or "-"))
+        if args.next:
+            step = data["next"]
+            lines.append(f"next: {step['stage'] or '-'} (jev={step['jev']}, applied="
+                         f"{'yes' if step['applied'] else 'no'}"
+                         + (f", {step['reason']}" if step["reason"] else "") + ")")
+        if report["blocking"]:
+            lines.append("blocking:")
+            lines.extend(f"  {item}" for item in report["blocking"])
+        _print(lines)
+    if args.check and not report["complete"]:
+        error = coverage.CoverageError(coverage.INCOMPLETE_CODE, f"{project}/{design} r{snapshot.revision} is not "
+                                       "complete:\n  " + "\n  ".join(report["blocking"]))
+        print(error, file=sys.stderr)
+        return EXIT_REFUSED
+    return EXIT_OK
+
+
+def _coverage_edit(args: argparse.Namespace, store, project: str, design: str) -> int:
+    import hashlib
+
+    from oah.design import coverage
+    from oah.design.sources.state import StateProblem, loads
+    from oah.discovery import inputs
+
+    if not args.from_file:
+        raise DesignError(INPUT_INVALID_CODE, "coverage edit needs --from EDITS.json (a CoverageEditV1 file)")
+    try:
+        raw = (sys.stdin.read(coverage.MAX_EDIT_BYTES + 1) if args.from_file == "-"
+               else inputs.source_text(pathlib.Path(args.from_file), read_source))
+    except SourceError as exc:
+        raise coverage.CoverageError(coverage.INVALID_CODE, str(exc)) from None
+    if len(raw.encode("utf-8")) > coverage.MAX_EDIT_BYTES:
+        raise coverage.CoverageError(coverage.INVALID_CODE, f"the edit is over {coverage.MAX_EDIT_BYTES} bytes")
+    try:
+        envelope = loads(raw.encode("utf-8"), "the coverage edit")
+    except StateProblem as exc:
+        raise coverage.CoverageError(coverage.INVALID_CODE, exc.detail) from None
+    coverage.check_envelope(envelope)
+    snapshot = store.context(project, design).current
+    ref = {"project": project, "design": design, "revision": snapshot.revision, "digest": snapshot.digest}
+    record = coverage.read(snapshot.texts, args.lang or "en")
+    if args.lang:
+        record["lang"] = args.lang
+    new = coverage.apply(record, envelope, texts=snapshot.texts, ref=ref, evidence=_coverage_evidence(store))
+    text = coverage.render(new)
+    event = f"coverage-r{snapshot.revision}-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
+    target = os.path.abspath(args.out) if args.out else "FILE"
+    command = ["oah", "design", "save", project, design, "--expect-revision", str(snapshot.revision),
+               "--expect-digest", snapshot.digest, "--part", f"coverage={target}", "--reason",
+               coverage.summary(envelope), "--event", event]
+    line = " ".join(_quote(part) for part in command)
+    if args.out:
+        out = pathlib.Path(target)
+        if os.path.lexists(out):
+            raise coverage.CoverageError(coverage.INVALID_CODE, f"{out} exists; --out takes a new file name")
+        out.write_bytes(text.encode("utf-8"))
+        print(f"OAH_COVERAGE_EDIT {project}/{design} from r{snapshot.revision} {snapshot.digest}: wrote {out} "
+              f"({len(envelope['ops'])} op(s))")
+        print(line)
+    else:
+        sys.stdout.write(text)
+        print(f"OAH_COVERAGE_EDIT {project}/{design} from r{snapshot.revision} {snapshot.digest}: save the part above "
+              "to a file, then run", file=sys.stderr)
+        print(line, file=sys.stderr)
+    return EXIT_OK
 
 
 def _reconcile(args: argparse.Namespace, store) -> int:
@@ -858,5 +1067,5 @@ def _carry(args: argparse.Namespace, store) -> int:
 
 
 HANDLERS = {"project": _project, "new": _new, "save": _save, "accept": _accept, "status": _status, "show": _show,
-            "context": _context, "check": _check, "reconcile": _reconcile, "recover": _recover, "task": _task,
-            "carry": _carry}
+            "context": _context, "check": _check, "coverage": _coverage, "reconcile": _reconcile,
+            "recover": _recover, "task": _task, "carry": _carry}

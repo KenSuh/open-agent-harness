@@ -26,8 +26,15 @@ with its source and license. It ships three kinds of item:
 | `oah skills update --project` | Updates this project's tracked skill copies, as its own leased task. |
 | `oah skills update --global` | Updates your user-level copies, after confirmation. |
 | `oah skills schedule install\|remove\|status` | Adds or removes a daily launchd agent (macOS) or Task Scheduler task (Windows) for the automatic check, with your consent. |
+| `oah skills find` | Looks for specialist skills for a design's stages, checks and technologies. Only public words are sent. |
+| `oah skills review` | Pins one GitHub skill folder and records its license, front matter, hosts and screening. Installs nothing. |
+| `oah skills candidates` | Lists stored reviews and search hits against the current decisions. Reads only. |
+| `oah skills read` | Prints a reviewed or installed skill's text, or one item of a run's skill bundle, as data. |
+| `oah skills plan` | Shows which skill texts a task's next dispatch would carry, or why it would refuse. Writes nothing. |
 
 `--dry-run` on `install` shows the plan and writes nothing. Every refusal names the next command to run.
+[Skills and capabilities](skills-and-capabilities.md) explains how `find`, `review` and `plan` connect a design
+to the skill texts a worker receives.
 
 ## Where skills are read from
 

@@ -83,8 +83,8 @@ def indexed(state_dir: str | None, task: str | None) -> list[str] | None:
 
 
 def probe(cwd: pathlib.Path, *args: str) -> dict:
-    env = dict(os.environ, PYTHONPATH=str(SRC))
-    done = subprocess.run([sys.executable, "-m", "oah", *args], cwd=cwd, env=env, capture_output=True, text=True,
+    env = dict(os.environ, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+    done = subprocess.run([sys.executable, "-B", "-m", "oah", *args], cwd=cwd, env=env, capture_output=True, text=True,
                           encoding="utf-8", timeout=120)
     return {"argv": list(args), "returncode": done.returncode, "stderr": done.stderr}
 

@@ -16,7 +16,7 @@
 | `oah start`, `renew`, `status`, `finish`, `release`, `log` | 리스. 경로를 잡고, 연장하고, 목록을 보고, 검사하며 닫고, 내려놓고, 메모를 남긴다. |
 | `oah recommend` | 네 가지 난이도 축으로 tier를 고른다. |
 | `oah models` | tier마다 쓰는 모델을 보여 주고 `--refresh`로 다시 읽는다. |
-| `oah call`, `oah wait` | 단계 하나에 Claude Code나 Codex를 띄우고 실행을 기록한다. 백그라운드 실행을 기다린다. |
+| `oah call`, `oah wait` | 단계 하나에 Claude Code나 Codex를 띄우고 실행을 기록한다. 백그라운드 실행을 기다린다. `oah call --launcher native`는 내 AI의 서브에이전트에게 줄 브리프를 제안만 하고, `oah call settle`은 그 결과를 기록한다([스킬과 능력](skills-and-capabilities.md#네이티브-서브에이전트) 참고). |
 | `oah gates` | 작업의 게이트 원장을 쓰고, 검토하고, 검사한다. |
 | `oah check` | 게이트 CHECK 줄에 쓰는 운영체제 공통 검사. |
 | `oah wiki` | 프로젝트 위키의 링크와 출처, 정리 상태를 관리한다. |
@@ -28,7 +28,8 @@
 | `oah fix` | 최근 리뷰의 지적을 Codex가 고치게 하고, 커밋한 수정을 기록에 묶는다. |
 | `oah land` | 리뷰한 head 그대로 반영해도 되는지 확인하거나, 사용자가 확인한 뒤 반영한다. |
 | `oah rules` | `AGENTS.md`의 공유 규칙 블록을 최신으로 유지한다. |
-| `oah skills` | 함께 싣거나 연결된 스킬을 보여 주고, 설치하고, 업데이트한다. |
+| `oah skills` | 함께 싣거나 연결된 스킬을 보여 주고, 설치하고, 업데이트한다. 전문 스킬을 찾아 검토하고, 설계가 링크한 스킬을 다시 확인하고, 작업 자신의 필요에 맞춰 고르고, 발주가 담을 스킬 본문을 계획한다. |
+| `oah capabilities` | 자식 엔진에 설정된 도구를 보여 주고, 작업의 능력 필요를 계획하고, 리드의 중계 결과를 기록한다. [스킬과 능력](skills-and-capabilities.md)을 참고한다. |
 | `oah hooks` | 선택형 Claude Code 훅과 git 훅을 설치하거나 지운다. |
 | `oah ci` | 내 프로젝트의 GitHub Actions 검사를 설정한다. |
 

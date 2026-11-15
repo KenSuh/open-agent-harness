@@ -304,6 +304,24 @@ class SelectionTest(unittest.TestCase):
                                 "do not use other skills", "don't use other skills"):
                     self.assertNotIn(promise, lowered)
 
+    def test_copies_of_a_selected_skill_with_other_contents_are_named_in_the_brief(self) -> None:
+        selection = self.select("implementation", "initial", "normal", ["a.py"])
+        (tdd,) = [skill for skill in selection.skills if skill.name == "test-driven-development"]
+        self.assertEqual(tdd.origin, "project")
+        (note,) = [note for note in selection.notes if note.startswith("`test-driven-development`")]
+        kit = skillsel.installed(self.fx.roots()).shadowed["test-driven-development"][0]
+        self.assertEqual(note, "`test-driven-development` is installed in more than one place with different "
+                         f"contents; this task uses `{tdd.label}` (project, digest {tdd.digest}); also "
+                         f"`{kit.label}` (kit, digest {kit.digest})")
+        self.assertIn(note, selection.brief_text())
+        same = make_tmp_dir(self)
+        for folder in ("one", "two"):
+            make_skill(same / folder, "unlazy", description="identical")
+        roots = [skillsel.SkillRoot(same / "one", "project", "one"), skillsel.SkillRoot(same / "two", "user", "two")]
+        quiet = skillsel.select("implementation", "initial", "high", ["a.py"], roots=roots)
+        self.assertEqual([skill.id for skill in quiet.skills], ["unlazy"])
+        self.assertFalse(any("more than one place" in note for note in quiet.notes))  # same bytes: nothing to say
+
     def test_record_shape(self) -> None:
         record = self.select("docs", "initial", "low", ["a.md"]).to_record()
         self.assertEqual(record["kind"], "docs")
@@ -413,6 +431,62 @@ class DefaultRootsTest(unittest.TestCase):
         (base / "home" / ".claude" / "plugins" / "installed_plugins.json").write_text("{", encoding="utf-8")
         roots = skillsel.default_roots(base / "repo", home=base / "home", env={})
         self.assertEqual([root for root in roots if root.origin == "plugin"], [])
+
+    def test_codex_plugin_cache_is_read_only_when_turned_on_and_comes_last(self) -> None:
+        base = make_tmp_dir(self)
+        repo, home = base / "repo", base / "home"
+        cache = home / ".codex" / "plugins" / "cache"
+        make_skill(cache / "market" / "helper" / "1.0" / "skills", "unlazy", description="cached unlazy")
+        make_skill(cache / "market" / "helper" / "0.9" / "skills", "unlazy", description="older cached unlazy")
+        make_skill(cache / "flat" / "skills", "planner", description="a flat layout")
+        make_skill(cache / "a" / "b" / "c" / "d" / "skills", "too-deep", description="seven parts down")
+        self.assertEqual([root for root in skillsel.default_roots(repo, home=home, env={})
+                          if root.origin == "plugin-cache"], [])  # off by default: nothing in the cache is read
+        roots = skillsel.default_roots(repo, home=home, env={}, codex_plugin_cache=True)
+        table = [(root.origin, root.label, root.plugin) for root in roots if root.origin == "plugin-cache"]
+        self.assertEqual(table, [
+            ("plugin-cache", "~/.codex/plugins/cache/flat/skills", "flat"),
+            ("plugin-cache", "~/.codex/plugins/cache/market/helper/0.9/skills", "helper"),
+            ("plugin-cache", "~/.codex/plugins/cache/market/helper/1.0/skills", "helper"),
+        ])
+        self.assertEqual(roots[-3:], [root for root in roots if root.origin == "plugin-cache"])
+        moved = skillsel.default_roots(repo, home=home, env={"CODEX_HOME": str(base / "cx")},
+                                       codex_plugin_cache=True)
+        self.assertEqual([root for root in moved if root.origin == "plugin-cache"], [])  # CODEX_HOME's cache only
+
+    def test_a_plugin_cache_skill_is_never_shown_as_enabled_and_loses_to_other_copies(self) -> None:
+        base = make_tmp_dir(self)
+        repo, home = base / "repo", base / "home"
+        make_skill(home / ".codex" / "plugins" / "cache" / "m" / "helper" / "1.0" / "skills", "unlazy",
+                   description="cached unlazy")
+        roots = skillsel.default_roots(repo, home=home, env={}, codex_plugin_cache=True)
+        selection = skillsel.select("implementation", "initial", "high", ["a.py"], roots=roots)
+        (skill,) = [item for item in selection.skills if item.name == "unlazy"]
+        self.assertEqual((skill.id, skill.origin), ("helper:unlazy", "plugin-cache"))
+        text = selection.brief_text()
+        self.assertIn("- `helper:unlazy` (plugin-cache (not proof of enabled)): "
+                      "`~/.codex/plugins/cache/m/helper/1.0/skills/unlazy/SKILL.md`", text)
+        make_skill(home / ".claude" / "plugins" / "cache" / "m" / "helper" / "1.0" / "skills", "unlazy",
+                   description="enabled unlazy")
+        (home / ".claude" / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {
+            "helper@m": [{"scope": "user", "installPath": str(home / ".claude" / "plugins" / "cache" / "m" / "helper"
+                                                              / "1.0")}]}}), encoding="utf-8")
+        roots = skillsel.default_roots(repo, home=home, env={}, codex_plugin_cache=True)
+        found = skillsel.installed(roots)
+        self.assertEqual(found.skills["helper:unlazy"].origin, "plugin")
+        self.assertEqual([copy.origin for copy in found.shadowed["helper:unlazy"]], ["plugin-cache"])
+
+    def test_the_setting_reaches_the_shared_root_list(self) -> None:
+        self.assertIs(skillsel.config_defaults()["codex_plugin_cache"], False)
+        base = make_tmp_dir(self)
+        (base / "repo" / ".oah").mkdir(parents=True)
+        (base / "repo" / ".oah" / "config.toml").write_text("[skills]\ncodex_plugin_cache = true\n", encoding="utf-8")
+        make_skill(base / "home" / ".codex" / "plugins" / "cache" / "m" / "helper" / "1.0" / "skills", "unlazy")
+        from oah import skillpack
+
+        roots = skillpack.environment_roots(base / "repo", base / "state", {"HOME": str(base / "home"),
+                                                                            "USERPROFILE": str(base / "home")})
+        self.assertEqual([root.plugin for root in roots if root.origin == "plugin-cache"], ["helper"])
 
 
 class TemplateTest(unittest.TestCase):

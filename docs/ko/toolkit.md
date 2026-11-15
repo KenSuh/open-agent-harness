@@ -25,8 +25,15 @@
 | `oah skills update --project` | 이 프로젝트가 추적하는 스킬 사본을 자체 리스 작업으로 갱신한다. |
 | `oah skills update --global` | 확인을 받은 뒤 사용자 수준 사본을 갱신한다. |
 | `oah skills schedule install\|remove\|status` | 자동 검사를 위한 매일 실행 항목(macOS launchd, Windows 작업 스케줄러)을 동의를 받아 추가하거나 지운다. |
+| `oah skills find` | 설계의 단계, 확인 항목, 기술에 맞는 전문 스킬을 찾는다. 공개된 낱말만 보낸다. |
+| `oah skills review` | GitHub 스킬 폴더 하나를 고정하고 라이선스, front matter, 호스트, 선별 결과를 기록한다. 아무것도 설치하지 않는다. |
+| `oah skills candidates` | 저장된 검토와 검색 결과를 현재 결정과 맞춰 보여 준다. 읽기만 한다. |
+| `oah skills read` | 검토했거나 설치된 스킬 본문, 또는 run 스킬 묶음의 항목 하나를 데이터로 출력한다. |
+| `oah skills plan` | 작업의 다음 발주가 어떤 스킬 본문을 담을지, 아니면 왜 거절될지 보여 준다. 아무것도 쓰지 않는다. |
 
 `install` 에 `--dry-run` 을 붙이면 계획만 보여 주고 아무것도 쓰지 않는다. 거절할 때는 다음에 실행할 명령을 함께 알려 준다.
+`find`, `review`, `plan`이 설계와 워커가 받는 스킬 본문을 어떻게 잇는지는 [스킬과 능력](skills-and-capabilities.md)에서
+설명한다.
 
 ## 스킬을 읽는 순서
 

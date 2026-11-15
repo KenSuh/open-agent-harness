@@ -324,6 +324,13 @@ def make_git_repo(test: unittest.TestCase) -> pathlib.Path:
     return repo
 
 
+def git_blob(repo: pathlib.Path, path: str, revision: str = "HEAD") -> bytes:
+    import subprocess
+
+    return subprocess.run(["git", "-C", str(repo), "show", f"{revision}:{path}"], check=True,
+                          capture_output=True, env=git_env()).stdout
+
+
 def git_commit(repo: pathlib.Path, files: dict, message: str = "change") -> str:
     """Write (str/bytes) or delete (None) files, commit everything, and return the new HEAD."""
     import subprocess

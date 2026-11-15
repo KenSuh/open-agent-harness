@@ -325,10 +325,14 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
 
 def _call(action: Callable[[], object]) -> tuple[object, str]:
     """Run a provider call and validate its result; consume only classified failure codes."""
+    from oah.design.sources.adapters import TransportRefused
+
     failure = None
     try:
         try:
             return action(), USED
+        except TransportRefused:
+            raise
         except BaseException as exc:
             failure = _classify_failure(exc)
         if type(failure) is str:

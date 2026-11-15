@@ -16,7 +16,7 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 | `oah start`, `renew`, `status`, `finish`, `release`, `log` | Leases: claim paths, extend, list, close with checks, drop, note. |
 | `oah recommend` | Picks a tier from the four difficulty axes. |
 | `oah models` | Shows, and with `--refresh` re-reads, the model each tier uses. |
-| `oah call`, `oah wait` | Launches Claude Code or Codex for one stage and records the run; waits for a background run. |
+| `oah call`, `oah wait` | Launches Claude Code or Codex for one stage and records the run; waits for a background run. `oah call --launcher native` only offers the brief for your own AI's subagent, and `oah call settle` records what it returned (see [Skills and capabilities](skills-and-capabilities.md#native-subagents)). |
 | `oah gates` | Writes, lints and checks a task's gate ledger. |
 | `oah check` | Portable assertions for gate CHECK lines. |
 | `oah wiki` | Keeps the project wiki linked, sourced and tidy. |
@@ -28,7 +28,8 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 | `oah fix` | Has Codex correct the latest review's findings, then binds the committed correction. |
 | `oah land` | Checks that the exact reviewed head may land, or lands it after you confirm. |
 | `oah rules` | Keeps the shared rules block in `AGENTS.md` in sync. |
-| `oah skills` | Lists, installs and updates bundled and linked skills. |
+| `oah skills` | Lists, installs and updates bundled and linked skills; finds and reviews specialist skills, checks the ones a design links again, selects them for a task's own needs and plans the skill texts a dispatch carries. |
+| `oah capabilities` | Shows the child engine's configured tools, plans a task's capability needs and records a lead's relay result. See [Skills and capabilities](skills-and-capabilities.md). |
 | `oah hooks` | Installs or removes the opt-in Claude Code and git hooks. |
 | `oah ci` | Sets up GitHub Actions checks for your project. |
 

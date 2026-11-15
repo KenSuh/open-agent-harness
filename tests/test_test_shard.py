@@ -377,11 +377,11 @@ class WeightedSplitTest(unittest.TestCase):
                             for name in ids]
                     self.assertEqual(sorted(flat), expected)
 
-    def test_real_tests_folder_at_five_shards_is_covered_by_discovery_only(self):
+    def test_real_tests_folder_at_six_shards_is_covered_by_discovery_only(self):
         expected = sorted(ShardTest._test_ids(unittest.TestLoader().discover(
             str(ROOT / "tests"), top_level_dir=str(ROOT))))
         listed = {name: 1 + i % 97 for i, name in enumerate(expected[::2])}
-        groups = per_shard(tool.shards(5, weights=(50, listed)))
+        groups = per_shard(tool.shards(6, weights=(50, listed)))
         self.assertEqual(sorted(name for ids in groups for name in ids), expected)
         self.assertTrue(all(groups))
 
@@ -668,17 +668,17 @@ class CheckedInTimesTest(unittest.TestCase):
         self.assertNotRegex(data["source"], r"[/\\\n]")
         self.assertEqual(tool.load_times(), (data["default_ms"], data["times_ms"]))
 
-    def test_ci_keeps_five_shards_and_the_limit_and_describes_the_basis(self):
+    def test_ci_keeps_six_shards_and_the_limit_and_describes_the_basis(self):
         text = text_of(ROOT / ".github" / "workflows" / "ci.yml")
-        # Five shards when the select job gives no count, as when its selector step failed.
-        self.assertIn("        shard: ${{ fromJSON(needs.select.outputs.shards || '[1, 2, 3, 4, 5]') }}\n", text)
-        self.assertIn("    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}\n", text)
-        self.assertIn("run: python tools/test_shard.py ${{ matrix.shard }} ${{ needs.select.outputs.count || 5 }} "
+        # Six shards when the select job gives no count, as when its selector step failed.
+        self.assertIn("        shard: ${{ fromJSON(needs.select.outputs.shards || '[1, 2, 3, 4, 5, 6]') }}\n", text)
+        self.assertIn("    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 45 }}\n", text)
+        self.assertIn("run: python tools/test_shard.py ${{ matrix.shard }} ${{ needs.select.outputs.count || 6 }} "
                       "--modules-env OAH_TEST_MODULES -v", text)
         self.assertNotIn("balanced by test count", text)
         self.assertIn("tools/test_shard_times.json", text)
         self.assertIn("tools/shard_times.py", text)
-        self.assertIn("60 minutes on Windows and 45 on macOS", text)
+        self.assertIn("75 minutes on Windows (a safety ceiling) and 45 on macOS", text)
         self.assertIn("balanced split with fresh data comes first", text)
 
 
@@ -930,10 +930,15 @@ class GeneratorTest(unittest.TestCase):
 
             weights = tool.load_times(out)
             totals = [sum(weights[1].get(name, weights[0]) for name in ids)
-                      for ids in per_shard(tool.shards(5, weights=weights))]
+                      for ids in per_shard(tool.shards(6, weights=weights))]
             minutes = " ".join(f"{total / 60000:.1f}" for total in totals)
-            self.assertIn(f"predicted minutes for COUNT=5: {minutes}; ", result.stdout)
+            self.assertIn(f"predicted minutes for COUNT=6: {minutes}; ", result.stdout)
             self.assertIn(f"total {sum(totals) / 60000:.1f}", result.stdout)
+
+            with mock.patch.object(self.generator, "predicted_minutes", return_value=[31.0875] * 4 + [31.05] * 2), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(self.generator.main([str(out), *map(str, logs)]), 0)
+            self.assertIn("total 186.4", output.getvalue())
 
             again = folder / "again.json"
             self.assertEqual(self.run_generator(again, *reversed(logs)).returncode, 0)

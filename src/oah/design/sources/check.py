@@ -28,7 +28,7 @@ from oah.config import ConfigError
 from oah.design.model import check_fact, check_id
 from oah.design.sources import association, portable, queue
 from oah.design.sources import license as license_module
-from oah.design.sources.adapters import SOURCE_DEADLINE, Observer, Settings, Transport
+from oah.design.sources.adapters import SOURCE_DEADLINE, Observer, Settings, Transport, TransportRefused
 from oah.design.sources.model import (MAX_SOURCES, VERIFICATION_POLICY, Head, Observation, Registry, SourceError, SourceSpec,
                                       freshness, iso, new_registration, observation_record, parse_head, parse_iso,
                                       parse_observation, parse_registry, record_word, transition)
@@ -416,7 +416,7 @@ class Sources:
             limit = self.clock() + SOURCE_DEADLINE if deadline is None else deadline
             return self._check_prepared(spec, head, started, deadline=limit, fault=fault, skip_fresh=skip_fresh,
                                         publish=publish)
-        except (_AuthorityFailure, ScratchError):
+        except (_AuthorityFailure, ScratchError, TransportRefused):
             raise
         except Exception:
             if not prepared:

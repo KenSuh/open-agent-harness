@@ -177,6 +177,56 @@
 | `OAH_UPDATE_OFF` | `oah doctor` 알림이다. `.oah/config.toml`의 `[updates]`에 `after_finish`가 없어서 도구 업데이트가 꺼져 있다. | 켜려면 `after_finish = true`를 두고(그다음 `oah update`가 지금 패스를 돌린다), 계속 끄고 알림을 없애려면 `false`를 둔다. |
 | `OAH_UPDATE_UNSETTLED` | `oah doctor` 알림이다. 마지막 패스가 `updated`나 `current`가 아닌 결과를 남겼다. | 그 줄의 다음 단계를 따른 뒤 `oah update`를 실행한다. |
 
+## 설계 coverage, 스킬, 능력
+
+이 단계들은 [스킬과 능력](skills-and-capabilities.md)에서 설명한다. 최초의 결정적 입장·용량 거절은 run 폴더나
+비용 전에 일어난다. 뒤의 준비·수신·정산 거절은 요청이나 자식 프로세스를 시작한 뒤에도 생긴다. 재시도 전에
+상태 폴더의 `skills/attempts/*.json`에 있는 스킬 순서 판정 및 각 수집 HTTP·`ls-remote`·Git fetch 작업의
+제한된 시도별 요청 사실과 run의 `capabilities-receiving.json`에 남긴 사용량을 확인한다. 각 수집 작업은
+I/O 직전에 입장을 다시 확인한다. 작업 사이 정책이 바뀌면 다음 요청을 거절하고 이전 요청 기록은 보존하므로,
+계속하려면 다시 준비한다. 로컬 Git URL 변환은 요청 시도를 만들지 않는다. 이 첫 수신 기록을 쓸 수 없으면, 쓸 수 있는
+`skills-receiving.json`에 출력 정규화 전에 닫힌 사용량 요약을 보존한다. run은 계속 실패이며, 저장한 사용량이
+전달·적용을 증명하지 않는다. 모르는 합계는 0이 아닌 미확인으로 기록하고, 관찰한 부분 수치를 전체로 표시하지 않는다.
+사용자가 치르는 비용: 실패한 시도도 요청·토큰을 썼을 수 있으며, 재시도 전에 그 사실을 확인할 수 있다.
+
+준비한 요청 수는 결과를 저장할 때까지 `null`이다. 최종 guard 거절은 0, 전송 반환은 1을 기록하며, 프로세스 중단이나
+끝 저장 실패 뒤에는 미확인으로 남는다. 수정·네이티브 정산은 원래 동결된 부모 목록과 중계 근거를 쓰며 시간 창을
+갱신하지 않는다. 저장한 digest와 현재 유효성 기준은 계속 비교한다. 수정은 원래 중계 시각이 표시된 도구 결과를
+받고, run의 동결 기록을 지웠다면 새 run이 필요하다.
+
+| 코드 | 뜻 | 다음에 할 일 |
+|---|---|---|
+| `OAH_COVERAGE_INVALID` | coverage 부분이나 coverage 편집 파일이 형식을 어겼다. 모르는 키, 잘못된 값, 목록 순서를 벗어난 확인 항목, 256 KiB를 넘는 파일 등이다. | 메시지가 가리키는 필드를 고친다. 편집은 손으로 쓰지 말고 `oah design coverage edit`으로 만든다. |
+| `OAH_COVERAGE_EDITED` | coverage 부분의 사람이 읽는 절이 JSON 블록과 다르다. 대개 손으로 고친 뒤에 생긴다. | 바꾸려던 내용을 `coverage edit` 파일에 넣어 실행하고, 출력된 부분을 저장한다. |
+| `OAH_COVERAGE_INCOMPLETE` | `oah design coverage --check`의 결과다. 열린 단계, 다시 확인할 단계, 사용자 확인을 기다리는 단계, 결과에 영향이 있는 제안이나 미룸이 남아 있다. 메시지가 막는 항목을 모두 보여 준다. | 보여 준 항목을 `coverage edit`으로 하나씩 정리하고 저장한 뒤 다시 확인한다. |
+| `OAH_SKILL_DISCOVERY_FAILED` | skills.sh 검색이 성공하지 못했다. 시간 초과, 요청 제한, HTTP 오류, 예상과 다른 응답, 막히거나 끊긴 네트워크, 꺼진 검색 등이다. 이유는 괄호 안에 있다. 종료 코드는 69다. | seed, 설치된 스킬, 저장된 검토는 그대로 쓸 수 있다. 나중에 다시 하거나 `.oah/config.toml`의 `[skills.discovery]`를 확인한다. |
+| `OAH_SKILL_SOURCE_UNSUPPORTED` | oah가 고정할 수 있는 GitHub 저장소 폴더가 아니다. | `--github OWNER/REPO --path PATH`나 저장된 검색의 결과를 준다. |
+| `OAH_SKILL_REVIEW_FAILED` | 검토가 멈췄다. 라이선스나 `SKILL.md`가 없는 것처럼 스킬 자체의 문제면 1로, git이나 네트워크가 실패하면 69로 끝난다. 이유는 괄호 안에 있다. | 이유를 읽는다. 라이선스는 받아들일 때만 `license_allow`에 더하고, 아니면 다른 스킬을 고른다. |
+| `OAH_SKILL_STATE_CORRUPT` | oah 스킬 상태의 파일을 쓸 수 없다. oah는 그 파일을 고치거나 초기화하지 않는다. | 메시지에 나온 파일을 다른 곳으로 옮긴다. 다음번에 그 부분이 새로 시작한다. |
+| `OAH_SKILLS_WORKER_REFUSED` | 발주된 워커가 검색, 검토, 검토 읽기, 중계 결과 저장을 하려 했거나 다른 run의 묶음을 읽으려 했다. | 리드 세션에서 실행한다. 워커는 `oah skills read --run`으로 자기 run만 읽는다. |
+| `OAH_SKILLS_USAGE` | `oah skills` 옵션이 빠졌거나 다른 옵션과 맞지 않는다. | 메시지를 따른다. `oah skills <subcommand> --help`가 옵션을 보여 준다. |
+| `OAH_SKILL_MANDATORY_MISSING` | 이번 발주 단계의 필수 스킬 필요에 살아 있는 연결이 없거나, 연결된 스킬의 검토가 이 상태 폴더에 없거나, 필수 작업 필요에 지금 lease 아래의 작업 선택이 없다. 아무것도 시작하지 않았다. | 스킬을 검토하고 `coverage edit`으로 연결하거나 그 필요에 공백을 기록한 뒤 다시 호출한다. 설계 없는 작업이면 `oah skills find --task T --out FILE`로 스킬을 찾아 검토하고 `oah skills select --needs FILE --review ID`로 고른다. `oah skills plan`이 시작하지 않고 같은 답을 보여 준다. |
+| `OAH_SKILL_NEEDS_INVALID` | 필요 파일이나 oah가 정한 필요가 지금의 작업과 맞지 않는다. `(stale)`: 필요를 적은 뒤 패킷, 그 의도, 종류, 위험도, 범위, 플랫폼, 설계 coverage, 탐색 설정이 바뀌었다. `(malformed)`: 파일이나 필요가 문서의 형태가 아니거나, 선택에 적은 검토가 저장된 검토가 아니다. `(foreign)`: 다른 작업의 필요다. `(scope)`: 패킷 범위 밖의 경로다. `(design-bound)`: 설계를 따르는 작업에 `oah skills select`를 했다. 아무것도 시작하거나 저장하지 않았다. | `oah skills find --task T --out FILE`로 필요를 다시 적는다. 설계가 있는 작업이면 고르는 대신 coverage에 스킬을 링크하고 설계를 수락한다. |
+| `OAH_SKILL_DISCOVERY` | 거절이 아니라 알림이다. 작업 필요에 찾은 검토된 스킬이 사용자의 선택을 기다리거나, 링크한 스킬 아래의 기술 결정이 바뀌었거나, 호출의 스킬 검색이 실패했다. run은 이미 승인된 것으로 진행했다. | `oah skills select`로 고르거나, 설계 coverage에 스킬을 링크하고 설계를 수락한다. 검색 실패에는 할 일이 없다. 링크된 스킬과 설치된 스킬은 그대로 쓰인다. |
+| `OAH_SKILL_REFERENCE_UNAVAILABLE` | `(inaccessible)`: 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나, `<!-- oah`로 시작하는 줄을 담고 있거나, 브리프에 들어가지 않는데 작업 디렉터리 안에 고정된 바이트 그대로인 설치본이 없다. `(unsupported-engine)`: Codex, 네이티브, 수정 run, 네이티브 Windows처럼 지원되는 읽기 관찰 경로가 없거나 Read가 파일을 그대로 돌려줄 수 없다. `(profile)`: 실제 실행 파일, CLI 버전 또는 도구가 공통 프로필 검증을 통과하지 못했다. `(access)`: 현재 읽기·접근 정책이 검증되지 않았다. 아무것도 시작하지 않았다. | 파일을 다시 검토하거나 선택으로 바꾸거나 인라인에 맞게 나눈다. 참조에는 검증된 용량 경로, 받는 저장소 안의 고정된 설치본, 검증된 실행 파일·버전·도구와 읽기 정책이 모두 필요하다. 파일 설치만으로는 충분하지 않다. 네이티브 Windows에서는 인라인에 맞게 나눈다. |
+| `OAH_SKILL_RECEIVING_FAILED` | 스킬 참조를 읽은 Claude run이 끝났지만 oah가 run 폴더에 `skills-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
+| `OAH_CAPABILITY_RECEIVING_FAILED` | oah가 도는 동안 스트림을 확인한 Claude run이 끝났지만 run 폴더에 `capabilities-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
+| `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유에는 `excluded`, `scope`, `user-only`, `license`, `host`, `marker`, `pin-mismatch`가 있다. `changed`는 정책, 목록의 승인·스키마·세션, 부모 권한, 중계, 작업·리스, 대상, 필요 또는 선택 등 준비한 전체 로컬 신원이 바뀌거나 만료됐다는 뜻이다. 아무것도 시작하지 않았고 앞선 E 기록은 보존한다. | `changed`면 현재 로컬 사실로 다시 준비한다. `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 제외·호스트·범위 제한이면 현재 작업의 호스트와 범위 안에서 허용된 스킬·필요를 고른다. 명령이 로컬 정책을 덮어쓰지 않는다. |
+| `OAH_SKILLS_BUDGET_EXCEEDED` | `(target-capacity-unknown)`: 정확한 경로에 근거·만료를 고정한 현재 용량 프로필이 없으며, 패키지에는 실제 검증 프로필이 아직 없다. 그 밖에는 inline 스킬, 필수 읽기를 포함한 전체 렌더, 설계 바이트, 대상 토큰의 독립 한도나 payload 128개를 넘었다. 측정 거절은 합계를 보여 준다. | 관리 전달 밖의 inline·작은 자료를 쓰거나 작업을 나누고 선택 자료를 뺀다. 관리 전달은 근거·만료가 있는 측정 프로필의 검토가 필요하며, 설정한 문맥 수만으로는 부족하다. |
+| `OAH_SKILL_UNMANAGED_RUN` | `oah skills read --run`이 스킬 묶음이 없는 run을 가리켰거나, `oah call settle`이 네이티브 제안이 없는 run을 가리켰다. | run id를 확인한다. 연결된 스킬이 없는 run에는 읽을 것이 없고, `oah call --launcher native`로 만든 run만 정산할 수 있다. |
+| `OAH_SKILL_HOST_UNSUPPORTED` | Claude용 `oah call --launcher native`가 저장소에서도 Claude 폴더에서도 `.claude/agents/oah-<tier>.md`를 찾지 못해, 호스트가 띄울 서브에이전트가 없다. | `oah init`으로 단 에이전트 파일을 쓴 뒤 다시 제안한다. |
+| `OAH_NATIVE_OFFER_STALE` | `oah call settle`이 작업, 의도, 패킷, 범위, 리스, 설계, 스킬 선택, 정책, 능력 목록·권한, 중계, 호스트 대상 또는 브리프의 변경을 찾았거나 제안이 24시간을 넘었다. 준비·목록·중계 시간 창은 최초 제안 전에 검사하며 정산에서 다시 만료시키지 않는다. 같은 정산 재시도 전에도 이 검사를 한다. 옛 제안과 앞선 영수증은 보존한다. | `oah call --launcher native`로 새 제안을 준비하고 그 run을 정산한다. |
+| `OAH_NATIVE_SETTLE_CONFLICT` | `oah call settle`이 다른 제안 digest를 받았거나, 이미 다른 결과·호스트 자식·결과 파일·카나리로 정산된 run이다. 처음 영수증이 그대로 남는다. | 제안이 출력한 digest를 넘긴다. 다른 결과를 남기려면 다시 제안한다. |
+| `OAH_NATIVE_RESULT_INVALID` | 정산 결과 파일이 65,536바이트를 넘었거나(`too-large`), UTF-8이 아니거나(`not-utf8`), `<!-- oah`로 시작하는 줄이 있다(`marker`). | 그 줄을 뺀 짧은 UTF-8 답을 저장한 뒤 다시 정산한다. |
+| `OAH_RUN_LAUNCH_INVALID` | 준비된 run의 저장 기록(리스 스냅샷, 의도 결속, 설계 기록, 스킬 기록 등)이 시작할 때 없거나 망가졌다. | `oah call`을 다시 실행해 새 run을 준비한다. |
+| `OAH_CAPABILITY_RELAY_REQUIRED` | 리드만 가진 필수 능력에 중계 결과가 필요하거나, 중계 결과가 낡았거나, 만료됐거나, 변조됐거나, 요청과 맞지 않거나, 한 필요에 다른 결과 둘이 왔다(`conflicting`). `oah capabilities relay`는 너무 크거나, oah 표시 줄을 담았거나, 비밀처럼 보이는 결과도 거절한다. 괄호 안에 이유가 없으면 리드가 아직 중계하지 않은 것이다. | `oah capabilities plan --task T --stage S --parent-inventory FILE`이 중계 요청을 출력한다. 호출이 `--skill-needs FILE`을 쓰면 같은 파일을 더한다. 요청된 도구를 직접 실행해 `oah capabilities relay`로 결과를 저장하고, 필요마다 `--relay-result HASH`를 하나씩 주어 다시 호출한다. 무엇이든 바뀌면 다시 중계한다. |
+| `OAH_CAPABILITY_UNAVAILABLE` | 필수 능력이 자식에 설정돼 있지 않거나 꺼져 있고, 리드의 목록에도 없다. | `--parent-inventory`로 리드의 목록을 주거나, 도구를 직접 설정한 뒤 다시 계획한다. |
+| `OAH_CAPABILITY_UNSUPPORTED` | 필수 능력에 쓸 수 있는 경로가 없다. 자식 설정에 이름만 있거나(`unknown-schema`, `pending-approval`), 격리된 리뷰 run이다(`review-isolated`). | initial이나 correction run이면 리드를 거쳐 중계한다. 리뷰는 중계를 받지 않으므로 리뷰 단계에서는 그 필요를 선택으로 둔다. |
+| `OAH_CAPABILITY_DEPENDENCY_UNSATISFIED` | 필수 의존이 채워지지 않았다. 설치되지 않았거나 꺼진 플러그인, 순환, 세 번을 넘는 의존 단계 등이다. 메시지가 그 고리를 적는다. | 플러그인을 직접 설치하거나 켜고, 또는 `[capabilities]`의 `requires`를 고친다. oah는 대신 하지 않는다. |
+| `OAH_CAPABILITY_INVENTORY_UNKNOWN` | 리드의 목록 파일이 없거나, 형식이 잘못됐거나, 변조됐거나, 300초보다 오래됐다. 종료 코드는 69다. | 새 목록을 써서 다시 넘긴다. |
+| `OAH_CAPABILITIES_USAGE` | `oah capabilities` 옵션이 빠졌거나, 작업에 살아 있는 리스가 없거나, 요청·호출·결과 파일을 읽을 수 없다. | 메시지를 따른다. `oah capabilities <subcommand> --help`가 옵션을 보여 준다. |
+| `OAH_CAPABILITIES_IO` | 능력 파일을 읽거나 쓰지 못했다. 종료 코드는 69다. | 권한과 남은 디스크 공간을 확인하고 다시 한다. |
+
 ## 그래도 막히면
 
 - `oah status`는 모든 리스와 각 리스가 살아 있는지 만료됐는지 보여 준다.

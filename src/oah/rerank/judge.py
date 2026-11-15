@@ -7,15 +7,19 @@ Every outgoing value is one of three tagged fields, never a caller string:
   read and rehashed from this clone's source store by `public_field`; the caller names the slice, never its text;
 - `PublicLabel` - a value from a closed oah enum (`LABELS`);
 - `DesignTextField` - a bounded slice of the design's own text (`design_field`), sent only when
-  `[rerank.judgement] send_design_text = true`.
+  `[rerank.judgement] send_design_text = true`;
+- `TaskTextField` - a bounded slice of the task's accepted packet intent (`task_field`, read from a trusted
+  `TaskView`), accepted only by the `capability-needs` purpose and sent only when
+  `[rerank.judgement] send_task_text = true`.
 
 Instructions and criteria come from closed versioned rubrics (`RUBRICS`); options are opaque keys. No question
 forces an answer: a `ChoiceRubric` asks for one option together with a yes/no question on whether any option fits,
 so the outcome is `chosen`, `no-match` or `uncertain`; a `LabelRubric` asks one yes/no question per label, so
 several labels or none can hold (`matched`, `no-match` or `uncertain`). `THRESHOLDS` are the provider's suggested
 starting points, not calibrated values, and are part of the recorded identity. Gate order:
-purpose, rubric and the purpose's closed field allowlist (`unused(scope)`), the design-text permission
-(`unused(design-text-off)`) and required inputs (`unused(insufficient-input)`); then `[rerank.judgement] enabled`
+purpose, rubric and the purpose's closed field allowlist (`unused(scope)`), a purpose's required roles
+(`unused(insufficient-input)`), the design-text and task-text permissions (`unused(design-text-off)`,
+`unused(task-text-off)`) and required authored inputs (`unused(insufficient-input)`); then `[rerank.judgement] enabled`
 (`unused(judgement-off)`); then every outgoing string, templates included, is screened with the privacy scanner's
 content rules plus an e-mail rule (`unused(secret)`); then the shared rerank gate (brief, provider, key, breaker).
 Nothing is sent before every gate passes. A result records its full input identity (constructor and rubric
@@ -36,13 +40,14 @@ import sys
 from typing import Callable, Mapping, Sequence
 
 from oah import secrets
+from oah.capabilities import CLASSES as CAPABILITY_CLASSES
 from oah.rerank import USED, _call, _gate, circuit, unused
 from oah.rerank.base import BAD_RESPONSE, JudgeReply, Provider, ProviderError
 from oah.rerank.judgement_policy import DEFAULTS, settings as judgement_settings
 from oah.rerank.typesafe import DEFAULT_MODEL, PROBABILITY_SUM_TOLERANCE, SCORE_TOLERANCE
 from oah.toolkit.checks import CONTENT_RULES
 
-CONSTRUCTOR_VERSION = "judge-fields-v3"
+CONSTRUCTOR_VERSION = "judge-fields-v4"
 FIELD_BYTES = 4096
 TOTAL_CHARACTERS = 16_000
 OPTION_LIMIT = 50
@@ -60,7 +65,27 @@ LABELS = {
     "technology": ("library", "framework", "service", "tool", "document"),
     "category": ("storage", "network", "ui", "auth", "build", "test", "docs", "other"),
     "stage": ("start", "resume", "revise", "recommend", "implement", "review"),
+    "skill-provider": ("seed", "installed", "skills-sh"),
+    "capability-class": CAPABILITY_CLASSES,
 }
+DESIGN_LABELS = ("design-stage", "design-check", "public-tech")  # oah's design vocabularies, read on first use
+
+
+def label_values(enum_id: str) -> tuple[str, ...]:
+    """The values of one closed label enum: `LABELS`, or the design stages, `stage.check` ids and public technology
+    words of the design catalog (loaded here so this module imports no design code at import time)."""
+    if enum_id in LABELS:
+        return LABELS[enum_id]
+    if enum_id not in DESIGN_LABELS:
+        return ()
+    from oah.design import stages
+
+    if enum_id == "design-stage":
+        return stages.STAGE_IDS
+    if enum_id == "design-check":
+        return tuple(f"{stage.id}.{check}" for stage in stages.STAGES for check in (*stage.checks, *stage.conditional))
+    return tuple(sorted(stages.PUBLIC_QUERY_TERMS))
+
 
 # purpose -> (public roles: allowed tags), (authored roles), whether authored input is mandatory
 PURPOSES = {
@@ -79,7 +104,37 @@ PURPOSES = {
     "stack-comparison": ({"component_excerpt": "snapshot", "runtime": "label:runtime", "platform": "label:platform"},
                          {"stack_description", "assumptions", "tradeoffs"}, False),
     "next-stage": ({"stage": "label:stage"}, {"answers", "unresolved", "context"}, True),
+    "design-stage": ({"stage": "label:design-stage"}, {"answers", "unresolved", "context"}, True),
+    "skill-fit": ({"skill_excerpt": "snapshot", "compatibility_excerpt": "snapshot",
+                   "design_stage": "label:design-stage", "check": "label:design-check", "tech": "label:public-tech",
+                   "platform": "label:platform"}, {"need"}, False),
+    "capability-needs": ({"capability_class": "label:capability-class", "capability_excerpt": "snapshot"},
+                         {"task_need", "task_context"}, True),
 }
+# purpose -> (shared roles, roles every option needs) that must be present, else unused(insufficient-input)
+REQUIRED_ROLES = {"skill-fit": (("design_stage", "check"), ("skill_excerpt",)),
+                  "capability-needs": (("task_need",), ())}
+TASK_TEXT_PURPOSES = frozenset({"capability-needs"})  # their authored roles take task text, never design text
+# E's new rubrics carry their own exact allowlist (DESIGN §7.1, §7.3 step 1): (shared roles, roles every option has
+# under its `oN:` prefix), each with its one allowed tag. A role in the wrong place, an unknown role or another tag
+# is unused(scope). The legacy rubrics keep their purpose's allowlist unchanged.
+RUBRIC_ROLES = {
+    "skill-search/v1": ({"technology": "label:technology", "public_tech": "label:public-tech",
+                         "query": "design-text"},
+                        {"provider": "label:skill-provider", "public_tech": "label:public-tech",
+                         "candidate_description": "snapshot"}),
+    "design-stage/v1": ({"answers": "design-text", "unresolved": "design-text", "context": "design-text"},
+                        {"stage": "label:design-stage"}),
+    "capability-select/v1": ({"capability_class": "label:capability-class", "task_need": "task-text",
+                              "task_context": "task-text"},
+                             {"capability_excerpt": "snapshot"}),
+}
+# rubric -> (shared roles, per-option roles) that must be present, over REQUIRED_ROLES of its purpose
+RUBRIC_REQUIRED = {"skill-search/v1": ((), ("provider",)),
+                   "design-stage/v1": ((), ("stage",)),
+                   "capability-select/v1": (("capability_class", "task_need"), ("capability_excerpt",))}
+# rubric -> the most options one request may carry (DESIGN §7.1.1: at most eight qualified entries per need)
+RUBRIC_OPTIONS = {"capability-select/v1": 8}
 
 @dataclasses.dataclass(frozen=True)
 class ChoiceRubric:
@@ -101,6 +156,16 @@ class LabelRubric:
 
 
 @dataclasses.dataclass(frozen=True)
+class OptionNoulRubric:
+    """One yes/no question per opaque option o0..oN, so each candidate is judged on its own `oN:` fields; a reply
+    that leaves an option out is `unused(error:dropped)`."""
+    purpose: str
+    instructions: str                   # `{option}` is the option key
+    true: str
+    false: str
+
+
+@dataclasses.dataclass(frozen=True)
 class ScoreRubric:
     purpose: str
     instructions: str
@@ -114,7 +179,7 @@ class ImpactRubric:
     urgency: ScoreRubric
 
 
-RUBRICS: dict[str, ChoiceRubric | LabelRubric | ScoreRubric | ImpactRubric] = {
+RUBRICS: dict[str, ChoiceRubric | LabelRubric | OptionNoulRubric | ScoreRubric | ImpactRubric] = {
     "source-change-assessment/v1": ImpactRubric("source-change-impact", LabelRubric(
         "source-change-impact", "Do the public change excerpts show {meaning}?",
         "The excerpts give concrete evidence of {meaning}.",
@@ -172,6 +237,43 @@ RUBRICS: dict[str, ChoiceRubric | LabelRubric | ScoreRubric | ImpactRubric] = {
         ("Does any of these stages fit as the next step?",
          "One of the stages follows from the answers and the unresolved decisions.",
          "None of the stages fits, for example the work waits on a decision these stages do not cover.")),
+    "skill-fit/v1": OptionNoulRubric(
+        "skill-fit", "Does {option}:skill_excerpt give concrete guidance for the check named in check, at the design "
+        "stage named in design_stage?",
+        "The excerpt explains actions or constraints for that check.",
+        "The excerpt mentions the area without usable guidance for that check."),
+    "skill-search/v1": ChoiceRubric(
+        "search-path", "Which permitted provider or template covers this public technology need?", None,
+        ("Does any permitted provider or template cover this public technology need?",
+         "At least one option covers where skills for this public technology are published.",
+         "None of the options covers it, for example every option is about another technology.")),
+    "design-stage/v1": ChoiceRubric(
+        "design-stage", "Which candidate design stage covers the unresolved decision in context?", None,
+        ("Does any candidate stage cover that unresolved decision?",
+         "At least one candidate's stage or its checks cover the unresolved decision.",
+         "The decision is outside every candidate stage.")),
+    "capability-select/v1": ChoiceRubric(
+        "capability-needs", "Which candidate capability's documented function fits task_need?", None,
+        ("Does any candidate's documented function fit task_need?",
+         "At least one excerpt describes a function needed for the bounded task.",
+         "The excerpts describe functions outside that task, even if their capability class is relevant.")),
+    "capability-needs/v1": LabelRubric(
+        "capability-needs", "Does task_need require {meaning}?",
+        "Accomplishing this bounded task needs {meaning}.",
+        "The task does not need {meaning}: it is unrelated or merely convenient.",
+        {"library-docs": "reading current documentation of a library or API",
+         "web-search": "searching the public web",
+         "web-browse": "opening and reading specific web pages",
+         "code-host": "working with a code hosting service, such as its repositories or pull requests",
+         "issue-tracker": "reading or changing issues in an issue tracker",
+         "database": "querying or changing a database",
+         "design-files": "reading design files, such as mockups or prototypes",
+         "cloud-console": "operating a cloud provider's console or resources",
+         "payment-docs": "reading a payment provider's documentation",
+         "messaging": "reading or sending messages in a chat or messaging service",
+         "file-storage": "reading or writing files in a storage service",
+         "browser-automation": "driving a web browser, such as clicking and filling forms",
+         "diagramming": "drawing or reading diagrams"}),
 }
 
 
@@ -223,7 +325,38 @@ class DesignTextField:
                 "bytes_digest": self.bytes_digest}
 
 
-Field = PublicSnapshotField | PublicLabel | DesignTextField
+@dataclasses.dataclass(frozen=True)
+class TaskTextField:
+    task_ref: Mapping
+    source: str
+    offset: int
+    length: int
+    bytes_digest: str
+    text: str = dataclasses.field(repr=False, compare=False, default="")
+
+    def identity(self) -> dict:
+        return {"tag": "task-text", "task_ref": dict(self.task_ref), "source": self.source, "offset": self.offset,
+                "length": self.length, "bytes_digest": self.bytes_digest}
+
+
+@dataclasses.dataclass(frozen=True)
+class TaskView:
+    """The task text a TaskTextField may slice, bound to the task, packet and intent the caller verified: only the
+    accepted packet's intent section (`intent`). Build it from a checked packet with `of`, never from caller text."""
+    ref: Mapping
+    texts: Mapping[str, str]
+
+    @classmethod
+    def of(cls, task: str, packet) -> "TaskView":
+        section = packet.section or ""
+        intent = packet.intent
+        ref = {"task": task, "source": packet.source, "intent": f"{intent.id}@r{intent.revision}",
+               "intent_digest": intent.digest,
+               "section_sha256": "sha256:" + hashlib.sha256(section.encode("utf-8")).hexdigest()}
+        return cls(ref, {"intent": section})
+
+
+Field = PublicSnapshotField | PublicLabel | DesignTextField | TaskTextField
 
 
 def _slice(data: bytes, offset: int, length: int, what: str) -> tuple[str, str]:
@@ -272,8 +405,18 @@ def public_field(sources, snapshot_ref: str, path_or_field: str, offset: int, le
     return PublicSnapshotField(snapshot_ref, path_or_field, offset, length, digest, text)
 
 
+def public_prefix(sources, snapshot_ref: str, path_or_field: str, limit: int = FIELD_BYTES) -> PublicSnapshotField:
+    """The longest prefix of a verified public file that is at most `limit` bytes and ends on a whole character."""
+    data = _public_bytes(sources, snapshot_ref, path_or_field)
+    size = min(len(data), limit)
+    while 0 < size < len(data) and data[size] & 0xC0 == 0x80:
+        size -= 1  # data[size] continues a character, so the prefix would cut it
+    text, digest = _slice(data, 0, size, path_or_field)
+    return PublicSnapshotField(snapshot_ref, path_or_field, 0, size, digest, text)
+
+
 def label(enum_id: str, value: str) -> PublicLabel:
-    if enum_id not in LABELS or value not in LABELS[enum_id]:
+    if value not in label_values(enum_id):
         raise JudgeError("OAH_JUDGE_FIELD_INVALID", f"{enum_id}={value!r} is not a fixed oah label")
     return PublicLabel(enum_id, value)
 
@@ -299,6 +442,19 @@ def design_field(view, part_or_decision_input: str, offset: int, length: int) ->
     """A slice of the design's own current text: authored, so it needs send_design_text to be sent."""
     text, digest = _slice(_design_bytes(view, part_or_decision_input), offset, length, part_or_decision_input)
     return DesignTextField(view.current.ref.to_json(), part_or_decision_input, offset, length, digest, text)
+
+
+def _task_bytes(task_view, source: str) -> bytes:
+    if not isinstance(task_view, TaskView) or source not in task_view.texts:
+        raise JudgeError("OAH_JUDGE_FIELD_INVALID", f"{source} is not task text of a verified task view (only the "
+                         "packet's intent section is)")
+    return task_view.texts[source].encode("utf-8")
+
+
+def task_field(task_view, source: str, offset: int, length: int) -> TaskTextField:
+    """A slice of the task's accepted packet intent: authored, so it needs send_task_text to be sent."""
+    text, digest = _slice(_task_bytes(task_view, source), offset, length, source)
+    return TaskTextField(dict(task_view.ref), source, offset, length, digest, text)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -352,6 +508,12 @@ def _questions(request: Request) -> dict[str, dict] | None:
     if isinstance(rubric, ScoreRubric):
         return None if request.options else {"score": {"type": "score", "instructions": rubric.instructions,
                                                         "criteria": list(rubric.levels)}}
+    if isinstance(rubric, OptionNoulRubric):
+        keys = request.options
+        if not 2 <= len(keys) <= OPTION_LIMIT or keys != tuple(f"o{index}" for index in range(len(keys))):
+            return None
+        return {key: {"type": "noul", "instructions": rubric.instructions.replace("{option}", key),
+                      "criteria": {"true": rubric.true, "false": rubric.false}} for key in keys}
     if isinstance(rubric, LabelRubric):
         if request.options:
             return None
@@ -375,30 +537,73 @@ def _questions(request: Request) -> dict[str, dict] | None:
             "fits": {"type": "noul", "instructions": instructions, "criteria": {"true": true, "false": false}}}
 
 
-def _scope_ok(request: Request) -> tuple[bool, bool]:
-    """(allowed, has authored fields) against the purpose's closed allowlist; tags must match exactly."""
-    public, authored, _required = PURPOSES[request.purpose]
-    has_authored = False
+def _tag_ok(expected: str | None, value: object) -> bool:
+    if expected == "snapshot":
+        return type(value) is PublicSnapshotField
+    if expected == "design-text":
+        return type(value) is DesignTextField
+    if expected == "task-text":
+        return type(value) is TaskTextField
+    return bool(expected and expected.startswith("label:") and type(value) is PublicLabel
+                and value.enum_id == expected[6:] and value.value in label_values(value.enum_id))
+
+
+def _rubric_scope_ok(request: Request) -> tuple[bool, bool, bool]:
+    """The exact allowlist of one of E's rubrics: every role in its place with its one tag (RUBRIC_ROLES), and no
+    more options than the rubric takes (RUBRIC_OPTIONS)."""
+    shared, per_option = RUBRIC_ROLES[request.rubric]
+    has_design = has_task = False
+    if len(request.options) > RUBRIC_OPTIONS.get(request.rubric, OPTION_LIMIT):
+        return False, has_design, has_task
     for role, value in request.fields:
         if not isinstance(role, str):
-            return False, has_authored
+            return False, has_design, has_task
+        option, sep, bare = role.partition(":")
+        expected = (per_option.get(bare) if option in request.options else None) if sep else shared.get(option)
+        if not _tag_ok(expected, value):
+            return False, has_design, has_task
+        has_design = has_design or expected == "design-text"
+        has_task = has_task or expected == "task-text"
+    return True, has_design, has_task
+
+
+def _scope_ok(request: Request) -> tuple[bool, bool, bool]:
+    """(allowed, has design text, has task text) against the purpose's closed allowlist; tags must match exactly.
+    A purpose in TASK_TEXT_PURPOSES takes task text in its authored roles and never design text; every other purpose
+    the reverse. One of E's rubrics in RUBRIC_ROLES uses its own exact allowlist instead."""
+    if request.rubric in RUBRIC_ROLES:
+        return _rubric_scope_ok(request)
+    public, authored, _required = PURPOSES[request.purpose]
+    authored_type = TaskTextField if request.purpose in TASK_TEXT_PURPOSES else DesignTextField
+    has_design = has_task = False
+    for role, value in request.fields:
+        if not isinstance(role, str):
+            return False, has_design, has_task
         option, sep, bare = role.partition(":")
         if sep:
             if option not in request.options:
-                return False, has_authored
+                return False, has_design, has_task
         else:
             bare = option
         expected = public.get(bare)
         if expected == "snapshot" and type(value) is PublicSnapshotField:
             continue
         if expected and expected.startswith("label:") and type(value) is PublicLabel \
-                and value.enum_id == expected[6:] and value.value in LABELS.get(value.enum_id, ()):
+                and value.enum_id == expected[6:] and value.value in label_values(value.enum_id):
             continue
-        if bare in authored and type(value) is DesignTextField:
-            has_authored = True
+        if bare in authored and type(value) is authored_type:
+            has_design = has_design or authored_type is DesignTextField
+            has_task = has_task or authored_type is TaskTextField
             continue
-        return False, has_authored
-    return True, has_authored
+        return False, has_design, has_task
+    return True, has_design, has_task
+
+
+def _missing_required(request: Request) -> bool:
+    shared, per_option = RUBRIC_REQUIRED.get(request.rubric) or REQUIRED_ROLES.get(request.purpose, ((), ()))
+    roles = {role for role, _value in request.fields}
+    return not (set(shared) <= roles and all(f"{option}:{role}" in roles for option in request.options
+                                              for role in per_option))
 
 
 def identity_of(request: Request, *, policy: str, provider: str | None, model: str | None,
@@ -420,11 +625,11 @@ def _flagged(text: str) -> bool:
     return bool(_EMAIL.search(text)) or any(pattern.search(text) for _rule, pattern in CONTENT_RULES)
 
 
-def _resolved(request: Request, sources, view) -> Request | None:
+def _resolved(request: Request, sources, view, task_view=None) -> Request | None:
     fields = []
     for role, value in request.fields:
         canonical = value
-        if type(value) in (PublicSnapshotField, DesignTextField):
+        if type(value) in (PublicSnapshotField, DesignTextField, TaskTextField):
             try:
                 if type(value) is PublicSnapshotField and sources is not None:
                     canonical = public_field(sources, value.snapshot_ref, value.path_or_field, value.offset, value.length)
@@ -432,6 +637,10 @@ def _resolved(request: Request, sources, view) -> Request | None:
                     if dict(value.design_ref) != view.current.ref.to_json():
                         return None
                     canonical = design_field(view, value.part_or_decision_input, value.offset, value.length)
+                elif type(value) is TaskTextField and isinstance(task_view, TaskView):
+                    if dict(value.task_ref) != dict(task_view.ref):
+                        return None  # another task, packet or intent than the one verified now
+                    canonical = task_field(task_view, value.source, value.offset, value.length)
                 else:
                     return None
                 if canonical.identity() != value.identity() or canonical.text != value.text:
@@ -467,7 +676,7 @@ def _strings(value: object) -> list[str]:
     return []
 
 
-def _notice(state_dir: pathlib.Path | None, design: bool, notify: Callable[[str], None] | None) -> None:
+def _notice(state_dir: pathlib.Path | None, kind: str, notify: Callable[[str], None] | None) -> None:
     if state_dir is None:
         return
     from oah.atomic import StorageError
@@ -478,27 +687,50 @@ def _notice(state_dir: pathlib.Path | None, design: bool, notify: Callable[[str]
     try:
         state = CacheState(state_dir)
         state.root.mkdir(parents=True, exist_ok=True)
-        name = "notice-design.json" if design else "notice-public.json"
+        name = f"notice-{kind}.json"
         with state.lock():
             if state.read_json(name, 1024) == {"version": 1, "shown": True}:
                 return
-            text = ("OAH_RERANK_JUDGEMENT_DESIGN_NOTICE: permitted design excerpts also go to the judge." if design else
-                    "OAH_RERANK_JUDGEMENT_NOTICE: verified public excerpts and fixed labels go to the judge.")
+            text = {"design": "OAH_RERANK_JUDGEMENT_DESIGN_NOTICE: permitted design excerpts also go to the judge.",
+                    "task": "OAH_RERANK_JUDGEMENT_TASK_NOTICE: bounded excerpts of the task's packet intent also go "
+                            "to the judge.",
+                    "public": "OAH_RERANK_JUDGEMENT_NOTICE: verified public excerpts and fixed labels go to the "
+                              "judge."}[kind]
             (notify or (lambda value: print(value, file=sys.stderr)))(text)
             state.write_json(name, {"version": 1, "shown": True})
     except (OSError, ValueError, StorageError, StateProblem, LockTimeout):
         return
 
 
+E_RUBRICS = frozenset({"skill-fit/v1", "skill-search/v1", "design-stage/v1", "capability-needs/v1",
+                      "capability-select/v1"})
+
+
+def _admitted(rubric, admitted) -> bool:
+    if rubric not in E_RUBRICS:
+        return True
+    from oah import skillpack
+
+    if not isinstance(admitted, skillpack.Admitted) or admitted._issuer is not skillpack._ISSUER \
+            or admitted.prepared is None:
+        return False
+    skillpack.require(admitted)
+    return True
+
+
 def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=None, brief_disabled: bool = False,
           env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
           providers: Mapping[str, Provider] | None = None, state_dir: pathlib.Path | None = None,
-          budget: Budget | None = None, notify: Callable[[str], None] | None = None) -> Judgement:
+          budget: Budget | None = None, notify: Callable[[str], None] | None = None,
+          task_view: TaskView | None = None, admitted=None) -> Judgement:
     """One advisory outcome for a closed purpose, or `unused(<reason>)` with nothing sent.
 
-    With `sources` (and `view` for design text) every slice is read again from the rehashed store before sending."""
+    With `sources` (and `view` for design text, `task_view` for task text) every slice is read again from its
+    verified origin before sending."""
     provider = key = None
     try:
+        if not _admitted(request.rubric, admitted):
+            return Judgement(unused("admission"), request.purpose, None)
         if request.purpose not in PURPOSES or request.rubric not in RUBRICS \
                 or RUBRICS[request.rubric].purpose != request.purpose:
             return Judgement(unused("scope"), str(request.purpose), None)
@@ -508,15 +740,19 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
             raise ValueError("a Choice request may not omit a mandatory candidate")
         if len({role for role, _value in request.fields}) != len(request.fields):
             return Judgement(unused("scope"), request.purpose, None)
-        allowed, has_authored = _scope_ok(request)
+        allowed, has_design, has_task = _scope_ok(request)
         if questions is None or not allowed:
             return Judgement(unused("scope"), request.purpose, None)
-        settings = judgement_settings(config)
-        if has_authored and settings.get("send_design_text") is not True:
-            return Judgement(unused("design-text-off"), request.purpose, None)
-        if PURPOSES[request.purpose][2] and not has_authored:
+        if _missing_required(request):
             return Judgement(unused("insufficient-input"), request.purpose, None)
-        resolved = _resolved(request, sources, view)
+        settings = judgement_settings(config)
+        if has_design and settings.get("send_design_text") is not True:
+            return Judgement(unused("design-text-off"), request.purpose, None)
+        if has_task and settings.get("send_task_text") is not True:
+            return Judgement(unused("task-text-off"), request.purpose, None)
+        if PURPOSES[request.purpose][2] and not (has_design or has_task):
+            return Judgement(unused("insufficient-input"), request.purpose, None)
+        resolved = _resolved(request, sources, view, task_view)
         if resolved is None:
             return Judgement(unused("scope"), request.purpose, None)
         request = resolved
@@ -553,7 +789,8 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         key_id = cache_key(identity)
         cached = judgement_cache.load(state_dir, key_id, identity, moment, float(settings["cache_hours"]))
         if cached is not None and not recheck(cached, sources=sources, view=view, policy=policy,
-                                              provider=identity["provider"], model=model, config=config):
+                                              provider=identity["provider"], model=model, config=config,
+                                              task_view=task_view, admitted=admitted):
             try:
                 answers = _valid_answers(cached["answers"], questions)
                 outcome, choice, labels, level = _read(RUBRICS[request.rubric], answers, identity["thresholds"])
@@ -567,10 +804,28 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         blocked = breaker.refusal() or breaker.reserve()
         if blocked is not None:
             return Judgement(unused(blocked), request.purpose, identity)
-        _notice(state_dir, False, notify)
-        if has_authored:
-            _notice(state_dir, True, notify)
-        reply, status = _call(lambda: _valid_reply(provider.judge(state, questions, key=key, config=config), questions))
+        _notice(state_dir, "public", notify)
+        if has_design:
+            _notice(state_dir, "design", notify)
+        if has_task:
+            _notice(state_dir, "task", notify)
+        if not _admitted(request.rubric, admitted):
+            return Judgement(unused("admission"), request.purpose, None)
+        if request.rubric in E_RUBRICS:
+            from oah.discovery import gateway
+
+            raw, status = _call(lambda: gateway.send(admitted, "skill-judge", key_id,
+                lambda: provider.judge(state, questions, key=key, config=config),
+                state=state_dir if state_dir is not None else getattr(sources, "state_dir", None)))
+        else:
+            raw, status = _call(lambda: provider.judge(state, questions, key=key, config=config))
+        if status == USED and isinstance(RUBRICS[request.rubric], OptionNoulRubric) and isinstance(raw, Mapping) \
+                and set(raw) < set(questions):
+            status = unused("error:dropped")  # the reply leaves a candidate out: no rank from a partial answer
+        reply = None
+        if status == USED:
+            reply, status = _call(lambda: _valid_reply(raw, questions))
+        raw = None
         breaker.record(circuit.outcome(status))
         if status != USED:
             return Judgement(status, request.purpose, identity, provider=identity["provider"])
@@ -660,6 +915,11 @@ def _read(rubric, answers: Mapping[str, Mapping], thresholds: Mapping = THRESHOL
         level = top if scores[top] >= thresholds["level_min"] and list(scores.values()).count(scores[top]) == 1 else None
         decisive = level is not None or (labels is not None and "yes" in labels.values())
         return ("matched" if decisive else "uncertain"), None, labels, level
+    if isinstance(rubric, OptionNoulRubric):
+        labels = {key: _reading(answer["noul"], thresholds) for key, answer in answers.items()}
+        readings = set(labels.values())
+        outcome = "matched" if "yes" in readings else "no-match" if readings == {"no"} else "uncertain"
+        return outcome, None, labels, None
     if isinstance(rubric, LabelRubric):
         labels = {label: _reading(answers[label]["noul"], thresholds) for label in rubric.labels}
         readings = set(labels.values())
@@ -673,12 +933,15 @@ def _read(rubric, answers: Mapping[str, Mapping], thresholds: Mapping = THRESHOL
 
 
 def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, provider: str | None,
-            model: str | None, config: Mapping | None = None) -> list[str]:
+            model: str | None, config: Mapping | None = None, task_view: TaskView | None = None,
+            admitted=None) -> list[str]:
     """Why a result or cached record may not be applied now ([] when every identity still holds)."""
     from oah.design.sources.state import StateProblem
 
     record = judgement.to_record() if isinstance(judgement, Judgement) else dict(judgement)
     identity = record.get("identity")
+    if isinstance(identity, Mapping) and not _admitted(identity.get("rubric"), admitted):
+        return ["admission"]
     if record.get("status") not in (USED, "used(cache)") or not isinstance(identity, Mapping):
         return ["not-used"]
     if config is not None and not config.get("enabled", False):
@@ -693,7 +956,8 @@ def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, 
     settings = judgement_settings({} if config is None else config)
     if identity.get("thresholds") != {key: settings[key] for key in THRESHOLDS}:
         reasons.append("thresholds-changed")
-    compared = set(settings) if config is not None else set(settings) - {"enabled", "send_design_text"}
+    compared = set(settings) if config is not None else set(settings) - {"enabled", "send_design_text",
+                                                                          "send_task_text"}
     if any((identity.get("settings") or {}).get(key) != settings[key] for key in compared):
         reasons.append("settings-changed")
     for field in identity.get("fields") or []:
@@ -707,7 +971,18 @@ def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, 
                     continue
                 data = _design_bytes(view, field["part_or_decision_input"])
                 digest = _slice(data, field["offset"], field["length"], field["part_or_decision_input"])[1]
+            elif field.get("tag") == "task-text":
+                if not isinstance(task_view, TaskView) or dict(field.get("task_ref") or {}) != dict(task_view.ref):
+                    reasons.append(f"task-changed:{field.get('role')}")
+                    continue
+                data = _task_bytes(task_view, field["source"])
+                digest = _slice(data, field["offset"], field["length"], field["source"])[1]
+            elif field.get("tag") == "public-label":
+                if field.get("value") not in label_values(str(field.get("enum_id"))):
+                    reasons.append(f"label-changed:{field.get('role')}")
+                continue
             else:
+                reasons.append(f"field-unknown:{field.get('role')}")  # an unknown tag is never skipped
                 continue
         except (JudgeError, StateProblem, KeyError, TypeError, AttributeError):
             reasons.append(f"field-unavailable:{field.get('role')}")
@@ -726,7 +1001,8 @@ class Applied:
 
 
 def apply(judgement: Judgement | Mapping, *, current_input_ref: str, config: Mapping, sources=None,
-          view=None, request: Request | None = None, policy: str | None = None) -> Applied:
+          view=None, request: Request | None = None, policy: str | None = None,
+          task_view: TaskView | None = None, admitted=None) -> Applied:
     record = judgement.to_record() if isinstance(judgement, Judgement) else dict(judgement)
     identity = record.get("identity") or {}
     if record.get("status") not in (USED, "used(cache)"):
@@ -740,11 +1016,11 @@ def apply(judgement: Judgement | Mapping, *, current_input_ref: str, config: Map
     if provider == "typesafe" and not model:
         model = DEFAULT_MODEL
     reasons = recheck(record, sources=sources, view=view, policy=effective_policy, provider=provider,
-                      model=model, config=config)
+                      model=model, config=config, task_view=task_view, admitted=admitted)
     if reasons:
         return Applied(False, reasons[0], {}, None)
     if request is not None:
-        resolved = _resolved(request, sources, view)
+        resolved = _resolved(request, sources, view, task_view)
         if resolved is None or identity_of(resolved, policy=effective_policy, provider=provider, model=model,
                                            settings=judgement_settings(config)) != identity:
             return Applied(False, "stale-input", {}, None)

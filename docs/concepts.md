@@ -377,6 +377,9 @@ have to.
   candidates the rules chose; it never adds or drops one. Every packet plan, brief and run record says
   `rerank=used` or `rerank=unused(<reason>)`. See [Keys](keys.md).
 - Selection records stay in a local file in the state folder and are never sent anywhere.
+- **Skills a design asks for are delivered, not selected.** When a task's accepted design links reviewed skills to
+  its stages, `oah call` puts those skill texts into the brief by fixed rules, and the re-ranker has no say. See
+  [Skills and capabilities](skills-and-capabilities.md).
 
 ## The impact map
 

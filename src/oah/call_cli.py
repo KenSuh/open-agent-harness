@@ -13,7 +13,10 @@ import time
 from typing import Callable, NamedTuple
 
 from oah import briefs, call, launchers, models, routing, runs
+from oah.launchers import native as native_launcher
 from oah.atomic import StateCorrupt, StorageError
+from oah.config import ConfigError
+from oah.discovery import boundaries, inputs, records
 from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
 from oah.lease import LeaseError
@@ -25,14 +28,50 @@ from oah.runs import TERMINAL, RunError
 
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT, EXIT_AGAIN = 0, 1, 2, 69, 75
 COMMANDS = ("call", "wait", "worker-run")
+MESSAGE_BEGIN, MESSAGE_END = "----- BEGIN MESSAGE -----\n", "----- END MESSAGE -----\n"  # around a native offer's text
 ENVIRONMENT_CODES = ("OAH_ENGINE_MISSING", "OAH_CONFIG_INVALID", "OAH_CODEX_CONFIG_INVALID",
                      "OAH_UNSUPPORTED_BATCH_SHIM", "OAH_PACKET_UNREADABLE", "OAH_INTENT_SOURCE_UNREADABLE",
                      "OAH_RUN_DETACH_FAILED", "OAH_LAUNCHER_UNAVAILABLE", "OAH_LAUNCHER_FAILED",
-                     "OAH_DESIGN_FRESHNESS_UNKNOWN", "OAH_DESIGN_RECOVERY_PENDING", "OAH_DESIGN_ORIGIN_UNKNOWN")
+                     "OAH_DESIGN_FRESHNESS_UNKNOWN", "OAH_DESIGN_RECOVERY_PENDING", "OAH_DESIGN_ORIGIN_UNKNOWN",
+                     "OAH_CAPABILITY_INVENTORY_UNKNOWN", "OAH_SKILL_STATE_CORRUPT")
+
+
+class _CallParser(argparse.ArgumentParser):
+    """`oah call settle ...` is a reserved first token, parsed before the engine positional (no engine is named
+    settle); everything else parses exactly as before."""
+
+    settle: argparse.ArgumentParser | None = None
+
+    def parse_known_args(self, args=None, namespace=None):
+        argv = list(sys.argv[1:] if args is None else args)
+        if argv[:1] == ["settle"] and self.settle is not None:
+            namespace, extras = self.settle.parse_known_args(argv[1:], namespace)
+            namespace.call_action = "settle"
+            return namespace, extras
+        return super().parse_known_args(argv, namespace)
+
+
+def _settle_parser() -> argparse.ArgumentParser:
+    settle = argparse.ArgumentParser(
+        prog="oah call settle", description="Record what a native subagent returned for an offer from "
+        "`oah call --launcher native`: the host child that received the exact offered message, its outcome and its "
+        "result as data. The lead runs this once the host returns; a dispatched worker cannot.")
+    settle.add_argument("--run", required=True, help="the run id the offer printed")
+    settle.add_argument("--offer-digest", required=True, metavar="HASH", help="the offered message's sha256, as printed")
+    settle.add_argument("--host-child-id", required=True, metavar="ID", help="the id the host gave the subagent")
+    settle.add_argument("--outcome", required=True, choices=native_launcher.OUTCOMES)
+    settle.add_argument("--result-file", required=True, metavar="FILE",
+                        help="the subagent's reply as UTF-8 text, at most 65536 bytes; it is read as data, never run")
+    settle.add_argument("--canary", help="the oah-canary value the subagent echoed (optional; unverified without it)")
+    settle.add_argument("--json", action="store_true", help="print the settlement as JSON")
+    return settle
 
 
 def register(commands: argparse._SubParsersAction) -> None:
-    parser = commands.add_parser("call", help="launch Claude Code or Codex for one stage and record the run")
+    parser = commands.add_parser("call", help="launch Claude Code or Codex for one stage and record the run",
+                                 epilog="`oah call settle --run R ...` settles a native offer; see oah call settle --help")
+    parser.__class__ = _CallParser  # `settle` is a reserved first token (see _CallParser)
+    parser.settle = _settle_parser()
     parser.add_argument("engine", choices=routing.ENGINES)
     parser.add_argument("--stage", required=True, choices=routing.STAGES)
     parser.add_argument("--task", default=call.DEFAULT_TASK, help=f"the task this run belongs to (default {call.DEFAULT_TASK})")
@@ -49,8 +88,9 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--override-stage", action="store_true",
                         help="run an engine that is not configured for this stage (recorded in the events)")
     parser.add_argument("--background", action="store_true", help="return the run id at once; then use oah wait")
-    parser.add_argument("--launcher", choices=launchers.NAMES, help="run the worker as a plain process or in an Orca "
-                        "worktree terminal (default: [call] launcher, else process)")
+    parser.add_argument("--launcher", choices=launchers.NAMES + launchers.EXPLICIT,
+                        help="run the worker as a plain process or in an Orca worktree terminal (default: [call] "
+                        "launcher, else process); native only offers the brief for your own host's subagent")
     parser.add_argument("--require-detach", action="store_true",
                         help="refuse background dispatch if Windows denies job breakaway; use another terminal")
     parser.add_argument("--request-id", help="retry a saved request from this repository's state folder")
@@ -60,6 +100,12 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--refresh-models", action="store_true", help="rebuild the model catalog before launching")
     parser.add_argument("--no-rerank", action="store_true", help="keep the rule order of the selected skills; the "
                         "re-ranker is not asked (recorded as rerank=unused(disabled-by-brief))")
+    parser.add_argument("--parent-inventory", metavar="FILE", help="the lead's InventoryV1 of its own tools, for "
+                        "capability needs only the lead can meet (see oah capabilities plan)")
+    parser.add_argument("--relay-result", metavar="HASH", action="append", default=[],
+                        help="a parent relay result stored with oah capabilities relay (repeatable)")
+    parser.add_argument("--skill-needs", metavar="FILE", help="the task's skill needs from oah skills find --task "
+                        "--out, checked again against the current packet (a subtask's own needs and selections)")
     parser.add_argument("--json", action="store_true", help="print the run record as JSON")
 
     wait = commands.add_parser("wait", help="wait up to 9 minutes for a background run; call it again if needed")
@@ -129,11 +175,12 @@ def _snapshot(args: argparse.Namespace) -> dict:
 
 
 def _restore(args: argparse.Namespace, state: pathlib.Path) -> argparse.Namespace:
-    from oah.atomic import read_json
-
     if not re.fullmatch(r"q[0-9a-f]{24}", args.request_id):
         raise EngineError("OAH_REQUEST_INVALID", "invalid request ID; copy the ID from a generated retry command")
-    saved = read_json(runs._contained_path(state, "requests", args.request_id + ".json"), None)
+    name = args.request_id + ".json"
+    runs._contained_path(state, "requests")
+    path = records.location(state / "requests" / name)
+    saved = records.read_json(path, required=False)
     if not isinstance(saved, dict) or saved.get("engine") != args.engine or saved.get("stage") != args.stage:
         raise EngineError("OAH_REQUEST_INVALID", "saved request is missing or has another engine/stage; "
                           "run the original call again to generate a new retry command")
@@ -144,7 +191,9 @@ def _restore(args: argparse.Namespace, state: pathlib.Path) -> argparse.Namespac
 def _read(path: str) -> str:
     if path == "-":
         return sys.stdin.buffer.read().decode("utf-8-sig")
-    return pathlib.Path(path).read_bytes().decode("utf-8-sig")  # bytes keep a stored brief's line endings
+    from oah.discovery import inputs
+
+    return inputs.read_bytes(path).decode("utf-8-sig")
 
 
 def _summary(data: dict) -> str:
@@ -166,14 +215,17 @@ def _report(data: dict, as_json: bool) -> int:
 
 def _print_skills(prepared: call.Prepared) -> None:
     """One line naming the brief's skills and the re-ranker status, from the run folder's skills.json."""
-    from oah.atomic import read_json
-
-    record = read_json(prepared.run.file_path("skills.json"), None)
-    if isinstance(record, dict):
+    def summary(record):
         names = ",".join(skill.get("id", "?") for skill in record.get("skills", [])) or "none"
-        print(f"OAH_SKILLS selected={names} rerank={record.get('rerank')}", file=sys.stderr)
+        return names, record.get("rerank")
+
+    found = records.run_json(prepared.run, "skills.json", required=False, parse=summary)
+    if found is not None:
+        names, rerank = found
+        print(f"OAH_SKILLS selected={names} rerank={rerank}", file=sys.stderr)
 
 
+@boundaries.entry("admission")
 def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
     if args.request_id:
         args = _restore(args, state)
@@ -194,7 +246,10 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         state = state_dir(repo_info(root), os.environ)
     section = load_call_section(root)
     orca = placement = None
-    if launchers.choose(getattr(args, "launcher", None), section) == "orca":
+    launcher = launchers.choose(getattr(args, "launcher", None), section)
+    if launcher == "native":
+        return _offer(args, root, state, axes)
+    if launcher == "orca":
         if args.require_detach:
             print("OAH_USAGE: --require-detach applies to the process launcher only; an Orca terminal never "
                   "belongs to this terminal. Remove --require-detach", file=sys.stderr)
@@ -217,11 +272,15 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         round_instructions=args.message,
         stored_brief=args.stored_brief_text,
         packet=(root / args.packet) if args.packet else None, timeout_s=args.timeout_seconds,
-        refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False))
+        refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False),
+        parent_inventory=(str(inputs.location(args.parent_inventory))
+                          if getattr(args, "parent_inventory", None) else None),
+        relay_results=tuple(getattr(args, "relay_result", None) or ()), route=launcher,
+        skill_needs=(str(inputs.location(args.skill_needs)) if getattr(args, "skill_needs", None) else None))
     try:
         prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
                                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
-    except Exception:
+    except (EngineError, routing.RoutingError, briefs.BriefError, RunError, LeaseError, ConfigError, StorageError):
         if placement is not None and placement.created:
             print(f"OAH_LAUNCHER_NOTE: the Orca worktree {placement.path} made for this call was kept; reuse it with "
                   f"--worktree {placement.path.name}, or remove it in Orca", file=sys.stderr)
@@ -229,7 +288,16 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
     if orca is not None:
-        info = orca_launcher.start(orca, prepared, placement)["launcher"]
+        class DispatchingOrca(orca_launcher.Orca):
+            def json(self, *arguments: str, timeout: float = orca_launcher.CLI_TIMEOUT) -> dict:
+                result = super().json(*arguments, timeout=timeout)
+                if arguments[:2] == ("terminal", "create"):
+                    boundaries.dispatched("runner")
+                return result
+
+        tracked = DispatchingOrca(orca.base, orca.version, orca.env, orca.deadline)
+        with boundaries.command("launch"):
+            info = orca_launcher.start(tracked, prepared, placement)["launcher"]
         _print_skills(prepared)
         print(f"OAH_RUN_STARTED run={prepared.run_id} launcher=orca terminal={info['terminal']} "
               f"worktree={info['worktree']}", file=sys.stdout if args.background else sys.stderr)
@@ -247,9 +315,96 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     return _report(call.execute(prepared), args.json)
 
 
+@boundaries.entry("admission")
+def _offer(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, axes: dict) -> int:
+    """`--launcher native`: print the exact message and the host's parameters; nothing starts and nothing is spent."""
+    if args.background or args.require_detach:
+        print("OAH_USAGE: --background and --require-detach do not apply to --launcher native; your own host runs "
+              "the subagent. Remove them", file=sys.stderr)
+        return EXIT_USAGE
+    tools = intent_tools()
+    request = call.CallRequest(
+        engine=args.engine, stage=args.stage, task=args.task, tier=args.tier, axes=axes,
+        override_stage=args.override_stage, round_instructions=args.message, stored_brief=args.stored_brief_text,
+        packet=(root / args.packet) if args.packet else None, no_rerank=True,
+        parent_inventory=(str(inputs.location(args.parent_inventory))
+                          if getattr(args, "parent_inventory", None) else None),
+        relay_results=tuple(getattr(args, "relay_result", None) or ()),
+        skill_needs=(str(inputs.location(args.skill_needs)) if getattr(args, "skill_needs", None) else None))
+    offered = call.prepare_native(request, load_settings(root), root=root, state_dir=state, env=os.environ,
+                                  footer=tools.footer, has_footer=tools.has_footer, parse_intent=tools.parse,
+                                  read_source=tools.read_source)
+    for warning in offered.warnings:
+        print(warning, file=sys.stderr)
+    digest = offered.offer["message"]["sha256"]
+    settle = (f"oah call settle --run {offered.run_id} --offer-digest {digest} --host-child-id <ID> "
+              "--outcome succeeded|failed --result-file <FILE> [--canary <VALUE>]")
+    if args.json:
+        print(json.dumps({"status": "offered", "run": offered.run_id, "tier": offered.tier,
+                          "tier_source": offered.tier_source, "offer": offered.offer, "host": offered.host,
+                          "message": offered.offer["message"], "settle": settle}, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    params = offered.host["params"]
+    print(f"OAH_NATIVE_OFFERED run={offered.run_id} task={args.task} stage={args.stage} engine={args.engine} "
+          f"tier={offered.tier}: offered, not delivered")
+    if args.engine == "claude":
+        print("Start a subagent with the Agent tool and exactly these parameters:")
+        print(f"  subagent_type: {params['subagent_type']}")
+        print(f"  description: {params['description']}")
+    else:
+        print("Start a native subagent in Codex with a registered role, and give it exactly this message:")
+    print(f"  {'prompt' if args.engine == 'claude' else 'message'}: the text between the markers, byte for byte "
+          f"({offered.offer['message']['bytes']} bytes, {digest})")
+    message = MESSAGE_BEGIN + offered.message + MESSAGE_END
+    sys.stdout.flush()
+    stream = getattr(sys.stdout, "buffer", None)
+    if stream is None:
+        sys.stdout.write(message)
+    else:
+        stream.write(message.encode("utf-8"))
+        stream.flush()
+    print("When the subagent returns, save its reply to a file and settle the offer:")
+    print(f"  {settle}")
+    return EXIT_OK
+
+
+def _settle(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
+    """`oah call settle`: the lead records which host child received the offer and what it returned."""
+    if os.environ.get("OAH_WORKER") == "1":
+        print("OAH_SKILLS_WORKER_REFUSED: a dispatched worker cannot settle a native offer; the lead settles it after "
+              "the subagent returns", file=sys.stderr)
+        return EXIT_REFUSED
+    tools = intent_tools()
+    settled = call.settle_native(state_dir=state, root=root, env=os.environ, settings=load_settings(root),
+                                 run_id=args.run, offer_digest=args.offer_digest, host_child_id=args.host_child_id,
+                                 outcome=args.outcome, result_path=pathlib.Path(args.result_file), token=args.canary,
+                                 parse_intent=tools.parse, read_source=tools.read_source)
+    settlement, receiving = settled.settlement, settled.receiving
+    if args.json:
+        print(json.dumps({"run": settled.run_id, "existing": settled.existing, "settlement": settlement,
+                          "receiving": receiving, "offer": settled.offer}, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    reads = sum(1 for item in receiving["items"] if item["read"] == "oah-mediated")
+    canary = settlement["canary"] + (" (unverified)" if settlement["canary"] == "absent" else "")
+    print(f"OAH_NATIVE_SETTLED run={settled.run_id} outcome={settlement['outcome']} delivery=parent-attested "
+          f"canary={canary} reads={reads}/{len(receiving['items'])}"
+          + (" (already settled; the first receipt is unchanged)" if settled.existing else ""))
+    print("The host gave oah no signed receipt, so this is cooperative evidence. It is not counted as a review or "
+          "process success, and it finishes nothing.")
+    return EXIT_OK
+
+
+@boundaries.entry("wait")
 def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, *, deadline: float) -> int:
-    current = runs.find_run(state, args.run_id, deadline=deadline).read()
+    from oah.discovery.runfiles import Run
+
+    saved = runs.find_run(state, args.run_id, deadline=deadline)
+    current = Run(saved.id, saved.task, saved.path, deadline=deadline).read()
     launcher = current.get("launcher")
+    if isinstance(launcher, dict) and launcher.get("name") == "native":
+        print(f"OAH_RUN_NATIVE: run {args.run_id} is a native offer; oah never starts it, so there is nothing to wait "
+              "for. When the subagent returns, settle it with oah call settle", file=sys.stderr)
+        return EXIT_REFUSED
     if isinstance(launcher, dict) and launcher.get("name") == "orca" and current.get("status") not in TERMINAL:
         from oah.launchers import orca as orca_launcher
 
@@ -276,23 +431,40 @@ def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, *, 
     return EXIT_AGAIN
 
 
+@boundaries.entry("worker")
 def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
     from oah.launchers import orca as orca_launcher
+    from oah.discovery import boundaries, runfiles
 
-    with runs.WorkerRun(runs.find_run(state, args.run_id)) as run:
-        data = run.read()
-        launcher = data.get("launcher")
-        if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
-            print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is not a queued Orca run, so nothing "
-                  "was started; start a new run with oah call", file=sys.stderr)
-            return EXIT_REFUSED
-        prepared = orca_launcher.worker_prepared(run, root, load_settings(root), args.stage)
-        call.check_prepared(prepared)
-        run.claim_queued_orca()
-        print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
-              f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
-        call.execute(prepared)
-        return _report(run.read(), False)
+    with runfiles.WorkerRun(runs.find_run(state, args.run_id)) as run:
+        try:
+            with boundaries.command("worker"):
+                data = run.read()
+                launcher = data.get("launcher")
+                if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
+                    print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is not a queued Orca run, so nothing "
+                          "was started; start a new run with oah call", file=sys.stderr)
+                    return EXIT_REFUSED
+                prepared = orca_launcher.worker_prepared(run, root, load_settings(root), args.stage)
+                call.check_prepared(prepared)
+                run.claim_queued_orca()
+                print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
+                      f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
+                call.execute(prepared)
+                return _report(run.read(), False)
+        except boundaries.CommandRefusal as exc:
+            unreadable_result = getattr(exc, "record_path", None) == run.path / "result.json"
+            if not unreadable_result or exc.code == "OAH_RUN_LAUNCH_INVALID":
+                try:
+                    os.close(run._open_file("worker.claim", os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+                except FileExistsError:
+                    pass
+                else:
+                    if not unreadable_result:
+                        run.result(status="refused", error=str(exc))
+            if unreadable_result:
+                run.write_logs("", call._recorded_error(exc, False) + "\n")
+            raise
 
 
 def _wait_repo_info(cwd: pathlib.Path, deadline: float):
@@ -317,6 +489,7 @@ def _wait_repo_info(cwd: pathlib.Path, deadline: float):
 
 def run(args: argparse.Namespace) -> int:
     from oah.config import ConfigError
+    from oah.discovery.store import StoreProblem
 
     deadline = (time.monotonic() + min(max(args.timeout_seconds, 0.0), call.WAIT_LIMIT_S)
                 if args.command == "wait" else None)
@@ -326,6 +499,8 @@ def run(args: argparse.Namespace) -> int:
         state = state_dir(info, os.environ)
         if args.command == "wait":
             return _wait(args, info.root, state, deadline=deadline)
+        if args.command == "call" and getattr(args, "call_action", None) == "settle":
+            return _settle(args, info.root, state)
         handler = {"call": _call, "worker-run": _worker_run}[args.command]
         return handler(args, info.root, state)
     except launchers.DeadlineExpired:
@@ -333,11 +508,11 @@ def run(args: argparse.Namespace) -> int:
         return EXIT_AGAIN
     except EngineError as exc:
         print(exc, file=sys.stderr)
-        return EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED
+        return getattr(exc, "exit_code", EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED)
     except (routing.RoutingError, briefs.BriefError, RunError, LeaseError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
-    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError,
+    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError, StoreProblem,
             ScratchError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
