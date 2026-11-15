@@ -190,7 +190,8 @@ FILE_MATRIX: dict[str, tuple[FileRule, ...]] = {
         FileRule('skills/task-selections/*.json', False, ('', 0))),
     'capabilities-plan': (
         FileRule('parent.json', input_id='parent-inventory', input_when=('plan.py:for_task',)),
-        FileRule('skills/reviews/*/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1)),
+        FileRule('skills/reviews/*/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(stale)', 1),
+            (('skillpack.py:admit', ('OAH_SKILL_MANDATORY_MISSING', 1)),)),
         FileRule('skills/sources/blobs/*/*'),
         FileRule('skills/relays/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1)),
         FileRule('skills/relay-payloads/*.json', False, ('OAH_CAPABILITY_RELAY_REQUIRED(missing)', 1))),
