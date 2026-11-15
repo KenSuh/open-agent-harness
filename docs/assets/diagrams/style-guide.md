@@ -105,7 +105,7 @@ wrapping must not change its words.
 
 Keep the architecture's 14 unique components and 16 connections across its two figures, and all
 15 numbered sequence messages. The overview may summarize these details, but must show the whole
-harness and both user touchpoints. The guided design conversation is **planned for v0.4.0**, never
+harness and both user touchpoints. The guided design conversation is **planned for a later release**, never
 shown as available. The features figure explains the six supporting parts together.
 
 ## Banner

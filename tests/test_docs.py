@@ -686,8 +686,11 @@ class BannerTest(unittest.TestCase):
                                           if figure is features else
                                           "Lease: reserve changed paths; refuse overlapping leases.", lease_text)
                     visible = " ".join(" ".join(t.itertext()) for t in overview.findall(f".//{SVG}text"))
-                    for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init", "v0.4.0"):
+                    for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init"):
                         self.assertIn(phrase, visible)
+                    # The guided design conversation stays planned without a version number.
+                    self.assertIn("계획 · 이후 릴리스" if language else "PLANNED · LATER RELEASE", visible)
+                    self.assertNotIn("v0.4.0", visible)
                     self.assertIn("예정된 기능이며 아직 제공하지 않는다." if language
                                   else "Planned, not available yet.", visible)
 
