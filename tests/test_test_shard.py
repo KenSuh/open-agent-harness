@@ -464,6 +464,76 @@ class WeightedSplitTest(unittest.TestCase):
                 tool.shards(2, folder)
 
 
+class ModulesOptionTest(unittest.TestCase):
+    """`--modules FILE`: only the listed test modules are split and run; nothing else changes."""
+
+    FILES = {"test_a.py": plain_module(3), "test_b.py": plain_module(2), "test_c.py": plain_module(1),
+             "test_broken.py": "# 불러오기가 실패하는 모듈.\nraise ImportError('broken on purpose')\n"}
+
+    def test_only_listed_modules_are_split_and_every_listed_test_runs_once(self):
+        with fixture_package("only_fixture", self.FILES) as folder:
+            listed = frozenset({"only_fixture.test_a", "only_fixture.test_c"})
+            expected = sorted([f"only_fixture.test_a.Test.test_{i}" for i in range(3)]
+                              + ["only_fixture.test_c.Test.test_0"])
+            for count in (1, 2, 3, 5):
+                with self.subTest(count=count):
+                    groups = per_shard(tool.shards(count, folder, weights=(1, {}), modules=listed))
+                    self.assertEqual(len(groups), count)
+                    self.assertEqual(sorted(name for ids in groups for name in ids), expected)
+
+    def test_a_listed_module_that_fails_to_import_still_runs_and_an_unlisted_one_does_not(self):
+        with fixture_package("failed_only_fixture", self.FILES) as folder:
+            failed = "unittest.loader._FailedTest.failed_only_fixture.test_broken"
+            listed = per_shard(tool.shards(1, folder, weights=(1, {}),
+                                           modules=frozenset({"failed_only_fixture.test_broken"})))
+            self.assertEqual(listed, [[failed]])
+            unlisted = per_shard(tool.shards(1, folder, weights=(1, {}),
+                                             modules=frozenset({"failed_only_fixture.test_b"})))
+            self.assertNotIn(failed, unlisted[0])
+
+    def test_an_unknown_module_stops_and_an_empty_list_runs_nothing(self):
+        with fixture_package("unknown_fixture", self.FILES) as folder:
+            with self.assertRaisesRegex(SystemExit, "unknown_fixture.test_gone"):
+                tool.shards(2, folder, weights=(1, {}), modules=frozenset({"unknown_fixture.test_gone"}))
+            self.assertEqual(tool.shards(3, folder, weights=(1, {}), modules=frozenset()), [[], [], []])
+
+    def test_the_callers_loader_is_left_as_it_was(self):
+        with fixture_package("loader_fixture", self.FILES) as folder:
+            loader = unittest.TestLoader()
+            tool.shards(1, folder, loader=loader, weights=(1, {}), modules=frozenset({"loader_fixture.test_a"}))
+            self.assertNotIn("loadTestsFromModule", vars(loader))
+            self.assertEqual(loader.discover(str(folder), top_level_dir=str(folder.parent)).countTestCases(), 7)
+
+    def test_main_reads_the_file_and_says_when_there_are_no_affected_tests(self):
+        with fixture_package("main_fixture", self.FILES) as folder, tempfile.TemporaryDirectory() as tmp:
+            original_shards = tool.shards
+            listing = pathlib.Path(tmp) / "modules.txt"
+            for text, ran, empty in (("main_fixture.test_a\n\nmain_fixture.test_c\n", "Ran 4 tests", False),
+                                     ("", "Ran 0 tests", True)):
+                with self.subTest(text=text):
+                    listing.write_text(text, encoding="utf-8")
+                    with mock.patch.object(tool, "shards", side_effect=lambda count, **kwargs:
+                                           original_shards(count, folder, weights=(1, {}), **kwargs)), \
+                            mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+                            mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                        self.assertEqual(tool.main(["1", "1", "--modules", str(listing), "-v"]), 0, err.getvalue())
+                    self.assertIn(ran, err.getvalue())
+                    self.assertEqual("no affected tests" in out.getvalue(), empty)
+
+    def test_bad_module_files_stop_with_a_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = pathlib.Path(tmp) / "bad.txt"
+            bad.write_text("tests.test_ok\nnot a module\n", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "bad module names"):
+                tool.load_modules(bad)
+            with self.assertRaisesRegex(SystemExit, "cannot read"):
+                tool.load_modules(pathlib.Path(tmp) / "missing.txt")
+        result = subprocess.run([sys.executable, str(ROOT / "tools" / "test_shard.py"), "1", "1", "--modules"],
+                                capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+
+
 class BadTimesTest(unittest.TestCase):
     GOOD = {"default_ms": 5, "source": "fixture", "times_ms": {"tests.test_one.Test.test_one": 5}}
 
@@ -563,9 +633,11 @@ class CheckedInTimesTest(unittest.TestCase):
 
     def test_ci_keeps_five_shards_and_the_limit_and_describes_the_basis(self):
         text = text_of(ROOT / ".github" / "workflows" / "ci.yml")
-        self.assertRegex(text, r"(?m)^ +shard: \[1, 2, 3, 4, 5\]$")
+        # Five shards when the select job gives no count, as when its selector step failed.
+        self.assertIn("        shard: ${{ fromJSON(needs.select.outputs.shards || '[1, 2, 3, 4, 5]') }}\n", text)
         self.assertIn("    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}\n", text)
-        self.assertIn("run: python tools/test_shard.py ${{ matrix.shard }} 5 -v", text)
+        self.assertIn("run: python tools/test_shard.py ${{ matrix.shard }} ${{ needs.select.outputs.count || 5 }} "
+                      "${{ steps.affected.outputs.args }} -v", text)
         self.assertNotIn("balanced by test count", text)
         self.assertIn("tools/test_shard_times.json", text)
         self.assertIn("tools/shard_times.py", text)
