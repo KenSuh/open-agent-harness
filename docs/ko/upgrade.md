@@ -2,7 +2,7 @@
 
 `oah`는 그 아래의 모델과 스킬이 바뀌는 만큼 함께 바뀐다. 이 문서는 부분마다 업데이트하는 방법을 설명한다.
 `oah` 자체, `oah init`이 프로젝트에 쓴 파일, 스킬 키트 캐시, 프로젝트에 고정된 스킬, MCP 템플릿, 모델 순서다.
-마지막으로 `docs/UPSTREAM_SYNC.md`가 무엇을 기록하는지 설명한다.
+이어서 0.3.0에서 0.4.0으로 바뀌는 점을 적고, 마지막으로 `docs/UPSTREAM_SYNC.md`가 무엇을 기록하는지 설명한다.
 
 [English](../upgrade.md)
 
@@ -218,7 +218,47 @@ Jev가 도움이 됐는지는 보여 주지 않는다.
 자세한 내용은 [작업이 끝난 뒤 도구 업데이트](concepts.md#작업이-끝난-뒤-도구-업데이트)에 있고, 코드는
 [문제 해결](troubleshooting.md#도구-업데이트)에 있다.
 
-## 7. docs/UPSTREAM_SYNC.md가 기록하는 것
+## 7. 0.3.0에서 0.4.0으로
+
+v0.3.0에서 v0.4.0으로 올리면 `oah`에 설계, 설계 출처, 검토한 스킬을 잇는 설계 단계, 네이티브 하위 에이전트 제안과
+능력 경로가 생기고, 짧게 쓰는 폴더가 사용자 전용 임시 작업 폴더로 옮겨 간다. 프로젝트는 고치지 않아도 그대로
+동작한다. 새 기능은 쓰기 전까지 아무 일도 하지 않으며, 예외는 아래에 적었다.
+
+- **새 명령.** `oah design`(`oah packet new --design`, `oah packet design` 포함), `oah sources`,
+  `oah skills find`, `review`, `candidates`, `read`, `select`, `plan`, `oah capabilities show`, `plan`, `relay`,
+  그리고 `oah call --launcher native`와 `oah call settle`이다. [명령 안내](commands.md)에 정리돼 있다.
+- **설계를 쓰면 생기는 프로젝트 파일.** `.oah/designs/<project>/`에 설계 기록이 남으며, 그 기록을 바꾼 작업과 함께
+  커밋한다. 설계 페이지는 위키의 `designs/` 폴더에 생기고, `index.md`에는 자기 표시 사이에 설계 링크 블록 하나가,
+  `log.md`에는 변경마다 기록 하나가 더해진다.
+- **작업 트리 밖의 새 상태.** 출처, 스킬 검색과 검토, 작업 선택, 중계 결과는 `oah`의 상태 폴더(저장소의 git 폴더
+  안, 또는 `OAH_STATE_DIR` 아래)에 둔다. 거기 있는 것은 커밋하지 않으며, 출처 근거는 지우지 않으므로 그 폴더는
+  계속 커진다.
+- **임시 작업 폴더가 시스템 임시 폴더 밖으로 옮겨 간다.** 리뷰 스냅샷, 예약 작업 파일, 스킬 설치와 업데이트,
+  평가 작업 공간, `git`과 `gitleaks` 실행용 빈 홈 폴더는 이제 Windows에서는 `%LOCALAPPDATA%\oah\scratch`,
+  macOS에서는 `~/Library/Caches/oah/scratch`, 그 밖에서는 `${XDG_CACHE_HOME:-~/.cache}/oah/scratch` 아래에
+  소유자 전용으로 만든다. 이 변경은 바로 적용된다. 그 폴더가 사용자만의 것임을 증명하지 못하면 명령은
+  `OAH_SCRATCH_UNSAFE`로 멈추고 폴더, 이유, 고치는 방법을 알려 준다. 시스템 임시 폴더로 돌아가지 않는다.
+  중단된 실행이 남긴 폴더는 직접 지울 때까지 남고, `oah doctor`가 목록을 보여 준다. 규칙은
+  [임시 작업 폴더](concepts.md#임시-작업-폴더)에 있다.
+- **장애가 이어지면 Jev를 쉰다.** Jev를 켰다면 시간 초과, 네트워크 오류, 429나 529 응답이 다섯 번 잇달아 날 때
+  10분 동안 Jev를 건너뛰고(`unused(circuit-open)`) 그동안 규칙이 정한다. `[rerank] circuit_failures`와
+  `circuit_open_seconds`로 바꿀 수 있고, `[rerank] max_requests_per_day`(기본은 꺼짐)로 요청 수에 상한을 둔다.
+- **v0.3.0의 패킷과 리스는 그대로 동작한다.** 자유롭게 쓴 `## Design` 절은 사용자의 글로 남는다. 작업을 설계에
+  묶는 것은 `oah packet design`이 쓰는 구조화 필드뿐이라서, v0.3.0에서 시작한 리스도 계속 검사하고 이어 가고 끝낼
+  수 있다.
+- **모두 선택인 새 설정.** `[review] codex_version`, `[rerank.judgement]`, `[sources]`, `[skills.discovery]`,
+  `[capabilities]`, `[call] launcher`다. 새로 실행한 `oah init`은 `[skills.discovery]`, `[capabilities]`, `[call]`의
+  주석 처리된 예시를 쓰고, 이미 있는 `.oah/config.toml`은 다시 쓰지 않는다. `oah skills find`는
+  `[skills.discovery] enabled = false`가 아니면 skills.sh에 검색을 보낸다.
+- **하위 에이전트 파일.** `oah init`이 `.claude/agents/oah-<tier>.md`에 쓰는 파일에 네이티브 하위 에이전트
+  브리프에 관한 줄이 하나 늘어난다. session-start 훅이 설치돼 있으면 고치지 않은 파일은 갱신된다. 그렇지 않으면
+  `oah doctor`가 그 파일과 고치는 방법을 알려 주며, 사용자가 고친 파일은 건드리지 않는다.
+- **스킬 본문은 검증된 호스트에서만 워커에게 간다.** 이번 릴리스에는 검증된 호스트가 없다. 그래서 연결된 스킬
+  본문이나 중계한 도구 결과를 실을 실행과 `oah skills find --task`는 아무것도 보내기 전에
+  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)`로 멈춘다. 연결된 스킬이 없는 작업은 영향을 받지 않는다.
+  나머지는 [이번 릴리스의 한계](skills-and-capabilities.md#이번-릴리스의-한계)에 있다.
+
+## 8. docs/UPSTREAM_SYNC.md가 기록하는 것
 
 `oah`는 소유자의 하네스가 나아지는 것을 따라간다. [`docs/UPSTREAM_SYNC.md`](../UPSTREAM_SYNC.md)는 그 하네스에서
 마지막으로 검토한 커밋과, 검토한 변경마다 한 줄씩 커밋, 요약, 판정을 기록한다.

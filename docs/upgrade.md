@@ -2,7 +2,8 @@
 
 `oah` changes as the models and skills under it change. This page says how to update each part: `oah`
 itself, the files `oah init` wrote into your project, the skill kit cache, your project's pinned skills, the
-MCP templates and the models. It ends with what `docs/UPSTREAM_SYNC.md` records.
+MCP templates and the models. It then says what changes from 0.3.0 to 0.4.0 and ends with what
+`docs/UPSTREAM_SYNC.md` records.
 
 [한국어](ko/upgrade.md)
 
@@ -224,7 +225,47 @@ ships in v0.3.0.
 [Tool updates after the work finishes](concepts.md#tool-updates-after-the-work-finishes) has the details, and
 [Troubleshooting](troubleshooting.md#tool-updates) lists the codes.
 
-## 7. What `docs/UPSTREAM_SYNC.md` records
+## 7. From 0.3.0 to 0.4.0
+
+When upgrading from v0.3.0 to v0.4.0, `oah` gains designs, design sources, design stages with reviewed skills,
+native subagent offers and capability routes, and moves its short-lived folders to a per-user scratch folder. Your
+project keeps working without edits; the new parts do nothing until you use them, except where noted below.
+
+- **New commands.** `oah design` (with `oah packet new --design` and `oah packet design`), `oah sources`,
+  `oah skills find`, `review`, `candidates`, `read`, `select` and `plan`, `oah capabilities show`, `plan` and
+  `relay`, and `oah call --launcher native` with `oah call settle`. [Commands](commands.md) lists them.
+- **New files in your project, once you use designs.** `.oah/designs/<project>/` holds the design records; commit
+  them with the work that changed them. Design pages go under the wiki's `designs/` folder, `index.md` gets one
+  block of design links between its own markers, and `log.md` one entry per change.
+- **New state outside your working tree.** Sources, skill searches and reviews, task selections and relay results
+  live in `oah`'s state folder (inside the repository's git folder, or under `OAH_STATE_DIR`). Nothing there is
+  committed, and source evidence is never pruned, so that folder grows.
+- **Scratch moves out of the system temp folder.** Review snapshots, scheduled-task files, skill installs and
+  updates, evaluation workspaces and the empty homes for `git` and `gitleaks` runs now go under
+  `%LOCALAPPDATA%\oah\scratch` on Windows, `~/Library/Caches/oah/scratch` on macOS or
+  `${XDG_CACHE_HOME:-~/.cache}/oah/scratch` elsewhere, created owner-only. This applies at once. If `oah` cannot
+  prove that folder is yours alone, commands stop with `OAH_SCRATCH_UNSAFE`, naming the folder, the reason and the
+  fix; there is no fallback to the system temp folder. Leftovers from interrupted runs stay until you remove them,
+  and `oah doctor` lists them. [Scratch folders](concepts.md#scratch-folders) has the rule.
+- **Jev pauses after outages.** With Jev on, five timeouts, network errors or 429 or 529 replies in a row now skip
+  Jev for ten minutes (`unused(circuit-open)`), and the rules decide meanwhile. `[rerank] circuit_failures` and
+  `circuit_open_seconds` change this; `[rerank] max_requests_per_day` (off by default) caps requests.
+- **Packets and leases from v0.3.0 keep working.** A free-form `## Design` section stays your own text. Only the
+  structured fields that `oah packet design` writes bind a task to a design, so leases started by v0.3.0 keep
+  checking, resuming and finishing.
+- **New settings, all optional.** `[review] codex_version`, `[rerank.judgement]`, `[sources]`,
+  `[skills.discovery]`, `[capabilities]` and `[call] launcher`. A new `oah init` writes commented examples of
+  `[skills.discovery]`, `[capabilities]` and `[call]`; an existing `.oah/config.toml` is not rewritten.
+  `oah skills find` sends searches to skills.sh unless `[skills.discovery] enabled = false`.
+- **Subagent files.** The files `oah init` writes in `.claude/agents/oah-<tier>.md` gain one line about native
+  subagent briefs. With the session-start hook installed, an unedited file is updated; otherwise `oah doctor`
+  names it with the fix, and an edited file is left alone.
+- **Skill texts reach workers only on a qualified host.** This release qualifies no host, so a dispatch that would
+  carry linked skill texts or relayed tool results, and `oah skills find --task`, stop with
+  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. Tasks without linked skills are
+  not affected. [Limits in this release](skills-and-capabilities.md#limits-in-this-release) lists the rest.
+
+## 8. What `docs/UPSTREAM_SYNC.md` records
 
 `oah` follows the owner's own harness as it improves. [`docs/UPSTREAM_SYNC.md`](UPSTREAM_SYNC.md) records the
 last commit of that harness that was reviewed, and one row per reviewed change: the commit, a summary and a

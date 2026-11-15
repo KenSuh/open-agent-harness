@@ -22,7 +22,7 @@ are instructions loaded by the AI. **CI** is the automated testing attached to a
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
-  <img src="assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for v0.4.0." width="100%">
+  <img src="assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for a later release." width="100%">
 </picture>
 
 Two AI sessions can edit the same files, call work done without evidence, or keep reviewing without an
@@ -72,8 +72,11 @@ it later in the config. It needs your own TypeSafe account and key. Without it, 
   candidate or bypass the floor. [Routing](concepts.md#routing-and-difficulty) and
   [model selection](concepts.md#how-a-model-is-chosen) describe the current choices and limits.
 
-The difficulty and model-selection features described above ship in v0.3.0. The
-[roadmap](../README.md#roadmap) describes the guided design conversation planned for v0.4.0.
+The difficulty and model-selection features described above ship in v0.3.0. v0.4.0 adds advisory Jev steps for
+design sources and skills, all behind their own switch ([Design sources](design-sources.md#optional-judgements),
+[Jev in these steps](skills-and-capabilities.md#jev-in-these-steps)), and pauses Jev after repeated outages
+([Jev judges difficulty](concepts.md#jev-judges-difficulty)). The [roadmap](../README.md#roadmap) describes the
+guided design conversation, which is planned for a later release.
 
 ## Strengths
 

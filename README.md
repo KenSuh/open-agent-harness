@@ -71,7 +71,7 @@ You describe the result you want. Your AI uses these parts together to carry the
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-  <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for v0.4.0." width="100%">
+  <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for a later release." width="100%">
 </picture>
 
 Talk to your AI in plain words. The rules installed by `oah init` and each command’s next-step message guide it
@@ -83,17 +83,17 @@ A round limit is optional.
 
 Ask “Is the review done?” or “Did all the gates pass?” Inspect the result and confirm before it lands in your
 project's main branch. The [full walkthrough](docs/how-it-works.md) shows the commands your AI runs underneath.
-The guided design conversation shown separately in the figure is **planned for v0.4.0**.
+The guided design conversation shown separately in the figure is **planned for a later release**.
 
 > [!NOTE]
-> **v0.3.0 is the current release.** It is for developers fluent with git and pull requests, on macOS and
+> **v0.4.0 is the current release.** It is for developers fluent with git and pull requests, on macOS and
 > native Windows. Linux is not yet supported.
 
 ## Install
 
 One command per OS installs `oah`. It asks before it installs any missing tool, shows the official command
 for each one, and never sees your passwords or keys. To install from a clone, run the commands below.
-For v0.3.0, you can instead download the tag’s source archive and `SHA256SUMS` from the repository’s release
+For v0.4.0, you can instead download the tag’s source archive and `SHA256SUMS` from the repository’s release
 page. Refuse to unpack it unless its SHA-256 matches that archive’s digest in `SHA256SUMS`; then run the
 included installer. The OS guides below show how to check it.
 
@@ -121,7 +121,7 @@ Then open a new terminal and check:
 
 ```console
 $ oah --version
-oah 0.3.0
+oah 0.4.0
 ```
 
 ## First run
@@ -146,70 +146,90 @@ underneath this conversation. [Your first task](examples/hello-oah/README.md) ta
 what you say, what the AI does and what you check, followed by the complete command walkthrough.
 [Setup details](docs/how-it-works.md#first-run) explain every option and generated file.
 
-## New in v0.3.0
+## New in v0.4.0
 
-The current release includes these changes:
+The current release includes these changes. The guided design conversation is not one of them; it stays on
+the [roadmap](#roadmap). [Upgrade](docs/upgrade.md#7-from-030-to-040) says what changes when you update from v0.3.0.
 
-- Benchmark scores pick the model. Difficulty and a profile (performance, balanced, efficient) set the score a job needs. Balanced takes
-  the cheapest model that reaches it, efficient the best score per price, and performance the top scorer for the hardest work. No table ties a difficulty to a
-  model, and every current model is a candidate in every profile.
-- Scores come from Epoch AI, with no key and no account. With your own Artificial Analysis key, oah uses those instead. Published
-  scores measure general quality, not your repository.
-- A new model generation joins once it has a score, and superseded or removed models drop out, with no file edited. Each change
-  shows a plain notice and stays in the run record.
-- TypeSafe Jev judges difficulty from the task's Intent and Scope paths. When Jev is off or has low confidence, the rule-based
-  difficulty runs. A call is never blocked.
-- A review never runs below the floor for its risk, whatever a flag, packet, profile or judge says.
-- After the last lease finishes, `oah` can bring Claude Code, Codex and Claude Code plugins up to date with each tool's own update
-  command, and the model lists refresh at the next call. Codex plugins and MCP servers are not updated; oah's skills keep their
-  own daily check (`oah skills update`). `oah init` asks once, and you can turn it off.
-- `oah models report` counts how model choices were made, and an export saves them as cases you can compare later. Counts alone do
-  not prove Jev helped.
-
-Your pinned models, tier pools, effort caps and task floors stay in force throughout.
+- **Designs you keep.** `oah design` keeps the design of each product you build: numbered revisions, each
+  acceptance with its reason, and pages and lists in the project wiki. Text outside oah's markers stays yours.
+  Designs change only on the branch that registered them; other worktrees read that branch's copy.
+  [Designs](docs/concepts.md#designs) has the rules.
+- **Work follows the accepted design.** `oah packet new --design` binds a task to the accepted revision of its
+  design, every brief carries that design, and call, review, fix, finish and land check it again. A newer accepted
+  revision makes the task `stale` until you start it again or record with `oah design carry` that the change does
+  not affect it, and `oah land` refuses a task whose design is not current. The check is per design revision.
+- **Sources you can check.** `oah sources` follows the public libraries and documents a design builds on and keeps
+  a verified snapshot of each version it saw, with its release and full license text. A license is eligible,
+  eligible by choice, excluded or unknown, never guessed. A design's material decisions record the snapshot they
+  were made against, and later checks say when an upstream moved on or a decision's inputs changed. Checks run when
+  you ask or from an optional daily OS entry you install; a failed check is never shown as fresh.
+  [Design sources](docs/design-sources.md) has the details.
+- **Nine design stages and reviewed skills.** A design keeps a `coverage` part with nine stages, from purpose to
+  confirm, and `oah design coverage` shows what is open and what needs a re-check. `oah skills find --design`
+  searches a small built-in catalog, installed skills and skills.sh, the only search that sends anything, with a
+  notice the first time. `oah skills review` pins a skill folder to a commit with its license, and
+  `oah skills select` links reviewed skills to a task's needs. Finding and reviewing install nothing.
+- **Native subagents and tool routes.** `oah call ... --launcher native` prepares the checked brief for your AI to
+  give its own subagent, and `oah call settle` records the reply as evidence the lead reported, not proof of
+  delivery. `oah capabilities show` lists the tools a child engine is configured with (names and flags, never
+  values), `plan` routes each tool a skill names, and `relay` stores a result the lead fetched itself.
+  **Limit:** no host has a qualified capacity profile in this release, so a dispatch that would carry skill texts
+  or relayed tool results, and `oah skills find --task`, stop with
+  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. Tasks without linked skills run as
+  before. [Skills and capabilities](docs/skills-and-capabilities.md#limits-in-this-release) lists every limit.
+- **Jev in design steps.** With Jev on and its own judgement switch on (`[rerank.judgement]`, off by default), Jev
+  can assess whether a source change matters to a design, choose which skill search runs first and suggest the next
+  design stage. Each answer is advice within the options the fixed rules allow.
+- **Safer reviews, Jev calls and landing.** `[review] codex_version` pins the reviewer's version and refuses a
+  mismatch before anything is launched (`OAH_REVIEW_VERSION_MISMATCH`). After five timeouts, network errors or 429
+  or 529 replies in a row, Jev is skipped for ten minutes (`unused(circuit-open)`), and
+  `[rerank] max_requests_per_day` can cap its requests. A gate deferred with `ABANDON: G<n> ci-check: "<check run>"`
+  closes at `oah land` only when every named check run succeeded at the exact HEAD.
+- **Scratch in a folder only you can use.** Review snapshots, evaluation workspaces and other short-lived folders
+  live under a per-user scratch folder, never in the system temp folder. When oah cannot prove that folder is yours
+  alone, it stops with `OAH_SCRATCH_UNSAFE`. `oah doctor` lists leftovers and deletes nothing.
+  [Scratch folders](docs/concepts.md#scratch-folders) names the folder for each OS.
 
 ## Roadmap
 
-Plans can change as the tools change.
+Plans can change as the tools change. The planned items below are not available in v0.4.0.
 
-### v0.4.0: design together, one question at a time
+### Planned: design together, one question at a time
 
-**Planned, not available yet.** You say what you want to build, and oah asks one design question at a time
-with a recommendation. You take part in the design decisions before implementation begins. The update is
-planned to include:
+**Planned for a later release, not available yet.** You say what you want to build, and oah asks one design
+question at a time with a recommendation. You take part in the design decisions before implementation begins.
+v0.4.0 already keeps the designs, stages and sources this conversation builds on. The update is planned to
+include:
 
 - **One question at a time.** oah asks one key design question, says why it matters and recommends an answer.
   You can say you don't know, decide later, mark a question as not applicable, and pick up where you left off.
 - **The whole design, not one issue.** The conversation covers behaviour, how long data is kept, what the server
   decides, secrets, effects outside the project, recovery, cost, accessibility and payment where it applies. It
-  skips irrelevant topics and revisits parts of the design that depend on a decision when it changes.
+  skips irrelevant topics and returns to the parts of the design that depend on a decision when it changes.
+  v0.4.0 records these topics in the nine coverage stages; asking about them is planned.
 - **Starts when you ask.** In supported AI tools, asking for a design in plain words opens the design
   conversation and applies its question-by-question method. You can turn this off.
 - **Stack suggestions with trade-offs.** oah suggests a language and source combination that fits, with what it
   means for learning and operation. It never forces Rust or a multi-language setup.
-- **Open-source references you can check.** Each reference keeps its source, reviewed revision, release and
-  license, and MIT, dual-licensed, ineligible and unknown stay distinct. Registered sources are refreshed when
-  work starts or resumes and on a schedule; a failed refresh is never shown as fresh.
-- **Work follows the current approved design.** Each decision has a stable ID and revision. When you start,
-  resume, hand off or review work, oah uses the current approved design. When you approve a change to a
-  decision, oah marks the work instructions and reviews it affects as out of date. Before the work can be
-  merged, those instructions must be updated and those reviews run again.
+- **Sources refreshed as work moves.** v0.4.0 checks registered sources when you ask or once a day. Refreshing
+  them when work starts or resumes is planned; a failed refresh will still never be shown as fresh.
+- **Only affected work goes out of date.** In v0.4.0 any newer accepted revision makes a bound task stale.
+  Tracking which work instructions and reviews each decision affects, so that approving a change marks only those,
+  is planned. Before such work can be merged, those instructions must be updated and those reviews run again.
 - **Design changes update earlier project documents.** When you approve a change to the design or one of its
   decisions, oah uses gbrain to find earlier wiki pages, notes and documents that depend on the previous design.
   It updates affected material within the project's configured scope, and you can roll back those changes.
-  gbrain searches on your computer using embeddings from Ollama. This feature is on by default for everyone. It
-  needs Ollama, Bun, about 2.7 GB of disk space and time to build the first search index.
-- **Skills and tools you can see.** oah can find skills beyond a fixed list with verified tools, showing source,
-  pin, license and compatibility, and never installs anything silently. It shows which skills, MCP servers and
-  plugins a worker really gets: directly, relayed by the lead session, or not supported. Claude Code, Codex,
-  Orca workers and native subagents share the same preparation process when launched in a way oah supports.
+  gbrain searches on your computer using embeddings from Ollama. This feature is planned to be on by default for
+  everyone. It needs Ollama, Bun, about 2.7 GB of disk space and time to build the first search index.
+- **Skills delivered on every supported host.** v0.4.0 prepares skill texts and tool results the same way for
+  Claude Code, Codex, Orca workers and native subagents, but delivers them only on a host with a qualified capacity
+  profile, and none is qualified yet. Qualifying real hosts is planned.
 - **Repeated problems are traced to their cause.** When the same kind of review problem comes back after a fix,
   the correction has to explain why the earlier fix missed it, fix every place with the same cause, and add one
   test that catches the whole kind.
-- **Your project wiki keeps the design.** The design index, decisions and history live in the project wiki, and
-  your own notes and other projects are left untouched.
-- TypeSafe Jev can help rank design options. The design follows recorded facts and your decisions. The oah CLI
-  uses the Python standard library and runs on Windows and macOS.
+- **Jev helps rank design options.** TypeSafe Jev can help rank options inside the conversation. The design
+  follows recorded facts and your decisions.
 
 ## Documentation
 
@@ -218,10 +238,12 @@ planned to include:
 | [How it works](docs/how-it-works.md) | How the parts fit, the full loop, checks, requirements and setup details. |
 | [Commands](docs/commands.md) | Find a command and understand its result. |
 | [Worked example](examples/hello-oah/README.md) | One task through the whole loop, step by step. |
-| [Concepts](docs/concepts.md) | Leases, packets and intent, difficulty, skills, impact map, wiki, gates, review, landing, updates, toolkit, CI and companion apps. |
+| [Concepts](docs/concepts.md) | Leases, packets and intent, difficulty, skills, impact map, wiki, designs, gates, review, landing, updates, toolkit, scratch folders, CI and companion apps. |
+| [Design sources](docs/design-sources.md) | Following a design's libraries and documents, snapshots, licenses and daily checks. |
+| [Skills and capabilities](docs/skills-and-capabilities.md) | The nine design stages, finding and reviewing skills, native subagents, tool routes and this release's limits. |
 | [Troubleshooting](docs/troubleshooting.md) | The common `OAH_*` refusals, what they mean and what to run next. |
 | [Keys](docs/keys.md) | Where each optional key lives, and what is off without it. |
-| [Upgrade](docs/upgrade.md) | Updating `oah`, your project files, skills, MCP templates and models. |
+| [Upgrade](docs/upgrade.md) | Updating `oah`, your project files, skills, MCP templates and models, and what changes from 0.3.0 to 0.4.0. |
 | [Install on macOS](docs/install-macos.md), [on Windows](docs/install-windows.md) | The installers, step by step. |
 | [CI starter](docs/ci-starter.md) | `oah ci init`, reading CI results and making checks required. |
 | [Companion apps](docs/companions.md) | Orca and Aside: what they add and how to set them up. |

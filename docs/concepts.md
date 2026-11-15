@@ -598,8 +598,8 @@ DACL present/protected state and every ACE in order (type, flags, mask and the S
 Object ACE GUIDs, compound principals and conditional/application data also remain part of their ACE's meaning.
 This same digest is recorded for DATA leaves, manifest and DATA directories, snapshot leaves/directories and the
 snapshot root. Original-record, pre-grant, post-grant and delete-observation comparisons all use that meaning;
-descriptor component order, group/SACL presence and raw descriptor hashes never gate equality. These unreleased
-records use only this semantic form, with no fallback to the earlier raw digest. No later read becomes the
+descriptor component order, group/SACL presence and raw descriptor hashes never gate equality. These records,
+new in v0.4.0, use only this semantic form, with no fallback to the earlier raw digest. No later read becomes the
 expectation. General identity reads can observe ancestors with a different owner; cleanup security reads and
 ACL grants still require the current principal. Every later observation must match the original
 identity with security replaced by this precomputed value; only change time may also change during the grant.

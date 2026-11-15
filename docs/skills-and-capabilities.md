@@ -162,7 +162,11 @@ run starts or a background runner is created, the error says so and keeps the re
 a damaged task folder has fewer message variants to interpret.
 
 Relay ingestion validates the full arguments digest and every stored time as ISO-8601 with a time zone before
-storing anything. An existing relay with malformed times follows the stored-record rule above. After spend,
+storing anything; a bad time there refuses with `OAH_CAPABILITY_RELAY_REQUIRED(invalid)` (exit 1) and stores
+nothing. An existing relay record with a malformed time follows the stored-record rule above. An ordinary
+`oah call` or a native offer that names it refuses with `OAH_SKILL_STATE_CORRUPT` (exit 69), with no run folder
+and no child. `oah skills read` and `oah design coverage` read no relay records; for their own damaged records
+they give `OAH_SKILLS_IO` (exit 69) and `OAH_SKILL_STATE_CORRUPT` (exit 69). After spend,
 settlement and correction bind the lease id; renewing that same lease does not invalidate
 the original. Pre-spend checks still compare the full lease identity. What it costs you: no new step for valid
 times or lease renewal; an invalid relay time is refused where it is recorded.
