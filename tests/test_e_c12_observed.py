@@ -25,7 +25,7 @@ from tests.e_c12_matrix import (FAULTS, INPUT_MATRIX, OWNER_MATRIX, OWNER_RUN_MA
                                 AFTER_MATRIX, SUCCESS_DISPATCH, SUCCESS_RUN_MATRIX, SUCCESS_KEPT_RUN_FILES,
                                 OUTPUT_MATRIX)
 from tests.e_c12_observer import ObservedFiles
-from tests.e_c12_scenarios import Scenario
+from tests.e_c12_scenarios import Scenario, recorded_path
 
 
 @dataclasses.dataclass(frozen=True)
@@ -369,15 +369,15 @@ def excluded_access(name, access, state):
     for pattern, owner, reason in EXCLUDED_PATHS:
         if not access.owned and fnmatch.fnmatchcase(path, pattern):
             return owner, reason
-    if pathlib.Path(access.path).name == 'skills-reads.jsonl' and 'atomic.py:append_jsonl' in access.chain:
+    if recorded_path(access.path).name == 'skills-reads.jsonl' and 'atomic.py:append_jsonl' in access.chain:
         return 'B atomic append validation', 'the shared append helper keeps its existing read contract'
     metadata = not access.owned and access.operation in ('stat', 'lstat') and 'runs.py:_contained_path' in access.chain
-    if metadata and pathlib.Path(access.path).name == 'launch.json' and any(
+    if metadata and recorded_path(access.path).name == 'launch.json' and any(
             context in access.chain for context in ('call.py:_launch_main', 'call.py:background_main')):
         return None
     if metadata and name == 'freeze' and any(context in access.chain for context in (
             'call.py:_write_result', 'fix.py:_end')):
-        if pathlib.Path(access.path).name == 'correction.json' and 'fix.py:_end' in access.chain:
+        if recorded_path(access.path).name == 'correction.json' and 'fix.py:_end' in access.chain:
             return 'B correction manifest', 'required output address check at final settlement'
         return 'B correction optional output', 'optional diagnostic writer keeps the base settlement outcome'
     if metadata and 'runs.py:result' in access.chain and 'runs.py:_write_result' not in access.chain:
@@ -389,14 +389,14 @@ def excluded_access(name, access, state):
     if metadata and (
             any(context in access.chain for context in ('runs.py:_create_run', 'runs.py:write_prompt',
                 'runs.py:_write_text', 'runs.py:_write_result', 'runs.py:launch_path'))
-            or pathlib.Path(access.path).name == 'skills.json' and any(context in access.chain for context in (
+            or recorded_path(access.path).name == 'skills.json' and any(context in access.chain for context in (
                 'original.py:publish', 'call.py:publish_run'))
-            or not access.present and pathlib.Path(access.path).name in ('capabilities.json', 'design.json', 'lease.json')
+            or not access.present and recorded_path(access.path).name in ('capabilities.json', 'design.json', 'lease.json')
                 and any(context in access.chain for context in ('call.py:_finish_prepare',
                     'call.py:_prepare_native', 'call.py:publish_run'))
-            or not access.present and pathlib.Path(access.path).name == 'lease.json' and
+            or not access.present and recorded_path(access.path).name == 'lease.json' and
                 'call.py:record_dispatch_binding' in access.chain
-            or pathlib.Path(access.path).name == 'last-message.md'):
+            or recorded_path(access.path).name == 'last-message.md'):
         return 'B run publication/output validation', 'write-only path check, not a read of recorded bytes'
     if name in EXCLUDED and access.site.startswith(EXCLUDED[name][0]):
         return EXCLUDED[name][1:]
@@ -428,7 +428,7 @@ def content_read_ordinal(accesses, ordinal):
 
 def presence_admission(access, fault):
     return fault == 'invalid-content' and not access.present and \
-        pathlib.Path(access.path).name == 'native-offer.json' and 'call.py:check_prepared' in access.chain
+        recorded_path(access.path).name == 'native-offer.json' and 'call.py:check_prepared' in access.chain
 
 
 def output_row(access, owner):
@@ -542,10 +542,20 @@ def frozen_publication_transit(observer, access, fault, expected, actual):
 
 
 def label(access, state):
-    path = pathlib.Path(access.path)
+    path, state = recorded_path(access.path), recorded_path(state)
     relative = path.relative_to(state).as_posix() if path.is_relative_to(state) else path.name
     return re.sub(r'r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}',
                   '{original-run}' if access.existing else '{new-run}', relative)
+
+
+def post_runner_output_accesses(accesses, *, platform=os.name):
+    operations = ('stat',) if platform == 'nt' else ('stat', 'lstat')
+    return tuple(next(row for row in reversed(accesses)
+        if recorded_path(row.path).name == 'result.json' and row.operation == operation
+        and row.phase == 'after-runner' and 'runs.py:_write_result' in row.chain
+        and 'runs.py:_contained_path' in row.chain
+        and (operation != 'stat' or row.site == 'runs.py:_contained_path:538'))
+        for operation in operations)
 
 
 def exhaustive_record_guard():
@@ -618,7 +628,7 @@ class ObservedAccessTest(unittest.TestCase):
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         owners = [excluded_access(case.name, row, case.storage) for row in accesses]
         ordinal = next(index for index, row in enumerate(accesses)
-            if pathlib.Path(row.path).name == 'result.json' and row.operation == 'stat'
+            if recorded_path(row.path).name == 'result.json' and row.operation == 'stat'
             and row.site == 'runs.py:_contained_path:538' and row.phase == 'after-runner'
             and 'runs.py:_write_result' in row.chain and 'call.py:_launch_main' in row.chain)
         access, rule = accesses[ordinal], FileRule('runs/*/{new-run}/result.json')
@@ -681,7 +691,7 @@ class ObservedAccessTest(unittest.TestCase):
         case.scenario('background')
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         access = next(row for row in reversed(accesses)
-            if pathlib.Path(row.path).name == 'intent-binding.json' and row.operation in METADATA_OPERATIONS
+            if recorded_path(row.path).name == 'intent-binding.json' and row.operation in METADATA_OPERATIONS
             and 'call.py:record_dispatch_binding' in row.chain and 'call.py:dispatch_binding' not in row.chain)
         for fault in ('not-regular', 'denied', 'eio'):
             with self.subTest(fault=fault):
@@ -718,7 +728,7 @@ class ObservedAccessTest(unittest.TestCase):
         case.scenario('background')
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         access = next(row for row in accesses
-            if pathlib.Path(row.path).name == 'result.json' and row.operation == 'open'
+            if recorded_path(row.path).name == 'result.json' and row.operation == 'open'
             and 'call.py:_launch_main' in row.chain and 'call.py:_check_e' in row.chain)
         observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault='invalid-content')
         opened, writes = builtins.open, []
@@ -750,7 +760,7 @@ class ObservedAccessTest(unittest.TestCase):
         case.scenario('worker')
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         access = next(row for row in accesses
-            if pathlib.Path(row.path).name == 'result.json' and row.operation == 'os.open')
+            if recorded_path(row.path).name == 'result.json' and row.operation == 'os.open')
         observer = ObservedFiles(case.storage, extra=case.extra, target=access, fault='invalid-content')
         result = case.invoke(observer)
         self.assertTrue(observer.reached)
@@ -782,7 +792,7 @@ class ObservedAccessTest(unittest.TestCase):
         case.scenario('background')
         accesses = case.observe(lambda observer: self.check_success(case, observer))
         ordinal = next(index for index, row in enumerate(accesses)
-            if pathlib.Path(row.path).name == 'intent-binding.json' and row.operation in METADATA_OPERATIONS)
+            if recorded_path(row.path).name == 'intent-binding.json' and row.operation in METADATA_OPERATIONS)
         target = content_read_ordinal(accesses, ordinal)
         self.assertIsNotNone(target)
         assert target is not None
@@ -813,11 +823,8 @@ class ObservedAccessTest(unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('background')
         accesses = case.observe(lambda observer: self.check_success(case, observer))
-        for operation in ('stat', 'lstat'):
-            access = next(row for row in reversed(accesses)
-                if pathlib.Path(row.path).name == 'result.json' and row.operation == operation
-                and row.phase == 'after-runner' and 'runs.py:_write_result' in row.chain
-                and (operation != 'stat' or row.site == 'runs.py:_contained_path:538'))
+        for access in post_runner_output_accesses(accesses):
+            operation = access.operation
             owner = excluded_access(case.name, access, case.storage)
             self.assertEqual(owner, ('B run publication/output validation',
                                     'write-only path check, not a read of recorded bytes'))
@@ -1016,7 +1023,7 @@ class ObservedAccessTest(unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('admission')
         accesses = case.observe(lambda observer: self.check_success(case, observer))
-        lookups = [row for row in accesses if pathlib.Path(row.path).name == 'skills.json'
+        lookups = [row for row in accesses if recorded_path(row.path).name == 'skills.json'
                    and 'call_cli.py:_print_skills' in row.chain]
         self.assertTrue(lookups, 'observe the summary lookup on this platform')
         access = next((row for row in lookups if row.operation == 'lstat'), lookups[0])
@@ -1247,9 +1254,9 @@ class ObservedAccessTest(unittest.TestCase):
                                          f'{name}: keep the earlier {earlier.name}')
                     self.assertEqual(kept_policy, 'inputs-at-access')
                     if name == 'worker' and outcome_access.phase == 'before' and result[0] and \
-                            pathlib.Path(access.path).name != 'result.json' and not presence_admission(access, fault):
+                            recorded_path(access.path).name != 'result.json' and not presence_admission(access, fault):
                         self.assertEqual(json.loads((case.run_dir / 'result.json').read_bytes())['status'], 'refused')
-                    if name == 'worker' and access.phase == 'before' and pathlib.Path(access.path).name == 'result.json':
+                    if name == 'worker' and access.phase == 'before' and recorded_path(access.path).name == 'result.json':
                         self.assertEqual((case.run_dir / 'worker.claim').exists(), access.claim_present or fault != 'eio')
                         raw = (case.run_dir / 'result.json').read_bytes()
                         expected_raw = observer.content_writes.get(str(case.run_dir / 'result.json'),

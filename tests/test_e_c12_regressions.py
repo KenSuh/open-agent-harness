@@ -20,6 +20,7 @@ from tests import e_c6_fixture, test_capabilities as capabilities
 from tests import test_e_relay_times as relays, test_e_spent_evidence as spent
 from tests import test_e_prepared as prepared_fixture, test_e_frozen_correction as correction_fixture
 from tests.test_e_c10_boundaries import cli_result as recorded_cli_result
+from tests.e_c12_scenarios import recorded_path
 from tests.test_skill_delivery import DeliveryTask, PLAIN
 
 
@@ -30,6 +31,13 @@ def cli_result(*args, **options):
         return recorded_cli_result(*args, **options)
     except records.InvalidRecord as exc:
         raise AssertionError(f'the CLI must return its typed refusal instead of raising {type(exc).__name__}: {exc}') from exc
+
+
+def capture_selection_access(accesses):
+    return next(row for row in accesses if recorded_path(row.path).parts[-3:] == (
+        'skills', 'task-selections', 'index.json')
+        and row.operation == 'stat' and 'call.py:capture' in row.chain
+        and 'original.py:selections' in row.chain and 'skillpack.py:checked' not in row.chain)
 
 
 @contextlib.contextmanager
@@ -97,7 +105,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 self.assertTrue(path.read_bytes().startswith(raw), 'keep each earlier history record when appending the start')
             else:
                 self.assertEqual(path.read_bytes(), raw, f'keep the earlier {path.name}')
-        payloads = [row for row in observer.accesses if pathlib.Path(row.path).name == 'result.json'
+        payloads = [row for row in observer.accesses if recorded_path(row.path).name == 'result.json'
                     and row.operation in ('open', 'read', 'os.open', 'os.read')]
         self.assertEqual(payloads, [], 'the frozen launch must not reopen its new result')
         print('FROZEN_RESULT', json.dumps(dict(exit=result[0], code='OAH_FIX_STATE_CHANGED',
@@ -127,7 +135,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.assertEqual(len(targets), 4, 'reach the binding, selection index, selection and review rechecks')
         for target in targets:
             for fault in ('denied', 'invalid-content', 'eio'):
-                with self.subTest(path=Path(target.path).name, fault=fault):
+                with self.subTest(path=recorded_path(target.path).name, fault=fault):
                     case.restore()
                     observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault=fault)
                     with mock.patch('oah.discovery.records.RETRY_SECONDS', 0.01, create=True), \
@@ -164,7 +172,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                                              'B may settle this new run without replacing its identity')
                         else:
                             self.assertEqual(actual_raw, raw, 'keep every earlier file at the named recheck')
-                    print('FROZEN_QUERY', json.dumps(dict(path=Path(target.path).name, fault=fault,
+                    print('FROZEN_QUERY', json.dumps(dict(path=recorded_path(target.path).name, fault=fault,
                         code=code, exit=exit_code, engines=case.engine_spawns,
                         runners=case.runner_creations, transit_exclusion=transit)), flush=True)
 
@@ -222,9 +230,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
 
         accesses = case.observe(valid_run)
         self.assertEqual(pointer.read_bytes(), earlier_pointer)
-        target = next(row for row in accesses if row.path.endswith('/skills/task-selections/index.json')
-            and row.operation == 'stat' and 'call.py:capture' in row.chain
-            and 'original.py:selections' in row.chain and 'skillpack.py:checked' not in row.chain)
+        target = capture_selection_access(accesses)
         runs_before = set(case.storage.glob('runs/*/r*'))
         observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='missing')
         result = case.invoke(observer)
@@ -463,7 +469,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
                 case.setUp()
                 try:
                     case.scenario(name)
-                    target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'native-offer.json')
+                    target = next(access for access in case.observe() if recorded_path(access.path).name == 'native-offer.json')
                     for fault, expected, exit_code in (('denied', 'OAH_RUN_LAUNCH_INVALID', 1),
                                                        ('eio', 'OAH_STATE_IO', 69)):
                         with self.subTest(fault=fault):
@@ -491,7 +497,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('launch')
         target = next(access for access in case.observe() if access.phase == 'after-engine' and
-            pathlib.Path(access.path).name == 'design.json' and 'call.py:_finish_inline_delivery' in access.chain)
+            recorded_path(access.path).name == 'design.json' and 'call.py:_finish_inline_delivery' in access.chain)
         for fault in ('denied', 'eio'):
             with self.subTest(fault=fault):
                 case.restore()
@@ -518,7 +524,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('background')
         target = next(access for access in case.observe() if access.phase == 'after-runner' and
-            pathlib.Path(access.path).name == 'skills.json' and 'call_cli.py:_print_skills' in access.chain)
+            recorded_path(access.path).name == 'skills.json' and 'call_cli.py:_print_skills' in access.chain)
         for fault in ('denied', 'eio'):
             with self.subTest(fault=fault):
                 case.restore()
@@ -545,7 +551,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('background')
         target = next(access for access in case.observe() if access.phase == 'after-runner' and
-            pathlib.Path(access.path).name == 'result.json' and access.operation == 'read' and 'call.py:_launch_main' in access.chain)
+            recorded_path(access.path).name == 'result.json' and access.operation == 'read' and 'call.py:_launch_main' in access.chain)
         observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='eio')
 
         result = case.invoke(observer)
@@ -570,7 +576,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('worker')
         target = next(access for access in case.observe() if access.phase == 'after-engine' and
-            pathlib.Path(access.path).name == 'design.json' and access.operation in ('read', 'os.read') and
+            recorded_path(access.path).name == 'design.json' and access.operation in ('read', 'os.read') and
             'call.py:_design_after' in access.chain)
         observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='eio')
         with mock.patch('tests.e_c12_scenarios.cli_result', cli_result):
@@ -860,7 +866,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         case.scenario('worker')
-        target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'prompt.md'
+        target = next(access for access in case.observe() if recorded_path(access.path).name == 'prompt.md'
                       and access.operation in ('read', 'os.read'))
         for fault in ('missing', 'denied', 'eio'):
             with self.subTest(fault=fault):
@@ -1027,7 +1033,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.addCleanup(case.doCleanups)
         case.scenario('freeze')
         accesses = case.observe()
-        target = next(access for access in accesses if pathlib.Path(access.path).name == 'intent-binding.json')
+        target = next(access for access in accesses if recorded_path(access.path).name == 'intent-binding.json')
         earlier = pathlib.Path(target.path).read_bytes()
         assert case.project is not None
         for fault in ('missing', 'not-regular', 'denied', 'eio'):
@@ -1059,7 +1065,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         case.scenario('background')
-        target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'launch.json'
+        target = next(access for access in case.observe() if recorded_path(access.path).name == 'launch.json'
                       and access.operation == 'read' and any(context in access.chain for context in (
                           'call.py:_launch_main', 'call.py:launch_main')))
         for fault in ('missing', 'not-regular', 'denied', 'invalid-content', 'eio'):
@@ -1092,7 +1098,7 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         case.setUp()
         self.addCleanup(case.doCleanups)
         case.scenario('background')
-        target = next(access for access in case.observe() if pathlib.Path(access.path).name == 'launch.json' and
+        target = next(access for access in case.observe() if recorded_path(access.path).name == 'launch.json' and
             access.operation == 'stat' and 'call.py:_launch_main' in access.chain)
         for fault in ('denied', 'eio'):
             with self.subTest(fault=fault):

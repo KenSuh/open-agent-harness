@@ -29,6 +29,10 @@ from tests.helpers import make_tmp_dir
 from tests.test_skill_delivery import PLAIN
 
 
+def recorded_path(path):
+    return pathlib.PurePosixPath(os.fspath(path).replace('\\', '/'))
+
+
 class Scenario(e_c9_fixture.CorrectionFixture):
     request = relay_fixture.RelayTimesTest.request
     offered_parent_relay = spent.SpentEvidenceTest.offered_parent_relay
@@ -94,7 +98,13 @@ class Scenario(e_c9_fixture.CorrectionFixture):
             self.enterContext(mock.patch('oah.review.fix.correct',
                 lambda request, **options: real(request, **options, rules=test_fix.RULES, temp_root=project.temp_root)))
         elif name in ('admission-needs', 'skills-select', 'skills-find'):
-            project, _original, _need, _basis = e_c6_fixture.selected_ordinary(self)
+            def configure(project, _reviewed):
+                path = project.repo / '.oah/config.toml'
+                command = test_fix.toml_list([sys.executable, str(test_fix.FAKES / 'fake_claude.py')])
+                project.commit({'.oah/config.toml': path.read_text(encoding='utf-8') +
+                    '\n[engines.claude]\ncommand = ' + command + '\n'})
+
+            project, _original, _need, _basis = e_c6_fixture.selected_ordinary(self, configure=configure)
             self.project = project
             self.root, self.storage, self.environment = project.repo, project.state, project.env
             self.saved_roots = [project.work, project.repo]
