@@ -1507,6 +1507,9 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
         policy = discovery.policy_digest(current_found)
         identity_needs = original.needs(live_basis, list(current_needs) + current_queries, policy)
         selections = original.selections(state_dir, live_basis, policy)
+        if selections != selected:
+            raise skillpack.PackRefused(skillpack.NOT_DELIVERABLE_CODE, "changed",
+                "the task selections changed before original preparation publication; prepare again")
         child = inventory.child(request.engine, root=root, env=env, home=skillsel.home_of(env), now=current,
                                 classes=capability_settings["classes"])
         if frozen_inputs is not None:

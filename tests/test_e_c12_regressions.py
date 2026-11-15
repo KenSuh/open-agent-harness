@@ -185,6 +185,59 @@ class RecordRegression(DeliveryTask, unittest.TestCase):
         self.assertEqual(project.fix_calls(), calls)
         self.assertTrue(all(path.read_bytes() == raw for path, raw in earlier.items()))
 
+    def test_capture_selection_change_keeps_the_original_and_valid_run_advances_it(self):
+        from oah.discovery import original, store
+        from tests.e_c12_observer import ObservedFiles
+        from tests.e_c12_scenarios import Scenario
+
+        now = dt.datetime.now(dt.timezone.utc)
+
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(now.timestamp(), tz)
+
+        self.enterContext(mock.patch.object(dt, 'datetime', Clock))
+        case = Scenario('scenario')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.scenario('admission-needs')
+        pointer = original._index(case.storage, 't1')
+        earlier_pointer = pointer.read_bytes()
+
+        def valid_run(_observer):
+            self.assertEqual((case.engine_spawns, case.runner_creations), (1, 0))
+            self.assertNotEqual(pointer.read_bytes(), earlier_pointer)
+            reference = json.loads(pointer.read_bytes())['original']
+            record = store.get_record(case.storage, original.FOLDER, reference)
+            self.assertIsNotNone(record)
+            assert record is not None
+            run = case.storage / 'runs' / 't1' / record['run_id']
+            self.assertNotIn(run / 'result.json', case.before)
+            self.assertEqual(json.loads((run / 'result.json').read_bytes())['status'], 'finished')
+            self.assertEqual(json.loads((run / 'skills.json').read_bytes())['prepared_e']['digest'], record['digest'])
+            for path, raw in case.before.items():
+                if path.name == 'result.json':
+                    self.assertEqual(path.read_bytes(), raw)
+
+        accesses = case.observe(valid_run)
+        self.assertEqual(pointer.read_bytes(), earlier_pointer)
+        target = next(row for row in accesses if row.path.endswith('/skills/task-selections/index.json')
+            and row.operation == 'stat' and 'call.py:capture' in row.chain
+            and 'original.py:selections' in row.chain and 'skillpack.py:checked' not in row.chain)
+        runs_before = set(case.storage.glob('runs/*/r*'))
+        observer = ObservedFiles(case.storage, extra=case.extra, target=target, fault='missing')
+        result = case.invoke(observer)
+        self.assertTrue(observer.reached)
+        self.assertEqual(result[0], 1, str(result))
+        self.assertIn('OAH_SKILL_NOT_DELIVERABLE(changed):', result[2])
+        self.assertNotIn('Traceback', result[2])
+        self.assertEqual((case.engine_spawns, case.runner_creations), (0, 0))
+        self.assertEqual(pointer.read_bytes(), earlier_pointer, 'keep the earlier original before publication')
+        self.assertEqual(set(case.storage.glob('runs/*/r*')), runs_before, 'refuse before allocating a run')
+        for path, raw in observer.retained.items():
+            self.assertEqual(path.read_bytes(), raw, 'keep every earlier byte at the capture recheck')
+
     def test_expired_preparation_keeps_its_changed_refusal_through_the_cli(self):
         from oah import call
 
