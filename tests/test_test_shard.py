@@ -672,13 +672,13 @@ class CheckedInTimesTest(unittest.TestCase):
         text = text_of(ROOT / ".github" / "workflows" / "ci.yml")
         # Six shards when the select job gives no count, as when its selector step failed.
         self.assertIn("        shard: ${{ fromJSON(needs.select.outputs.shards || '[1, 2, 3, 4, 5, 6]') }}\n", text)
-        self.assertIn("    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}\n", text)
+        self.assertIn("    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 45 }}\n", text)
         self.assertIn("run: python tools/test_shard.py ${{ matrix.shard }} ${{ needs.select.outputs.count || 6 }} "
                       "--modules-env OAH_TEST_MODULES -v", text)
         self.assertNotIn("balanced by test count", text)
         self.assertIn("tools/test_shard_times.json", text)
         self.assertIn("tools/shard_times.py", text)
-        self.assertIn("60 minutes on Windows and 45 on macOS", text)
+        self.assertIn("75 minutes on Windows (a safety ceiling) and 45 on macOS", text)
         self.assertIn("balanced split with fresh data comes first", text)
 
 
