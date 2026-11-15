@@ -5,14 +5,14 @@
 What runs when, in plain words:
 
 * A pull request runs only the test modules its changes can reach, on as few shards as their measured time needs
-  (about 30 minutes each, 1 to 5 shards per OS). A pull request that reaches no test runs one shard with no tests,
+  (about 30 minutes each, 1 to 6 shards per OS). A pull request that reaches no test runs one shard with no tests,
   so the install, version, privacy and installer steps of shard 1 still run.
-* The whole suite runs on 5 shards per OS when the run was started by hand (any event other than `pull_request`),
+* The whole suite runs on 6 shards per OS when the run was started by hand (any event other than `pull_request`),
   when the base commit is missing or unreadable, when a changed file is shared test infrastructure (listed below),
   when any non-Python file under src/ changes, when a changed file under `src/` or `tests/` reaches no test, or when
   anything here goes wrong. Doubt never means fewer tests.
 * CI selects once. Its job outputs give every shard the same module list and count. If the selector fails or writes
-  no plan, the select job gives every shard the whole suite on 5 shards; test jobs never select again.
+  no plan, the select job gives every shard the whole suite on 6 shards; test jobs never select again.
 
 Changed files are `git diff --name-only --no-renames <base>...<head>` (since the merge base); a rename counts as its
 old and its new path. Every file is read from the head commit with git, never from the working tree and never by
@@ -77,7 +77,7 @@ PACKAGE_INIT = "tests/__init__.py"
 AMBIENT_ROOTS = frozenset({PACKAGE_INIT, HELPERS})
 TIMES = "tools/test_shard_times.json"
 SHARD_MS = 30 * 60 * 1000
-MAX_SHARDS = 5
+MAX_SHARDS = 6
 WHOLE = "ALL"
 
 # Starting the program as a child: `python -m oah`, `[sys.executable, "-m", "oah"...]`, runpy, the console script.
@@ -150,7 +150,7 @@ def module_weight(module: str, ids: Iterable[str], default_ms: int, times_ms: Ma
 
 
 def shard_count(weights: Iterable[int]) -> int:
-    """Shards of about 30 minutes for these module weights, at least 1 and at most 5."""
+    """Shards of about 30 minutes for these module weights, at least 1 and at most 6."""
     return max(1, min(MAX_SHARDS, math.ceil(sum(weights) / SHARD_MS)))
 
 

@@ -16,7 +16,7 @@ The output holds test ids and those numbers only, so nothing else from a log rea
 
 Printed counts separate complete entries (including those dropped for no confirmed start), planned tests with no
 usable line (including tests never reached), and complete entries dropped for no confirmed start. The script then
-prints the minutes per shard that the file predicts for COUNT=5, discovering tests/ without running it. Standard
+prints the minutes per shard that the file predicts for COUNT=6, discovering tests/ without running it. Standard
 library only.
 """
 from __future__ import annotations
@@ -24,11 +24,12 @@ from __future__ import annotations
 import collections
 import datetime
 import json
+import math
 import pathlib
 import re
 import sys
 
-PREDICTED_COUNT = 5
+PREDICTED_COUNT = 6
 _STAMPED = re.compile(r"\ufeff?(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)(?: (.*))?")
 _SHARD = re.compile(r"shard \d+/\d+: (\d+) tests\Z")
 _RAN = re.compile(r"Ran \d+ tests? in ")
@@ -133,7 +134,7 @@ def main(argv: list[str]) -> int:
           f"{counts['unconfirmed start']} dropped (unconfirmed start)")
     minutes = predicted_minutes(out)
     print(f"predicted minutes for COUNT={PREDICTED_COUNT}: {' '.join(f'{m:.1f}' for m in minutes)}; "
-          f"total {sum(minutes):.1f}")
+          f"total {math.fsum(minutes):.1f}")
     return 0
 
 

@@ -116,7 +116,7 @@ class SelectionRulesTest(unittest.TestCase):
     def assertWhole(self, selection, reason):
         self.assertTrue(selection.whole, selection.modules)
         self.assertIn(reason, selection.reason)
-        self.assertEqual(selection.count, 5)
+        self.assertEqual(selection.count, 6)
 
     def test_rule1_shared_infrastructure_runs_the_whole_suite(self):
         repo = Repo(self)
@@ -252,7 +252,7 @@ class FallbackTest(unittest.TestCase):
             with self.subTest(base=base):
                 selection = repo.select(head, base=base)
                 self.assertTrue(selection.whole, selection)
-                self.assertEqual(selection.count, 5)
+                self.assertEqual(selection.count, 6)
 
     def test_missing_git_runs_the_whole_suite(self):
         repo = Repo(self)
@@ -332,7 +332,7 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(out, "selected 0 of 7 test modules (1 shard): no affected tests\n")
         self.assertEqual(github.read_text(encoding="utf-8"), "count=1\nshards=[1]\nmodules=NONE\n")
 
-    def test_the_whole_suite_outputs_all_modules_and_five_shards(self):
+    def test_the_whole_suite_outputs_all_modules_and_six_shards(self):
         repo = Repo(self)
         head = repo.head({"tests/helpers.py": "# changed\n"})
         github = repo.path.parent / "github-output"
@@ -340,7 +340,7 @@ class OutputTest(unittest.TestCase):
                             "--github-output", str(github))
         self.assertEqual(out, "ALL\n")
         self.assertEqual(github.read_text(encoding="utf-8"),
-                         "count=5\nshards=[1, 2, 3, 4, 5]\nmodules=ALL\n")
+                         "count=6\nshards=[1, 2, 3, 4, 5, 6]\nmodules=ALL\n")
 
 
 class ShardCountTest(unittest.TestCase):
@@ -352,7 +352,8 @@ class ShardCountTest(unittest.TestCase):
         self.assertEqual(tool.shard_count([shard, 1]), 2)
         self.assertEqual(tool.shard_count([shard, shard, 1]), 3)
         self.assertEqual(tool.shard_count([shard * 4, shard]), 5)
-        self.assertEqual(tool.shard_count([shard * 40]), 5)
+        self.assertEqual(tool.shard_count([shard * 5, 1]), 6)
+        self.assertEqual(tool.shard_count([shard * 40]), 6)
 
     def test_module_weight_counts_listed_and_unlisted_tests(self):
         times = {"tests.test_m.T.test_a": 7, "tests.test_m.T.test_gone": 3, "tests.test_mx.T.test_a": 100}
@@ -379,14 +380,14 @@ class WorkflowTest(unittest.TestCase):
                                     "--head \"$OAH_HEAD\" --summary"), 1)
         select, test = text.split("  test:\n", 1)
         ready = "steps.affected.outcome == 'success' && steps.affected.outputs.modules"
-        self.assertIn("count: ${{ " + ready + " && steps.affected.outputs.count || 5 }}", select)
-        self.assertIn("shards: ${{ " + ready + " && steps.affected.outputs.shards || '[1, 2, 3, 4, 5]' }}", select)
+        self.assertIn("count: ${{ " + ready + " && steps.affected.outputs.count || 6 }}", select)
+        self.assertIn("shards: ${{ " + ready + " && steps.affected.outputs.shards || '[1, 2, 3, 4, 5, 6]' }}", select)
         self.assertIn("modules: ${{ " + ready + " || 'ALL' }}", select)
         self.assertNotIn("affected_tests.py", test)
         self.assertNotIn("continue-on-error", test)
         self.assertIn("OAH_TEST_MODULES: ${{ needs.select.outputs.modules || 'ALL' }}", test)
         self.assertIn("--modules-env OAH_TEST_MODULES -v", test)
-        self.assertIn("name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ needs.select.outputs.count || 5 }})", text)
+        self.assertIn("name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ needs.select.outputs.count || 6 }})", text)
         self.assertEqual(text.count("if: matrix.shard == 1"), 4)
         self.assertEqual(text.count("if: runner.os == 'macOS' && matrix.shard == 1"), 1)
         self.assertEqual(text.count("if: runner.os == 'Windows' && matrix.shard == 1"), 2)

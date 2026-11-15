@@ -25,7 +25,7 @@ the Windows command-line limit. `ALL` runs the whole suite and `NONE` runs no te
 stops the run; a shard never chooses a replacement plan. All shards balance the same list and count.
 
 Refresh the file with `python tools/shard_times.py tools/test_shard_times.json LOG [LOG ...]` from saved GitHub job
-logs. A slow shard is answered by this split and fresh data, not by a higher limit or more shards.
+logs. The whole CI suite uses six shards per OS with the existing Windows/macOS limits and fresh timing data.
 """
 from __future__ import annotations
 

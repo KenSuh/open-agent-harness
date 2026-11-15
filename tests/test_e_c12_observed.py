@@ -577,12 +577,6 @@ class ObservedAccessTest(unittest.TestCase):
     and require its own direct content cell. With no later read, assert the
     existing presence rule. The faulted outcome never supplies an expected row.
     """
-    @classmethod
-    def setUpClass(cls):
-        cls.completed = {}
-        cls.output_cells = set()
-        cls.presence_cells = set()
-
     def test_exhaustive_switch_selects_all_accesses_only_when_explicit(self):
         from types import SimpleNamespace
 
@@ -1061,6 +1055,7 @@ class ObservedAccessTest(unittest.TestCase):
         self.assertEqual((case.engine_spawns, case.runner_creations), SUCCESS_DISPATCH[name])
         reached, specified, contexts, content_links, direct_content = set(), set(), set(), set(), set()
         output_links, direct_missing = set(), set()
+        output_cells, presence_cells = set(), set()
         content_targets = {index: content_read_ordinal(accesses, index) for index, row in enumerate(accesses)
                            if row.operation in METADATA_OPERATIONS}
         selected = observed_indices(accesses, owners)
@@ -1192,7 +1187,7 @@ class ObservedAccessTest(unittest.TestCase):
                             row = output_row(access, excluded[0])
                             expected = OUTPUT_MATRIX[row][('missing', 'denied', 'eio').index(fault)]
                             self.assertEqual((code, result[0]), expected, str(result))
-                            self.__class__.output_cells.add((row, fault))
+                            output_cells.add((row, fault))
                             if fault == 'missing' and excluded[0] == 'review/fix publication':
                                 direct_missing.add(ordinal)
                         self.assertEqual((case.engine_spawns, case.runner_creations),
@@ -1213,7 +1208,7 @@ class ObservedAccessTest(unittest.TestCase):
                         expected = ('OAH_STATE_IO', 69)
                     self.assertEqual((code, result[0]), expected, str(result))
                     if presence_admission(access, fault):
-                        self.__class__.presence_cells.add('native-offer-at-handoff')
+                        presence_cells.add('native-offer-at-handoff')
                     if fault == 'missing' and context is not None:
                         contexts.add((index, context))
                     if fault == 'missing':
@@ -1275,87 +1270,26 @@ class ObservedAccessTest(unittest.TestCase):
                         'each clean byte read selected by metadata content needs its own reached direct content cell')
         self.assertTrue({target for _source, target in output_links} <= direct_missing,
                         'each required query selected by an output address needs its own reached direct missing cell')
-        self.__class__.completed[name] = dict(accesses=len(accesses), cells=len(reached))
-
-    def test_process_admission_observed_files(self):
-        self.exercise('admission')
-
-    def test_native_admission_observed_files(self):
-        self.exercise('admission-native')
-
-    def test_orca_admission_observed_files(self):
-        self.exercise('admission-orca')
-
-    def test_needs_admission_observed_files(self):
-        self.exercise('admission-needs')
-
-    def test_saved_request_admission_observed_files(self):
-        self.exercise('admission-saved')
-
-    def test_prepared_launch_observed_files(self):
-        self.exercise('launch')
-
-    def test_background_child_observed_files(self):
-        self.exercise('background')
-
-    def test_native_settle_observed_files(self):
-        self.exercise('settle')
-
-    def test_native_settle_retry_observed_files(self):
-        self.exercise('settle-retry')
-
-    def test_skills_read_observed_files(self):
-        self.exercise('skills')
-
-    def test_skills_receiving_observed_files(self):
-        self.exercise('skills-receiving')
-
-    def test_skills_repeat_read_observed_files(self):
-        self.exercise('skills-repeat')
-
-    def test_skills_plan_observed_files(self):
-        self.exercise('skills-plan')
-
-    def test_skills_review_read_observed_files(self):
-        self.exercise('skills-read-review')
-
-    def test_skills_candidates_observed_files(self):
-        self.exercise('skills-candidates')
-
-    def test_skills_review_update_observed_files(self):
-        self.exercise('skills-review')
-
-    def test_skills_select_observed_files(self):
-        self.exercise('skills-select')
-
-    def test_skills_find_observed_files(self):
-        self.exercise('skills-find')
-
-    def test_capability_plan_observed_files(self):
-        self.exercise('capabilities-plan')
-
-    def test_relay_observed_files(self):
-        self.exercise('relay')
-
-    def test_orca_worker_observed_files(self):
-        self.exercise('worker')
-
-    def test_freeze_and_correction_observed_files(self):
-        self.exercise('freeze')
-
-    def test_design_coverage_observed_files(self):
-        self.exercise('design')
-
-    def test_wait_observed_files(self):
-        self.exercise('wait')
+        return dict(accesses=len(accesses), cells=len(reached)), presence_cells, output_cells
 
     def test_z_all_commands_have_reached_every_observed_fault_cell(self):
-        self.assertEqual(set(self.completed), set(BOUNDARY), 'each command must finish its reached-access checks')
+        # One test owns both the evidence and its aggregate checks; shards may run it alone.
+        completed, presence_cells, output_cells = {}, set(), set()
+        for name in BOUNDARY:
+            with self.subTest(command=name):
+                try:
+                    summary, presence, output = self.exercise(name)
+                    completed[name] = summary
+                    presence_cells.update(presence)
+                    output_cells.update(output)
+                finally:
+                    self.doCleanups()
+        self.assertEqual(set(completed), set(BOUNDARY), 'each command must finish its reached-access checks')
         if exhaustive_record_guard():
-            self.assertEqual(self.presence_cells, set(PRESENCE_MATRIX), 'each presence admission row must be reached')
-            self.assertEqual(self.output_cells, {(row, fault) for row in OUTPUT_MATRIX
+            self.assertEqual(presence_cells, set(PRESENCE_MATRIX), 'each presence admission row must be reached')
+            self.assertEqual(output_cells, {(row, fault) for row in OUTPUT_MATRIX
                                                for fault in ('missing', 'denied', 'eio')})
         else:
-            self.assertTrue(all(row['cells'] == len(FAULTS) for row in self.completed.values()),
+            self.assertTrue(all(row['cells'] == len(FAULTS) for row in completed.values()),
                             'every command needs one reached cell for each fault class')
-        print('OS_COVERAGE', json.dumps(self.completed, sort_keys=True), flush=True)
+        print('OS_COVERAGE', json.dumps(completed, sort_keys=True), flush=True)
