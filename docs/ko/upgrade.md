@@ -255,7 +255,8 @@ v0.3.0에서 v0.4.0으로 올리면 `oah`에 설계, 설계 출처, 검토한 �
   `oah doctor`가 그 파일과 고치는 방법을 알려 주며, 사용자가 고친 파일은 건드리지 않는다.
 - **스킬 본문은 검증된 호스트에서만 워커에게 간다.** 이번 릴리스에는 검증된 호스트가 없다. 그래서 연결된 스킬
   본문이나 중계한 도구 결과를 실을 실행과 `oah skills find --task`는 아무것도 보내기 전에
-  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)`로 멈춘다. 연결된 스킬이 없는 작업은 영향을 받지 않는다.
+  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)`로 멈춘다. 관리 전달·탐색·능력 입력·허용되고 설정된
+  작업 조언이 없는 일반 작업은 기존 경로를 따른다.
   나머지는 [이번 릴리스의 한계](skills-and-capabilities.md#이번-릴리스의-한계)에 있다.
 
 ## 8. docs/UPSTREAM_SYNC.md가 기록하는 것

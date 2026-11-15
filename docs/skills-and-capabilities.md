@@ -104,7 +104,6 @@ judges, the round and the reservation. The links in the task's accepted coverage
   dispatch would carry, or why it would refuse. It writes nothing and sends nothing.
 - `oah skills read --run RUN --item N` prints one bundle item and records the read. A worker may read only its own
   run's bundle.
-- A task whose coverage links no skill gets exactly the brief it got before.
 
 **One prepared identity.** Local admission checks `[skills] exclude`, each need's host and scope, mandatory
 selections, current capability approval and schema, relay eligibility and expiry, the task and lease generation,
@@ -139,8 +138,8 @@ ordinary run is later refused or never spent. Corrections and reviews keep
 the pointer as it is. A managed correction reads only the run named by that pointer. A missing pointer when
 managed content is needed, missing or incomplete records, a different digest, or a result without a running,
 finished or failed status gives `OAH_FIX_STATE_CHANGED`. A task with a skill only in a later dispatch stage still
-records its complete identity during its empty original stage without requiring an extra skill, relay or
-capacity qualification. Ordinary tasks without managed content keep their existing flow.
+records its complete identity during its empty original stage. With no managed delivery, discovery, capability
+inputs or permitted, configured task advice, that stage requires no extra skill, relay or capacity qualification.
 What it costs you: corrections use the latest original. Prepare a new initial run if its record is damaged or
 the task needs managed content again. Once an ordinary original clears the pointer, the earlier managed run
 cannot be corrected until a new initial run is spent. The refusal explains whether no managed original is

@@ -176,8 +176,9 @@ the [roadmap](#roadmap). [Upgrade](docs/upgrade.md#7-from-030-to-040) says what 
   values), `plan` routes each tool a skill names, and `relay` stores a result the lead fetched itself.
   **Limit:** no host has a qualified capacity profile in this release, so a dispatch that would carry skill texts
   or relayed tool results, and `oah skills find --task`, stop with
-  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. Tasks without linked skills run as
-  before. [Skills and capabilities](docs/skills-and-capabilities.md#limits-in-this-release) lists every limit.
+  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. Ordinary work with no managed
+  delivery, discovery, capability inputs or permitted, configured task advice keeps its existing path.
+  [Skills and capabilities](docs/skills-and-capabilities.md#limits-in-this-release) lists every limit.
 - **Jev in design steps.** With Jev on and its own judgement switch on (`[rerank.judgement]`, off by default), Jev
   can assess whether a source change matters to a design, choose which skill search runs first and suggest the next
   design stage. Each answer is advice within the options the fixed rules allow.

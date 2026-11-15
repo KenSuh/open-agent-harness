@@ -30,6 +30,12 @@ PENDING_LANES = {"OAH_FIX_": "oah.fix_cli", "OAH_INIT_": "oah.init_cli"}
 PENDING_CODES = {"OAH_MCP_UPDATE_AVAILABLE"} if not hasattr(update, "last_mcp_notices") else set()
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 HANGUL_COLON = re.compile(r"[가-힣][)\]`*]*:\s*$")
+UNLINKED_SKILL_ASSURANCE = re.compile(
+    r"(?:\btasks?\s+(?:without\s+(?:any\s+)?linked\s+skills?|whose\s+coverage\s+links\s+no\s+skills?)"
+    r"|연결(?:한|된)\s+스킬(?:이)?\s+없는\s+작업)"
+    r"[^.!?]*(?:unaffected|not\s+affected|as\s+before|exactly\s+the\s+brief"
+    r"|(?:이전|전)과\s+(?:똑)?같|영향(?:을)?\s+받지\s+않)",
+    re.IGNORECASE)
 
 
 def read(path: pathlib.Path) -> str:
@@ -182,6 +188,7 @@ class AccuracyTest(unittest.TestCase):
 
     def test_korean_sentences_do_not_end_with_a_colon(self):
         pages = [REPO / "docs" / "ko" / f"{page}.md" for page in PAGES]
+        pages += [REPO / "docs" / "ko" / f"{page}.md" for page in ("skills-and-capabilities", "design-sources")]
         pages += [EXAMPLE / "README.ko.md", REPO / "README.ko.md"]
         for name, text in [(str(p.relative_to(REPO)), read(p)) for p in pages]:
             for number, line in prose_lines(text):
@@ -189,6 +196,12 @@ class AccuracyTest(unittest.TestCase):
                     continue
                 with self.subTest(page=name, line=number):
                     self.assertIsNone(HANGUL_COLON.search(line), line)
+
+    def test_release_pages_do_not_equate_unlinked_skills_with_unmanaged_work(self):
+        for page in all_docs():
+            text = "\n".join(line for _, line in prose_lines(read(page)))
+            with self.subTest(page=str(page.relative_to(REPO))):
+                self.assertIsNone(UNLINKED_SKILL_ASSURANCE.search(text))
 
     def test_keys_page_names_the_lookup(self):
         for page in (REPO / "docs/keys.md", REPO / "docs/ko/keys.md"):
