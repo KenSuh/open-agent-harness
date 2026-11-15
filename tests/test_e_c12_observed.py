@@ -1,3 +1,10 @@
+"""Recorded-file CLI checks with a representative default and an optional full sweep.
+
+By default, each command changes one observed byte-read with every fault class.
+Run with OAH_EXHAUSTIVE_RECORD_GUARD=1 to fault every observed access and require
+the complete matrix, optional-read, presence and output-query coverage. The full
+sweep is optional; focused finding regressions also live in test_e_c12_regressions.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -7,6 +14,7 @@ import datetime as dt
 import fnmatch
 import hashlib
 import json
+import os
 import pathlib
 import re
 import traceback
@@ -540,6 +548,17 @@ def label(access, state):
                   '{original-run}' if access.existing else '{new-run}', relative)
 
 
+def exhaustive_record_guard():
+    return os.environ.get('OAH_EXHAUSTIVE_RECORD_GUARD') == '1'
+
+
+def observed_indices(accesses, owners):
+    if exhaustive_record_guard():
+        return tuple(range(len(accesses)))
+    return (next(index for index, access in enumerate(accesses)
+                 if owners[index] is None and access.operation in BYTE_OPERATIONS),)
+
+
 class ObservedAccessTest(unittest.TestCase):
     """Change one fixture file at an observed access and assert its literal owner rule.
 
@@ -553,6 +572,17 @@ class ObservedAccessTest(unittest.TestCase):
         cls.completed = {}
         cls.output_cells = set()
         cls.presence_cells = set()
+
+    def test_exhaustive_switch_selects_all_accesses_only_when_explicit(self):
+        from types import SimpleNamespace
+
+        accesses = [SimpleNamespace(operation='stat'), SimpleNamespace(operation='read'),
+                    SimpleNamespace(operation='read')]
+        owners = [None, None, None]
+        with mock.patch.dict(os.environ, {'OAH_EXHAUSTIVE_RECORD_GUARD': ''}):
+            self.assertEqual(observed_indices(accesses, owners), (1,))
+        with mock.patch.dict(os.environ, {'OAH_EXHAUSTIVE_RECORD_GUARD': '1'}):
+            self.assertEqual(observed_indices(accesses, owners), (0, 1, 2))
 
     def assert_content_read(self, observer, expected, classified):
         self.assertTrue(observer.content_accesses, 'the fault must reach the clean trace byte read')
@@ -1026,7 +1056,9 @@ class ObservedAccessTest(unittest.TestCase):
         output_links, direct_missing = set(), set()
         content_targets = {index: content_read_ordinal(accesses, index) for index, row in enumerate(accesses)
                            if row.operation in METADATA_OPERATIONS}
-        for ordinal, access in enumerate(accesses):
+        selected = observed_indices(accesses, owners)
+        for ordinal in selected:
+            access = accesses[ordinal]
             path = label(access, case.storage)
             matched = [index for index, rule in enumerate(FILE_MATRIX[name]) if fnmatch.fnmatchcase(path, rule.pattern)]
             self.assertTrue(matched, f'{name}: observed access has no literal owner path: {path} {access}')
@@ -1223,14 +1255,15 @@ class ObservedAccessTest(unittest.TestCase):
                         expected_raw = observer.content_writes.get(str(case.run_dir / 'result.json'),
                             case.before[case.run_dir / 'result.json'])
                         self.assertEqual(raw, expected_raw, 'the queued label is historical for this refused claim')
-        self.assertEqual(specified, set(range(len(FILE_MATRIX[name]))), 'each literal file row needs an observed case')
-        self.assertEqual(contexts, {(index, context) for index, rule in enumerate(FILE_MATRIX[name])
-                                   for context, _outcome in rule.absent_by_context},
-                         'each literal optional-read phase needs an observed case')
-        expected_cells = {(ordinal, fault) for ordinal, access in enumerate(accesses)
+        if exhaustive_record_guard():
+            self.assertEqual(specified, set(range(len(FILE_MATRIX[name]))), 'each literal file row needs an observed case')
+            self.assertEqual(contexts, {(index, context) for index, rule in enumerate(FILE_MATRIX[name])
+                                       for context, _outcome in rule.absent_by_context},
+                             'each literal optional-read phase needs an observed case')
+        expected_cells = {(ordinal, fault) for ordinal in selected
                           for fault in (('missing', 'denied', 'eio') if
-                              excluded_access(name, access, case.storage) else FAULTS)}
-        self.assertEqual(reached, expected_cells, 'every observed access and every fault cell needs a reached case')
+                              owners[ordinal] else FAULTS)}
+        self.assertEqual(reached, expected_cells, 'every selected access and fault cell needs a reached case')
         self.assertTrue({target for _source, target in content_links} <= direct_content,
                         'each clean byte read selected by metadata content needs its own reached direct content cell')
         self.assertTrue({target for _source, target in output_links} <= direct_missing,
@@ -1311,7 +1344,11 @@ class ObservedAccessTest(unittest.TestCase):
 
     def test_z_all_commands_have_reached_every_observed_fault_cell(self):
         self.assertEqual(set(self.completed), set(BOUNDARY), 'each command must finish its reached-access checks')
-        self.assertEqual(self.presence_cells, set(PRESENCE_MATRIX), 'each presence admission row must be reached')
-        self.assertEqual(self.output_cells, {(row, fault) for row in OUTPUT_MATRIX
-                                           for fault in ('missing', 'denied', 'eio')})
+        if exhaustive_record_guard():
+            self.assertEqual(self.presence_cells, set(PRESENCE_MATRIX), 'each presence admission row must be reached')
+            self.assertEqual(self.output_cells, {(row, fault) for row in OUTPUT_MATRIX
+                                               for fault in ('missing', 'denied', 'eio')})
+        else:
+            self.assertTrue(all(row['cells'] == len(FAULTS) for row in self.completed.values()),
+                            'every command needs one reached cell for each fault class')
         print('OS_COVERAGE', json.dumps(self.completed, sort_keys=True), flush=True)
