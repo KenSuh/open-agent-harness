@@ -172,6 +172,19 @@ class SelectionRulesTest(unittest.TestCase):
         repo = Repo(self, files)
         self.assertSelected(repo.select(repo.head({"tools/check.py": "X = 2\n"})), ["tests.test_tool"])
 
+    def test_imported_test_helpers_follow_transitive_function_imports(self):
+        for folder in ("tests/fixtures/gates", "tests/fakes/nested", "tests/support/nested"):
+            with self.subTest(folder=folder):
+                files = dict(BASE_FILES, **{
+                    "tests/test_helper.py": f"from {folder.replace('/', '.')}.support import run_cli\n" + case(),
+                    f"{folder}/support.py": "def run_cli():\n    from . import bridge\n    return bridge.run()\n",
+                    f"{folder}/bridge.py": "def run():\n    import oah.c\n    return oah.c.VALUE\n",
+                    "tests/fixtures/data/repo/broken.py": "def (:\n",
+                })
+                repo = Repo(self, files)
+                self.assertSelected(repo.select(repo.head({"src/oah/c.py": "VALUE = 2\n"})),
+                                    ["tests.test_a", "tests.test_lazy", "tests.test_helper", *CHILD])
+
     def test_rule4_child_process_tests_and_fakes_run_for_any_src_change(self):
         repo = Repo(self)
         self.assertSelected(repo.select(repo.head({"src/oah/new.py": "X = 1\n"})), CHILD)
@@ -190,9 +203,21 @@ class SelectionRulesTest(unittest.TestCase):
         self.assertSelected(repo.select(repo.head({"tests/fakes/fake_tool.py": "print(1)\n"})),
                             ["tests.test_fake"])
 
-    def test_rule5_package_data_reaches_the_tests_of_the_modules_that_name_it(self):
-        repo = Repo(self)
-        self.assertSelected(repo.select(repo.head({"src/oah/data.txt": "new data\n"})), ["tests.test_d", *CHILD])
+    def test_non_python_src_changes_always_run_the_whole_suite(self):
+        cases: dict[str, dict[str, str | None]] = {
+            "changed named resource": {"src/oah/data.txt": "new data\n"},
+            "added directory resource": {"src/oah/templates/obsidian/extra.json": "not JSON\n"},
+            "deleted resource": {"src/oah/data.txt": None},
+            "renamed template": {"src/oah/templates/rules/block.en.md": None,
+                                 "src/oah/templates/rules/block.english.md": "template\n"},
+            "other src package": {"src/another/extra.json": "{}\n"},
+            "extensionless file": {"src/oah/NOTICE": "notice\n"},
+        }
+        for label, change in cases.items():
+            with self.subTest(change=label):
+                files = dict(BASE_FILES, **{"src/oah/templates/rules/block.en.md": "template\n"})
+                repo = Repo(self, files)
+                self.assertWhole(repo.select(repo.head(change)), "is a non-Python file under src/")
 
     def test_rule6_an_unreached_file_under_tests_runs_the_whole_suite(self):
         repo = Repo(self)
@@ -245,6 +270,16 @@ class FallbackTest(unittest.TestCase):
         self.assertTrue(selection.whole)
         self.assertIn("SyntaxError", selection.reason)
 
+    def test_a_syntax_error_in_an_imported_fixture_runs_the_whole_suite(self):
+        files = dict(BASE_FILES, **{
+            "tests/test_helper.py": "from tests.fixtures.support import run\n" + case(),
+            "tests/fixtures/support.py": "def (:\n",
+        })
+        repo = Repo(self, files)
+        selection = repo.select(repo.head({"tests/test_plain.py": case("pass  # changed")}))
+        self.assertTrue(selection.whole)
+        self.assertIn("SyntaxError", selection.reason)
+
     def test_unreadable_timing_data_runs_the_whole_suite(self):
         files = {name: text for name, text in BASE_FILES.items() if name != "tools/test_shard_times.json"}
         repo = Repo(self, files)
@@ -281,38 +316,31 @@ class OutputTest(unittest.TestCase):
     def test_plain_output_and_github_output_for_a_selection(self):
         repo = Repo(self)
         head = repo.head({"tests/test_plain.py": case("pass  # changed")})
-        modules = repo.path.parent / "out" / "modules.txt"
         github = repo.path.parent / "github-output"
         out = self.run_main("--repo", str(repo.path), "--base", repo.base, "--head", head,
-                            "--modules-file", str(modules), "--github-output", str(github))
+                            "--github-output", str(github))
         self.assertEqual(out, "tests.test_plain\n")
-        self.assertEqual(modules.read_text(encoding="utf-8"), "tests.test_plain\n")
         self.assertEqual(github.read_text(encoding="utf-8"),
-                         f"whole=false\ncount=1\nshards=[1]\nargs=--modules {modules}\n")
+                         "count=1\nshards=[1]\nmodules=tests.test_plain\n")
 
-    def test_an_empty_selection_writes_an_empty_modules_file_and_one_shard(self):
+    def test_an_empty_selection_outputs_no_modules_and_one_shard(self):
         repo = Repo(self)
         head = repo.head({"LICENSE": "changed\n"})
-        modules = repo.path.parent / "modules.txt"
         github = repo.path.parent / "github-output"
         out = self.run_main("--repo", str(repo.path), "--base", repo.base, "--head", head, "--summary",
-                            "--modules-file", str(modules), "--github-output", str(github))
+                            "--github-output", str(github))
         self.assertEqual(out, "selected 0 of 7 test modules (1 shard): no affected tests\n")
-        self.assertEqual(modules.read_text(encoding="utf-8"), "")
-        self.assertIn("count=1\nshards=[1]\n", github.read_text(encoding="utf-8"))
+        self.assertEqual(github.read_text(encoding="utf-8"), "count=1\nshards=[1]\nmodules=NONE\n")
 
-    def test_the_whole_suite_removes_the_modules_file_and_gives_no_args(self):
+    def test_the_whole_suite_outputs_all_modules_and_five_shards(self):
         repo = Repo(self)
         head = repo.head({"tests/helpers.py": "# changed\n"})
-        modules = repo.path.parent / "modules.txt"
-        modules.write_text("tests.test_plain\n", encoding="utf-8")
         github = repo.path.parent / "github-output"
         out = self.run_main("--repo", str(repo.path), "--base", repo.base, "--head", head,
-                            "--modules-file", str(modules), "--github-output", str(github))
+                            "--github-output", str(github))
         self.assertEqual(out, "ALL\n")
-        self.assertFalse(modules.exists())
         self.assertEqual(github.read_text(encoding="utf-8"),
-                         "whole=true\ncount=5\nshards=[1, 2, 3, 4, 5]\nargs=\n")
+                         "count=5\nshards=[1, 2, 3, 4, 5]\nmodules=ALL\n")
 
 
 class ShardCountTest(unittest.TestCase):
@@ -346,10 +374,18 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('    paths-ignore:\n      - "docs/**"\n      - "*.md"\n  workflow_dispatch:\n', text)
         self.assertIn("  select:\n    runs-on: ubuntu-latest\n", text)
         self.assertIn("    needs: select\n", text)
-        # A failing selector step leaves its outputs empty; the defaults are then the whole suite on 5 shards.
-        self.assertEqual(text.count("        continue-on-error: true\n"), 2)
+        self.assertEqual(text.count("        continue-on-error: true\n"), 1)
         self.assertEqual(text.count("python tools/affected_tests.py --event \"$OAH_EVENT\" --base \"$OAH_BASE\" "
-                                    "--head \"$OAH_HEAD\" --summary"), 2)
+                                    "--head \"$OAH_HEAD\" --summary"), 1)
+        select, test = text.split("  test:\n", 1)
+        ready = "steps.affected.outcome == 'success' && steps.affected.outputs.modules"
+        self.assertIn("count: ${{ " + ready + " && steps.affected.outputs.count || 5 }}", select)
+        self.assertIn("shards: ${{ " + ready + " && steps.affected.outputs.shards || '[1, 2, 3, 4, 5]' }}", select)
+        self.assertIn("modules: ${{ " + ready + " || 'ALL' }}", select)
+        self.assertNotIn("affected_tests.py", test)
+        self.assertNotIn("continue-on-error", test)
+        self.assertIn("OAH_TEST_MODULES: ${{ needs.select.outputs.modules || 'ALL' }}", test)
+        self.assertIn("--modules-env OAH_TEST_MODULES -v", test)
         self.assertIn("name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ needs.select.outputs.count || 5 }})", text)
         self.assertEqual(text.count("if: matrix.shard == 1"), 4)
         self.assertEqual(text.count("if: runner.os == 'macOS' && matrix.shard == 1"), 1)

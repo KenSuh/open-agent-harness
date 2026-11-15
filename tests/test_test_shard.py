@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -520,6 +521,42 @@ class ModulesOptionTest(unittest.TestCase):
                     self.assertIn(ran, err.getvalue())
                     self.assertEqual("no affected tests" in out.getvalue(), empty)
 
+    def test_every_shard_partitions_the_same_modules_from_the_environment(self):
+        files = {name: text for name, text in self.FILES.items() if name != "test_broken.py"}
+        with fixture_package("plan_fixture", files) as folder:
+            original_shards = tool.shards
+            for plan, count, expected in (
+                ("plan_fixture.test_a plan_fixture.test_c", 3,
+                 [*(f"plan_fixture.test_a.Test.test_{i}" for i in range(3)), "plan_fixture.test_c.Test.test_0"]),
+                ("ALL", 5, [*(f"plan_fixture.test_a.Test.test_{i}" for i in range(3)),
+                            *(f"plan_fixture.test_b.Test.test_{i}" for i in range(2)),
+                            "plan_fixture.test_c.Test.test_0"]),
+                ("NONE", 1, []),
+            ):
+                with self.subTest(plan=plan):
+                    ran = []
+                    for index in range(1, count + 1):
+                        with mock.patch.dict(os.environ, {"OAH_TEST_MODULES": plan}), \
+                                mock.patch.object(tool, "shards", side_effect=lambda count, **kwargs:
+                                                  original_shards(count, folder, weights=(1, {}), **kwargs)), \
+                                mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+                                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                            self.assertEqual(tool.main([str(index), str(count), "--modules-env", "OAH_TEST_MODULES",
+                                                        "-v"]), 0, err.getvalue())
+                            self.assertEqual("no affected tests" in out.getvalue(), plan == "NONE")
+                        for line in err.getvalue().splitlines():
+                            if line.endswith(" ... ok"):
+                                ran.append(line.split(" (", 1)[1].split(")", 1)[0])
+                    self.assertEqual(sorted(ran), sorted(expected))
+
+    def test_missing_or_bad_environment_plan_stops_without_local_fallback(self):
+        for value in (None, "", "tests.test_ok bad-name"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {}, clear=True):
+                if value is not None:
+                    os.environ["OAH_TEST_MODULES"] = value
+                with self.assertRaisesRegex(SystemExit, "test_shard:"):
+                    tool.main(["1", "5", "--modules-env", "OAH_TEST_MODULES", "-v"])
+
     def test_bad_module_files_stop_with_a_message(self):
         with tempfile.TemporaryDirectory() as tmp:
             bad = pathlib.Path(tmp) / "bad.txt"
@@ -637,7 +674,7 @@ class CheckedInTimesTest(unittest.TestCase):
         self.assertIn("        shard: ${{ fromJSON(needs.select.outputs.shards || '[1, 2, 3, 4, 5]') }}\n", text)
         self.assertIn("    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}\n", text)
         self.assertIn("run: python tools/test_shard.py ${{ matrix.shard }} ${{ needs.select.outputs.count || 5 }} "
-                      "${{ steps.affected.outputs.args }} -v", text)
+                      "--modules-env OAH_TEST_MODULES -v", text)
         self.assertNotIn("balanced by test count", text)
         self.assertIn("tools/test_shard_times.json", text)
         self.assertIn("tools/shard_times.py", text)

@@ -15,10 +15,14 @@ lowest shard. The methods of one class land apart, so no single class can outgro
 in discovery order, so a class's methods stay adjacent and unittest runs its module and class fixtures once in each
 shard that holds their tests.
 
-With `--modules FILE` (one test module name per line, such as `tests.test_cli`, written by tools/affected_tests.py)
+With `--modules FILE` (one test module name per line, such as `tests.test_cli`)
 only the tests of those modules are split and run, the same way; a listed module that discovery does not find stops
 the run with a message, and an empty file runs no tests and says "no affected tests". Without the option every
 discovered test is split, as before.
+
+CI uses `--modules-env NAME` to read the select job's space-separated list from that environment variable, avoiding
+the Windows command-line limit. `ALL` runs the whole suite and `NONE` runs no tests. A missing or invalid variable
+stops the run; a shard never chooses a replacement plan. All shards balance the same list and count.
 
 Refresh the file with `python tools/shard_times.py tools/test_shard_times.json LOG [LOG ...]` from saved GitHub job
 logs. A slow shard is answered by this split and fresh data, not by a higher limit or more shards.
@@ -26,6 +30,7 @@ logs. A slow shard is answered by this split and fresh data, not by a higher lim
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import sys
@@ -155,9 +160,13 @@ def load_modules(path: pathlib.Path) -> frozenset[str]:
     except (OSError, ValueError) as error:
         raise SystemExit(f"test_shard: cannot read {path}: {error}") from None
     names = [line.strip() for line in lines if line.strip()]
+    return _module_names(names, str(path))
+
+
+def _module_names(names: list[str], source: str) -> frozenset[str]:
     bad = [name for name in names if not _MODULE_NAME.fullmatch(name)]
     if bad:
-        raise SystemExit(f"test_shard: bad module names in {path}: {', '.join(bad)}")
+        raise SystemExit(f"test_shard: bad module names in {source}: {', '.join(bad)}")
     return frozenset(names)
 
 
@@ -180,13 +189,21 @@ def main(argv: list[str]) -> int:
         return 2
     index, count = int(argv[0]), int(argv[1])
     modules = None
-    if argv[2:3] == ["--modules"]:
+    if argv[2:3] in (["--modules"], ["--modules-env"]):
         if len(argv) < 4:
-            print("usage: python tools/test_shard.py INDEX COUNT --modules FILE [unittest options]", file=sys.stderr)
+            print(f"usage: python tools/test_shard.py INDEX COUNT {argv[2]} FILE_OR_ENV [unittest options]",
+                  file=sys.stderr)
             return 2
-        modules = load_modules(pathlib.Path(argv[3]))
+        if argv[2] == "--modules":
+            modules = load_modules(pathlib.Path(argv[3]))
+        else:
+            text = os.environ.get(argv[3], "")
+            if not text.strip():
+                raise SystemExit(f"test_shard: missing or empty environment variable {argv[3]}")
+            if text != "ALL":
+                modules = _module_names([] if text == "NONE" else text.split(), f"environment variable {argv[3]}")
         argv = argv[:2] + argv[4:]
-        if not modules:
+        if modules is not None and not modules:
             print("no affected tests", flush=True)
     sys.path.insert(0, str(ROOT))
 

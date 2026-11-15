@@ -20,13 +20,15 @@ jobs:
   # 30 minutes of measured time each); a pull request that affects no test still runs shard 1 with no tests, so the
   # install, version, privacy and installer checks below always run. A manual run, a change to shared test
   # infrastructure (tests/helpers.py, tests/__init__.py, this folder, the shard tools, pyproject.toml, ...) or any
-  # failure of the selector runs the whole suite on 5 shards per OS. tools/affected_tests.py lists the rules.
+  # non-Python file under src/ or a failure of the selector runs the whole suite on 5 shards per OS.
+  # The select job decides once and gives every shard the same modules and count.
   select:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      count: ${{ steps.affected.outputs.count }}
-      shards: ${{ steps.affected.outputs.shards }}
+      count: ${{ steps.affected.outcome == 'success' && steps.affected.outputs.modules && steps.affected.outputs.count || 5 }}
+      shards: ${{ steps.affected.outcome == 'success' && steps.affected.outputs.modules && steps.affected.outputs.shards || '[1, 2, 3, 4, 5]' }}
+      modules: ${{ steps.affected.outcome == 'success' && steps.affected.outputs.modules || 'ALL' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,7 +40,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # If this step fails its outputs stay empty, and the test job falls back to the whole suite on 5 shards.
+      # A failed step's outputs, even partial ones, are ignored; no plan means the whole suite on 5 shards.
       - name: Select affected tests
         id: affected
         continue-on-error: true
@@ -74,26 +76,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      # The same selection again on this checkout (the selector is deterministic, so no artifact is passed). Its
-      # `args` output names the selected modules for the unit tests; when the whole suite runs, or this step fails,
-      # `args` is empty and the unit tests run the whole suite.
-      - name: Select affected tests
-        id: affected
-        continue-on-error: true
-        shell: bash
-        env:
-          OAH_EVENT: ${{ github.event_name }}
-          OAH_BASE: ${{ github.event.pull_request.base.sha }}
-          OAH_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: python tools/affected_tests.py --event "$OAH_EVENT" --base "$OAH_BASE" --head "$OAH_HEAD" --summary --modules-file "$RUNNER_TEMP/affected-tests.txt" --github-output "$GITHUB_OUTPUT"
-
       # Readable failure output on Windows; UTF-8 mode stays off so missing encodings still fail.
       # With no affected tests this shard runs zero tests, says "no affected tests" and passes.
       - name: Unit tests
         env:
           OAH_REQUIRE_NODE_TESTS: "1"
           PYTHONIOENCODING: "utf-8:backslashreplace"
-        run: python tools/test_shard.py ${{ matrix.shard }} ${{ needs.select.outputs.count || 5 }} ${{ steps.affected.outputs.args }} -v
+          OAH_TEST_MODULES: ${{ needs.select.outputs.modules || 'ALL' }}
+        run: python tools/test_shard.py ${{ matrix.shard }} ${{ needs.select.outputs.count || 5 }} --modules-env OAH_TEST_MODULES -v
 
       # The packaging, privacy and installer checks run once per OS, in the first shard.
       # One command per step: a multi-line PowerShell step only fails on its last command.

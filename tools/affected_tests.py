@@ -9,8 +9,10 @@ What runs when, in plain words:
   so the install, version, privacy and installer steps of shard 1 still run.
 * The whole suite runs on 5 shards per OS when the run was started by hand (any event other than `pull_request`),
   when the base commit is missing or unreadable, when a changed file is shared test infrastructure (listed below),
-  when a changed file under `src/` or `tests/` reaches no test, or when anything here goes wrong. Doubt never means
-  fewer tests.
+  when any non-Python file under src/ changes, when a changed file under `src/` or `tests/` reaches no test, or when
+  anything here goes wrong. Doubt never means fewer tests.
+* CI selects once. Its job outputs give every shard the same module list and count. If the selector fails or writes
+  no plan, the select job gives every shard the whole suite on 5 shards; test jobs never select again.
 
 Changed files are `git diff --name-only --no-renames <base>...<head>` (since the merge base); a rename counts as its
 old and its new path. Every file is read from the head commit with git, never from the working tree and never by
@@ -24,14 +26,15 @@ importing it, so the answer depends only on the two commits. A changed file sele
 3. every test module that imports it directly or through a chain of imports (`ast`, absolute and relative imports,
    parent packages, literal `importlib.import_module` names, and `from oah... import` lines written inside strings
    for a child Python). A test module's own chain includes imports inside functions, since it may call anything it
-   imports. The tests package every test imports (tests/__init__.py and the helpers it calls at import time) counts
+   imports, including Python helpers under tests/fixtures/ or elsewhere under tests/. Fixture data trees that no
+   test imports are not parsed. The tests package every test imports (tests/__init__.py and its helpers) counts
    only through module-level imports, since those helpers only set attributes. tests/helpers.py counts per top-level
    function or class: a test module depends on the helpers it names;
 4. when it is under src/, every test module that starts the program as a child (`-m oah`, `runpy` of `oah`, the
    `oah` console script), directly or through a helper or a fake under tests/fakes/ that it names or imports;
-5. every test module (or tests/helpers.py function, or fake) whose source names its repo-relative path or its file
-   name; a changed non-Python file under src/ (package data) also counts every src/ module that names its file name
-   as changed. Fakes and tools/ scripts that a change reaches are followed the same way, by name;
+5. the whole suite for any changed, added, deleted or renamed non-Python file under src/ (package data). For other
+   files, every test module (or tests/helpers.py function, or fake) whose source names its repo-relative path or its
+   file name. Fakes and tools/ scripts that a change reaches are followed the same way, by name;
 6. nothing else. A changed file under src/ or tests/ that selects no test module means the whole suite; a deleted
    test module and files outside src/ and tests/ (LICENSE, install/*, docs) may select nothing.
 
@@ -39,9 +42,10 @@ The shard count uses the measured times in tools/test_shard_times.json, the data
 with: a test the file does not list weighs `default_ms`.
 
 Options: `--event NAME` (default pull_request), `--repo DIR` (default the current folder), `--summary` (a readable
-report instead of one module per line or `ALL`), `--modules-file PATH` (the selected modules for
-`tools/test_shard.py --modules`; removed when the whole suite runs), `--github-output PATH` (appends `whole`,
-`count`, `shards` and `args` for a GitHub Actions step). Standard library only.
+report instead of one module per line or `ALL`), `--github-output PATH` (appends `count`, `shards` and `modules` for
+the select job). `modules` is a space-separated list, `NONE` for no tests or `ALL` for the whole suite. Test jobs
+pass it through an environment variable to `tools/test_shard.py --modules-env`, keeping it off the Windows command
+line. Standard library only.
 """
 from __future__ import annotations
 
@@ -50,7 +54,6 @@ import ast
 import dataclasses
 import json
 import math
-import os
 import pathlib
 import posixpath
 import re
@@ -124,6 +127,8 @@ def _select(repo: pathlib.Path, base: str, head: str, event: str) -> Selection:
     for path in changed:
         if path in WHOLE_SUITE_PATHS or path.startswith(WHOLE_SUITE_PREFIXES):
             return whole_suite(f"{path} is shared test infrastructure", total)
+        if path.startswith("src/") and not path.endswith(".py"):
+            return whole_suite(f"{path} is a non-Python file under src/", total)
     graph = Graph(tree, changed)
     selected: set[str] = set()
     for path in changed:
@@ -176,7 +181,7 @@ def changed_files(repo: pathlib.Path, base: str, head: str) -> list[str]:
 def _scanned(path: str) -> bool:
     if not path.endswith(".py"):
         return False
-    return path.startswith(("src/", "tools/")) or (path.startswith("tests/") and not path.startswith("tests/fixtures/"))
+    return path.startswith(("src/", "tools/", "tests/"))
 
 
 class Tree:
@@ -279,18 +284,28 @@ class Graph:
                                 and path.split("/")[1].isidentifier()})
         self.names = {name: path for path in tree.sources if (name := self._module_name(path)) is not None}
         self.script_dirs = sorted({posixpath.dirname(path) for path in tree.sources
-                                   if path.startswith("tests/") and self._module_name(path) is None} | {"tools"})
-        self.scripts = {path for path in tree.sources if posixpath.dirname(path) in self.script_dirs}
+                                   if path.startswith("tests/")
+                                   and posixpath.dirname(path) + "/__init__.py" not in tree.paths} | {"tools"})
+        self.scripts = {path for path in tree.sources if posixpath.dirname(path) in self.script_dirs
+                        and not path.startswith("tests/fixtures/")}
         self.texts: dict[str, str] = {}
         self.eager: dict[str, set[str]] = {}
         self.lazy: dict[str, set[str]] = {}
-        for path in sorted(tree.sources):
+        pending = sorted(path for path in tree.sources
+                         if not path.startswith("tests/fixtures/") or path in tree.test_modules)
+        while pending:
+            path = pending.pop()
+            if path in self.texts:
+                continue
             if path == HELPERS:
                 self._add_helpers(path)
             else:
                 self.texts[path] = tree.texts[path]
                 self.eager[path], self.lazy[path] = self._imports(path, [ast.parse(tree.sources[path], filename=path)],
                                                                   tree.texts[path])
+            nodes = [node for node in self.texts if node == path or node.startswith(path + "::")]
+            imported = set().union(*(self._direct(node) for node in nodes))
+            pending.extend(sorted((imported & tree.sources.keys()) - self.texts.keys()))
         self._add_name_edges()
         self.child_nodes = {node for node in self.texts if self._test_side(node) and CHILD.search(self.texts[node])}
         self.ambient = self._reach({PACKAGE_INIT}, eager_only=True, stop=frozenset())
@@ -306,9 +321,7 @@ class Graph:
         elif parts[0] == "tools" and len(parts) == 2:
             pass
         elif parts[0] == "tests":
-            for depth in range(1, len(parts)):
-                if "/".join(parts[:depth]) + "/__init__.py" not in self.tree.paths:
-                    return None
+            pass
         else:
             return None
         if parts[-1] == "__init__":
@@ -453,8 +466,6 @@ class Graph:
         """The test module paths at head that the changed `path` can affect (rules 2 to 5)."""
         seeds = {path}
         name = posixpath.basename(path)
-        if path.startswith("src/") and not path.endswith(".py"):
-            seeds |= {node for node, text in self.texts.items() if node.startswith("src/") and name in text}
         mentioners = {node for node, text in self.texts.items() if self._test_side(node) and name in text}
         found = set()
         for test, depends in self.depends.items():
@@ -495,20 +506,10 @@ def _summary(selection: Selection) -> str:
     return head + "\n" + "".join(f"  {module}\n" for module in selection.modules)
 
 
-def _write_modules(path: pathlib.Path, selection: Selection) -> None:
-    if selection.whole:
-        path.unlink(missing_ok=True)
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text("".join(f"{module}\n" for module in selection.modules), encoding="utf-8", newline="\n")
-    os.replace(temporary, path)
-
-
-def _github_output(selection: Selection, modules_file: pathlib.Path | None) -> str:
-    args = "" if selection.whole or modules_file is None else f"--modules {modules_file}"
-    return (f"whole={'true' if selection.whole else 'false'}\ncount={selection.count}\n"
-            f"shards={json.dumps(list(range(1, selection.count + 1)))}\nargs={args}\n")
+def _github_output(selection: Selection) -> str:
+    modules = WHOLE if selection.whole else " ".join(selection.modules) or "NONE"
+    return (f"count={selection.count}\nshards={json.dumps(list(range(1, selection.count + 1)))}\n"
+            f"modules={modules}\n")
 
 
 def main(argv: list[str]) -> int:
@@ -519,15 +520,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--event", default="pull_request", help="the GitHub event name")
     parser.add_argument("--repo", default=".", type=pathlib.Path, help="the repository folder")
     parser.add_argument("--summary", action="store_true", help="print a readable report")
-    parser.add_argument("--modules-file", type=pathlib.Path, help="write the selected modules here")
     parser.add_argument("--github-output", type=pathlib.Path, help="append step outputs to this file")
     options = parser.parse_args(argv)
     selection = select(options.repo, options.base, options.head, options.event)
-    if options.modules_file is not None:
-        _write_modules(options.modules_file, selection)
     if options.github_output is not None:
         with open(options.github_output, "a", encoding="utf-8", newline="\n") as handle:
-            handle.write(_github_output(selection, options.modules_file))
+            handle.write(_github_output(selection))
     if options.summary:
         sys.stdout.write(_summary(selection))
     else:
