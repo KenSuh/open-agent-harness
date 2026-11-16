@@ -98,8 +98,8 @@ fn each_area_is_pending_and_every_case_is_complete() {
     }
 }
 
-/// No `.gitattributes` guards these files, so a byte Git could rewrite on checkout (a CR) or a file that is not
-/// UTF-8 text must never be committed; raw input bytes belong in input.json as `bytes` (hex).
+/// The scoped `* -text` attribute preserves these bytes on CRLF checkouts. This guard detects a lost policy;
+/// raw input bytes belong in input.json as `bytes` (hex).
 #[test]
 fn every_file_is_utf8_without_a_cr_byte() {
     let files = files_below(&conformance_root());

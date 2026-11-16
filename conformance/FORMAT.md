@@ -18,10 +18,11 @@ Areas: `config`, `rules`, `review`, `license`, `doctor`, `models`, `skills-roots
 - **Input files.** A case's input files live in `input.json`: `files` maps a relative path with `/` to the file's
   UTF-8 text (CRLF, a byte order mark and a missing final newline are kept exactly), and `bytes` maps a path to
   lowercase hex for content that is not UTF-8. A runner writes both into one folder before the call.
-  Every file under `conformance/` is UTF-8 with LF line ends and no CR byte (a Rust test checks it), so Git's
-  line-ending conversion has nothing to change.
+  Every file under `conformance/` is UTF-8 with LF line ends and no CR byte (a Rust test checks it).
+  `conformance/.gitattributes` sets `* -text` so Git never converts these bytes, including on CRLF checkouts.
 - **expect.json** is `{"ok": <value>}` or `{"error": {"code": "OAH_..."}}`. An `error.message` key appears only
-  where the message is part of the behaviour and must be compared exactly.
+  where the message is part of the behaviour and must be compared exactly. The config manifest's `notes`
+  describe its message normalization: removing the leading error code and replacing the temporary filename.
 - **JSON escapes.** v0.4.0 source ids start with `sk-`, which the repository privacy scan reads as an API key, so
   the extractor writes that `s` as `\u0073`. Any JSON parser reads the same value; compare parsed values, not
   raw text.
