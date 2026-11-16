@@ -32,6 +32,75 @@ fn files_below(root: &Path) -> Vec<PathBuf> {
 /// What in `text` looks like private data: a home folder path, an e-mail address, or a constant named
 /// `*_KEY`, `*_TOKEN`, `*_SECRET` or `*_PASSWORD` assigned a literal. Each finding names its kind.
 fn privacy_findings(text: &str) -> Vec<String> {
+    let mut found = text_findings(text, true);
+    let decoded = decoded_json_text(text);
+    if decoded != text {
+        found.extend(text_findings(&decoded, false));
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn decoded_json_text(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        decoded.push(c);
+        if c == '"' {
+            let mut candidate = chars.clone();
+            if let Some(value) = json_string(&mut candidate) {
+                decoded.push_str(&value);
+                decoded.push('"');
+                chars = candidate;
+            }
+        }
+    }
+    decoded
+}
+
+fn hex_quad(chars: &mut std::str::Chars<'_>) -> Option<u32> {
+    (0..4).try_fold(0, |value, _| Some(value * 16 + chars.next()?.to_digit(16)?))
+}
+
+fn json_string(chars: &mut std::str::Chars<'_>) -> Option<String> {
+    let mut value = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(value),
+            '\\' => value.push(match chars.next()? {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'b' => '\u{08}',
+                'f' => '\u{0c}',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'u' => {
+                    let mut code = hex_quad(chars)?;
+                    if (0xd800..=0xdbff).contains(&code) {
+                        if chars.next()? != '\\' || chars.next()? != 'u' {
+                            return None;
+                        }
+                        let low = hex_quad(chars)?;
+                        if !(0xdc00..=0xdfff).contains(&low) {
+                            return None;
+                        }
+                        code = 0x10000 + (code - 0xd800) * 0x400 + low - 0xdc00;
+                    }
+                    char::from_u32(code)?
+                }
+                _ => return None,
+            }),
+            '\u{00}'..='\u{1f}' => return None,
+            _ => value.push(c),
+        }
+    }
+    None
+}
+
+fn text_findings(text: &str, json_escapes: bool) -> Vec<String> {
     let mut found = Vec::new();
     if text.contains("/Users/") {
         found.push("path: /Users/".to_owned());
@@ -43,7 +112,7 @@ fn privacy_findings(text: &str) -> Vec<String> {
     if lower.contains("c:\\users\\") || lower.contains("c:\\\\users\\\\") {
         found.push("path: C:\\Users\\".to_owned());
     }
-    if let Some(address) = email(text) {
+    if let Some(address) = email(text, json_escapes) {
         found.push(format!("e-mail: {address}"));
     }
     if let Some(name) = secret_constant(text) {
@@ -57,71 +126,132 @@ fn home_path(text: &str) -> bool {
         text[at + "/home/".len()..]
             .chars()
             .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            .is_some_and(|c| !matches!(c, '/' | '\\' | '"' | '\'' | '\r' | '\n' | '\0'))
     })
 }
 
-fn is_local(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || b"._%+-".contains(&c)
+fn is_local(c: char) -> bool {
+    c.is_alphanumeric() || ".!#$%&'*+-/=?^_`{|}~".contains(c)
 }
 
-fn is_domain(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'-' || c == b'.'
+fn is_domain(c: char) -> bool {
+    c.is_alphanumeric() || c == '-' || c == '.'
 }
 
-/// The first e-mail address (local part, `@`, domain with a dot) in `text`. A local part right after a backslash is a JSON escape such as `\n`.
-fn email(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
+fn email(text: &str, json_escapes: bool) -> Option<String> {
     for (at, _) in text.match_indices('@') {
         let mut start = at;
-        while start > 0 && is_local(bytes[start - 1]) {
-            start -= 1;
+        for (offset, c) in text[..at].char_indices().rev() {
+            if !is_local(c) {
+                break;
+            }
+            start = offset;
         }
-        if start == at || (start > 0 && bytes[start - 1] == b'\\') {
+        if json_escapes && text[..start].ends_with('\\') {
+            let local = &text[start..at];
+            if local.starts_with(['n', 'r', 't', 'b', 'f']) {
+                start += 1;
+            } else if local.starts_with('u')
+                && local
+                    .as_bytes()
+                    .get(1..5)
+                    .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            {
+                start += 5;
+            }
+        }
+        if start == at {
             continue;
         }
         let mut end = at + 1;
-        while end < bytes.len() && is_domain(bytes[end]) {
-            end += 1;
+        for c in text[end..].chars() {
+            if !is_domain(c) {
+                break;
+            }
+            end += c.len_utf8();
         }
         let domain = text[at + 1..end].trim_end_matches('.');
         let Some((head, tld)) = domain.rsplit_once('.') else {
             continue;
         };
-        if !head.is_empty() && tld.len() >= 2 && tld.bytes().all(|c| c.is_ascii_alphabetic()) {
+        if !head.is_empty() && tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic) {
             return Some(text[start..at + 1 + domain.len()].to_owned());
         }
     }
     None
 }
 
-/// The first `NAME_KEY = "..."`, `NAME_TOKEN: '...'` or `"NAME_SECRET": "..."` in `text`.
+fn identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn variable_reference(value: &str, allow_identifier: bool) -> bool {
+    if let Some(name) = value.strip_prefix("${") {
+        return name.split_once('}').is_some_and(|(name, rest)| {
+            identifier(name) && rest.chars().all(|c| ",;}]".contains(c))
+        });
+    }
+    let value = value.trim_end_matches([',', ';', '}', ']']);
+    if let Some(name) = value.strip_prefix('$') {
+        return identifier(name);
+    }
+    allow_identifier
+        && identifier(value)
+        && !matches!(value, "true" | "false" | "null" | "True" | "False" | "None")
+}
+
+fn literal_value(rest: &str, allow_identifier: bool) -> bool {
+    let decoded = if rest.starts_with('\\') {
+        json_string(&mut rest.chars())
+    } else {
+        None
+    };
+    let rest = decoded.as_deref().unwrap_or(rest);
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let mut chars = quoted.chars();
+        return !json_string(&mut chars).is_some_and(|value| variable_reference(&value, false));
+    }
+    if rest.starts_with('\'') {
+        return true;
+    }
+    let value = rest.split_whitespace().next().unwrap_or("");
+    !value.is_empty()
+        && !value.starts_with([',', ';', '}', ']'])
+        && !variable_reference(value, allow_identifier)
+}
+
 fn secret_constant(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
     for suffix in ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD"] {
         for (at, _) in text.match_indices(suffix) {
             let end = at + suffix.len();
-            if bytes
-                .get(end)
-                .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_')
+            if text[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
             {
                 continue;
             }
             let mut start = at;
-            while start > 0
-                && (bytes[start - 1].is_ascii_uppercase()
-                    || bytes[start - 1].is_ascii_digit()
-                    || bytes[start - 1] == b'_')
-            {
-                start -= 1;
+            for (offset, c) in text[..at].char_indices().rev() {
+                if !c.is_alphanumeric() && c != '_' {
+                    break;
+                }
+                start = offset;
             }
-            if start == at {
+            if !identifier(&text[start..end]) {
                 continue;
             }
             let mut rest = text[end..].trim_start_matches(['"', '\'']).trim_start();
             if let Some(after) = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':')) {
+                if after.starts_with('=') && rest.starts_with('=') {
+                    continue;
+                }
+                let allow_identifier =
+                    rest.starts_with('=') && after.starts_with(char::is_whitespace);
                 rest = after.trim_start();
-                if rest.starts_with('"') || rest.starts_with('\'') {
+                if literal_value(rest, allow_identifier) {
                     return Some(text[start..end].to_owned());
                 }
             }
@@ -150,91 +280,133 @@ fn no_file_under_conformance_holds_private_data() {
     );
 }
 
-/// The samples are assembled from fragments, so this file never matches the repository privacy scan itself.
+/// Samples use fragments so the repository privacy scan does not mistake them for private data.
 #[test]
-fn each_pattern_is_caught() {
+fn every_private_form_is_rejected_and_controls_are_allowed() {
     let users = ["Us", "ers"].concat();
     let home = ["ho", "me"].concat();
     let at = "@";
+    let email = format!("person{at}synthetic.invalid");
+    let token = ["APP_", "TOKEN"].concat();
+    let password = ["APP_", "PASSWORD"].concat();
+    let path = |account: &str| format!("/{home}/{account}/x");
+    let json_text = |text: &str| format!("{{\"text\": \"{text}\"}}");
     let samples = [
+        (format!("see /{users}/someone/project"), true),
+        (format!("\"path\": \"{}\"", path("someone")), true),
+        (format!(r"C:\{users}\someone\x"), true),
+        (format!(r"c:\{}\someone", users.to_lowercase()), true),
+        (format!(r#""C:\\{users}\\someone""#), true),
+        (format!("write to someone{at}example.org today"), true),
+        (format!("\"author\": \"a.b+c{at}mail.example.co\""), true),
+        (format!("OPENAI_API_{} = \"abc\"", "KEY"), true),
+        (format!("GH_{}: 'abc'", "TOKEN"), true),
+        (format!("{{\"APP_{}\": \"abc\"}}", "SECRET"), true),
+        (format!("DB_{}=\"abc\"", "PASSWORD"), true),
+        (format!("/{users}/synthetic/x"), true),
+        (path("synthetic"), true),
+        (format!(r"C:\{users}\synthetic\x"), true),
+        (format!(r#"{{"path": "C:\\{users}\\synthetic\\x"}}"#), true),
+        (email.clone(), true),
+        (format!("APP_{} = \"fixture-value\"", "KEY"), true),
+        (format!("{token}: 'fixture-value'"), true),
+        (format!("{{\"APP_{}\": \"fixture-value\"}}", "SECRET"), true),
+        (format!("{password}=\"fixture-value\""), true),
+        (json_text(&format!(r"first line\n{email}")), true),
+        (json_text(&format!(r"first word\t{email}")), true),
+        (json_text(&format!(r#"{token} = \"fixture-value\""#)), true),
+        (format!("{token}=fixture-value-123456789"), true),
+        (format!("{password} = 123456789"), true),
+        (path("사용자"), true),
+        (json_text(&format!(r"\/{users}\/synthetic")), true),
+        (json_text(&format!(r"\u002f{users}\u002fsynthetic")), true),
+        (json_text(r"\/home\/\uc0ac\uc6a9\uc790/x"), true),
+        (json_text(r"\/home\/\ud83d\ude00/x"), true),
+        (path("-fixture"), true),
+        (path(".fixture"), true),
+        (path(" fixture"), true),
+        (path(" "), true),
+        (json_text(&format!(r"C:\u005c{users}\u005csynthetic")), true),
+        (json_text(r"person\u0040synthetic.invalid"), true),
+        (format!("사용자{at}예시.한국"), true),
+        (format!("o'hara{at}example.org"), true),
+        (format!(r"\{email}"), true),
+        (json_text(&format!(r"\r{email}")), true),
+        (json_text(&format!(r"\b{email}")), true),
+        (json_text(&format!(r"\f{email}")), true),
+        (r#"{"APP_\u004bEY":123}"#.to_owned(), true),
+        (format!("app_{}=fixture-value", "KEY"), true),
+        (format!("앱_{}=fixture-value", "KEY"), true),
+        (format!("_{}=fixture", "KEY"), true),
+        (format!("{token}=FIXTURE"), true),
+        (format!("{token} = true"), true),
+        (format!("{token}: null"), true),
+        (format!("{password} = -1.25e3"), true),
+        (format!("{token}=\"\""), true),
+        (format!("{token}='$OTHER_TOKEN'"), true),
+        (format!(r#""\q /{users}/synthetic""#), true),
+        ("\"claude_after\": \"@AGENTS.md\\n\"".to_owned(), false),
+        (json_text(r"\n@AGENTS.md\t@AGENTS.md"), false),
+        (json_text(&format!(r"\u000a{at}AGENTS.md")), false),
         (
-            "macos home",
-            format!("see /{users}/someone/project"),
-            format!("path: /{users}/"),
+            "\"label\": \"~/.claude/skills\", \"path\": \"<base>/userhome/.claude/skills\""
+                .to_owned(),
+            false,
         ),
+        ("\"superpowers@m\": []".to_owned(), false),
+        ("npm install -g @openai/codex".to_owned(), false),
         (
-            "linux home",
-            format!("\"path\": \"/{home}/someone/x\""),
-            "path: /home/<name>".to_owned(),
+            "only if you stored your own ARTIFICIAL_ANALYSIS_API_KEY, a key".to_owned(),
+            false,
         ),
+        ("AA_KEY_NAME = \"x\"".to_owned(), false),
+        ("\"email\": \"fixture\"".to_owned(), false),
         (
-            "windows home",
-            format!(r"C:\{users}\someone\x"),
-            r"path: C:\Users\".to_owned(),
+            "/homepage/ and a bare home folder: /home/".to_owned(),
+            false,
         ),
-        (
-            "windows home, lower case",
-            format!(r"c:\{}\someone", users.to_lowercase()),
-            r"path: C:\Users\".to_owned(),
-        ),
-        (
-            "windows home, JSON escaped",
-            format!(r#""C:\\{users}\\someone""#),
-            r"path: C:\Users\".to_owned(),
-        ),
-        (
-            "e-mail",
-            format!("write to someone{at}example.org today"),
-            format!("e-mail: someone{at}example.org"),
-        ),
-        (
-            "e-mail in JSON",
-            format!("\"author\": \"a.b+c{at}mail.example.co\""),
-            format!("e-mail: a.b+c{at}mail.example.co"),
-        ),
-        (
-            "assigned key",
-            format!("OPENAI_API_{} = \"abc\"", "KEY"),
-            "constant: OPENAI_API_KEY".to_owned(),
-        ),
-        (
-            "assigned token",
-            format!("GH_{}: 'abc'", "TOKEN"),
-            "constant: GH_TOKEN".to_owned(),
-        ),
-        (
-            "JSON secret",
-            format!("{{\"APP_{}\": \"abc\"}}", "SECRET"),
-            "constant: APP_SECRET".to_owned(),
-        ),
-        (
-            "assigned password",
-            format!("DB_{}=\"abc\"", "PASSWORD"),
-            "constant: DB_PASSWORD".to_owned(),
-        ),
+        (json_text(&format!("/{home}/")), false),
+        (format!("{token}=$OTHER_TOKEN"), false),
+        (format!("{password}=${{OTHER_PASSWORD}}"), false),
+        (format!("{token} = OTHER_TOKEN"), false),
+        (format!("{token} = other_token"), false),
+        (format!("{token}=\"$OTHER_TOKEN\""), false),
+        (json_text(&format!(r#"{token}=\"$OTHER_TOKEN\""#)), false),
+        (json_text(&token), false),
+        (format!("{token}="), false),
+        (format!("{token} == \"fixture\""), false),
     ];
-    for (name, text, expected) in samples {
+    for (text, forbidden) in samples {
         let found = privacy_findings(&text);
-        assert!(
-            found.contains(&expected),
-            "{name}: {found:?} lacks {expected}"
-        );
+        assert_eq!(!found.is_empty(), forbidden, "{text}: {found:?}");
     }
 }
 
 #[test]
-fn ordinary_fixture_text_is_not_a_hit() {
+fn json_string_decodes_all_escapes_and_rejects_invalid_sequences() {
     let samples = [
-        "\"claude_after\": \"@AGENTS.md\\n\"",
-        "\"label\": \"~/.claude/skills\", \"path\": \"<base>/userhome/.claude/skills\"",
-        "\"superpowers@m\": []",
-        "npm install -g @openai/codex",
-        "only if you stored your own ARTIFICIAL_ANALYSIS_API_KEY, a key",
-        "AA_KEY_NAME = \"x\"",
-        "\"email\": \"fixture\"",
-        "/homepage/ and a bare home folder: /home/",
+        (r#"plain""#, Some("plain")),
+        (r#"\"\\\/\b\f\n\r\t""#, Some("\"\\/\u{08}\u{0c}\n\r\t")),
+        (r#"\u0041\u00e9\uc0ac""#, Some("Aé사")),
+        (r#"\ud83d\ude00""#, Some("😀")),
+        (r#"\uD800\uDC00""#, Some("\u{10000}")),
+        (r#"\uDBFF\uDFFF""#, Some("\u{10ffff}")),
+        (r#"\uD800""#, None),
+        (r#"\uDC00""#, None),
+        (r#"\uD800\u0041""#, None),
+        (r#"\uD800x""#, None),
+        (r#"\u12x4""#, None),
+        (r#"\u123""#, None),
+        (r#"\q""#, None),
+        ("raw\ncontrol\"", None),
+        ("unterminated", None),
+        ("trailing\\", None),
     ];
-    for text in samples {
-        assert_eq!(privacy_findings(text), Vec::<String>::new(), "{text}");
+    for (text, expected) in samples {
+        assert_eq!(
+            json_string(&mut text.chars()).as_deref(),
+            expected,
+            "{text}"
+        );
     }
 }
