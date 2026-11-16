@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_INVALID",
+    "message": ".oah/config.toml: stages must be a table, not a string; write it as a [stages] section"
+  }
+}

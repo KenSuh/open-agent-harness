@@ -1,0 +1,14 @@
+{
+  "allowed": [],
+  "effort_ok": null,
+  "engine": "codex",
+  "entry": null,
+  "floor_tier": "low",
+  "pins": {
+    "max": "my-own-model"
+  },
+  "pools": {},
+  "profile": "balanced",
+  "quality_order": [],
+  "scores": null
+}

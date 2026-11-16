@@ -1,0 +1,22 @@
+{
+  "calls": {
+    "absent": {
+      "models_cache.json": null
+    },
+    "bom": {
+      "models_cache.json": "\ufeff{\"models\": [{\"slug\": \"gpt-6.1-sol\", \"is_default\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\"}, {\"effort\": \"medium\"}, {\"effort\": \"high\"}, {\"effort\": \"xhigh\"}, {\"effort\": \"low\"}]}]}"
+    },
+    "models-object": {
+      "models_cache.json": "{\n \"models\": [\n  {\n   \"slug\": \"gpt-6.1-sol\",\n   \"is_default\": true,\n   \"supported_reasoning_levels\": [\n    {\n     \"effort\": \"low\"\n    },\n    {\n     \"effort\": \"medium\"\n    },\n    {\n     \"effort\": \"high\"\n    },\n    {\n     \"effort\": \"xhigh\"\n    },\n    {\n     \"effort\": \"low\"\n    }\n   ]\n  },\n  {\n   \"slug\": \"gpt-6-luna\",\n   \"visibility\": \"list\",\n   \"supported_reasoning_levels\": [\n    \"low\",\n    \"BAD\",\n    3\n   ]\n  },\n  {\n   \"slug\": \"gpt-6-astra\",\n   \"visibility\": \"hide\",\n   \"supported_reasoning_levels\": [\n    \"max\"\n   ]\n  },\n  {\n   \"id\": \"gpt-6-sol\",\n   \"hidden\": true,\n   \"default\": true\n  },\n  {\n   \"model\": \"gpt-5.6-terra\"\n  },\n  {\n   \"slug\": \"gpt-6.1-sol\",\n   \"supported_reasoning_levels\": [\n    \"low\"\n   ]\n  },\n  {\n   \"slug\": \"\"\n  },\n  \"not an object\",\n  {\n   \"slug\": 7\n  }\n ]\n}"
+    },
+    "not-json": {
+      "models_cache.json": "{"
+    },
+    "top-level-list": {
+      "models_cache.json": "[{\"slug\": \"gpt-6.1-sol\", \"is_default\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\"}, {\"effort\": \"medium\"}, {\"effort\": \"high\"}, {\"effort\": \"xhigh\"}, {\"effort\": \"low\"}]}, {\"slug\": \"gpt-6-luna\", \"visibility\": \"list\", \"supported_reasoning_levels\": [\"low\", \"BAD\", 3]}]"
+    },
+    "unknown-shape": {
+      "models_cache.json": "{\"data\": []}"
+    }
+  }
+}

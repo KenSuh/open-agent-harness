@@ -1,0 +1,79 @@
+{
+  "defaults": {
+    "claude": {
+      "allowed_models": [],
+      "command": [
+        "claude"
+      ],
+      "effort_caps": {},
+      "permission_mode": "acceptEdits",
+      "quality_order": [],
+      "tier_pools": {},
+      "tiers": {
+        "high": {
+          "effort": "high",
+          "model": "",
+          "timeout_min": 60
+        },
+        "low": {
+          "effort": "low",
+          "model": "",
+          "timeout_min": 15
+        },
+        "max": {
+          "effort": "max",
+          "model": "",
+          "timeout_min": 90
+        },
+        "medium": {
+          "effort": "medium",
+          "model": "",
+          "timeout_min": 30
+        }
+      },
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Edit",
+        "Write",
+        "Bash"
+      ]
+    },
+    "codex": {
+      "allowed_models": [],
+      "command": [
+        "codex"
+      ],
+      "effort_caps": {},
+      "quality_order": [],
+      "tier_pools": {},
+      "tiers": {
+        "high": {
+          "effort": "high",
+          "model": "",
+          "timeout_min": 60
+        },
+        "low": {
+          "effort": "low",
+          "model": "",
+          "timeout_min": 15
+        },
+        "max": {
+          "effort": "highest",
+          "model": "",
+          "timeout_min": 90
+        },
+        "medium": {
+          "effort": "medium",
+          "model": "",
+          "timeout_min": 30
+        }
+      }
+    }
+  },
+  "files": {
+    ".oah/config.toml": "# oah project settings, written by `oah init`. Edit freely: `oah init` never replaces this file\n# without --force. A key you leave out uses oah's built-in default.\n\n# Which engine does each stage: Claude Code implements first; Codex reviews, corrects and re-reviews.\n[stages]\ninitial = \"claude\"\nreview = \"codex\"\ncorrection = \"codex\"\n\n# How benchmark scores pick the model inside each engine. \"balanced\" takes the cheapest model that reaches what\n# the difficulty asks, \"performance\" asks one step more, and \"efficient\" takes the most score per cost, from\n# one step lower up.\n[models]\nprofile = \"balanced\"\n# When oah rebuilds its list of models (after a CLI update, or once ttl_hours, 24 by default, have passed), it\n# downloads fresh public scores: Epoch AI's benchmark file from epoch.ai and, only if you stored your own\n# ARTIFICIAL_ANALYSIS_API_KEY, Artificial Analysis's model list from artificialanalysis.ai with that key. A request\n# carries oah's name and version and nothing about you, your project or your tasks; the scores stay on this machine.\n# false: no request, and the scores shipped with oah choose.\nfetch_scores = true\n\n[engines.claude]\ncommand = [\"claude\"]\n# Empty: benchmark scores choose, so new models arrive without edits here. List models, strongest first,\n# to rank them yourself instead.\nquality_order = []\n# When the re-ranker ([rerank], Jev) is on, it picks each call's model and effort from the models the\n# CLI lists, never below the floor the task kind needs. Empty allows every listed model; name models\n# to allow only those. This list only filters: it never makes a model qualified for a tier.\nallowed_models = []\n\n# The highest effort any call may use for a model, one line each, such as \"<model>\" = \"high\".\n# Empty: no cap. Clamps to a supported effort are recorded, including for model pins and without Jev.\n# A cap below the model's own floor effort skips that model; raise or remove the cap to include it.\n# An unrunnable model pin refuses with OAH_CONFIG_INVALID.\n# The efficient profile passes over such a model instead.\n[engines.claude.effort_caps]\n\n# The models you have checked for a tier, one line per tier, such as high = [\"<model>\", \"<model>\"]. That\n# tier runs the first one the CLI lists, ahead of quality_order and scores. When Jev is on, a call may\n# use a model only when it is in the pool of its floor tier and of its own tier; models in one pool are\n# equals. Empty: scores choose.\n[engines.claude.tier_pools]\n\n# Difficulty tiers: model = \"\" lets scores choose, or follows quality_order when it lists models (low\n# takes the last, medium the second, high and max the first); a model name pins that tier.\n[engines.claude.tiers]\nlow = { model = \"\", effort = \"low\", timeout_min = 15 }\nmedium = { model = \"\", effort = \"medium\", timeout_min = 30 }\nhigh = { model = \"\", effort = \"high\", timeout_min = 60 }\nmax = { model = \"\", effort = \"max\", timeout_min = 90 }\n\n[engines.codex]\ncommand = [\"codex\"]\n# Empty: benchmark scores choose, so new models arrive without edits here. List models, strongest first,\n# to rank them yourself instead.\nquality_order = []\n# When the re-ranker ([rerank], Jev) is on, it picks each call's model and effort from the models the\n# CLI lists, never below the floor the task kind needs. Empty allows every listed model; name models\n# to allow only those. This list only filters: it never makes a model qualified for a tier.\nallowed_models = []\n\n# The highest effort any call may use for a model, one line each, such as \"<model>\" = \"high\".\n# Empty: no cap. Clamps to a supported effort are recorded, including for model pins and without Jev.\n# A cap below the model's own floor effort skips that model; raise or remove the cap to include it.\n# An unrunnable model pin refuses with OAH_CONFIG_INVALID.\n# The efficient profile passes over such a model instead.\n[engines.codex.effort_caps]\n\n# The models you have checked for a tier, one line per tier, such as high = [\"<model>\", \"<model>\"]. That\n# tier runs the first one the CLI lists, ahead of quality_order and scores. When Jev is on, a call may\n# use a model only when it is in the pool of its floor tier and of its own tier; models in one pool are\n# equals. Empty: scores choose.\n[engines.codex.tier_pools]\n\n# \"highest\" is the highest reasoning effort the resolved model supports.\n[engines.codex.tiers]\nlow = { model = \"\", effort = \"low\", timeout_min = 15 }\nmedium = { model = \"\", effort = \"medium\", timeout_min = 30 }\nhigh = { model = \"\", effort = \"high\", timeout_min = 60 }\nmax = { model = \"\", effort = \"highest\", timeout_min = 90 }\n\n[preflight]\n# The branch work lands on (read from the remote's HEAD). Change it if your default branch has another name.\ndefault_branch = \"main\"\n\n[skills]\n# Keep oah's own skill cache (in its state folder) current, checked at most once per interval.\n# Your project's skill folders never change on their own: `oah skills update --project` does that.\nauto_update = true\nupdate_interval_days = 1\n# Read skills from Codex's plugin cache too. Cached plugins may be turned off, so those copies come last and\n# are shown as \"plugin-cache (not proof of enabled)\".\n# codex_plugin_cache = false\n\n# Finding specialist skills for a design's needs (oah skills find). Only oah's fixed public words leave the machine.\n# [skills.discovery]\n# enabled = true\n# provider = \"skills-sh\"\n# cache_hours = 24\n# max_queries = 4\n# license_allow = []   # empty: the [sources] license list\n\n# Tools that delivered skills name (oah capabilities plan): tag a server with a capability class, add dependencies,\n# and link one exact capability to a public documentation file Jev may read (\"SOURCE:PATH\" of oah sources).\n# [capabilities]\n# classes = {}\n# requires = {}\n# docs = {}\n\n# Where oah call runs a worker: \"process\" (the default) or \"orca\". The native route is a flag only:\n# oah call --launcher native offers the brief to your own AI's subagent; launcher = \"native\" here is refused.\n# [call]\n# launcher = \"process\"\n\n[updates]\n# After oah finish leaves no task or run active, at most once per interval_hours, bring Claude Code, Codex,\n# and Claude Code plugins up to date with each tool's own update command; every result is checked by reading\n# what is installed. Codex plugins are not updated. MCP servers are never changed.\n# oah's skills keep their own daily check (oah skills update). false: nothing runs and nothing is recorded.\n# `oah update` runs a pass now, and `oah update status` shows the last one.\nafter_finish = false\ninterval_hours = 24\n\n# The TypeSafe Jev re-ranker is off: you answered no in `oah init` on 2026-01-01. A key alone never turns\n# it on. To turn it on, set enabled = true and provider = \"typesafe\" here, and rerank = true under\n# [impact]; it then sends candidate names and short descriptions to TypeSafe and, to judge how hard each\n# task is, the task's Intent text and Scope paths (up to 16,000 characters). TypeSafe may charge for it.\n[rerank]\nenabled = false\nprovider = \"\"\n\n"
+  },
+  "section": "engines"
+}

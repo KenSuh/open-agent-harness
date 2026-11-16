@@ -1,0 +1,17 @@
+{
+  "calls": {
+    "mixed": {
+      "folder": "skills/odd",
+      "present": [
+        "skills/odd/references/notes.md",
+        "skills/odd/scripts/run.sh"
+      ],
+      "text": "Read `references/absent.md` and [notes](references/notes.md).\nSee scripts/run.sh and [site](https://example.org/x) and [top](#top) and [up](../x.md) and [self](./SKILL.md).\nAlso [dot](./references/notes.md) and templates/a.txt.\n"
+    },
+    "none": {
+      "folder": "skills/x",
+      "present": [],
+      "text": "No references.\n"
+    }
+  }
+}

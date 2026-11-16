@@ -1,0 +1,13 @@
+{
+  "calls": {
+    "dotdot": {
+      "name": ".."
+    },
+    "literal": {
+      "name": "pg-schema"
+    },
+    "slash": {
+      "name": "a/b"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "ok": {
+    "high": {
+      "error": "OAH_MODEL_CATALOG_UNAVAILABLE"
+    },
+    "low": {
+      "error": "OAH_MODEL_CATALOG_UNAVAILABLE"
+    },
+    "max": {
+      "model": "my-own-model",
+      "source": "pin"
+    },
+    "medium": {
+      "error": "OAH_MODEL_CATALOG_UNAVAILABLE"
+    }
+  }
+}

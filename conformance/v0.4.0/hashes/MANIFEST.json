@@ -1,0 +1,32 @@
+{
+  "area": "hashes",
+  "cases": [
+    {
+      "function": "skills computedHash",
+      "name": "no-files",
+      "source": "public"
+    },
+    {
+      "function": "skills computedHash",
+      "name": "one-file",
+      "source": "public"
+    },
+    {
+      "function": "skills computedHash",
+      "name": "two-files",
+      "source": "public"
+    }
+  ],
+  "deviations": [],
+  "functions": [],
+  "mined_from": [
+    "https://raw.githubusercontent.com/vercel-labs/skills/main/README.md (section Lock File Content Hash)"
+  ],
+  "notes": [
+    "No v0.4.0 function computes this hash; the expectations are the published vectors, which the extractor recomputes with the published algorithm before writing them.",
+    "input.json `files` maps each path in the skill folder (with `/`) to its UTF-8 text."
+  ],
+  "omitted": [],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

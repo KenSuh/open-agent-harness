@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_SKILL_SOURCE_UNSUPPORTED",
+    "message": "OAH_SKILL_SOURCE_UNSUPPORTED: 'plugins/*/skills/x' is not a literal folder path inside the repository"
+  }
+}

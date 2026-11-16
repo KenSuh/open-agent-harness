@@ -1,0 +1,20 @@
+{
+  "ok": {
+    "high": {
+      "model": "gpt-6-astra",
+      "source": "pool"
+    },
+    "low": {
+      "model": "gpt-6-luna",
+      "source": "pool"
+    },
+    "max": {
+      "model": "gpt-6.1-terra",
+      "source": "quality_order"
+    },
+    "medium": {
+      "model": "gpt-6-luna",
+      "source": "quality_order"
+    }
+  }
+}

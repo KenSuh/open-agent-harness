@@ -1,0 +1,73 @@
+{
+  "ok": {
+    "candidate": {
+      "hit": {
+        "name": "pg-schema",
+        "source": "acme/db"
+      },
+      "provider": "skills-sh",
+      "query_id": "q-fixture",
+      "seed": null
+    },
+    "checked_at": "2026-01-02T00:00:00+00:00",
+    "compatibility": {
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "problems": [
+        "name-mismatch"
+      ],
+      "requires_tools": [],
+      "scripts_present": false
+    },
+    "frontmatter": {
+      "allowed_tools": null,
+      "description": "postgres-schema guidance for testing",
+      "model_invocable": true,
+      "name": "postgres-schema",
+      "user_invocable": true
+    },
+    "id": "sha256:51f8bcde41dbe1f6385126a4b85a507f29ed0d95e8c227da24d5bd46f377bc00",
+    "license": {
+      "eligibility": "eligible",
+      "expression": "MIT",
+      "form": "single",
+      "governing": [
+        {
+          "path": "LICENSE",
+          "sha256": "sha256:eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2"
+        }
+      ],
+      "verdict": "recognized"
+    },
+    "policy_digest": "sha256:866bbb01726daa0bad720fe32b93118d861350b0136a48f2c674877092942cce",
+    "reason": "name-mismatch",
+    "screening": {
+      "flags": [],
+      "marker_collision": false
+    },
+    "source": {
+      "commit": "0b08045b7c1795defb7bfc5bd3bdafdd95f4c7ea",
+      "files": [
+        {
+          "bytes": 102,
+          "path": "skills/pg-schema/SKILL.md",
+          "sha256": "sha256:f981fba1247fbba3235126a177996aaa9f90adcad20a49197ab59dafc66a2ce5"
+        }
+      ],
+      "locator": "https://github.com/acme/db",
+      "path": "skills/pg-schema",
+      "provider": "github",
+      "references": [],
+      "skill_lf_sha256": "sha256:f981fba1247fbba3235126a177996aaa9f90adcad20a49197ab59dafc66a2ce5",
+      "skill_sha256": "sha256:f981fba1247fbba3235126a177996aaa9f90adcad20a49197ab59dafc66a2ce5",
+      "snapshot": "sha256:a0e6192ef6dc0eb7f35317c55d8193a3dbace9d685ff4b557d2e6df0d2869867",
+      "source_id": "\u0073k-035560dad5ab45b746845fe0706e86bd1c114",
+      "spec_digest": "sha256:22b5bf36af6d7e0bffe898a4445d920831fc67eb6801b7ebb92674957e3a89e4",
+      "tree": "c3209c3c114f5388a3cd93120ff6d674765291c7"
+    },
+    "status": "rejected",
+    "version": 1
+  }
+}

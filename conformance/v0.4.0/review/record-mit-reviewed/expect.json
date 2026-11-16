@@ -1,0 +1,78 @@
+{
+  "ok": {
+    "candidate": {
+      "hit": null,
+      "provider": "github",
+      "query_id": null,
+      "seed": null
+    },
+    "checked_at": "2026-01-02T00:00:00+00:00",
+    "compatibility": {
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "problems": [],
+      "requires_tools": [],
+      "scripts_present": false
+    },
+    "frontmatter": {
+      "allowed_tools": null,
+      "description": "grill guidance for testing",
+      "model_invocable": true,
+      "name": "grill",
+      "user_invocable": true
+    },
+    "id": "sha256:c95d717f83aadd5662d52c567319ee4347cecde38224465d48e2c2116c211786",
+    "license": {
+      "eligibility": "eligible",
+      "expression": "MIT",
+      "form": "single",
+      "governing": [
+        {
+          "path": "LICENSE",
+          "sha256": "sha256:eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2"
+        }
+      ],
+      "verdict": "recognized"
+    },
+    "policy_digest": "sha256:866bbb01726daa0bad720fe32b93118d861350b0136a48f2c674877092942cce",
+    "reason": null,
+    "screening": {
+      "flags": [],
+      "marker_collision": false
+    },
+    "source": {
+      "commit": "0260774fc7db54f6a482fd1e9e4a1fe1b40a7f97",
+      "files": [
+        {
+          "bytes": 87,
+          "path": "skills/grill/SKILL.md",
+          "sha256": "sha256:2de71e718b75895d3b688b53a7423d83d64c2bb910702acb7bf811339186665f"
+        },
+        {
+          "bytes": 6,
+          "path": "skills/grill/references/more.md",
+          "sha256": "sha256:a6511d3c4c0155a7c5e5e719ad513a93df6ae76f4a3a89fc3952914a0fa76439"
+        }
+      ],
+      "locator": "https://github.com/acme/skills",
+      "path": "skills/grill",
+      "provider": "github",
+      "references": [
+        {
+          "path": "references/more.md",
+          "present": true
+        }
+      ],
+      "skill_lf_sha256": "sha256:2de71e718b75895d3b688b53a7423d83d64c2bb910702acb7bf811339186665f",
+      "skill_sha256": "sha256:2de71e718b75895d3b688b53a7423d83d64c2bb910702acb7bf811339186665f",
+      "snapshot": "sha256:51102b15938c45f33bc23fe4bd11964ec665e447f5f259e4ec8546b9621dd2a0",
+      "source_id": "\u0073k-2212f2f480b62061b5c21d008053e8cdfd038",
+      "spec_digest": "sha256:be436af5ff2fcf6d0af6596389a238478f7b3e8ce00fbdf192d8f9922b1025c1",
+      "tree": "ccc4cb2caff9263b057ec6326afeadc8f6a9b64d"
+    },
+    "status": "reviewed",
+    "version": 1
+  }
+}

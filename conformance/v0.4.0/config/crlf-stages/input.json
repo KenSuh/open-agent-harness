@@ -1,0 +1,11 @@
+{
+  "defaults": {
+    "correction": "codex",
+    "initial": "claude",
+    "review": "codex"
+  },
+  "files": {
+    ".oah/config.toml": "[stages]\r\ninitial = \"codex\"\r\nreview = \"claude\"\r\n"
+  },
+  "section": "stages"
+}

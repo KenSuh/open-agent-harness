@@ -1,0 +1,199 @@
+{
+  "defaults": {
+    "attach_max_bytes": 65536,
+    "auto_update": true,
+    "codex_plugin_cache": false,
+    "discovery": {
+      "cache_hours": 24.0,
+      "enabled": true,
+      "license_allow": [],
+      "max_queries": 4,
+      "provider": "skills-sh"
+    },
+    "exclude": [],
+    "extra_rules": [],
+    "file_kinds": {
+      ".bash": "shell",
+      ".c": "c",
+      ".cc": "cpp",
+      ".cjs": "javascript",
+      ".cpp": "cpp",
+      ".cs": "csharp",
+      ".css": "web",
+      ".cts": "typescript",
+      ".go": "go",
+      ".h": "c",
+      ".hpp": "cpp",
+      ".html": "web",
+      ".java": "java",
+      ".js": "javascript",
+      ".json": "config",
+      ".jsx": "react",
+      ".kt": "kotlin",
+      ".md": "markdown",
+      ".mdx": "markdown",
+      ".mjs": "javascript",
+      ".mts": "typescript",
+      ".php": "php",
+      ".ps1": "powershell",
+      ".psm1": "powershell",
+      ".py": "python",
+      ".pyi": "python",
+      ".rb": "ruby",
+      ".rs": "rust",
+      ".scss": "web",
+      ".sh": "shell",
+      ".sql": "sql",
+      ".svelte": "web",
+      ".swift": "swift",
+      ".toml": "config",
+      ".ts": "typescript",
+      ".tsx": "react",
+      ".vue": "web",
+      ".yaml": "config",
+      ".yml": "config",
+      ".zsh": "shell"
+    },
+    "mode": "reference",
+    "pins": [],
+    "rules": [
+      {
+        "kinds": [
+          "implementation",
+          "refactor",
+          "fix",
+          "migration",
+          "security"
+        ],
+        "reason": "code changes are written test-first",
+        "skill": [
+          "test-driven-development",
+          "tdd"
+        ],
+        "stages": [
+          "initial",
+          "correction"
+        ]
+      },
+      {
+        "kinds": [
+          "fix"
+        ],
+        "reason": "a fix starts from the root cause",
+        "skill": [
+          "systematic-debugging",
+          "diagnosing-bugs"
+        ]
+      },
+      {
+        "reason": "each review finding is traced to its root cause before it is fixed",
+        "skill": [
+          "systematic-debugging",
+          "diagnosing-bugs"
+        ],
+        "stages": [
+          "correction"
+        ]
+      },
+      {
+        "reason": "corrections check each review finding before acting on it",
+        "skill": [
+          "receiving-code-review"
+        ],
+        "stages": [
+          "correction"
+        ]
+      },
+      {
+        "kinds": [
+          "review",
+          "adversarial-review",
+          "high-risk-review"
+        ],
+        "reason": "review work follows a review checklist",
+        "skill": [
+          "requesting-code-review"
+        ]
+      },
+      {
+        "reason": "review rounds follow a review checklist",
+        "skill": [
+          "requesting-code-review"
+        ],
+        "stages": [
+          "review"
+        ]
+      },
+      {
+        "reason": "a claim of done needs fresh evidence",
+        "skill": [
+          "verification-before-completion"
+        ],
+        "stages": [
+          "initial",
+          "correction"
+        ]
+      },
+      {
+        "kinds": [
+          "implementation",
+          "refactor",
+          "migration",
+          "security"
+        ],
+        "reason": "risky work is planned before it is built",
+        "risks": [
+          "high",
+          "critical"
+        ],
+        "skill": [
+          "writing-plans"
+        ],
+        "stages": [
+          "initial"
+        ]
+      },
+      {
+        "reason": "risky work proves done with gates",
+        "risks": [
+          "high",
+          "critical"
+        ],
+        "skill": [
+          "unlazy"
+        ],
+        "stages": [
+          "initial",
+          "correction"
+        ]
+      },
+      {
+        "kinds": [
+          "broad-audit"
+        ],
+        "reason": "a broad audit tracks every item with gates",
+        "skill": [
+          "unlazy"
+        ]
+      },
+      {
+        "file_kinds": [
+          "react"
+        ],
+        "reason": "the scope has React files",
+        "skill": [
+          "vercel-react-best-practices",
+          "react-best-practices"
+        ]
+      }
+    ],
+    "size_jump_min_bytes": 262144,
+    "size_jump_ratio": 2.0,
+    "telemetry": true,
+    "update_interval_days": 1
+  },
+  "files": {
+    ".oah/config.toml": "[skills]\nauto_update = false\npins = [\"grill\"]\n[skills.discovery]\nmax_queries = 2\n"
+  },
+  "section": "skills"
+}

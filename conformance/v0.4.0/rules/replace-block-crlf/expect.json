@@ -1,0 +1,8 @@
+{
+  "ok": {
+    "agents_after": "top\r\n<!-- OAH:RULES:BEGIN v1 -->\r\n<!-- oah rules lang=en; managed by `oah rules sync`. Put project rules in .oah/rules.local.md, not here. -->\r\n## Fixture workflow\r\n\r\n1. Read the fixture rules first.\r\n2. Keep changes small.\r\n<!-- OAH:RULES:END -->\r\nend",
+    "block_bytes": 242,
+    "claude_after": "@AGENTS.md\n",
+    "lang": "en"
+  }
+}

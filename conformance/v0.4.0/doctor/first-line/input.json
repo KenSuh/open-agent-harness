@@ -1,0 +1,22 @@
+{
+  "calls": {
+    "ansi": {
+      "text": "\u001b[32mgh version 2.91.0\u001b[0m\n"
+    },
+    "crlf": {
+      "text": "uv 0.11.7\r\nextra\r\n"
+    },
+    "empty": {
+      "text": ""
+    },
+    "leading-blank-lines": {
+      "text": "\n  \n  v24.14.0  \nmore\n"
+    },
+    "long": {
+      "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "plain": {
+      "text": "git version 2.50.1\n"
+    }
+  }
+}

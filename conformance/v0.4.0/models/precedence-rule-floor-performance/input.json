@@ -1,0 +1,205 @@
+{
+  "allowed": [],
+  "effort_ok": null,
+  "engine": "codex",
+  "entry": {
+    "checked_at": "2026-11-02T00:00:00Z",
+    "cli_version": "1.0.0",
+    "models": [
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6.1-sol"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6.1-terra"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6-luna"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6-astra"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-5.6-terra"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-7-luna"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "codex-mini"
+      }
+    ],
+    "source": "fixture"
+  },
+  "floor_tier": "high",
+  "pins": {},
+  "pools": {},
+  "profile": "performance",
+  "quality_order": [],
+  "scores": {
+    "credit": "Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.",
+    "date": "2026-11-02",
+    "engine": "codex",
+    "failure": "",
+    "fetched_at": "",
+    "left_out": {
+      "codex-mini": "unknown-family",
+      "gpt-5.6-terra": "superseded",
+      "gpt-7-luna": "unscored"
+    },
+    "models": [
+      {
+        "cost": 12,
+        "family": "sol",
+        "generation": [
+          6,
+          1
+        ],
+        "model": "gpt-6.1-sol",
+        "score": 98.96103896103895
+      },
+      {
+        "cost": 60,
+        "family": "astra",
+        "generation": [
+          6,
+          0
+        ],
+        "model": "gpt-6-astra",
+        "score": 98.90666666666667
+      },
+      {
+        "cost": 6,
+        "family": "terra",
+        "generation": [
+          6,
+          1
+        ],
+        "model": "gpt-6.1-terra",
+        "score": 89.79462398067048
+      },
+      {
+        "cost": 0.6,
+        "family": "luna",
+        "generation": [
+          6,
+          0
+        ],
+        "model": "gpt-6-luna",
+        "score": 0.0
+      }
+    ],
+    "retired": [
+      {
+        "cost": 0.6,
+        "family": "luna",
+        "generation": [
+          5,
+          6
+        ],
+        "model": "gpt-5.6-luna",
+        "score": 10.14430014430014
+      },
+      {
+        "cost": 12,
+        "family": "sol",
+        "generation": [
+          5,
+          6
+        ],
+        "model": "gpt-5.6-sol",
+        "score": 66.25524346454579
+      },
+      {
+        "cost": 6,
+        "family": "terra",
+        "generation": [
+          5,
+          6
+        ],
+        "model": "gpt-5.6-terra",
+        "score": 44.04459881204067
+      },
+      {
+        "cost": 12,
+        "family": "sol",
+        "generation": [
+          6,
+          0
+        ],
+        "model": "gpt-6-sol",
+        "score": 70.84059867780798
+      }
+    ],
+    "scale": [
+      0.0,
+      98.96103896103895
+    ],
+    "source": "Epoch AI",
+    "stays": {
+      "gpt-7-luna": "gpt-6-luna"
+    }
+  }
+}

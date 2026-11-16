@@ -1,0 +1,19 @@
+{
+  "ok": {
+    "high": {
+      "model": "gpt-6.1-sol",
+      "source": "scored"
+    },
+    "low": {
+      "model": "gpt-6-luna",
+      "source": "scored"
+    },
+    "max": {
+      "model": "gpt-6.1-sol",
+      "source": "scored"
+    },
+    "medium": {
+      "error": "OAH_MODEL_UNRESOLVED"
+    }
+  }
+}

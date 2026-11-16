@@ -1,0 +1,148 @@
+{
+  "ok": {
+    "claude-not-signed-in": {
+      "name": "claude",
+      "note": "initial implementation (Claude Code); not signed in, run: claude auth login",
+      "requirement": "required",
+      "source": "fake/bin/claude",
+      "status": "not-signed-in",
+      "version": "2.1.318 (Claude Code)"
+    },
+    "codex-not-signed-in": {
+      "name": "codex",
+      "note": "review and correction (Codex CLI); not signed in, run: codex login",
+      "requirement": "required",
+      "source": "fake/bin/codex",
+      "status": "not-signed-in",
+      "version": "codex-cli 0.163.0"
+    },
+    "login-launch-error": {
+      "name": "codex",
+      "note": "review and correction (Codex CLI); 'codex login status' could not launch: permission denied",
+      "requirement": "required",
+      "source": "fake/bin/codex",
+      "status": "error",
+      "version": "codex-cli 0.163.0"
+    },
+    "login-timeout": {
+      "name": "claude",
+      "note": "initial implementation (Claude Code); 'claude auth status' timed out",
+      "requirement": "required",
+      "source": "fake/bin/claude",
+      "status": "error",
+      "version": "2.1.318 (Claude Code)"
+    },
+    "missing": {
+      "name": "codex",
+      "note": "review and correction (Codex CLI)",
+      "requirement": "required",
+      "source": null,
+      "status": "missing",
+      "version": null
+    },
+    "node-required-with-gates": {
+      "name": "node",
+      "note": "runs unlazy's gate checks; required because this project uses gates",
+      "requirement": "required",
+      "source": "fake/bin/node",
+      "status": "ok",
+      "version": "v24.14.0"
+    },
+    "ok-aside": {
+      "name": "aside",
+      "note": "optional app: a browser with an AI agent that Claude Code and Codex use for web tasks",
+      "requirement": "optional",
+      "source": "fake/bin/aside",
+      "status": "ok",
+      "version": "1.26.1010.1739"
+    },
+    "ok-claude": {
+      "name": "claude",
+      "note": "initial implementation (Claude Code); signed in",
+      "requirement": "required",
+      "source": "fake/bin/claude",
+      "status": "ok",
+      "version": "2.1.318 (Claude Code)"
+    },
+    "ok-codex": {
+      "name": "codex",
+      "note": "review and correction (Codex CLI); signed in",
+      "requirement": "required",
+      "source": "fake/bin/codex",
+      "status": "ok",
+      "version": "codex-cli 0.163.0"
+    },
+    "ok-git": {
+      "name": "git",
+      "note": "version control",
+      "requirement": "required",
+      "source": "fake/bin/git",
+      "status": "ok",
+      "version": "git version 2.50.1"
+    },
+    "too-old": {
+      "name": "node",
+      "note": "runs unlazy's gate checks; needs 16.0.0 or newer",
+      "requirement": "recommended",
+      "source": "fake/bin/node",
+      "status": "too-old",
+      "version": "v14.21.3"
+    },
+    "too-old-required-with-gates": {
+      "name": "node",
+      "note": "runs unlazy's gate checks; required because this project uses gates; needs 16.0.0 or newer",
+      "requirement": "required",
+      "source": "fake/bin/node",
+      "status": "too-old",
+      "version": "v14.21.3"
+    },
+    "too-old-unparsed": {
+      "name": "node",
+      "note": "runs unlazy's gate checks; needs 16.0.0 or newer",
+      "requirement": "recommended",
+      "source": "fake/bin/node",
+      "status": "too-old",
+      "version": "node (unknown build)"
+    },
+    "unsupported-shim": {
+      "name": "codex",
+      "note": "OAH_UNSUPPORTED_BATCH_SHIM: fake/bin/codex.cmd: no package. Install the tool's native executable, or configure an explicit command such as [\"node.exe\", \"<path to the script>\"] in .oah/config.toml.",
+      "requirement": "required",
+      "source": "fake/bin/codex.cmd",
+      "status": "unsupported-shim",
+      "version": null
+    },
+    "version-exit-code": {
+      "name": "rg",
+      "note": "fast code search (ripgrep); --version exited with code 2",
+      "requirement": "recommended",
+      "source": "fake/bin/rg",
+      "status": "error",
+      "version": "ripgrep 14.1.1"
+    },
+    "version-from-stderr": {
+      "name": "gh",
+      "note": "pull requests from the terminal",
+      "requirement": "recommended",
+      "source": "fake/bin/gh",
+      "status": "ok",
+      "version": "gh version 2.91.0"
+    },
+    "version-launch-error": {
+      "name": "git",
+      "note": "version control; --version could not launch: exec format error",
+      "requirement": "required",
+      "source": "fake/bin/git",
+      "status": "error",
+      "version": null
+    },
+    "version-timeout": {
+      "name": "claude",
+      "note": "initial implementation (Claude Code); --version timed out after 10s",
+      "requirement": "required",
+      "source": "fake/bin/claude",
+      "status": "error",
+      "version": null
+    }
+  }
+}

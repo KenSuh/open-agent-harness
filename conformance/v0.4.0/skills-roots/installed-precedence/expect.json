@@ -1,0 +1,116 @@
+{
+  "ok": {
+    "issues": [
+      "OAH_SKILL_UNREADABLE: ~/.agents/skills/broken/SKILL.md is not UTF-8; save it as UTF-8 to use it"
+    ],
+    "shadowed": {
+      "grill": [
+        {
+          "description": "upper",
+          "digest": "62d375aa714c24ac",
+          "id": "Grill",
+          "label": "~/.agents/skills/Mixed-Case/SKILL.md",
+          "name": "Grill",
+          "origin": "user",
+          "path": "<base>/userhome/.agents/skills/Mixed-Case/SKILL.md"
+        }
+      ],
+      "test-driven-development": [
+        {
+          "description": "kit copy",
+          "digest": "c95fbbff89483088",
+          "id": "test-driven-development",
+          "label": "kit cache/test-driven-development/SKILL.md",
+          "name": "test-driven-development",
+          "origin": "kit",
+          "path": "<base>/state/skills-cache/test-driven-development/SKILL.md"
+        }
+      ],
+      "unlazy": [
+        {
+          "description": "user claude copy",
+          "digest": "146e82d778652760",
+          "id": "unlazy",
+          "label": "~/.claude/skills/unlazy/SKILL.md",
+          "name": "unlazy",
+          "origin": "user",
+          "path": "<base>/userhome/.claude/skills/unlazy/SKILL.md"
+        }
+      ]
+    },
+    "skills": {
+      "a": {
+        "description": "only a",
+        "digest": "68424aea43d0706a",
+        "id": "a",
+        "label": "kit two/a/SKILL.md",
+        "name": "a",
+        "origin": "kit",
+        "path": "<base>/kit2/a/SKILL.md"
+      },
+      "bom": {
+        "description": "byte order mark",
+        "digest": "abaa656ef4bfb41f",
+        "id": "bom",
+        "label": "~/.agents/skills/bom/SKILL.md",
+        "name": "bom",
+        "origin": "user",
+        "path": "<base>/userhome/.agents/skills/bom/SKILL.md"
+      },
+      "grill": {
+        "description": "lower",
+        "digest": "d2264a77b9e941f4",
+        "id": "grill",
+        "label": "~/.agents/skills/lower/SKILL.md",
+        "name": "grill",
+        "origin": "user",
+        "path": "<base>/userhome/.agents/skills/lower/SKILL.md"
+      },
+      "superpowers:test-driven-development": {
+        "description": "plugin tdd",
+        "digest": "acafb2984e148270",
+        "id": "superpowers:test-driven-development",
+        "label": "~/plugin/skills/test-driven-development/SKILL.md",
+        "name": "test-driven-development",
+        "origin": "plugin",
+        "path": "<base>/plugin/skills/test-driven-development/SKILL.md"
+      },
+      "superpowers:writing-plans": {
+        "description": "plugin plans",
+        "digest": "8e234d25fe0566b4",
+        "id": "superpowers:writing-plans",
+        "label": "~/plugin/skills/writing-plans/SKILL.md",
+        "name": "writing-plans",
+        "origin": "plugin",
+        "path": "<base>/plugin/skills/writing-plans/SKILL.md"
+      },
+      "systematic-debugging": {
+        "description": "find root causes",
+        "digest": "3f0f0ba154235da6",
+        "id": "systematic-debugging",
+        "label": "~/.claude/skills/systematic-debugging/SKILL.md",
+        "name": "systematic-debugging",
+        "origin": "user",
+        "path": "<base>/userhome/.claude/skills/systematic-debugging/SKILL.md"
+      },
+      "test-driven-development": {
+        "description": "project copy of tdd",
+        "digest": "2c156b60df82fa82",
+        "id": "test-driven-development",
+        "label": ".claude/skills/test-driven-development/SKILL.md",
+        "name": "test-driven-development",
+        "origin": "project",
+        "path": "<base>/repo/.claude/skills/test-driven-development/SKILL.md"
+      },
+      "unlazy": {
+        "description": "gates",
+        "digest": "420a9a53d2b16f55",
+        "id": "unlazy",
+        "label": "~/.agents/skills/unlazy/SKILL.md",
+        "name": "unlazy",
+        "origin": "user",
+        "path": "<base>/userhome/.agents/skills/unlazy/SKILL.md"
+      }
+    }
+  }
+}

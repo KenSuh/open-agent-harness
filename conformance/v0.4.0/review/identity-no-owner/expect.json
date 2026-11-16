@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_SKILL_SOURCE_UNSUPPORTED",
+    "message": "OAH_SKILL_SOURCE_UNSUPPORTED: 'acme' is not an owner/repo GitHub name; only GitHub skill folders are reviewed"
+  }
+}

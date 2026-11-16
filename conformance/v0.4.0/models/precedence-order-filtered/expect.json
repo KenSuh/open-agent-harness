@@ -1,0 +1,20 @@
+{
+  "ok": {
+    "high": {
+      "model": "gpt-6.1-sol",
+      "source": "quality_order"
+    },
+    "low": {
+      "model": "gpt-6.1-sol",
+      "source": "quality_order"
+    },
+    "max": {
+      "model": "gpt-6.1-sol",
+      "source": "quality_order"
+    },
+    "medium": {
+      "model": "gpt-6.1-sol",
+      "source": "quality_order"
+    }
+  }
+}

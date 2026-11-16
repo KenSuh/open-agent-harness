@@ -1,0 +1,11 @@
+{
+  "bytes": {
+    ".oah/config.toml": "5b7374616765735d0a726576696577203d2022c4dab5a6220a"
+  },
+  "defaults": {
+    "correction": "codex",
+    "initial": "claude",
+    "review": "codex"
+  },
+  "section": "stages"
+}

@@ -1,0 +1,5 @@
+{
+  "files": {
+    "benchmarks.csv": "model,started_at,Status,mean_score,original_task_name,extra\ngpt-6-sol_max,yesterday,Success,0.5,Chess Puzzles,x\n"
+  }
+}

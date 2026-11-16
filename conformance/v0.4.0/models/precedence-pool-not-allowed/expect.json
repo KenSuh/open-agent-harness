@@ -1,0 +1,19 @@
+{
+  "ok": {
+    "high": {
+      "model": "gpt-6-luna",
+      "source": "scored"
+    },
+    "low": {
+      "model": "gpt-6-luna",
+      "source": "scored"
+    },
+    "max": {
+      "error": "OAH_MODEL_UNRESOLVED"
+    },
+    "medium": {
+      "model": "gpt-6-luna",
+      "source": "scored"
+    }
+  }
+}

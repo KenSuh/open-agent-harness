@@ -1,0 +1,10 @@
+{
+  "codex_plugin_cache": false,
+  "env": {},
+  "files": {
+    "userhome/.claude/plugins/installed_plugins.json": "{"
+  },
+  "home": "<base>/userhome",
+  "kit_cache": null,
+  "repo": "<base>/repo"
+}

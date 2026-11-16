@@ -1,0 +1,25 @@
+{
+  "calls": {
+    "crlf-quotes-blocks": {
+      "text": "\ufeff---\r\nname: 'it''s'\r\ndescription: >-\r\n  folded\r\n  text\r\nother: \"a \\\"q\\\" b\"\r\nliteral: |\r\n  one\r\n  two\r\nmetadata:\r\n  type: x\r\nplain: first\r\n  second\r\n---\r\nbody\r\n"
+    },
+    "flags-and-tools": {
+      "text": "---\nname: odd\ndescription: odd guidance for testing\ndisable-model-invocation: true\nuser-invocable: false\nallowed-tools: Read, Bash(git log:*) TodoWrite\n---\n\nUse this skill well.\n"
+    },
+    "flags-empty": {
+      "text": "---\nname: odd\ndescription: odd guidance for testing\ndisable-model-invocation:\nuser-invocable: maybe\nallowed-tools: \"\"\n---\n\nUse this skill well.\n"
+    },
+    "no-description": {
+      "text": "---\nname: bare\n---\nbody\n"
+    },
+    "no-front-matter": {
+      "text": "# Title\n"
+    },
+    "plain": {
+      "text": "---\nname: grill\ndescription: grill guidance for testing\n---\n\nUse this skill well.\n"
+    },
+    "unclosed": {
+      "text": "---\nname: x\n"
+    }
+  }
+}

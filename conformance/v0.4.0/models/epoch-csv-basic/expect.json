@@ -1,0 +1,11 @@
+{
+  "ok": {
+    "claude-opus-5-5": {
+      "Mystery Game Puzzles": 1.0
+    },
+    "gpt-6-sol": {
+      "Chess Puzzles": 0.6,
+      "EBR-bench": 0.7
+    }
+  }
+}

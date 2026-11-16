@@ -1,0 +1,6 @@
+{
+  "files": {
+    ".oah/config.toml": "[stages]\ninitial = \"codex\"\nreview = \"claude\"\ncorrection = \"codex\"\n"
+  },
+  "read": "legacy-to-1.0"
+}

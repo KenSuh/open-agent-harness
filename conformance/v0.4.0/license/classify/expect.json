@@ -1,0 +1,94 @@
+{
+  "ok": {
+    "apache-2-0": {
+      "problem": null,
+      "spdx": "Apache-2.0",
+      "strict": true
+    },
+    "bsd-2-clause": {
+      "problem": null,
+      "spdx": "BSD-2-Clause",
+      "strict": true
+    },
+    "bsd-3-clause": {
+      "problem": null,
+      "spdx": "BSD-3-Clause",
+      "strict": true
+    },
+    "empty": {
+      "problem": "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields",
+      "spdx": null,
+      "strict": false
+    },
+    "gpl-title": {
+      "problem": "reads as GPL-3.0, which this kit never treats as eligible",
+      "spdx": "GPL-3.0",
+      "strict": false
+    },
+    "isc": {
+      "problem": null,
+      "spdx": "ISC",
+      "strict": true
+    },
+    "mit": {
+      "problem": null,
+      "spdx": "MIT",
+      "strict": true
+    },
+    "mit-and-isc-in-one-file": {
+      "problem": "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields",
+      "spdx": null,
+      "strict": false
+    },
+    "mit-copyright-clause": {
+      "problem": "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields",
+      "spdx": null,
+      "strict": false
+    },
+    "mit-crlf": {
+      "problem": null,
+      "spdx": "MIT",
+      "strict": true
+    },
+    "mit-extra-terms": {
+      "problem": "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields",
+      "spdx": null,
+      "strict": false
+    },
+    "mit-hidden-character": {
+      "problem": "license text holds control or invisible formatting characters",
+      "spdx": null,
+      "strict": false
+    },
+    "mit-multiword-holder": {
+      "problem": "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields",
+      "spdx": null,
+      "strict": false
+    },
+    "mit-notice-range": {
+      "problem": null,
+      "spdx": "MIT",
+      "strict": true
+    },
+    "mit-notice-short": {
+      "problem": null,
+      "spdx": "MIT",
+      "strict": true
+    },
+    "mit-notice-symbol": {
+      "problem": null,
+      "spdx": "MIT",
+      "strict": true
+    },
+    "mit-parenthesized-terms": {
+      "problem": "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields",
+      "spdx": null,
+      "strict": false
+    },
+    "mit-snippet": {
+      "problem": "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields",
+      "spdx": null,
+      "strict": false
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "calls": {
+    "cargo": {
+      "path": "Cargo.toml",
+      "text": "[package]\nname = \"x\"\nlicense = \"MIT OR Apache-2.0\"\n"
+    },
+    "cargo-invalid": {
+      "path": "Cargo.toml",
+      "text": "[package\n"
+    },
+    "package-json": {
+      "path": "package.json",
+      "text": "{\"license\": \"MIT\"}"
+    },
+    "package-json-no-field": {
+      "path": "package.json",
+      "text": "{\"name\": \"x\"}"
+    },
+    "pyproject-table": {
+      "path": "pyproject.toml",
+      "text": "[project]\nlicense = {text = \"ISC\"}\n"
+    }
+  }
+}

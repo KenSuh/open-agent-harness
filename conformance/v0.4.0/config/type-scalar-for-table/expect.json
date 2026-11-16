@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_INVALID",
+    "message": ".oah/config.toml: engines.claude must be a table, not an integer; change it to a table or remove it to use the default"
+  }
+}

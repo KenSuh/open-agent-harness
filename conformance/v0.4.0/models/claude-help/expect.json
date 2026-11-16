@@ -1,0 +1,40 @@
+{
+  "ok": {
+    "changed": {
+      "aliases": [],
+      "efforts": []
+    },
+    "crlf-other-lists": {
+      "aliases": [
+        "opus",
+        "haiku"
+      ],
+      "efforts": [
+        "low",
+        "high"
+      ]
+    },
+    "default": {
+      "aliases": [
+        "fable",
+        "opus",
+        "sonnet"
+      ],
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "options-later": {
+      "aliases": [
+        "sonnet"
+      ],
+      "efforts": [
+        "low"
+      ]
+    }
+  }
+}

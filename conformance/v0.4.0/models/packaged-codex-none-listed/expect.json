@@ -1,0 +1,249 @@
+{
+  "ok": {
+    "choices": {
+      "high/high/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/high/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/high/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/low/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/low/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/low/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/max/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/max/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/max/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/medium/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/medium/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "high/medium/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/high/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/high/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/high/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/low/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/low/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/low/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/max/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/max/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/max/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/medium/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/medium/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "low/medium/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/high/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/high/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/high/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/low/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/low/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/low/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/max/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/max/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/max/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/medium/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/medium/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "max/medium/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/high/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/high/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/high/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/low/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/low/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/low/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/max/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/max/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/max/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/medium/balanced": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/medium/efficient": {
+        "error": "OAH_MODEL_NO_SCORES"
+      },
+      "medium/medium/performance": {
+        "error": "OAH_MODEL_NO_SCORES"
+      }
+    },
+    "score_set": {
+      "credit": "Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.",
+      "date": "2026-11-02",
+      "engine": "codex",
+      "failure": "no model the codex CLI lists has a usable score, so scores cannot choose one; run `oah models` to see why each was left out, or pin a model with [engines.codex.tiers] <tier> = { model = \"<model>\" } in .oah/config.toml",
+      "fetched_at": "",
+      "left_out": {
+        "codex-mini": "unknown-family"
+      },
+      "models": [],
+      "retired": [
+        {
+          "cost": 0.6,
+          "family": "luna",
+          "generation": [
+            5,
+            6
+          ],
+          "model": "gpt-5.6-luna",
+          "score": 10.14430014430014
+        },
+        {
+          "cost": 12,
+          "family": "sol",
+          "generation": [
+            5,
+            6
+          ],
+          "model": "gpt-5.6-sol",
+          "score": 66.25524346454579
+        },
+        {
+          "cost": 6,
+          "family": "terra",
+          "generation": [
+            5,
+            6
+          ],
+          "model": "gpt-5.6-terra",
+          "score": 44.04459881204067
+        },
+        {
+          "cost": 60,
+          "family": "astra",
+          "generation": [
+            6,
+            0
+          ],
+          "model": "gpt-6-astra",
+          "score": 98.90666666666667
+        },
+        {
+          "cost": 0.6,
+          "family": "luna",
+          "generation": [
+            6,
+            0
+          ],
+          "model": "gpt-6-luna",
+          "score": 0.0
+        },
+        {
+          "cost": 12,
+          "family": "sol",
+          "generation": [
+            6,
+            0
+          ],
+          "model": "gpt-6-sol",
+          "score": 70.84059867780798
+        },
+        {
+          "cost": 12,
+          "family": "sol",
+          "generation": [
+            6,
+            1
+          ],
+          "model": "gpt-6.1-sol",
+          "score": 98.96103896103895
+        },
+        {
+          "cost": 6,
+          "family": "terra",
+          "generation": [
+            6,
+            1
+          ],
+          "model": "gpt-6.1-terra",
+          "score": 89.79462398067048
+        }
+      ],
+      "scale": [
+        0.0,
+        98.96103896103895
+      ],
+      "source": "Epoch AI",
+      "stays": {}
+    }
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "ok": {
+    "candidate": {
+      "hit": null,
+      "provider": "github",
+      "query_id": null,
+      "seed": null
+    },
+    "checked_at": "2026-01-02T00:00:00+00:00",
+    "compatibility": {
+      "hosts": [
+        "claude"
+      ],
+      "problems": [
+        "missing-reference: references/absent.md",
+        "marker-collision: not deliverable inline"
+      ],
+      "requires_tools": [
+        "Read",
+        "TodoWrite"
+      ],
+      "scripts_present": true
+    },
+    "frontmatter": {
+      "allowed_tools": [
+        "Read",
+        "TodoWrite"
+      ],
+      "description": "odd guidance for testing",
+      "model_invocable": false,
+      "name": "odd",
+      "user_invocable": true
+    },
+    "id": "sha256:26b2fdc2e754a8ae11a7ba73eb1fdaa66ee4db58e90bda37c9831d6fbf46986e",
+    "license": {
+      "eligibility": "eligible",
+      "expression": "MIT",
+      "form": "single",
+      "governing": [
+        {
+          "path": "LICENSE",
+          "sha256": "sha256:eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2"
+        }
+      ],
+      "verdict": "recognized"
+    },
+    "policy_digest": "sha256:866bbb01726daa0bad720fe32b93118d861350b0136a48f2c674877092942cce",
+    "reason": null,
+    "screening": {
+      "flags": [
+        {
+          "kind": "ignore-instructions",
+          "line": 8
+        },
+        {
+          "kind": "shell-pipe",
+          "line": 9
+        }
+      ],
+      "marker_collision": true
+    },
+    "source": {
+      "commit": "10898a86c1d96a11f99b8d253f57a218d1449015",
+      "files": [
+        {
+          "bytes": 325,
+          "path": "skills/odd/SKILL.md",
+          "sha256": "sha256:9a8b82095078e156e4d99d855e1f427564563a716e88ee60acf468e0bfce6b59"
+        },
+        {
+          "bytes": 2,
+          "path": "skills/odd/references/notes.md",
+          "sha256": "sha256:a4fb621495a0122493b2203591c448903c472e306a1ede54fabad829e01075c0"
+        },
+        {
+          "bytes": 9,
+          "path": "skills/odd/scripts/run.sh",
+          "sha256": "sha256:3732c54214730f15058529acef1ff3561104b38d4ff472f579a23ad1a01ca1d4"
+        }
+      ],
+      "locator": "https://github.com/acme/odd",
+      "path": "skills/odd",
+      "provider": "github",
+      "references": [
+        {
+          "path": "references/absent.md",
+          "present": false
+        },
+        {
+          "path": "references/notes.md",
+          "present": true
+        }
+      ],
+      "skill_lf_sha256": "sha256:9a8b82095078e156e4d99d855e1f427564563a716e88ee60acf468e0bfce6b59",
+      "skill_sha256": "sha256:9a8b82095078e156e4d99d855e1f427564563a716e88ee60acf468e0bfce6b59",
+      "snapshot": "sha256:e1c4d54c8b1ca84e92900f14785af25ce7bf8ab0f3c84f7b3c9d2ce178d9abac",
+      "source_id": "\u0073k-c865ebaec2a6c88ecccab87d8d6899186c734",
+      "spec_digest": "sha256:95f377da634fe3643451c2a7ab58f37d83d5875467e48f1d66d034d9491892c5",
+      "tree": "27812030032765cbd6965b3c446a9c3047443b9e"
+    },
+    "status": "reviewed",
+    "version": 1
+  }
+}

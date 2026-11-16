@@ -1,0 +1,18 @@
+{
+  "calls": {
+    "supported": {
+      "version_info": [
+        3,
+        11,
+        4
+      ]
+    },
+    "too-old": {
+      "version_info": [
+        3,
+        10,
+        12
+      ]
+    }
+  }
+}

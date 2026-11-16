@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_UNKNOWN_KEY",
+    "message": ".oah/config.toml: unknown key engines.codex.permission_mode; remove it or use one of: allowed_models, command, effort_caps, quality_order, tier_pools, tiers"
+  }
+}

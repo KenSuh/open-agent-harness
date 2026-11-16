@@ -1,0 +1,60 @@
+{
+  "calls": {
+    "aa-two-indexes-one-engine": {
+      "raw": "{\"schema\": 1, \"source\": \"Artificial Analysis\", \"date\": \"2026-11-02\", \"url\": \"https://artificialanalysis.ai/\", \"credit\": \"Artificial Analysis, https://artificialanalysis.ai/\", \"min_tasks\": 1, \"source_url\": \"https://artificialanalysis.ai/api/v2/data/llms/models\", \"fetched_at\": \"2026-11-02T10:00:00Z\", \"scores\": {\"gpt-6-sol\": {\"Coding Index\": 0.5}, \"gpt-6-luna\": {\"Intelligence Index\": 0.2}}}",
+      "source": "aa"
+    },
+    "aa-valid": {
+      "raw": "{\"schema\": 1, \"source\": \"Artificial Analysis\", \"date\": \"2026-11-02\", \"url\": \"https://artificialanalysis.ai/\", \"credit\": \"Artificial Analysis, https://artificialanalysis.ai/\", \"min_tasks\": 1, \"source_url\": \"https://artificialanalysis.ai/api/v2/data/llms/models\", \"fetched_at\": \"2026-11-02T10:00:00Z\", \"scores\": {\"gpt-6-sol\": {\"Coding Index\": 0.5}, \"claude-opus-5-5\": {\"Coding Index\": 0.6}}}",
+      "source": "aa"
+    },
+    "epoch-absent": {
+      "raw": null,
+      "source": "epoch"
+    },
+    "epoch-bad-credit": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 0.5, \"EBR-bench\": 0.25}, \"claude-opus-5-5\": {\"Chess Puzzles\": 0.75}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-bad-fetch-time": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 0.5, \"EBR-bench\": 0.25}, \"claude-opus-5-5\": {\"Chess Puzzles\": 0.75}}, \"fetched_at\": \"2026-11-02\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-bad-model-name": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"GPT-6\": {\"Chess Puzzles\": 0.5}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-date-not-fetch-date": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-01\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 0.5, \"EBR-bench\": 0.25}, \"claude-opus-5-5\": {\"Chess Puzzles\": 0.75}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-missing-field": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 0.5, \"EBR-bench\": 0.25}, \"claude-opus-5-5\": {\"Chess Puzzles\": 0.75}}, \"fetched_at\": \"2026-11-02T10:00:00Z\"}",
+      "source": "epoch"
+    },
+    "epoch-nan-constant": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 0.5, \"EBR-bench\": NaN}, \"claude-opus-5-5\": {\"Chess Puzzles\": 0.75}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-not-json": {
+      "raw": "{",
+      "source": "epoch"
+    },
+    "epoch-score-out-of-range": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 1.5}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-unknown-task": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Coding Index\": 0.5}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-valid": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"CC BY 4.0\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 0.5, \"EBR-bench\": 0.25}, \"claude-opus-5-5\": {\"Chess Puzzles\": 0.75}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    },
+    "epoch-wrong-license": {
+      "raw": "{\"schema\": 1, \"source\": \"Epoch AI\", \"date\": \"2026-11-02\", \"license\": \"MIT\", \"url\": \"https://epoch.ai/benchmarks/use-this-data\", \"credit\": \"Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.\", \"scores\": {\"gpt-6-sol\": {\"Chess Puzzles\": 0.5, \"EBR-bench\": 0.25}, \"claude-opus-5-5\": {\"Chess Puzzles\": 0.75}}, \"fetched_at\": \"2026-11-02T10:00:00Z\", \"source_url\": \"https://epoch.ai/data/benchmarks.csv\"}",
+      "source": "epoch"
+    }
+  }
+}

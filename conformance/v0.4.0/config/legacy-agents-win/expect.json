@@ -1,0 +1,14 @@
+{
+  "ok": {
+    "agents": {
+      "codex": {
+        "command": [
+          "codex"
+        ]
+      }
+    },
+    "file_unchanged": true,
+    "notices": [],
+    "unused_kept_in_file": []
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "codex_plugin_cache": false,
+  "env": {},
+  "files": {
+    "userhome/.claude/plugins/installed_plugins.json": "{\n \"version\": 2,\n \"plugins\": {\n  \"superpowers@m\": [\n   {\n    \"scope\": \"user\",\n    \"installPath\": \"<base>/userhome/.claude/plugins/cache/m/superpowers/2.0\"\n   }\n  ],\n  \"local-only@m\": [\n   {\n    \"scope\": \"project\",\n    \"installPath\": \"<base>/userhome/.claude/plugins/cache/m/local-only/1.0\",\n    \"projectPath\": \"<base>/elsewhere\"\n   }\n  ],\n  \"mine@m\": [\n   {\n    \"scope\": \"local\",\n    \"installPath\": \"<base>/userhome/.claude/plugins/cache/m/mine/1.0\",\n    \"projectPath\": \"<base>/repo\"\n   }\n  ],\n  \"no-scope@m\": [\n   {\n    \"installPath\": \"<base>/userhome/.claude/plugins/cache/m/no-scope/1.0\"\n   }\n  ],\n  \"broken@m\": [\n   \"not an object\",\n   {\n    \"scope\": \"user\"\n   },\n   {\n    \"scope\": \"user\",\n    \"installPath\": 7\n   }\n  ],\n  \"notalist@m\": {\n   \"scope\": \"user\",\n   \"installPath\": \"<base>/x\"\n  },\n  \"two@m\": [\n   {\n    \"scope\": \"user\",\n    \"installPath\": \"<base>/userhome/.claude/plugins/cache/m/two/1.0\"\n   },\n   {\n    \"scope\": \"user\",\n    \"installPath\": \"<base>/userhome/.claude/plugins/cache/m/two/2.0\"\n   }\n  ],\n  \"plain\": [\n   {\n    \"scope\": \"user\",\n    \"installPath\": \"<base>/userhome/plugins/plain\"\n   }\n  ]\n }\n}"
+  },
+  "home": "<base>/userhome",
+  "kit_cache": "<base>/kit",
+  "repo": "<base>/repo"
+}

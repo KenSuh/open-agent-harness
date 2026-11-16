@@ -1,0 +1,283 @@
+{
+  "ok": {
+    "choice": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC"
+          ],
+          "reason": "MIT OR ISC is a choice; usable under ISC",
+          "status": "eligible-by-choice",
+          "usable_under": "ISC"
+        },
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "MIT OR ISC is a choice; usable under MIT",
+          "status": "eligible-by-choice",
+          "usable_under": "MIT"
+        },
+        {
+          "policy": [],
+          "reason": "no alternative of MIT OR ISC is allowed",
+          "status": "excluded",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": "MIT OR ISC",
+        "form": "choice",
+        "ids": [
+          "MIT",
+          "ISC"
+        ],
+        "problems": [],
+        "strict": true
+      }
+    },
+    "conjunction": {
+      "eligibility": [
+        {
+          "policy": [
+            "MIT"
+          ],
+          "reason": "MIT AND ISC needs a license that is not allowed",
+          "status": "excluded",
+          "usable_under": null
+        },
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "every part of MIT AND ISC is allowed",
+          "status": "eligible",
+          "usable_under": "MIT AND ISC"
+        }
+      ],
+      "verdict": {
+        "expression": "MIT AND ISC",
+        "form": "conjunction",
+        "ids": [
+          "MIT",
+          "ISC"
+        ],
+        "problems": [],
+        "strict": true
+      }
+    },
+    "declared-differs": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "the manifest declares MIT OR ISC but the license files read as MIT",
+          "status": "unknown",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": null,
+        "form": "unknown",
+        "ids": [],
+        "problems": [
+          "the manifest declares MIT OR ISC but the license files read as MIT"
+        ],
+        "strict": false
+      }
+    },
+    "evidence-problem": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "src holds a LICENSES folder",
+          "status": "unknown",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": null,
+        "form": "unknown",
+        "ids": [],
+        "problems": [
+          "src holds a LICENSES folder"
+        ],
+        "strict": false
+      }
+    },
+    "gpl": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "GPL-3.0 is not a license this policy can allow",
+          "status": "excluded",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": "GPL-3.0",
+        "form": "single",
+        "ids": [
+          "GPL-3.0"
+        ],
+        "problems": [],
+        "strict": false
+      }
+    },
+    "mit": {
+      "eligibility": [
+        {
+          "policy": [
+            "MIT"
+          ],
+          "reason": "MIT is allowed",
+          "status": "eligible",
+          "usable_under": "MIT"
+        },
+        {
+          "policy": [
+            "ISC"
+          ],
+          "reason": "MIT is not in the allowed licenses",
+          "status": "excluded",
+          "usable_under": null
+        },
+        {
+          "policy": [],
+          "reason": "MIT is not in the allowed licenses",
+          "status": "excluded",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": "MIT",
+        "form": "single",
+        "ids": [
+          "MIT"
+        ],
+        "problems": [],
+        "strict": true
+      }
+    },
+    "nested-disagrees": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "nested license file src/vendor/LICENSE does not read as the folder's license",
+          "status": "unknown",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": null,
+        "form": "unknown",
+        "ids": [],
+        "problems": [
+          "nested license file src/vendor/LICENSE does not read as the folder's license"
+        ],
+        "strict": false
+      }
+    },
+    "no-license-file": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "no license file at or above src",
+          "status": "unknown",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": null,
+        "form": "unknown",
+        "ids": [],
+        "problems": [
+          "no license file at or above src"
+        ],
+        "strict": false
+      }
+    },
+    "scopes-differ": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "the selected paths are under different licenses",
+          "status": "unknown",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": null,
+        "form": "unknown",
+        "ids": [],
+        "problems": [
+          "the selected paths are under different licenses"
+        ],
+        "strict": false
+      }
+    },
+    "stored-text-missing": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "LICENSE: the stored license text is missing",
+          "status": "unknown",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": null,
+        "form": "unknown",
+        "ids": [],
+        "problems": [
+          "LICENSE: the stored license text is missing"
+        ],
+        "strict": false
+      }
+    },
+    "two-texts-nothing-declared": {
+      "eligibility": [
+        {
+          "policy": [
+            "ISC",
+            "MIT"
+          ],
+          "reason": "several license texts without a declared expression; register the package manifest with --manifest",
+          "status": "unknown",
+          "usable_under": null
+        }
+      ],
+      "verdict": {
+        "expression": null,
+        "form": "unknown",
+        "ids": [],
+        "problems": [
+          "several license texts without a declared expression; register the package manifest with --manifest"
+        ],
+        "strict": false
+      }
+    }
+  }
+}

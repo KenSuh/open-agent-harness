@@ -1,0 +1,23 @@
+{
+  "ok": {
+    "mixed": [
+      {
+        "path": "references/absent.md",
+        "present": false
+      },
+      {
+        "path": "references/notes.md",
+        "present": true
+      },
+      {
+        "path": "scripts/run.sh",
+        "present": true
+      },
+      {
+        "path": "templates/a.txt",
+        "present": false
+      }
+    ],
+    "none": []
+  }
+}

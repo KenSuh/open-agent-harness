@@ -1,0 +1,399 @@
+{
+  "calls": {
+    "claude-not-signed-in": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/claude"
+        ],
+        "kind": "native",
+        "source": "fake/bin/claude"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "2.1.318 (Claude Code)\n",
+          "timed_out": false
+        },
+        "auth status": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "{\"loggedIn\": false}\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "claude"
+    },
+    "codex-not-signed-in": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/codex"
+        ],
+        "kind": "native",
+        "source": "fake/bin/codex"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "codex-cli 0.163.0\n",
+          "timed_out": false
+        },
+        "login status": {
+          "returncode": 1,
+          "stderr": "",
+          "stdout": "Not logged in\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "codex"
+    },
+    "login-launch-error": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/codex"
+        ],
+        "kind": "native",
+        "source": "fake/bin/codex"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "codex-cli 0.163.0\n",
+          "timed_out": false
+        },
+        "login status": {
+          "oserror": "permission denied"
+        }
+      },
+      "timeout": 10.0,
+      "tool": "codex"
+    },
+    "login-timeout": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/claude"
+        ],
+        "kind": "native",
+        "source": "fake/bin/claude"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "2.1.318 (Claude Code)\n",
+          "timed_out": false
+        },
+        "auth status": {
+          "returncode": null,
+          "stderr": "",
+          "stdout": "",
+          "timed_out": true
+        }
+      },
+      "timeout": 10.0,
+      "tool": "claude"
+    },
+    "missing": {
+      "gates": false,
+      "resolve": null,
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "codex-cli 0.163.0\n",
+          "timed_out": false
+        },
+        "login status": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "Logged in using ChatGPT\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "codex"
+    },
+    "node-required-with-gates": {
+      "gates": true,
+      "resolve": {
+        "argv": [
+          "fake/bin/node"
+        ],
+        "kind": "native",
+        "source": "fake/bin/node"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "v24.14.0\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "node"
+    },
+    "ok-aside": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/aside"
+        ],
+        "kind": "native",
+        "source": "fake/bin/aside"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "1.26.1010.1739\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "aside"
+    },
+    "ok-claude": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/claude"
+        ],
+        "kind": "native",
+        "source": "fake/bin/claude"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "2.1.318 (Claude Code)\n",
+          "timed_out": false
+        },
+        "auth status": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "{\"loggedIn\": true}\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "claude"
+    },
+    "ok-codex": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/codex"
+        ],
+        "kind": "native",
+        "source": "fake/bin/codex"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "codex-cli 0.163.0\n",
+          "timed_out": false
+        },
+        "login status": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "Logged in using ChatGPT\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "codex"
+    },
+    "ok-git": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/git"
+        ],
+        "kind": "native",
+        "source": "fake/bin/git"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "git version 2.50.1\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "git"
+    },
+    "too-old": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/node"
+        ],
+        "kind": "native",
+        "source": "fake/bin/node"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "v14.21.3\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "node"
+    },
+    "too-old-required-with-gates": {
+      "gates": true,
+      "resolve": {
+        "argv": [
+          "fake/bin/node"
+        ],
+        "kind": "native",
+        "source": "fake/bin/node"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "v14.21.3\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "node"
+    },
+    "too-old-unparsed": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/node"
+        ],
+        "kind": "native",
+        "source": "fake/bin/node"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "node (unknown build)\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "node"
+    },
+    "unsupported-shim": {
+      "gates": false,
+      "resolve": {
+        "unsupported_shim": {
+          "path": "fake/bin/codex.cmd",
+          "reason": "no package"
+        }
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "codex-cli 0.163.0\n",
+          "timed_out": false
+        },
+        "login status": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "Logged in using ChatGPT\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "codex"
+    },
+    "version-exit-code": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/rg"
+        ],
+        "kind": "native",
+        "source": "fake/bin/rg"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 2,
+          "stderr": "",
+          "stdout": "ripgrep 14.1.1\n",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "rg"
+    },
+    "version-from-stderr": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/gh"
+        ],
+        "kind": "native",
+        "source": "fake/bin/gh"
+      },
+      "runs": {
+        "--version": {
+          "returncode": 0,
+          "stderr": "\u001b[32mgh version 2.91.0\u001b[0m\n",
+          "stdout": "",
+          "timed_out": false
+        }
+      },
+      "timeout": 10.0,
+      "tool": "gh"
+    },
+    "version-launch-error": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/git"
+        ],
+        "kind": "native",
+        "source": "fake/bin/git"
+      },
+      "runs": {
+        "--version": {
+          "oserror": "exec format error"
+        }
+      },
+      "timeout": 10.0,
+      "tool": "git"
+    },
+    "version-timeout": {
+      "gates": false,
+      "resolve": {
+        "argv": [
+          "fake/bin/claude"
+        ],
+        "kind": "native",
+        "source": "fake/bin/claude"
+      },
+      "runs": {
+        "--version": {
+          "returncode": null,
+          "stderr": "",
+          "stdout": "",
+          "timed_out": true
+        }
+      },
+      "timeout": 10.0,
+      "tool": "claude"
+    }
+  }
+}

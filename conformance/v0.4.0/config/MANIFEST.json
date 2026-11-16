@@ -1,0 +1,245 @@
+{
+  "area": "config",
+  "cases": [
+    {
+      "function": "oah.config.Config.section",
+      "name": "missing-file-stages",
+      "note": "no .oah/config.toml: every section is its defaults",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "empty-file-models",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "missing-section-engines",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "missing-section-skills",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "init-template-stages",
+      "note": "the file `oah init` writes, rendered by init.render_config",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "init-template-models",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "init-template-engines",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "init-template-skills",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "crlf-stages",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "bom-stages",
+      "note": "UTF-8 with a byte order mark",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "invalid-utf8",
+      "note": "cp949 bytes",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "invalid-toml",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "engines-deep-merge",
+      "note": "a table and an inline table both merge key by key over the defaults",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "engines-open-tables",
+      "note": "an empty default table accepts any key",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "models-int-for-float",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "skills-merge",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "type-string-for-int",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "type-int-for-bool",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "type-bool-for-float",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "type-float-for-int",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "type-scalar-for-table",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "type-table-for-array",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "type-section-not-table",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "unknown-key-stages",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "unknown-key-nested",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.config.Config.section",
+      "name": "unknown-key-codex-permission",
+      "note": "v0.4.0 has no permission_mode for codex",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "design:config-legacy-read",
+      "name": "legacy-only-legacy-keys",
+      "note": "only legacy [stages] keys. Expectation is the effective assignment and notice code of the design's legacy reading table (section 3.1), not a v0.4.0 output.",
+      "source": "design"
+    },
+    {
+      "function": "design:config-legacy-read",
+      "name": "legacy-new-keys-win",
+      "note": "new keys present: they win and the legacy keys are ignored with a notice. Expectation is the effective assignment and notice code of the design's legacy reading table (section 3.1), not a v0.4.0 output.",
+      "source": "design"
+    },
+    {
+      "function": "design:config-legacy-read",
+      "name": "legacy-engines-read-as-agents",
+      "note": "[engines.claude] without [agents.claude] is read as [agents.claude]; timeout_min, permission_mode and tools stay in the file unused. Expectation is the effective assignment and notice code of the design's legacy reading table (section 3.1), not a v0.4.0 output.",
+      "source": "design"
+    },
+    {
+      "function": "design:config-legacy-read",
+      "name": "legacy-agents-win",
+      "note": "both present: [agents.codex] wins. Expectation is the effective assignment and notice code of the design's legacy reading table (section 3.1), not a v0.4.0 output.",
+      "source": "design"
+    }
+  ],
+  "deviations": [
+    {
+      "case": "unknown-key-stages",
+      "change": "1.0 reports an unknown key inside a table it reads as the notice OAH_CONFIG_UNKNOWN_KEY and keeps reading; v0.4.0 refuses",
+      "design": "3.1"
+    },
+    {
+      "case": "unknown-key-nested",
+      "change": "as unknown-key-stages",
+      "design": "3.1"
+    },
+    {
+      "case": "unknown-key-codex-permission",
+      "change": "as unknown-key-stages; [engines.*] is read as [agents.*] in 1.0",
+      "design": "3.1"
+    }
+  ],
+  "functions": [
+    {
+      "file": "src/oah/config.py",
+      "module": "oah.config",
+      "name": "load_config"
+    },
+    {
+      "file": "src/oah/config.py",
+      "module": "oah.config",
+      "name": "parse_config"
+    },
+    {
+      "file": "src/oah/config.py",
+      "module": "oah.config",
+      "name": "Config.section"
+    },
+    {
+      "file": "src/oah/init.py",
+      "module": "oah.init",
+      "name": "render_config",
+      "template": "src/oah/templates/init/config.toml"
+    },
+    {
+      "file": "src/oah/call.py",
+      "module": "oah.call",
+      "name": "STAGE_DEFAULTS, ENGINE_DEFAULTS"
+    },
+    {
+      "file": "src/oah/models.py",
+      "module": "oah.models",
+      "name": "DEFAULTS"
+    },
+    {
+      "file": "src/oah/skillsel.py",
+      "module": "oah.skillsel",
+      "name": "config_defaults"
+    }
+  ],
+  "mined_from": [
+    "tests/test_config.py"
+  ],
+  "notes": [
+    "input.json `defaults` is the v0.4.0 default table the command passes for `section`.",
+    "`error.message` is the ConfigError message: str(exc) without its leading `<code>: `. It names the file as `.oah/config.toml` (the extractor replaces the temporary path).",
+    "Cases with source `design` take `{\"read\": \"legacy-to-1.0\"}` and expect the effective 1.0 reading: `stages` (section id -> agent), `agents` (only keys the file gives that 1.0 uses), `unused_kept_in_file` (dotted keys left in the file and not used), `notices` (codes) and `file_unchanged`."
+  ],
+  "omitted": [
+    {
+      "behaviour": "a .oah/config.toml path that exists but cannot be read (for example a folder)",
+      "reason": "the operating system's error text is part of the message and differs by system"
+    },
+    {
+      "behaviour": "messages of OAH_CONFIG_INVALID for invalid UTF-8 and invalid TOML",
+      "reason": "they quote the TOML parser's own error text; only the code is pinned"
+    },
+    {
+      "behaviour": "Config.raw being read-only and results being isolated copies",
+      "reason": "Python object identity, not a file format; 1.0 returns owned values"
+    }
+  ],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

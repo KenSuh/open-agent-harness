@@ -1,0 +1,312 @@
+{
+  "ok": {
+    "clean": {
+      "flags": [
+        {
+          "kind": "destructive-shell",
+          "line": 2
+        }
+      ],
+      "marker_collision": false
+    },
+    "crlf-lines": {
+      "flags": [
+        {
+          "kind": "ignore-instructions",
+          "line": 2
+        }
+      ],
+      "marker_collision": false
+    },
+    "flags": {
+      "flags": [
+        {
+          "kind": "ignore-instructions",
+          "line": 4
+        },
+        {
+          "kind": "shell-pipe",
+          "line": 5
+        },
+        {
+          "kind": "role-override",
+          "line": 6
+        },
+        {
+          "kind": "destructive-shell",
+          "line": 7
+        },
+        {
+          "kind": "shell-pipe",
+          "line": 8
+        }
+      ],
+      "marker_collision": false
+    },
+    "many-flags": {
+      "flags": [
+        {
+          "kind": "role-override",
+          "line": 1
+        },
+        {
+          "kind": "role-override",
+          "line": 2
+        },
+        {
+          "kind": "role-override",
+          "line": 3
+        },
+        {
+          "kind": "role-override",
+          "line": 4
+        },
+        {
+          "kind": "role-override",
+          "line": 5
+        },
+        {
+          "kind": "role-override",
+          "line": 6
+        },
+        {
+          "kind": "role-override",
+          "line": 7
+        },
+        {
+          "kind": "role-override",
+          "line": 8
+        },
+        {
+          "kind": "role-override",
+          "line": 9
+        },
+        {
+          "kind": "role-override",
+          "line": 10
+        },
+        {
+          "kind": "role-override",
+          "line": 11
+        },
+        {
+          "kind": "role-override",
+          "line": 12
+        },
+        {
+          "kind": "role-override",
+          "line": 13
+        },
+        {
+          "kind": "role-override",
+          "line": 14
+        },
+        {
+          "kind": "role-override",
+          "line": 15
+        },
+        {
+          "kind": "role-override",
+          "line": 16
+        },
+        {
+          "kind": "role-override",
+          "line": 17
+        },
+        {
+          "kind": "role-override",
+          "line": 18
+        },
+        {
+          "kind": "role-override",
+          "line": 19
+        },
+        {
+          "kind": "role-override",
+          "line": 20
+        },
+        {
+          "kind": "role-override",
+          "line": 21
+        },
+        {
+          "kind": "role-override",
+          "line": 22
+        },
+        {
+          "kind": "role-override",
+          "line": 23
+        },
+        {
+          "kind": "role-override",
+          "line": 24
+        },
+        {
+          "kind": "role-override",
+          "line": 25
+        },
+        {
+          "kind": "role-override",
+          "line": 26
+        },
+        {
+          "kind": "role-override",
+          "line": 27
+        },
+        {
+          "kind": "role-override",
+          "line": 28
+        },
+        {
+          "kind": "role-override",
+          "line": 29
+        },
+        {
+          "kind": "role-override",
+          "line": 30
+        },
+        {
+          "kind": "role-override",
+          "line": 31
+        },
+        {
+          "kind": "role-override",
+          "line": 32
+        },
+        {
+          "kind": "role-override",
+          "line": 33
+        },
+        {
+          "kind": "role-override",
+          "line": 34
+        },
+        {
+          "kind": "role-override",
+          "line": 35
+        },
+        {
+          "kind": "role-override",
+          "line": 36
+        },
+        {
+          "kind": "role-override",
+          "line": 37
+        },
+        {
+          "kind": "role-override",
+          "line": 38
+        },
+        {
+          "kind": "role-override",
+          "line": 39
+        },
+        {
+          "kind": "role-override",
+          "line": 40
+        },
+        {
+          "kind": "role-override",
+          "line": 41
+        },
+        {
+          "kind": "role-override",
+          "line": 42
+        },
+        {
+          "kind": "role-override",
+          "line": 43
+        },
+        {
+          "kind": "role-override",
+          "line": 44
+        },
+        {
+          "kind": "role-override",
+          "line": 45
+        },
+        {
+          "kind": "role-override",
+          "line": 46
+        },
+        {
+          "kind": "role-override",
+          "line": 47
+        },
+        {
+          "kind": "role-override",
+          "line": 48
+        },
+        {
+          "kind": "role-override",
+          "line": 49
+        },
+        {
+          "kind": "role-override",
+          "line": 50
+        },
+        {
+          "kind": "role-override",
+          "line": 51
+        },
+        {
+          "kind": "role-override",
+          "line": 52
+        },
+        {
+          "kind": "role-override",
+          "line": 53
+        },
+        {
+          "kind": "role-override",
+          "line": 54
+        },
+        {
+          "kind": "role-override",
+          "line": 55
+        },
+        {
+          "kind": "role-override",
+          "line": 56
+        },
+        {
+          "kind": "role-override",
+          "line": 57
+        },
+        {
+          "kind": "role-override",
+          "line": 58
+        },
+        {
+          "kind": "role-override",
+          "line": 59
+        },
+        {
+          "kind": "role-override",
+          "line": 60
+        },
+        {
+          "kind": "role-override",
+          "line": 61
+        },
+        {
+          "kind": "role-override",
+          "line": 62
+        },
+        {
+          "kind": "role-override",
+          "line": 63
+        },
+        {
+          "kind": "role-override",
+          "line": 64
+        }
+      ],
+      "marker_collision": false
+    },
+    "marker-collision": {
+      "flags": [],
+      "marker_collision": true
+    }
+  }
+}

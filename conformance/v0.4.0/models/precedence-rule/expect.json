@@ -1,0 +1,20 @@
+{
+  "ok": {
+    "high": {
+      "model": "sonnet",
+      "source": "scored"
+    },
+    "low": {
+      "model": "haiku",
+      "source": "scored"
+    },
+    "max": {
+      "model": "opus",
+      "source": "scored"
+    },
+    "medium": {
+      "model": "sonnet",
+      "source": "scored"
+    }
+  }
+}

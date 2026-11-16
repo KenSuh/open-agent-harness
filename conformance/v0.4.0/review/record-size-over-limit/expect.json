@@ -1,0 +1,68 @@
+{
+  "ok": {
+    "candidate": {
+      "hit": null,
+      "provider": "github",
+      "query_id": null,
+      "seed": null
+    },
+    "checked_at": "2026-01-02T00:00:00+00:00",
+    "compatibility": {
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "problems": [],
+      "requires_tools": [],
+      "scripts_present": false
+    },
+    "frontmatter": {
+      "allowed_tools": null,
+      "description": "big guidance for testing",
+      "model_invocable": true,
+      "name": "big",
+      "user_invocable": true
+    },
+    "id": "sha256:42eebd024852c69571f273259c30deefb8c834fc4c3a3a1f3f581233929ccd3f",
+    "license": {
+      "eligibility": "eligible",
+      "expression": "MIT",
+      "form": "single",
+      "governing": [
+        {
+          "path": "LICENSE",
+          "sha256": "sha256:eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2"
+        }
+      ],
+      "verdict": "recognized"
+    },
+    "policy_digest": "sha256:866bbb01726daa0bad720fe32b93118d861350b0136a48f2c674877092942cce",
+    "reason": "too-large",
+    "screening": {
+      "flags": [],
+      "marker_collision": false
+    },
+    "source": {
+      "commit": "5e24f07e6e5fa1a95012a827d5015006208c501e",
+      "files": [
+        {
+          "bytes": 196609,
+          "path": "skills/big/SKILL.md",
+          "sha256": "sha256:f6eadfd9a1691453681289364ecdad0360fe3cb240059d038f0f729047f08e3f"
+        }
+      ],
+      "locator": "https://github.com/acme/big",
+      "path": "skills/big",
+      "provider": "github",
+      "references": [],
+      "skill_lf_sha256": "sha256:f6eadfd9a1691453681289364ecdad0360fe3cb240059d038f0f729047f08e3f",
+      "skill_sha256": "sha256:f6eadfd9a1691453681289364ecdad0360fe3cb240059d038f0f729047f08e3f",
+      "snapshot": "sha256:d5168bd05bd21ff6ceb909168acbab86900d9ef5941084bc6cfb1383898dec6d",
+      "source_id": "\u0073k-fe1fa70fe71942bcd6a8557c9cff32c62b81d",
+      "spec_digest": "sha256:b0bdef867eef1ba23724f5a98964c74b64bd26680b61a25bbc42bfe8e9e568d7",
+      "tree": "bcf911ae30b321016431a5bf0f4772c14e26fe77"
+    },
+    "status": "rejected",
+    "version": 1
+  }
+}

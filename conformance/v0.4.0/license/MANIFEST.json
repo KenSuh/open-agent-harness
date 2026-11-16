@@ -1,0 +1,87 @@
+{
+  "area": "license",
+  "cases": [
+    {
+      "function": "oah.design.sources.license.classify_text",
+      "name": "classify-mit-utf16",
+      "note": "the input file LICENSE holds the exact bytes",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.design.sources.license.classify_text",
+      "name": "classify",
+      "note": "a table: each row passes the UTF-8 bytes of `text`",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.design.sources.license.parse_expression",
+      "name": "expression",
+      "note": "a table of parse_expression calls",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.design.sources.license.eligibility",
+      "name": "eligibility",
+      "note": "a table: verdict(evidence, blobs) once per row, then eligibility under each allow list in `allow`, in order",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.design.sources.license.declared_from_manifest",
+      "name": "declared",
+      "note": "a table: each row passes the manifest path and its UTF-8 bytes",
+      "source": "v0.4.0"
+    }
+  ],
+  "deviations": [],
+  "functions": [
+    {
+      "file": "src/oah/design/sources/license.py",
+      "module": "oah.design.sources.license",
+      "name": "classify_text"
+    },
+    {
+      "file": "src/oah/design/sources/license.py",
+      "module": "oah.design.sources.license",
+      "name": "parse_expression"
+    },
+    {
+      "file": "src/oah/design/sources/license.py",
+      "module": "oah.design.sources.license",
+      "name": "declared_from_manifest"
+    },
+    {
+      "file": "src/oah/design/sources/license.py",
+      "module": "oah.design.sources.license",
+      "name": "verdict"
+    },
+    {
+      "file": "src/oah/design/sources/license.py",
+      "module": "oah.design.sources.license",
+      "name": "eligibility"
+    }
+  ],
+  "mined_from": [
+    "tests/test_design_sources.py"
+  ],
+  "notes": [
+    "Table cases give `calls` (row name -> arguments) and expect a map of row name -> result.",
+    "eligibility rows: `evidence` and `blobs` (sha256 -> text) are what verdict() reads; a listed file whose digest is absent from `blobs` is a missing stored text.",
+    "The Apache-2.0 text is the terms section of the copy tag v0.4.0 ships in skills/skill-creator."
+  ],
+  "omitted": [
+    {
+      "behaviour": "license discovery over a fetched repository tree (discover)",
+      "reason": "it walks a collector snapshot; the review records pin it end to end through review()"
+    },
+    {
+      "behaviour": "a manifest over MANIFEST_LIMIT bytes",
+      "reason": "a 256 KiB input for one size check; the limit constant is in the pinned source"
+    },
+    {
+      "behaviour": "copyright notices that carry an e-mail address",
+      "reason": "fixtures hold no e-mail address (privacy rule); the holder rules are pinned without it"
+    }
+  ],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

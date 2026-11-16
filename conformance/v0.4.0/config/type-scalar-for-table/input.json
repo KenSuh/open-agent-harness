@@ -1,0 +1,79 @@
+{
+  "defaults": {
+    "claude": {
+      "allowed_models": [],
+      "command": [
+        "claude"
+      ],
+      "effort_caps": {},
+      "permission_mode": "acceptEdits",
+      "quality_order": [],
+      "tier_pools": {},
+      "tiers": {
+        "high": {
+          "effort": "high",
+          "model": "",
+          "timeout_min": 60
+        },
+        "low": {
+          "effort": "low",
+          "model": "",
+          "timeout_min": 15
+        },
+        "max": {
+          "effort": "max",
+          "model": "",
+          "timeout_min": 90
+        },
+        "medium": {
+          "effort": "medium",
+          "model": "",
+          "timeout_min": 30
+        }
+      },
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Edit",
+        "Write",
+        "Bash"
+      ]
+    },
+    "codex": {
+      "allowed_models": [],
+      "command": [
+        "codex"
+      ],
+      "effort_caps": {},
+      "quality_order": [],
+      "tier_pools": {},
+      "tiers": {
+        "high": {
+          "effort": "high",
+          "model": "",
+          "timeout_min": 60
+        },
+        "low": {
+          "effort": "low",
+          "model": "",
+          "timeout_min": 15
+        },
+        "max": {
+          "effort": "highest",
+          "model": "",
+          "timeout_min": 90
+        },
+        "medium": {
+          "effort": "medium",
+          "model": "",
+          "timeout_min": 30
+        }
+      }
+    }
+  },
+  "files": {
+    ".oah/config.toml": "[engines]\nclaude = 3\n"
+  },
+  "section": "engines"
+}

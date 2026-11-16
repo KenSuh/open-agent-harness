@@ -1,0 +1,102 @@
+{
+  "allowed": [],
+  "effort_ok": null,
+  "engine": "codex",
+  "entry": {
+    "checked_at": "2026-11-02T00:00:00Z",
+    "cli_version": "1.0.0",
+    "models": [
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6.1-sol"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6.1-terra"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6-luna"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-6-astra"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-5.6-terra"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "gpt-7-luna"
+      },
+      {
+        "default": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "listed": true,
+        "name": "codex-mini"
+      }
+    ],
+    "source": "fixture"
+  },
+  "floor_tier": "low",
+  "pins": {},
+  "pools": {},
+  "profile": "balanced",
+  "quality_order": [],
+  "scores": null
+}

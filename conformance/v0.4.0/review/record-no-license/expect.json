@@ -1,0 +1,63 @@
+{
+  "ok": {
+    "candidate": {
+      "hit": null,
+      "provider": "github",
+      "query_id": null,
+      "seed": null
+    },
+    "checked_at": "2026-01-02T00:00:00+00:00",
+    "compatibility": {
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "problems": [],
+      "requires_tools": [],
+      "scripts_present": false
+    },
+    "frontmatter": {
+      "allowed_tools": null,
+      "description": "thing guidance for testing",
+      "model_invocable": true,
+      "name": "thing",
+      "user_invocable": true
+    },
+    "id": "sha256:fdb93a0c9a0f4c17fcc54be6e2ddd57dd415a1c8a911fcc213b73f4e4a29211c",
+    "license": {
+      "eligibility": "unknown",
+      "expression": null,
+      "form": "unknown",
+      "governing": [],
+      "verdict": "unknown"
+    },
+    "policy_digest": "sha256:866bbb01726daa0bad720fe32b93118d861350b0136a48f2c674877092942cce",
+    "reason": null,
+    "screening": {
+      "flags": [],
+      "marker_collision": false
+    },
+    "source": {
+      "commit": "dff0865006c4d5f86ca3c26a7f40598dde28a171",
+      "files": [
+        {
+          "bytes": 82,
+          "path": "skills/thing/SKILL.md",
+          "sha256": "sha256:b39a4ed41f23de9af4b6bd021bbb9793f9bc645b589199ef78318709138667d0"
+        }
+      ],
+      "locator": "https://github.com/acme/bare",
+      "path": "skills/thing",
+      "provider": "github",
+      "references": [],
+      "skill_lf_sha256": "sha256:b39a4ed41f23de9af4b6bd021bbb9793f9bc645b589199ef78318709138667d0",
+      "skill_sha256": "sha256:b39a4ed41f23de9af4b6bd021bbb9793f9bc645b589199ef78318709138667d0",
+      "snapshot": "sha256:107b62b7e2581d3a14d7fa773628d10c96b0bf4e95581a4b25db87afc541d7a6",
+      "source_id": "\u0073k-ed3bd9def55694d114fedef12083038b00779",
+      "spec_digest": "sha256:a42ff2b289ef34796d5cbcc9ed581d860be677a4432eb968940fd76c9070d606",
+      "tree": "88f921fbbe233785b00ff68fa41852f368aa14a6"
+    },
+    "status": "reviewed",
+    "version": 1
+  }
+}
