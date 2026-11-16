@@ -4,8 +4,9 @@
     python3.11 -I tools/conformance/extract.py           # rewrite conformance/v0.4.0/
     python3.11 -I tools/conformance/extract.py --check   # extract into a temporary folder and compare
 
-The frozen package is imported from src/ of this checkout. The extractor refuses to run unless src/oah is the
-tree of tag v0.4.0 with no uncommitted change. It runs that code with HOME, USERPROFILE, XDG and OAH variables
+The frozen code is imported from src/ of this checkout; package resources come from the tag's Git blobs.
+The extractor refuses to run unless src/oah is the tree of tag v0.4.0 with no uncommitted change.
+It runs that code with HOME, USERPROFILE, XDG and OAH variables
 pointed at synthetic temporary folders and rewrites every temporary path in an output to a fixed placeholder.
 """
 from __future__ import annotations
@@ -25,7 +26,7 @@ TAG = "v0.4.0"
 AREAS = ("config", "rules", "review", "license", "doctor", "models", "skills-roots", "hashes")
 
 
-def _git(*args: str) -> subprocess.CompletedProcess:
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
 
 
@@ -70,12 +71,13 @@ def extract(base: pathlib.Path) -> dict[str, bytes]:
     import importlib
 
     files: dict[str, bytes] = {}
-    for area in AREAS:
-        module = importlib.import_module("area_" + area.replace("-", "_"))
-        built = module.build(base)
-        if built.name != area:
-            raise SystemExit(f"area module for {area} built {built.name}")
-        files.update(built.files())
+    with importlib.import_module("frozen").package_resources(base):
+        for area in AREAS:
+            module = importlib.import_module("area_" + area.replace("-", "_"))
+            built = module.build(base)
+            if built.name != area:
+                raise SystemExit(f"area module for {area} built {built.name}")
+            files.update(built.files())
     leaks = [str(base), base.as_posix(), str(pathlib.Path(base).resolve()), REAL_HOME]
     for rel, data in files.items():
         text = data.decode("utf-8", "replace")
