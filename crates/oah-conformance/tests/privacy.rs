@@ -216,7 +216,7 @@ fn each_pattern_is_caught() {
     for (name, text, expected) in samples {
         let found = privacy_findings(&text);
         assert!(
-            found.iter().any(|item| *item == expected),
+            found.contains(&expected),
             "{name}: {found:?} lacks {expected}"
         );
     }
