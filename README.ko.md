@@ -173,7 +173,7 @@ v0.3.0에서 올릴 때 바뀌는 점은 [업그레이드](docs/ko/upgrade.md#7-
   값은 보이지 않는다), `plan`은 스킬이 이름 붙인 도구마다 경로를 정하고, `relay`는 리드가 직접 얻은 결과를 저장한다.
   **한계.** 이번 릴리스에는 용량 검증 프로필을 갖춘 호스트가 없다. 그래서 스킬 본문이나 중계한 도구 결과를
   실을 실행과 `oah skills find --task`는 아무것도 보내기 전에 `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)`로
-  멈춘다. 관리 전달·탐색·능력 입력·허용되고 설정된 작업 조언이 없는 일반 작업은 기존 경로를 따른다. 모든 한계는
+  멈춘다. [일반 작업의 입장 규칙](docs/ko/skills-and-capabilities.md#일반-작업과-관리-입장)을 참고한다. 모든 한계는
   [스킬과 능력](docs/ko/skills-and-capabilities.md#이번-릴리스의-한계)에 있다.
 - **설계 단계의 Jev.** Jev와 그 판정 스위치(`[rerank.judgement]`, 기본은 꺼짐)를 켜면 Jev가 출처 변경이 설계에
   중요한지 평가하고, 어느 스킬 검색을 먼저 돌릴지 고르고, 다음 설계 단계를 제안할 수 있다. 답은 모두 정해진
@@ -258,7 +258,7 @@ API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 저�
 ## 라이선스
 
 `oah`는 [MIT 라이선스](LICENSE)로 배포하며 저작권자는 open-agent-harness 기여자다.
-`skills/`의 스킬은 각 라이선스가 허락하는 것만 원본 그대로 싣고 해당 라이선스를 함께 둔다.
+`skills/`의 스킬은 각 라이선스가 허락하는 것만 원본을 싣고 해당 라이선스를 함께 둔다.
 다이어그램 HTML과 SVG는 MIT 라이선스인 diagram-design의 템플릿과 스타일을 바탕으로 만들었다.
 [외부 저작물 고지](THIRD_PARTY_NOTICES.md)에 이 저작물과 oah가 실행하거나 연결하는 도구인
 unlazy, superpowers, graphify, Claude Code, Codex CLI 등의 출처와 라이선스가 있다.

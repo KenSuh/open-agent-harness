@@ -880,7 +880,7 @@ counts as off.
 The kit bundles the skills, MCP server templates and command-line checks the workflow uses, each with its
 source and license:
 
-- skills vendored unchanged under `skills/` only where their license allows it, with the license, a pinned
+- upstream skill texts vendored under `skills/` only where their license allows it, with the license, a pinned
   upstream commit and a `THIRD_PARTY_NOTICES.md` entry;
 - other skills linked, with their install command and URL;
 - MCP templates in `mcp/` that use `${NAME}` placeholders for keys, never values;

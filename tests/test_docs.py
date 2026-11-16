@@ -8,6 +8,7 @@ import re
 import shutil
 import unittest
 import xml.etree.ElementTree as ET
+from typing import Final
 
 from tests.helpers import make_tmp_dir
 from oah.toolkit import update
@@ -30,12 +31,27 @@ PENDING_LANES = {"OAH_FIX_": "oah.fix_cli", "OAH_INIT_": "oah.init_cli"}
 PENDING_CODES = {"OAH_MCP_UPDATE_AVAILABLE"} if not hasattr(update, "last_mcp_notices") else set()
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 HANGUL_COLON = re.compile(r"[가-힣][)\]`*]*:\s*$")
-UNLINKED_SKILL_ASSURANCE = re.compile(
-    r"(?:\btasks?\s+(?:without\s+(?:any\s+)?linked\s+skills?|whose\s+coverage\s+links\s+no\s+skills?)"
-    r"|연결(?:한|된)\s+스킬(?:이)?\s+없는\s+작업)"
-    r"[^.!?]*(?:unaffected|not\s+affected|as\s+before|exactly\s+the\s+brief"
-    r"|(?:이전|전)과\s+(?:똑)?같|영향(?:을)?\s+받지\s+않)",
+MANAGED_SUBJECT: Final = re.compile(
+    r"\b(?:skills?|capabilit(?:y|ies)|discovery|delivery|managed\s+(?:work|content))\b"
+    r"|스킬|능력|탐색|전달(?![하한할했])|관리\s*(?:작업|콘텐츠)", re.IGNORECASE)
+UNCHANGED_WORK: Final = re.compile(
+    r"\bunaffected\b|\bnot\s+affected\b|\bas\s+before\b|\bunchanged\b|\bno\s+change\b"
+    r"|\bkeeps?\s+working\b|\bstill\s+(?:work|apply)\b|\bsame\s+(?:brief|prompt)\b|\bexactly\s+the\s+brief\b"
+    r"|\bexisting\s+(?:flow|path)\b|(?:이전|전)과\s+(?:똑)?같|변함\s*없"
+    r"|영향(?:을)?\s+받지\s+않|그대로|똑같|기존\s*(?:흐름|경로)|같은\s*(?:브리프|프롬프트)"
+    r"|requires?\s+no\s+extra[^.!?]*qualification|추가[^.!?]*자격(?:을)?\s*요구하지\s*않",
     re.IGNORECASE)
+MANAGED_CONDITION: Final = re.compile(
+    r"\b(?:with\s+no|without)\s+managed\s+delivery,\s*discovery,\s*capability\s+inputs\s+or\s+"
+    r"permitted,?\s*configured\s+task\s+advice\b"
+    r"|관리\s*전달[·,\s]+탐색[·,\s]+능력\s*입력[·,\s]+허용되고\s*설정된\s*작업\s*조언이?\s*(?:모두\s*)?없으면",
+    re.IGNORECASE)
+MANAGED_RULES: Final = (
+    ("docs/skills-and-capabilities.md", "### Ordinary work and managed admission", "ordinary-work-and-managed-admission",
+     (("README.md", "## New in v0.4.0"), ("docs/upgrade.md", "## 7. From 0.3.0 to 0.4.0"))),
+    ("docs/ko/skills-and-capabilities.md", "### 일반 작업과 관리 입장", "일반-작업과-관리-입장",
+     (("README.ko.md", "## v0.4.0의 새 기능"), ("docs/ko/upgrade.md", "## 7. 0.3.0에서 0.4.0으로"))),
+)
 
 
 def read(path: pathlib.Path) -> str:
@@ -76,6 +92,37 @@ def prose_lines(text: str):
             continue
         if not fenced:
             yield number, line
+
+
+def prose_sentences(text: str) -> list[str]:
+    """Keep wrapped sentences together, without joining separate paragraphs or list items."""
+    prose = "\n".join(line for _, line in prose_lines(text) if not line.lstrip().startswith("#"))
+    prose = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", prose)
+    prose = prose.replace("**", "").replace("__", "")
+    blocks = re.split(r"\n\s*\n|\n(?=\s*(?:[-*] |\|))", prose)
+    return [sentence for block in blocks
+            for sentence in re.split(r"(?<=[.!?。])\s+", " ".join(block.split())) if sentence]
+
+
+def managed_admission_claims(text: str, *, owner: bool = False) -> list[str]:
+    # shortcut: conclusions outside this vocabulary need a human sweep; extend it when new wording appears.
+    return [sentence for sentence in prose_sentences(text)
+            if (MANAGED_CONDITION.search(sentence) or
+                (MANAGED_SUBJECT.search(sentence) and UNCHANGED_WORK.search(sentence)))
+            and not (owner and MANAGED_CONDITION.search(sentence))]
+
+
+def split_section(text: str, heading: str) -> tuple[str, str]:
+    """Return a heading's body and the rest of the page, ending at the next peer or parent heading."""
+    lines = list(prose_lines(text))
+    start = next((i for i, (_, line) in enumerate(lines) if line == heading), None)
+    if start is None:
+        return "", text
+    level = len(heading.split(" ", 1)[0])
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r"#{1," + str(level) + r"} +", lines[i][1])), len(lines))
+    return ("\n".join(line for _, line in lines[start + 1:end]),
+            "\n".join(line for _, line in lines[:start] + lines[end:]))
 
 
 READMES = {"README.md": ("English", "한국어"), "README.ko.md": ("한국어", "English")}
@@ -197,11 +244,87 @@ class AccuracyTest(unittest.TestCase):
                 with self.subTest(page=name, line=number):
                     self.assertIsNone(HANGUL_COLON.search(line), line)
 
-    def test_release_pages_do_not_equate_unlinked_skills_with_unmanaged_work(self):
-        for page in all_docs():
-            text = "\n".join(line for _, line in prose_lines(read(page)))
+    def test_managed_admission_has_one_linked_owner_per_language(self) -> None:
+        pages = {page: read(page) for page in all_docs()}
+        outside = pages.copy()
+        for name, heading, anchor, summaries in MANAGED_RULES:
+            owner = REPO / name
+            with self.subTest(owner=name):
+                occurrences = [page for page, text in pages.items()
+                               for _, line in prose_lines(text) if anchor in heading_anchors(line)]
+                self.assertEqual(occurrences, [owner], "the ordinary-work rule needs exactly one owner")
+                body, outside[owner] = split_section(pages[owner], heading)
+                self.assertIn(anchor, heading_anchors(pages[owner]))
+                self.assertEqual(sum(len(MANAGED_CONDITION.findall(s)) for s in prose_sentences(body)), 1,
+                                 "state the full admission condition once, inside its owner section")
+                self.assertEqual(managed_admission_claims(body, owner=True), [])
+            locations = [(REPO / path, split_section(pages[REPO / path], title)[0]) for path, title in summaries]
+            originals = [block for block in re.split(r"\n\s*\n", pages[owner]) if "`skills/originals`" in block]
+            self.assertEqual(len(originals), 1, "locate the empty-original-stage paragraph")
+            locations.append((owner, "\n\n".join(originals)))
+            for page, summary in locations:
+                with self.subTest(summary=str(page.relative_to(REPO))):
+                    if page != owner:
+                        summary = "\n".join(block for block in re.split(r"\n(?=- )", summary)
+                                            if "OAH_SKILLS_BUDGET_EXCEEDED" in block)
+                    self.assertTrue(any(
+                        (page.parent / path if path else page).resolve() == owner.resolve() and fragment == anchor
+                        for target in LINK.findall(summary) for path, _, fragment in [target.partition("#")]
+                    ), "this summary must link directly to the ordinary-work owner rule")
+        for page, text in outside.items():
             with self.subTest(page=str(page.relative_to(REPO))):
-                self.assertIsNone(UNLINKED_SKILL_ASSURANCE.search(text))
+                self.assertEqual(managed_admission_claims(text), [], "link to the owner instead of restating an assurance")
+
+    def test_managed_admission_detector_checks_condition_and_location(self) -> None:
+        cases = (
+            ("en-invalid-existing-path", "Tasks without linked skills keep their existing path.", True, True),
+            ("ko-invalid-existing-path", "연결된 스킬이 없는 작업은 기존 경로를 따른다.", True, True),
+            ("en-qualified", "Tasks without linked skills and without managed delivery, discovery, capability inputs "
+             "or permitted, configured task advice run as before.", True, False),
+            ("ko-qualified", "연결된 스킬이 없는 작업도 관리 전달·탐색·능력 입력·허용되고 설정된 작업 조언이 "
+             "모두 없으면 전과 같이 실행된다.", True, False),
+            ("unaffected", "Skill delivery is unaffected.", True, True),
+            ("not-affected", "Capabilities are not affected.", True, True),
+            ("as-before", "Discovery runs as before.", True, True),
+            ("unchanged", "Managed work is unchanged.", True, True),
+            ("no-change", "There is no change to skill delivery.", True, True),
+            ("keep-working", "Tasks without linked skills keep working.", True, True),
+            ("keeps-working", "Skill discovery keeps working.", True, True),
+            ("still-work", "Installed skills still work.", True, True),
+            ("still-apply", "Linked skills still apply.", True, True),
+            ("same-brief", "Tasks whose coverage links no skill receive the same brief.", True, True),
+            ("same-prompt", "Managed work uses the same prompt.", True, True),
+            ("exactly-the-brief", "Tasks without linked skills receive exactly the brief the lead wrote.", True, True),
+            ("existing-flow", "Capability inputs retain their existing flow.", True, True),
+            ("wrapped-existing-path", "Tasks without linked skills keep their\nexisting path.", True, True),
+            ("전과-같", "스킬이 없는 작업은 전과 같이 실행된다.", True, True),
+            ("이전과-같", "관리 작업은 이전과 같이 실행된다.", True, True),
+            ("이전과-똑같", "탐색은 이전과 똑같이 실행된다.", True, True),
+            ("변함없", "능력 전달은 변함없다.", True, True),
+            ("영향을-받지-않", "스킬이 없는 작업은 영향을 받지 않는다.", True, True),
+            ("영향-받지-않", "관리 작업은 영향 받지 않는다.", True, True),
+            ("그대로", "관리 작업은 그대로 실행된다.", True, True),
+            ("똑같", "탐색은 똑같이 실행된다.", True, True),
+            ("기존-흐름", "능력은 기존 흐름을 따른다.", True, True),
+            ("같은-브리프", "스킬이 없는 작업은 같은 브리프를 받는다.", True, True),
+            ("같은-프롬프트", "관리 작업은 같은 프롬프트로 실행된다.", True, True),
+            ("no-extra-qualification", "That stage requires no extra skill, relay or capacity qualification.", True, True),
+            ("추가-자격", "그 단계는 추가 스킬·중계·용량 자격을 요구하지 않는다.", True, True),
+            ("partial-condition", "With no managed delivery, discovery or capability inputs, work runs as before.", True, True),
+            ("조건-누락", "관리 전달·탐색·능력 입력이 없으면 전과 같이 실행된다.", True, True),
+            ("condition-only", "With no managed delivery, discovery, capability inputs or permitted, configured task advice.",
+             True, False),
+            ("limit", "No host is qualified, so required managed delivery refuses.", False, False),
+            ("separate-sentences", "Skills require review. Packets are unchanged.", False, False),
+            ("bold-separate-sentences", "**Packets are unchanged.** Skills require review.", False, False),
+            ("separate-paragraphs", "Skills require review\n\nPackets are unchanged.", False, False),
+            ("fenced-example", "```text\nSkill delivery is unchanged.\n```", False, False),
+            ("link-target", "[Guide](skills/unchanged.md) describes admission.", False, False),
+        )
+        for name, sentence, outside_reject, inside_reject in cases:
+            for owner, reject in ((False, outside_reject), (True, inside_reject)):
+                with self.subTest(case=name, owner=owner):
+                    self.assertEqual(bool(managed_admission_claims(sentence, owner=owner)), reject)
 
     def test_keys_page_names_the_lookup(self):
         for page in (REPO / "docs/keys.md", REPO / "docs/ko/keys.md"):

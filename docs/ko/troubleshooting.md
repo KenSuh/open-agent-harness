@@ -179,6 +179,9 @@
 
 ## 설계 coverage, 스킬, 능력
 
+이번 릴리스에는 검증된 실제 호스트가 없으므로 필수 관리 전달은 거절된다.
+[일반 작업의 입장 규칙](skills-and-capabilities.md#일반-작업과-관리-입장)을 참고한다.
+
 이 단계들은 [스킬과 능력](skills-and-capabilities.md)에서 설명한다. 최초의 결정적 입장·용량 거절은 run 폴더나
 비용 전에 일어난다. 뒤의 준비·수신·정산 거절은 요청이나 자식 프로세스를 시작한 뒤에도 생긴다. 재시도 전에
 상태 폴더의 `skills/attempts/*.json`에 있는 스킬 순서 판정 및 각 수집 HTTP·`ls-remote`·Git fetch 작업의
@@ -199,7 +202,7 @@ I/O 직전에 입장을 다시 확인한다. 작업 사이 정책이 바뀌면 �
 | `OAH_COVERAGE_INVALID` | coverage 부분이나 coverage 편집 파일이 형식을 어겼다. 모르는 키, 잘못된 값, 목록 순서를 벗어난 확인 항목, 256 KiB를 넘는 파일 등이다. | 메시지가 가리키는 필드를 고친다. 편집은 손으로 쓰지 말고 `oah design coverage edit`으로 만든다. |
 | `OAH_COVERAGE_EDITED` | coverage 부분의 사람이 읽는 절이 JSON 블록과 다르다. 대개 손으로 고친 뒤에 생긴다. | 바꾸려던 내용을 `coverage edit` 파일에 넣어 실행하고, 출력된 부분을 저장한다. |
 | `OAH_COVERAGE_INCOMPLETE` | `oah design coverage --check`의 결과다. 열린 단계, 다시 확인할 단계, 사용자 확인을 기다리는 단계, 결과에 영향이 있는 제안이나 미룸이 남아 있다. 메시지가 막는 항목을 모두 보여 준다. | 보여 준 항목을 `coverage edit`으로 하나씩 정리하고 저장한 뒤 다시 확인한다. |
-| `OAH_SKILL_DISCOVERY_FAILED` | skills.sh 검색이 성공하지 못했다. 시간 초과, 요청 제한, HTTP 오류, 예상과 다른 응답, 막히거나 끊긴 네트워크, 꺼진 검색 등이다. 이유는 괄호 안에 있다. 종료 코드는 69다. | seed, 설치된 스킬, 저장된 검토는 그대로 쓸 수 있다. 나중에 다시 하거나 `.oah/config.toml`의 `[skills.discovery]`를 확인한다. |
+| `OAH_SKILL_DISCOVERY_FAILED` | skills.sh 검색이 성공하지 못했다. 시간 초과, 요청 제한, HTTP 오류, 예상과 다른 응답, 막히거나 끊긴 네트워크, 꺼진 검색 등이다. 이유는 괄호 안에 있다. 종료 코드는 69다. | seed, 설치된 스킬, 저장된 검토를 로컬에서 확인한다. 관리 발주는 [일반 작업의 입장 규칙](skills-and-capabilities.md#일반-작업과-관리-입장)을 참고한다. 나중에 다시 하거나 `.oah/config.toml`의 `[skills.discovery]`를 확인한다. |
 | `OAH_SKILL_SOURCE_UNSUPPORTED` | oah가 고정할 수 있는 GitHub 저장소 폴더가 아니다. | `--github OWNER/REPO --path PATH`나 저장된 검색의 결과를 준다. |
 | `OAH_SKILL_REVIEW_FAILED` | 검토가 멈췄다. 라이선스나 `SKILL.md`가 없는 것처럼 스킬 자체의 문제면 1로, git이나 네트워크가 실패하면 69로 끝난다. 이유는 괄호 안에 있다. | 이유를 읽는다. 라이선스는 받아들일 때만 `license_allow`에 더하고, 아니면 다른 스킬을 고른다. |
 | `OAH_SKILL_STATE_CORRUPT` | oah 스킬 상태의 파일을 쓸 수 없다. oah는 그 파일을 고치거나 초기화하지 않는다. | 메시지에 나온 파일을 다른 곳으로 옮긴다. 다음번에 그 부분이 새로 시작한다. |
@@ -207,8 +210,8 @@ I/O 직전에 입장을 다시 확인한다. 작업 사이 정책이 바뀌면 �
 | `OAH_SKILLS_USAGE` | `oah skills` 옵션이 빠졌거나 다른 옵션과 맞지 않는다. | 메시지를 따른다. `oah skills <subcommand> --help`가 옵션을 보여 준다. |
 | `OAH_SKILL_MANDATORY_MISSING` | 이번 발주 단계의 필수 스킬 필요에 살아 있는 연결이 없거나, 연결된 스킬의 검토가 이 상태 폴더에 없거나, 필수 작업 필요에 지금 lease 아래의 작업 선택이 없다. 아무것도 시작하지 않았다. | 스킬을 검토하고 `coverage edit`으로 연결하거나 그 필요에 공백을 기록한 뒤 다시 호출한다. 설계 없는 작업이면 `oah skills find --task T --out FILE`로 스킬을 찾아 검토하고 `oah skills select --needs FILE --review ID`로 고른다. `oah skills plan`이 시작하지 않고 같은 답을 보여 준다. |
 | `OAH_SKILL_NEEDS_INVALID` | 필요 파일이나 oah가 정한 필요가 지금의 작업과 맞지 않는다. `(stale)`: 필요를 적은 뒤 패킷, 그 의도, 종류, 위험도, 범위, 플랫폼, 설계 coverage, 탐색 설정이 바뀌었다. `(malformed)`: 파일이나 필요가 문서의 형태가 아니거나, 선택에 적은 검토가 저장된 검토가 아니다. `(foreign)`: 다른 작업의 필요다. `(scope)`: 패킷 범위 밖의 경로다. `(design-bound)`: 설계를 따르는 작업에 `oah skills select`를 했다. 아무것도 시작하거나 저장하지 않았다. | `oah skills find --task T --out FILE`로 필요를 다시 적는다. 설계가 있는 작업이면 고르는 대신 coverage에 스킬을 링크하고 설계를 수락한다. |
-| `OAH_SKILL_DISCOVERY` | 거절이 아니라 알림이다. 작업 필요에 찾은 검토된 스킬이 사용자의 선택을 기다리거나, 링크한 스킬 아래의 기술 결정이 바뀌었거나, 호출의 스킬 검색이 실패했다. run은 이미 승인된 것으로 진행했다. | `oah skills select`로 고르거나, 설계 coverage에 스킬을 링크하고 설계를 수락한다. 검색 실패에는 할 일이 없다. 링크된 스킬과 설치된 스킬은 그대로 쓰인다. |
-| `OAH_SKILL_REFERENCE_UNAVAILABLE` | `(inaccessible)`: 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나, `<!-- oah`로 시작하는 줄을 담고 있거나, 브리프에 들어가지 않는데 작업 디렉터리 안에 고정된 바이트 그대로인 설치본이 없다. `(unsupported-engine)`: Codex, 네이티브, 수정 run, 네이티브 Windows처럼 지원되는 읽기 관찰 경로가 없거나 Read가 파일을 그대로 돌려줄 수 없다. `(profile)`: 실제 실행 파일, CLI 버전 또는 도구가 공통 프로필 검증을 통과하지 못했다. `(access)`: 현재 읽기·접근 정책이 검증되지 않았다. 아무것도 시작하지 않았다. | 파일을 다시 검토하거나 선택으로 바꾸거나 인라인에 맞게 나눈다. 참조에는 검증된 용량 경로, 받는 저장소 안의 고정된 설치본, 검증된 실행 파일·버전·도구와 읽기 정책이 모두 필요하다. 파일 설치만으로는 충분하지 않다. 네이티브 Windows에서는 인라인에 맞게 나눈다. |
+| `OAH_SKILL_DISCOVERY` | 거절이 아니라 알림이다. 작업 필요에 찾은 검토된 스킬이 사용자의 선택을 기다리거나, 링크한 스킬 아래의 기술 결정이 바뀌었거나, 호출의 스킬 검색이 실패했다. run은 이미 승인된 것으로 진행했다. | `oah skills select`로 고르거나, 설계 coverage에 스킬을 링크하고 설계를 수락한다. 검색이 실패하면 링크된 스킬과 설치된 스킬을 로컬에서 확인하고, 발주는 [일반 작업의 입장 규칙](skills-and-capabilities.md#일반-작업과-관리-입장)을 참고한다. |
+| `OAH_SKILL_REFERENCE_UNAVAILABLE` | `(inaccessible)`: 연결된 스킬의 필수 보조 파일이 고정된 digest로 검토 스냅샷에 없거나, `<!-- oah`로 시작하는 줄을 담고 있거나, 브리프에 들어가지 않는데 작업 디렉터리 안에 고정한 바이트와 일치하는 설치본이 없다. `(unsupported-engine)`: Codex, 네이티브, 수정 run, 네이티브 Windows처럼 지원되는 읽기 관찰 경로가 없거나 Read가 파일을 그대로 돌려줄 수 없다. `(profile)`: 실제 실행 파일, CLI 버전 또는 도구가 공통 프로필 검증을 통과하지 못했다. `(access)`: 현재 읽기·접근 정책이 검증되지 않았다. 아무것도 시작하지 않았다. | 파일을 다시 검토하거나 선택으로 바꾸거나 인라인에 맞게 나눈다. 참조에는 검증된 용량 경로, 받는 저장소 안의 고정된 설치본, 검증된 실행 파일·버전·도구와 읽기 정책이 모두 필요하다. 파일 설치만으로는 충분하지 않다. 네이티브 Windows에서는 인라인에 맞게 나눈다. |
 | `OAH_SKILL_RECEIVING_FAILED` | 스킬 참조를 읽은 Claude run이 끝났지만 oah가 run 폴더에 `skills-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
 | `OAH_CAPABILITY_RECEIVING_FAILED` | oah가 도는 동안 스트림을 확인한 Claude run이 끝났지만 run 폴더에 `capabilities-receiving.json`을 쓰지 못해 그 run은 세지 않는다. | run 폴더에 쓸 수 있는지(디스크 공간, 권한) 확인하고 다시 호출한다. |
 | `OAH_SKILL_NOT_DELIVERABLE` | 필수 스킬을 넘길 수 없다. 이유에는 `excluded`, `scope`, `user-only`, `license`, `host`, `marker`, `pin-mismatch`가 있다. `changed`는 정책, 목록의 승인·스키마·세션, 부모 권한, 중계, 작업·리스, 대상, 필요 또는 선택 등 준비한 전체 로컬 신원이 바뀌거나 만료됐다는 뜻이다. 아무것도 시작하지 않았고 앞선 E 기록은 보존한다. | `changed`면 현재 로컬 사실로 다시 준비한다. `pin-mismatch`면 설치본을 되돌리거나 다시 검토해 연결한다. 제외·호스트·범위 제한이면 현재 작업의 호스트와 범위 안에서 허용된 스킬·필요를 고른다. 명령이 로컬 정책을 덮어쓰지 않는다. |

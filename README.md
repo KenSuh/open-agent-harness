@@ -176,8 +176,8 @@ the [roadmap](#roadmap). [Upgrade](docs/upgrade.md#7-from-030-to-040) says what 
   values), `plan` routes each tool a skill names, and `relay` stores a result the lead fetched itself.
   **Limit:** no host has a qualified capacity profile in this release, so a dispatch that would carry skill texts
   or relayed tool results, and `oah skills find --task`, stop with
-  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. Ordinary work with no managed
-  delivery, discovery, capability inputs or permitted, configured task advice keeps its existing path.
+  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. See the
+  [ordinary-work admission rule](docs/skills-and-capabilities.md#ordinary-work-and-managed-admission).
   [Skills and capabilities](docs/skills-and-capabilities.md#limits-in-this-release) lists every limit.
 - **Jev in design steps.** With Jev on and its own judgement switch on (`[rerank.judgement]`, off by default), Jev
   can assess whether a source change matters to a design, choose which skill search runs first and suggest the next
@@ -266,7 +266,7 @@ its history, releases, issues or CI logs.
 ## License and third-party notices
 
 `oah` is released under the [MIT License](LICENSE), copyright open-agent-harness contributors.
-Bundled skills under `skills/` are shipped unchanged where their licenses allow it, with their own licenses.
+Bundled skills under `skills/` carry their upstream texts where their licenses allow it, with their own licenses.
 The diagram HTML and SVGs adapt the MIT-licensed diagram-design templates and styles.
 [Third-party notices](THIRD_PARTY_NOTICES.md) credits these works and the tools oah runs or links to,
 including unlazy, superpowers, graphify, Claude Code and Codex CLI.

@@ -262,8 +262,8 @@ project keeps working without edits; the new parts do nothing until you use them
   names it with the fix, and an edited file is left alone.
 - **Skill texts reach workers only on a qualified host.** This release qualifies no host, so a dispatch that would
   carry linked skill texts or relayed tool results, and `oah skills find --task`, stop with
-  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. Ordinary work with no managed
-  delivery, discovery, capability inputs or permitted, configured task advice keeps its existing path.
+  `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)` before anything is sent. See the
+  [ordinary-work admission rule](skills-and-capabilities.md#ordinary-work-and-managed-admission).
   [Limits in this release](skills-and-capabilities.md#limits-in-this-release) lists the rest.
 
 ## 8. What `docs/UPSTREAM_SYNC.md` records

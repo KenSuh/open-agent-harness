@@ -138,8 +138,8 @@ ordinary run is later refused or never spent. Corrections and reviews keep
 the pointer as it is. A managed correction reads only the run named by that pointer. A missing pointer when
 managed content is needed, missing or incomplete records, a different digest, or a result without a running,
 finished or failed status gives `OAH_FIX_STATE_CHANGED`. A task with a skill only in a later dispatch stage still
-records its complete identity during its empty original stage. With no managed delivery, discovery, capability
-inputs or permitted, configured task advice, that stage requires no extra skill, relay or capacity qualification.
+records its complete identity during its empty original stage. This release qualifies no real host, so required
+managed delivery refuses. See the [ordinary-work admission rule](#ordinary-work-and-managed-admission).
 What it costs you: corrections use the latest original. Prepare a new initial run if its record is damaged or
 the task needs managed content again. Once an ordinary original clears the pointer, the earlier managed run
 cannot be corrected until a new initial run is spent. The refusal explains whether no managed original is
@@ -184,10 +184,13 @@ creates no request attempt. What it costs you: an
 unavailable required capability or a changed local input needs an explicit correction and a new preparation
 before another request; failed work that used requests or tokens stays inspectable before retry.
 
-**Ordinary work keeps its existing path.** With no managed delivery, discovery, capability inputs or permitted,
-configured task advice, the same prompt, judges and reservation sequence run. Global rerank and judgement
-enable flags alone require no managed target profile. What it costs you: nothing; a run that cannot reach
-managed work behaves exactly as before.
+### Ordinary work and managed admission
+
+With no managed delivery, discovery, capability inputs or permitted, configured task advice, an ordinary run uses
+the same prompt, judges and reservation sequence. Global rerank and judgement enable flags alone require no
+managed target profile. What it costs you: nothing.
+
+### Required managed delivery
 
 A required skill that cannot be delivered initially refuses the call with a
 typed code: `OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE` (`inaccessible` or
@@ -305,8 +308,8 @@ selections, and another version constraint is another need. After the task is st
 longer apply. What it costs you: you select again for a changed need or a new lease.
 
 **The call may search.** A call whose needs carry public technology words sends up to `max_queries` searches to
-skills.sh after admission, each with a 15-second limit and never under a launch lock. Answers and an unchanged
-need's discovery are reused for `cache_hours`. `[skills.discovery] enabled = false` turns it off. What it costs you:
+skills.sh after admission, each with a 15-second limit and never under a launch lock. Answers and discovery are
+reused for `cache_hours` while the need matches the cached need. `[skills.discovery] enabled = false` turns it off. What it costs you:
 the first such call each day can wait for the search. `oah fix` corrections never search; they re-admit the verified
 frozen selections and save only their closed projection.
 
