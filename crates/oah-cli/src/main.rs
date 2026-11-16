@@ -2,7 +2,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() == 1 && args[0] == "--version" {
         println!("oah {}", oah_core::VERSION);
         ExitCode::SUCCESS
