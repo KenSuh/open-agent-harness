@@ -34,12 +34,15 @@ fn files_below(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn no_file_under_conformance_holds_private_data() {
-    let files = files_below(&conformance_root());
+    let root = conformance_root();
+    let files = files_below(&root);
     assert!(!files.is_empty(), "no conformance files");
     let mut hits = Vec::new();
     for path in files {
         let bytes = std::fs::read(&path).expect("read fixture");
-        for finding in privacy_findings(&String::from_utf8_lossy(&bytes)) {
+        for finding in
+            scanner::file_privacy_findings(path.strip_prefix(&root).expect("fixture path"), &bytes)
+        {
             hits.push(format!("{}: {finding}", path.display()));
         }
     }
@@ -53,7 +56,11 @@ fn no_file_under_conformance_holds_private_data() {
 #[test]
 fn every_private_form_is_rejected_and_controls_are_allowed() {
     for probe in probes::samples() {
-        let findings = privacy_findings(&probe.text);
+        let findings = if probe.path == "correction-probe.json" && probe.bytes.is_none() {
+            privacy_findings(&probe.text)
+        } else {
+            scanner::file_privacy_findings(Path::new(probe.path), probe.data())
+        };
         assert_eq!(
             !findings.is_empty(),
             probe.forbidden,

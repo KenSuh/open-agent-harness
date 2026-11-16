@@ -58,3 +58,24 @@ to run (exit 1) unless `src/oah` is the tree of tag `v0.4.0` with no uncommitted
 deterministic: JSON with sorted keys, two-space indent, LF and a final newline, and no clock, random value,
 absolute path, user name or host value. `--check` prints `CONFORMANCE_MATCH files=<n>` and exits 0, or lists each
 difference and exits 1.
+
+## Privacy scan
+
+Every fixture file must strictly parse as the extractor's canonical JSON: sorted keys, two-space indent,
+ASCII escapes (including the source-id escape above), LF and one final newline. Duplicate keys, lone
+surrogates and invalid strings fail the Rust privacy test. JSON string values and keys are scanned, and
+embedded JSON documents are strictly parsed and decoded recursively. An embedded document starts with an
+object, quoted string or JSON array value after whitespace and an optional BOM. The `NaN` scalar is allowed
+only inside embedded input documents as a rejection-case marker. TOML section headings and the lone opening
+brace used as an invalid-input marker are plain body text. Other body text permits CR, LF, tab and ANSI SGR
+controls and only literal backslash, quote and regex-dot escapes; other forms are refused rather than interpreted.
+There is no raw-only fallback or recovery after a rejected document or string.
+
+Only an object-valued `bytes` field defines a hex layer: its values must be lowercase, even-length hex
+strings. A UTF-16 BOM selects strict little- or big-endian decoding; other bytes use lossy UTF-8. Ordinary
+strings that look like hex are not decoded. The same path, address and secret-assignment rules apply to every layer. Addresses include
+punycode top-level labels and bracketed literals; dotless domains and percent-encoding are not address
+layers. Secret assignments permit only exact `$NAME` or `${NAME}` references, optionally quoted, with no
+bare uppercase allowance. `FORMAT.md` is plain printable ASCII Markdown with this title, these five ordered
+headings, balanced code fences and a final LF; `.gitattributes` is exactly `* -text` followed by LF. Both
+plain documents are scanned directly, and only these two paths are exempt from the JSON grammar.

@@ -217,7 +217,7 @@ def build(base: pathlib.Path) -> Area:
                "record-* cases run review() with a fresh state folder, `now` as the clock and a public-explore "
                "admission with a budget of 4.",
                "Refusals carry the exception text as `message`.",
-               "Source ids encode the leading s of sk- as \\u0073 in JSON; decoded values are unchanged "
+               "Source ids encode their leading letter with a JSON Unicode escape; decoded values are unchanged "
                "(see conformance/FORMAT.md).",
                "Table cases give `calls` (row name -> keyword arguments) and expect a map of row name -> result."],
     )

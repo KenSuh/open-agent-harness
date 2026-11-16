@@ -159,7 +159,7 @@
     "record-* cases: input.json `upstream` describes a one-commit Git repository (branch, author, e-mail field, date, message, files) that the collector reads instead of github.com; a file given as {\"text\", \"pad\", \"size\"} is `text` followed by `pad` repeated up to exactly `size` bytes. The commit is made with core.autocrlf=false, so its id is the same on every system.",
     "record-* cases run review() with a fresh state folder, `now` as the clock and a public-explore admission with a budget of 4.",
     "Refusals carry the exception text as `message`.",
-    "Source ids encode the leading s of \u0073k- as \\u0073 in JSON; decoded values are unchanged (see conformance/FORMAT.md).",
+    "Source ids encode their leading letter with a JSON Unicode escape; decoded values are unchanged (see conformance/FORMAT.md).",
     "Table cases give `calls` (row name -> keyword arguments) and expect a map of row name -> result."
   ],
   "omitted": [

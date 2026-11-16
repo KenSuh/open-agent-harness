@@ -1,28 +1,252 @@
-// JSON 문자열의 범위와 값을 함께 읽어 직렬화 구문을 개인정보의 일부로 오인하지 않게 한다.
-pub struct JsonString {
-    pub start: usize,
-    pub end: usize,
-    pub value: String,
+// 엄격한 JSON 문법과 추출기의 정규 바이트를 검사하고 문자열 디코딩 실패는 즉시 거부한다.
+use std::collections::BTreeMap;
+
+#[derive(Debug)]
+pub enum Value {
+    Scalar(String),
+    String(String),
+    Array(Vec<Value>),
+    Object(BTreeMap<String, Value>),
 }
 
-pub fn strings(text: &str) -> Vec<JsonString> {
-    let mut result = Vec::new();
+pub fn document(text: &str) -> Option<Value> {
+    parse_document(text, false)
+}
+
+pub fn input_document(text: &str) -> Option<Value> {
+    parse_document(text, true)
+}
+
+fn parse_document(text: &str, invalid_input_marker: bool) -> Option<Value> {
     let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            let start = text.len() - chars.as_str().len() - 1;
-            let mut candidate = chars.clone();
-            if let Some(value) = string(&mut candidate) {
-                result.push(JsonString {
-                    start,
-                    end: text.len() - candidate.as_str().len(),
-                    value,
-                });
-                chars = candidate;
+    let value = value(&mut chars, invalid_input_marker)?;
+    whitespace(&mut chars);
+    chars.as_str().is_empty().then_some(value)
+}
+
+pub fn canonical_document(text: &str) -> Option<Value> {
+    let value = document(text)?;
+    let mut canonical = render(&value, 0);
+    canonical.push('\n');
+    (canonical == text).then_some(value)
+}
+
+fn whitespace(chars: &mut std::str::Chars<'_>) {
+    while chars.clone().next().is_some_and(|c| " \t\r\n".contains(c)) {
+        chars.next();
+    }
+}
+
+fn take(chars: &mut std::str::Chars<'_>, expected: char) -> Option<()> {
+    (chars.next()? == expected).then_some(())
+}
+
+fn value(chars: &mut std::str::Chars<'_>, invalid_input_marker: bool) -> Option<Value> {
+    whitespace(chars);
+    match chars.clone().next()? {
+        '"' => {
+            chars.next();
+            Some(Value::String(string(chars)?))
+        }
+        '{' => {
+            chars.next();
+            whitespace(chars);
+            let mut fields = BTreeMap::new();
+            if chars.clone().next() != Some('}') {
+                loop {
+                    whitespace(chars);
+                    take(chars, '"')?;
+                    let key = string(chars)?;
+                    whitespace(chars);
+                    take(chars, ':')?;
+                    if fields
+                        .insert(key, value(chars, invalid_input_marker)?)
+                        .is_some()
+                    {
+                        return None;
+                    }
+                    whitespace(chars);
+                    if chars.clone().next() != Some(',') {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            take(chars, '}')?;
+            Some(Value::Object(fields))
+        }
+        '[' => {
+            chars.next();
+            whitespace(chars);
+            let mut items = Vec::new();
+            if chars.clone().next() != Some(']') {
+                loop {
+                    items.push(value(chars, invalid_input_marker)?);
+                    whitespace(chars);
+                    if chars.clone().next() != Some(',') {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            take(chars, ']')?;
+            Some(Value::Array(items))
+        }
+        't' | 'f' | 'n' => {
+            let literal = match chars.clone().next()? {
+                't' => "true",
+                'f' => "false",
+                'n' => "null",
+                _ => unreachable!(),
+            };
+            for c in literal.chars() {
+                take(chars, c)?;
+            }
+            Some(Value::Scalar(literal.to_owned()))
+        }
+        'N' if invalid_input_marker => {
+            for c in "NaN".chars() {
+                take(chars, c)?;
+            }
+            Some(Value::Scalar("NaN".to_owned()))
+        }
+        '-' | '0'..='9' => {
+            let start = chars.as_str();
+            while chars
+                .clone()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || "-.eE+".contains(c))
+            {
+                chars.next();
+            }
+            let number = &start[..start.len() - chars.as_str().len()];
+            Some(Value::Scalar(number_value(number)?))
+        }
+        _ => None,
+    }
+}
+
+fn number_value(text: &str) -> Option<String> {
+    let mut chars = text.chars();
+    if chars.clone().next() == Some('-') {
+        chars.next();
+    }
+    match chars.next()? {
+        '0' => {}
+        '1'..='9' => {
+            while chars.clone().next().is_some_and(|c| c.is_ascii_digit()) {
+                chars.next();
+            }
+        }
+        _ => return None,
+    }
+    if chars.clone().next() == Some('.') {
+        chars.next();
+        let before = chars.as_str().len();
+        while chars.clone().next().is_some_and(|c| c.is_ascii_digit()) {
+            chars.next();
+        }
+        if chars.as_str().len() == before {
+            return None;
+        }
+    }
+    if chars.clone().next().is_some_and(|c| "eE".contains(c)) {
+        chars.next();
+        if chars.clone().next().is_some_and(|c| "+-".contains(c)) {
+            chars.next();
+        }
+        let before = chars.as_str().len();
+        while chars.clone().next().is_some_and(|c| c.is_ascii_digit()) {
+            chars.next();
+        }
+        if chars.as_str().len() == before {
+            return None;
+        }
+    }
+    if !chars.as_str().is_empty() {
+        return None;
+    }
+    if !text.contains(['.', 'e', 'E']) {
+        return Some(if text == "-0" { "0" } else { text }.to_owned());
+    }
+    let number: f64 = text.parse().ok()?;
+    if !number.is_finite() {
+        return None;
+    }
+    let repr = format!("{number:?}");
+    match repr.split_once('e') {
+        Some((mantissa, exponent)) => {
+            let exponent: i32 = exponent.parse().ok()?;
+            Some(format!("{mantissa}e{exponent:+03}"))
+        }
+        None => Some(repr),
+    }
+}
+
+fn render(value: &Value, depth: usize) -> String {
+    let indent = "  ".repeat(depth);
+    let child = "  ".repeat(depth + 1);
+    match value {
+        Value::Scalar(text) => text.clone(),
+        Value::String(text) => quoted(text),
+        Value::Array(items) if items.is_empty() => "[]".to_owned(),
+        Value::Array(items) => format!(
+            "[\n{}\n{indent}]",
+            items
+                .iter()
+                .map(|item| format!("{child}{}", render(item, depth + 1)))
+                .collect::<Vec<_>>()
+                .join(",\n")
+        ),
+        Value::Object(fields) if fields.is_empty() => "{}".to_owned(),
+        Value::Object(fields) => format!(
+            "{{\n{}\n{indent}}}",
+            fields
+                .iter()
+                .map(|(key, value)| format!("{child}{}: {}", quoted(key), render(value, depth + 1)))
+                .collect::<Vec<_>>()
+                .join(",\n")
+        ),
+    }
+}
+
+fn quoted(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ' '..='~' => out.push(c),
+            _ => {
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
             }
         }
     }
-    result
+    out.push('"');
+    // The extractor's sole non-default escape: source ids retain their decoded value.
+    let mut escaped = String::new();
+    let mut start = 0;
+    for (at, _) in out.match_indices("sk-") {
+        if out[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '\\')
+        {
+            continue;
+        }
+        escaped.push_str(&out[start..at]);
+        escaped.push_str("\\u0073");
+        start = at + 1;
+    }
+    escaped.push_str(&out[start..]);
+    escaped
 }
 
 fn hex_quad(chars: &mut std::str::Chars<'_>) -> Option<u32> {
