@@ -8,6 +8,8 @@ import re
 import shutil
 import unittest
 import xml.etree.ElementTree as ET
+from typing import Final
+from unittest.mock import patch
 
 from tests.helpers import make_tmp_dir
 from oah.toolkit import update
@@ -30,6 +32,20 @@ PENDING_LANES = {"OAH_FIX_": "oah.fix_cli", "OAH_INIT_": "oah.init_cli"}
 PENDING_CODES = {"OAH_MCP_UPDATE_AVAILABLE"} if not hasattr(update, "last_mcp_notices") else set()
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 HANGUL_COLON = re.compile(r"[가-힣][)\]`*]*:\s*$")
+# Match only the fixed four-exclusion condition; conclusions elsewhere require review.
+MANAGED_CONDITION: Final = re.compile(
+    r"\b(?:with\s+no|without)\s+managed\s+delivery,\s*discovery,\s*capability\s+inputs\s+or\s+"
+    r"permitted,?\s*configured\s+task\s+advice\b"
+    r"|관리\s*전달[·,\s]+탐색[·,\s]+능력\s*입력[·,\s]+허용되고\s*설정된\s*작업\s*조언이?\s*(?:모두\s*)?없으면",
+    re.IGNORECASE)
+MANAGED_RULES: Final = (
+    ("docs/skills-and-capabilities.md", "### Ordinary work and managed admission", "ordinary-work-and-managed-admission",
+     (("README.md", "## New in v0.4.0"), ("docs/upgrade.md", "## 7. From 0.3.0 to 0.4.0"),
+      ("docs/troubleshooting.md", "## Design coverage, skills and capabilities"))),
+    ("docs/ko/skills-and-capabilities.md", "### 일반 작업과 관리 입장", "일반-작업과-관리-입장",
+     (("README.ko.md", "## v0.4.0의 새 기능"), ("docs/ko/upgrade.md", "## 7. 0.3.0에서 0.4.0으로"),
+      ("docs/ko/troubleshooting.md", "## 설계 coverage, 스킬, 능력"))),
+)
 
 
 def read(path: pathlib.Path) -> str:
@@ -70,6 +86,26 @@ def prose_lines(text: str):
             continue
         if not fenced:
             yield number, line
+
+
+def managed_conditions(text: str) -> list[str]:
+    prose = "\n".join(line for _, line in prose_lines(text))
+    prose = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", prose)
+    prose = prose.replace("**", "").replace("__", "")
+    return MANAGED_CONDITION.findall(prose)
+
+
+def split_section(text: str, heading: str) -> tuple[str, str]:
+    """Return a heading's body and the rest of the page, ending at the next peer or parent heading."""
+    lines = list(prose_lines(text))
+    start = next((i for i, (_, line) in enumerate(lines) if line == heading), None)
+    if start is None:
+        return "", text
+    level = len(heading.split(" ", 1)[0])
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r"#{1," + str(level) + r"} +", lines[i][1])), len(lines))
+    return ("\n".join(line for _, line in lines[start + 1:end]),
+            "\n".join(line for _, line in lines[:start] + lines[end:]))
 
 
 READMES = {"README.md": ("English", "한국어"), "README.ko.md": ("한국어", "English")}
@@ -182,6 +218,7 @@ class AccuracyTest(unittest.TestCase):
 
     def test_korean_sentences_do_not_end_with_a_colon(self):
         pages = [REPO / "docs" / "ko" / f"{page}.md" for page in PAGES]
+        pages += [REPO / "docs" / "ko" / f"{page}.md" for page in ("skills-and-capabilities", "design-sources")]
         pages += [EXAMPLE / "README.ko.md", REPO / "README.ko.md"]
         for name, text in [(str(p.relative_to(REPO)), read(p)) for p in pages]:
             for number, line in prose_lines(text):
@@ -189,6 +226,80 @@ class AccuracyTest(unittest.TestCase):
                     continue
                 with self.subTest(page=name, line=number):
                     self.assertIsNone(HANGUL_COLON.search(line), line)
+
+    def test_managed_admission_has_one_linked_owner_per_language(self) -> None:
+        pages = {page: read(page) for page in all_docs()}
+        outside = pages.copy()
+        for name, heading, anchor, summaries in MANAGED_RULES:
+            owner = REPO / name
+            with self.subTest(owner=name):
+                occurrences = [page for page, text in pages.items()
+                               for _, line in prose_lines(text) if anchor in heading_anchors(line)]
+                self.assertEqual(occurrences, [owner], "the ordinary-work rule needs exactly one owner")
+                body, outside[owner] = split_section(pages[owner], heading)
+                self.assertIn(anchor, heading_anchors(pages[owner]))
+                self.assertEqual(len(managed_conditions(body)), 1,
+                                 "state the full admission condition once, inside its owner section")
+            locations = []
+            for path, title in summaries:
+                page = REPO / path
+                section = split_section(pages[page], title)[0]
+                if page.name == "troubleshooting.md":
+                    locations.append((page, section.strip().split("\n\n", 1)[0]))
+                    for code in ("OAH_SKILL_DISCOVERY_FAILED", "OAH_SKILL_DISCOVERY"):
+                        rows = [line for _, line in prose_lines(section) if line.startswith(f"| `{code}` |")]
+                        self.assertEqual(len(rows), 1, f"locate the {code} remedy")
+                        locations.append((page, "\n".join(rows)))
+                else:
+                    locations.append((page, "\n".join(block for block in re.split(r"\n(?=- )", section)
+                                                      if "OAH_SKILLS_BUDGET_EXCEEDED" in block)))
+            originals = [block for block in re.split(r"\n\s*\n", pages[owner]) if "`skills/originals`" in block]
+            self.assertEqual(len(originals), 1, "locate the empty-original-stage paragraph")
+            locations.append((owner, "\n\n".join(originals)))
+            for page, summary in locations:
+                with self.subTest(summary=str(page.relative_to(REPO))):
+                    self.assertTrue(any(
+                        (page.parent / path if path else page).resolve() == owner.resolve() and fragment == anchor
+                        for target in LINK.findall(summary) for path, _, fragment in [target.partition("#")]
+                    ), "this summary must link directly to the ordinary-work owner rule")
+        for page, text in outside.items():
+            with self.subTest(page=str(page.relative_to(REPO))):
+                self.assertEqual(managed_conditions(text), [],
+                                 "link to the owner instead of copying the full exclusion condition")
+
+    def test_managed_admission_guard_checks_structure_only(self) -> None:
+        pages = {page: read(page) for page in all_docs()}
+        cases: list[tuple[str, pathlib.Path, str, bool]] = []
+        for name, heading, anchor, summaries in MANAGED_RULES:
+            owner = REPO / name
+            summary = REPO / summaries[0][0]
+            body, _ = split_section(pages[owner], heading)
+            target = f"{name}#{anchor}"
+            self.assertIn(f"]({target})", pages[summary])
+            cases.extend((
+                ("duplicate-condition-outside", summary, pages[summary] + "\n" + body, False),
+                ("condition-in-heading", summary, pages[summary] + f"\n### {managed_conditions(body)[0]}\n", False),
+                ("duplicate-condition-inside", owner, pages[owner].replace(body, body + "\n" + body, 1), False),
+                ("missing-summary-link", summary, pages[summary].replace(f"]({target})", "]", 1), False),
+                ("broken-summary-anchor", summary, pages[summary].replace(f"]({target})", f"]({target}-missing)", 1), False),
+                ("broken-summary-path", summary, pages[summary].replace(f"]({target})", f"](missing.md#{anchor})", 1), False),
+                ("second-owner-heading", summary, pages[summary] + "\n" + heading.upper() + "!\n", False),
+            ))
+        for name, sentence in (
+            ("README.md", "Bundled skills under `skills/` are shipped unchanged where their licenses allow it, "
+             "with their own licenses."),
+            ("README.ko.md", "`skills/`의 스킬은 각 라이선스가 허락하는 것만 원본 그대로 싣고 해당 라이선스를 함께 둔다."),
+        ):
+            page = REPO / name
+            cases.append(("unrelated-vendoring", page, pages[page] + "\n" + sentence + "\n", True))
+        for label, page, changed, passes in cases:
+            with self.subTest(case=label, page=str(page.relative_to(REPO))):
+                self.assertNotEqual(changed, pages[page], "the mutation must change the fixture")
+                with patch(__name__ + ".read", side_effect=(pages | {page: changed}).__getitem__):
+                    result = unittest.TestResult()
+                    AccuracyTest("test_managed_admission_has_one_linked_owner_per_language").run(result)
+                self.assertEqual(result.errors, [], result.errors)
+                self.assertEqual(result.wasSuccessful(), passes, result.failures)
 
     def test_keys_page_names_the_lookup(self):
         for page in (REPO / "docs/keys.md", REPO / "docs/ko/keys.md"):
@@ -686,8 +797,11 @@ class BannerTest(unittest.TestCase):
                                           if figure is features else
                                           "Lease: reserve changed paths; refuse overlapping leases.", lease_text)
                     visible = " ".join(" ".join(t.itertext()) for t in overview.findall(f".//{SVG}text"))
-                    for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init", "v0.4.0"):
+                    for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init"):
                         self.assertIn(phrase, visible)
+                    # The guided design conversation stays planned without a version number.
+                    self.assertIn("계획 · 이후 릴리스" if language else "PLANNED · LATER RELEASE", visible)
+                    self.assertNotIn("v0.4.0", visible)
                     self.assertIn("예정된 기능이며 아직 제공하지 않는다." if language
                                   else "Planned, not available yet.", visible)
 

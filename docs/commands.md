@@ -21,6 +21,7 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 | `oah check` | Portable assertions for gate CHECK lines. |
 | `oah wiki` | Keeps the project wiki linked, sourced and tidy. |
 | `oah design` | Keeps each product's design: its revisions, which one is accepted, and its pages in the wiki. `oah design task` shows the design a task follows and its state; `oah design carry` records that a change leaves the task unchanged. |
+| `oah sources` | Follows the public libraries and documents a design builds on, keeps a verified snapshot of each version and checks a design's material decisions against them. See [Design sources](design-sources.md). |
 | `oah impact` | Lists what to re-check when files or database objects change. |
 | `oah eval` | Replays real cases with hidden expected answers and reports each variant, with its limits. |
 | `oah graph` | Uses the graphify knowledge graph when graphify is installed. |

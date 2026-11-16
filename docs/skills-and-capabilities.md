@@ -104,7 +104,6 @@ judges, the round and the reservation. The links in the task's accepted coverage
   dispatch would carry, or why it would refuse. It writes nothing and sends nothing.
 - `oah skills read --run RUN --item N` prints one bundle item and records the read. A worker may read only its own
   run's bundle.
-- A task whose coverage links no skill gets exactly the brief it got before.
 
 **One prepared identity.** Local admission checks `[skills] exclude`, each need's host and scope, mandatory
 selections, current capability approval and schema, relay eligibility and expiry, the task and lease generation,
@@ -139,8 +138,8 @@ ordinary run is later refused or never spent. Corrections and reviews keep
 the pointer as it is. A managed correction reads only the run named by that pointer. A missing pointer when
 managed content is needed, missing or incomplete records, a different digest, or a result without a running,
 finished or failed status gives `OAH_FIX_STATE_CHANGED`. A task with a skill only in a later dispatch stage still
-records its complete identity during its empty original stage without requiring an extra skill, relay or
-capacity qualification. Ordinary tasks without managed content keep their existing flow.
+records its complete identity during its empty original stage. This release qualifies no real host, so required
+managed delivery refuses. See the [ordinary-work admission rule](#ordinary-work-and-managed-admission).
 What it costs you: corrections use the latest original. Prepare a new initial run if its record is damaged or
 the task needs managed content again. Once an ordinary original clears the pointer, the earlier managed run
 cannot be corrected until a new initial run is spent. The refusal explains whether no managed original is
@@ -162,7 +161,11 @@ run starts or a background runner is created, the error says so and keeps the re
 a damaged task folder has fewer message variants to interpret.
 
 Relay ingestion validates the full arguments digest and every stored time as ISO-8601 with a time zone before
-storing anything. An existing relay with malformed times follows the stored-record rule above. After spend,
+storing anything; a bad time there refuses with `OAH_CAPABILITY_RELAY_REQUIRED(invalid)` (exit 1) and stores
+nothing. An existing relay record with a malformed time follows the stored-record rule above. An ordinary
+`oah call` or a native offer that names it refuses with `OAH_SKILL_STATE_CORRUPT` (exit 69), with no run folder
+and no child. `oah skills read` and `oah design coverage` read no relay records; for their own damaged records
+they give `OAH_SKILLS_IO` (exit 69) and `OAH_SKILL_STATE_CORRUPT` (exit 69). After spend,
 settlement and correction bind the lease id; renewing that same lease does not invalidate
 the original. Pre-spend checks still compare the full lease identity. What it costs you: no new step for valid
 times or lease renewal; an invalid relay time is refused where it is recorded.
@@ -181,10 +184,13 @@ creates no request attempt. What it costs you: an
 unavailable required capability or a changed local input needs an explicit correction and a new preparation
 before another request; failed work that used requests or tokens stays inspectable before retry.
 
-**Ordinary work keeps its existing path.** With no managed delivery, discovery, capability inputs or permitted,
-configured task advice, the same prompt, judges and reservation sequence run. Global rerank and judgement
-enable flags alone require no managed target profile. What it costs you: nothing; a run that cannot reach
-managed work behaves exactly as before.
+### Ordinary work and managed admission
+
+With no managed delivery, discovery, capability inputs or permitted, configured task advice, an ordinary run uses
+the same prompt, judges and reservation sequence. Global rerank and judgement enable flags alone require no
+managed target profile. What it costs you: nothing.
+
+### Required managed delivery
 
 A required skill that cannot be delivered initially refuses the call with a
 typed code: `OAH_SKILL_MANDATORY_MISSING`, `OAH_SKILL_REFERENCE_UNAVAILABLE` (`inaccessible` or
@@ -302,8 +308,8 @@ selections, and another version constraint is another need. After the task is st
 longer apply. What it costs you: you select again for a changed need or a new lease.
 
 **The call may search.** A call whose needs carry public technology words sends up to `max_queries` searches to
-skills.sh after admission, each with a 15-second limit and never under a launch lock. Answers and an unchanged
-need's discovery are reused for `cache_hours`. `[skills.discovery] enabled = false` turns it off. What it costs you:
+skills.sh after admission, each with a 15-second limit and never under a launch lock. Answers and discovery are
+reused for `cache_hours` while the need matches the cached need. `[skills.discovery] enabled = false` turns it off. What it costs you:
 the first such call each day can wait for the search. `oah fix` corrections never search; they re-admit the verified
 frozen selections and save only their closed projection.
 

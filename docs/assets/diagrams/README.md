@@ -51,7 +51,7 @@ The overview and features wording follows the same contract as the pages: you as
 problem or design choice stops the AI, and confirm before landing. A lease reserves the paths a task changes;
 an overlapping lease is refused. TypeSafe Jev is the recommended, optional judge. It re-orders chosen skills;
 in v0.3.0 it judges difficulty, and its tier picks the model subject to confidence and minimum-level
-rules. Without a key, rules decide. The guided design conversation stays planned for v0.4.0.
+rules. Without a key, rules decide. The guided design conversation stays planned for a later release.
 
 ## Regenerate
 
@@ -111,7 +111,7 @@ The whole-harness overview is a new **Swimlane** composition, replacing the old 
 It shows a plain-language request; installed rules preparing intent, scope, lease, impact and recommended, optional
 Jev judgement; Claude Code building; gates and wiki evidence; Codex review and correction returning
 to evidence; the user's question, answer to a decision, inspection and confirmation; and checked landing.
-A separate unconnected note marks the guided design conversation **planned for v0.4.0, not yet available**.
+A separate unconnected note marks the guided design conversation **planned for a later release, not yet available**.
 It does not turn that future feature into a current workflow step.
 
 The new **Architecture** features figure has six nodes and six supporting/evidence connections.

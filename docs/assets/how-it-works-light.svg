@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 1080 1420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-light-title how-it-works-light-desc" data-diagram-type="Swimlane" data-size="fit" id="how-it-works-light-root">
 <title id="how-it-works-light-title">You ask, answer and confirm; the harness carries the work.</title>
-<desc id="how-it-works-light-desc">You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for v0.4.0.</desc>
+<desc id="how-it-works-light-desc">You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for a later release.</desc>
 <defs>
       <style>#how-it-works-light-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #2d3142; }
       #how-it-works-light-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -36,7 +36,7 @@
 <rect x="752" y="144" width="272" height="904" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
 <text x="768" y="168" class="zone-label" text-anchor="start">INSTALLED AI ENGINES</text>
 <rect x="40" y="1096" width="984" height="128" rx="8" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="64" y="1124" class="label" text-anchor="start">PLANNED · v0.4.0</text>
+<text x="64" y="1124" class="label" text-anchor="start">PLANNED · LATER RELEASE</text>
 <text x="64" y="1160" class="node" text-anchor="start">Design together, one question at a time</text>
 <text x="64" y="1188" class="prose" text-anchor="start">You describe what to build; oah asks a design question with a recommendation.</text>
 <text x="64" y="1208" class="prose" text-anchor="start">Planned, not available yet.</text>
