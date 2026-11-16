@@ -1,0 +1,13 @@
+[package]
+name = "oah-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "oah"
+path = "src/main.rs"
+
+[dependencies]
+oah-core = { path = "../oah-core" }
