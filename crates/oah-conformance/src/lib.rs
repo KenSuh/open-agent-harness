@@ -1,5 +1,7 @@
-// 적합성 시험용 크레이트: conformance/ 아래 영역(폴더) 목록을 읽는다.
-//! Test-only crate for the golden fixtures a later slice adds under `conformance/`.
+// 적합성 시험용 크레이트: conformance/ 아래 영역(폴더) 목록을 읽고, 켜진 영역을 실제 oah-core 로 실행한다.
+//! Test-only crate that runs the golden fixtures under `conformance/` against `oah-core` (see [`runner`]).
+
+pub mod runner;
 
 use std::path::Path;
 
