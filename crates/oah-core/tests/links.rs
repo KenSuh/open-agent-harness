@@ -1320,13 +1320,13 @@ fn operation_identity_real_fat32_fallback_record() {
                 )
                 .unwrap();
                 let original = read("replaced");
-                let EntryIdentity::WindowsFatDirectory {
-                    file_index: original_index,
-                    ..
-                } = original.identity.unwrap()
-                else {
-                    panic!("the actual returned record lacks FAT directory proof");
+                let index = |link: &ManagedLink| match link.identity.unwrap() {
+                    EntryIdentity::WindowsFatDirectory { file_index, .. } => file_index,
+                    other => {
+                        panic!("the actual returned record lacks FAT directory proof: {other:?}")
+                    }
                 };
+                let mut retained = vec![original];
                 let mut reused = false;
                 for number in 0..128 {
                     let replacement = create(&LinkRequest {
@@ -1336,19 +1336,22 @@ fn operation_identity_real_fat32_fallback_record() {
                         allow_copy: true,
                     })
                     .unwrap();
-                    let EntryIdentity::WindowsFatDirectory { file_index, .. } =
-                        replacement.link.identity.unwrap()
-                    else {
-                        panic!("the replacement lacks actual FAT directory proof");
-                    };
-                    assert_ne!(original.identity, replacement.link.identity);
                     println!(
                         "REPLACEMENT_PROOF attempt={number} {:?}",
                         replacement.link.identity
                     );
-                    if file_index == original_index {
+                    if let Some(original) = retained
+                        .iter()
+                        .find(|prior| index(prior) == index(&replacement.link))
+                    {
+                        assert_ne!(original.identity, replacement.link.identity);
+                        fs::write(records.join("reused-original"), record_text(original)).unwrap();
                         fs::write(records.join("replacement"), record_text(&replacement.link))
                             .unwrap();
+                        println!(
+                            "ACTUAL_FAT32_SLOT_REUSED_WITH_ORIGINAL_ALLOCATED original={:?} replacement={:?}",
+                            original.identity, replacement.link.identity
+                        );
                         reused = true;
                         break;
                     }
@@ -1357,12 +1360,12 @@ fn operation_identity_real_fat32_fallback_record() {
                         root.join(format!("retained-replacement-{number}")),
                     )
                     .unwrap();
+                    retained.push(replacement.link);
                 }
                 assert!(
                     reused,
                     "the bounded actual FAT32 control did not exercise directory-slot reuse; no preservation pass"
                 );
-                println!("ACTUAL_FAT32_SLOT_REUSED_WITH_ORIGINAL_ALLOCATED index={original_index}");
             }
             "remove" => {
                 assert_eq!(remove(&read("copy"), &[&store]).unwrap(), Removal::Removed);
@@ -1370,8 +1373,10 @@ fn operation_identity_real_fat32_fallback_record() {
                     remove(&read("copy"), &[&store]).unwrap(),
                     Removal::AlreadyGone
                 );
-                let error = remove(&read("replaced"), &[&store]).unwrap_err();
-                assert_eq!(error.kind(), FsxErrorKind::NotOwned);
+                for name in ["replaced", "reused-original"] {
+                    let error = remove(&read(name), &[&store]).unwrap_err();
+                    assert_eq!(error.kind(), FsxErrorKind::NotOwned);
+                }
                 let original = read("malformed");
                 let EntryIdentity::WindowsFatDirectory {
                     volume_serial,
@@ -1449,6 +1454,19 @@ fn operation_identity_real_fat32_fallback_record() {
             fs::read(root.join(folder).join("스킬.txt")).unwrap(),
             b"synthetic bytes\r\n"
         );
+    }
+    for entry in fs::read_dir(&root).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("retained-replacement-")
+        {
+            assert_eq!(
+                fs::read(entry.path().join("스킬.txt")).unwrap(),
+                b"synthetic bytes\r\n"
+            );
+        }
     }
     assert_eq!(
         fs::read(root.join("agents/unowned.txt")).unwrap(),
