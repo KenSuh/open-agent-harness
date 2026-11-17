@@ -135,7 +135,7 @@ pub struct Merged {
 
 pub(crate) fn parse_values(text: &str, where_: &str) -> Result<Table, ConfigError> {
     let document =
-        toml_edit::Document::parse(text).map_err(|error| invalid_toml(text, where_, &error))?;
+        toml_edit::ImDocument::parse(text).map_err(|error| invalid_toml(text, where_, &error))?;
     Ok(value::from_table(document.as_table()))
 }
 

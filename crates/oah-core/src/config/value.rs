@@ -427,7 +427,7 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Table {
-        from_table(toml_edit::Document::parse(text).unwrap().as_table())
+        from_table(toml_edit::ImDocument::parse(text).unwrap().as_table())
     }
 
     #[test]

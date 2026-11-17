@@ -12,9 +12,11 @@
 
 mod atomic;
 mod error;
+mod identity;
 pub mod links;
 mod lock;
 mod selfwrite;
+mod staging;
 
 pub use atomic::{Fingerprint, WriteReceipt, publish_new, read_optional, write_atomic};
 pub use error::{FsxError, FsxErrorKind};

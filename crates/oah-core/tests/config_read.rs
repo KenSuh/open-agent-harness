@@ -4,6 +4,36 @@ use oah_core::config::{
     UserSettings, Value, codes, notice_codes,
 };
 use std::fs;
+
+#[test]
+fn toml_10_grammar_is_the_parse_boundary() {
+    let invalid = [
+        "info = {\nname = \"sample\",\n}\n",
+        "info = { name = \"sample\", }\n",
+        "text = \"\\e\"\n",
+        "text = \"\\x1b\"\n",
+        "time = 12:34\n",
+        "time = 2024-01-02T12:34Z\n",
+    ];
+    for text in invalid {
+        let error =
+            ConfigFile::from_bytes(Path::new("config.toml"), Some(text.as_bytes().to_vec()))
+                .unwrap_err();
+        assert_eq!(error.code(), "OAH_CONFIG_INVALID", "{text:?}");
+    }
+    let valid = [
+        "info = { name = \"sample\", nested = { value = 1 } }\n",
+        "items = [\n1,\n2,\n]\n",
+        "text = \"\\u001b\"\n",
+        "time = 12:34:56\n",
+        "time = 2024-01-02T12:34:56Z\n",
+    ];
+    for text in valid {
+        let file = ConfigFile::from_bytes(Path::new("config.toml"), Some(text.as_bytes().to_vec()))
+            .unwrap();
+        assert_eq!(file.source_bytes(), Some(text.as_bytes()));
+    }
+}
 use std::path::{Path, PathBuf};
 
 struct Project {

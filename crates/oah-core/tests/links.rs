@@ -71,7 +71,6 @@ impl NativeLinker for Unavailable {
     }
 }
 
-/// A native linker that makes a real link to the wrong folder, as when a new link cannot be followed to its source.
 struct Misdirected {
     elsewhere: PathBuf,
 }
@@ -81,7 +80,12 @@ impl NativeLinker for Misdirected {
         SystemLinker.kind()
     }
 
-    fn link(&self, _source: &Path, destination: &Path, _target: &Path) -> io::Result<()> {
+    fn link(&self, source: &Path, destination: &Path, target: &Path) -> io::Result<()> {
+        SystemLinker.link(source, destination, target)?;
+        #[cfg(windows)]
+        fs::remove_dir(destination)?;
+        #[cfg(not(windows))]
+        fs::remove_file(destination)?;
         SystemLinker.link(&self.elsewhere, destination, &self.elsewhere)
     }
 }
@@ -115,9 +119,14 @@ fn a_native_link_points_at_the_store_and_is_reported_once() {
         fs::read_to_string(destination.join("SKILL.md")).unwrap(),
         "# Skill A\n"
     );
-    let again = create(&request).unwrap();
-    assert!(!again.created, "an identical link is already in place");
-    assert_eq!(again.link, outcome.link);
+    assert_eq!(
+        create(&request).unwrap_err().kind(),
+        FsxErrorKind::LinkExists
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+        "# Skill A\n"
+    );
 }
 
 #[cfg(unix)]
@@ -276,7 +285,7 @@ fn without_permission_to_copy_a_failed_link_is_an_error() {
 }
 
 #[test]
-fn a_new_link_that_misses_its_source_is_removed_and_replaced_by_a_reported_copy() {
+fn cleanup_ownership_native_replacement_survives_with_or_without_copy() {
     let stores = Stores::new();
     let source = stores.source();
     let elsewhere = stores.store.join("elsewhere");
@@ -285,42 +294,60 @@ fn a_new_link_that_misses_its_source_is_removed_and_replaced_by_a_reported_copy(
     let linker = Misdirected {
         elsewhere: elsewhere.clone(),
     };
-    let destination = stores.agents.join("skill-a");
-
-    let error = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, false, &source),
-        &linker,
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
-    assert_eq!(
-        inspect(&destination).unwrap(),
-        Entry::Missing,
-        "the link that missed its source was left behind"
-    );
-
-    let outcome = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, true, &source),
-        &linker,
-    )
-    .unwrap();
-    assert_eq!(outcome.link.kind, LinkKind::Copy);
-    let reason = outcome
-        .fallback
-        .expect("a copy reports why the native link was not kept");
-    assert!(
-        reason.contains("does not resolve to the source folder"),
-        "{reason}"
-    );
-    assert_eq!(inspect(&destination).unwrap(), Entry::Directory);
-    assert_eq!(
-        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-        "# Skill A\n"
-    );
+    for allow_copy in [false, true] {
+        let destination = stores.agents.join(format!("skill-{allow_copy}"));
+        let error = create_with(
+            &stores.request(&destination, TargetStyle::Absolute, allow_copy, &source),
+            &linker,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), FsxErrorKind::NotOwned);
+        assert!(matches!(
+            inspect(&destination).unwrap(),
+            Entry::Symlink { .. } | Entry::Junction { .. }
+        ));
+        assert_eq!(fs::canonicalize(&destination).unwrap(), elsewhere);
+    }
     assert_eq!(
         fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
         "kept\n",
         "removing the wrong link touched its target"
+    );
+}
+
+#[test]
+fn unowned_matching_link_cannot_be_adopted_and_removed() {
+    let stores = Stores::new();
+    let source = stores.source();
+    let destination = stores.agents.join("user-link");
+    SystemLinker.link(&source, &destination, &source).unwrap();
+    let error =
+        create(&stores.request(&destination, TargetStyle::Absolute, true, &source)).unwrap_err();
+    assert_eq!(error.kind(), FsxErrorKind::LinkExists);
+    assert_eq!(fs::canonicalize(&destination).unwrap(), source);
+    assert_eq!(
+        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+        "# Skill A\n"
+    );
+}
+
+#[test]
+fn cleanup_ownership_descriptor_rejects_even_a_matching_replacement() {
+    let stores = Stores::new();
+    let source = stores.source();
+    let destination = stores.agents.join("skill-a");
+    let owned =
+        create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap();
+    let saved = stores.agents.join("original-link");
+    fs::rename(&destination, &saved).unwrap();
+    SystemLinker.link(&source, &destination, &source).unwrap();
+    assert_eq!(
+        remove(&owned.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+        "# Skill A\n"
     );
 }
 
@@ -437,4 +464,118 @@ fn a_real_junction_is_made_without_elevation() {
         Removal::Removed
     );
     assert!(source.join("SKILL.md").is_file());
+}
+
+#[cfg(windows)]
+fn require_windows_context(guard: u32) {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public static class LinkTestContext {
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessMitigationPolicy(IntPtr process, int policy, out uint flags, UIntPtr size);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr buffer, int size, out int needed);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static string Read(int pid) {
+    IntPtr process = OpenProcess(0x1000, false, pid);
+    if (process == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+    IntPtr token = IntPtr.Zero;
+    IntPtr label = IntPtr.Zero;
+    IntPtr elevation = IntPtr.Zero;
+    try {
+      uint flags;
+      if (!GetProcessMitigationPolicy(process, 16, out flags, (UIntPtr)4)) throw new System.ComponentModel.Win32Exception();
+      if (!OpenProcessToken(process, 8, out token)) throw new System.ComponentModel.Win32Exception();
+      int needed;
+      GetTokenInformation(token, 25, IntPtr.Zero, 0, out needed);
+      label = Marshal.AllocHGlobal(needed);
+      if (!GetTokenInformation(token, 25, label, needed, out needed)) throw new System.ComponentModel.Win32Exception();
+      string sid = new SecurityIdentifier(Marshal.ReadIntPtr(label)).Value;
+      elevation = Marshal.AllocHGlobal(4);
+      if (!GetTokenInformation(token, 20, elevation, 4, out needed)) throw new System.ComponentModel.Win32Exception();
+      return "integrity=" + sid + " elevated=" + Marshal.ReadInt32(elevation) + " redirection_guard=" + (flags & 1);
+    } finally {
+      if (label != IntPtr.Zero) Marshal.FreeHGlobal(label);
+      if (elevation != IntPtr.Zero) Marshal.FreeHGlobal(elevation);
+      if (token != IntPtr.Zero) CloseHandle(token);
+      CloseHandle(process);
+    }
+  }
+}
+'@
+[LinkTestContext]::Read(PARENT_PID)
+"#.replace("PARENT_PID", &std::process::id().to_string());
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let context = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        context.trim(),
+        format!("integrity=S-1-16-8192 elevated=0 redirection_guard={guard}")
+    );
+    println!(
+        "WINDOWS_CONTEXT pid={} {}",
+        std::process::id(),
+        context.trim()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires ordinary medium integrity with Redirection Guard disabled; run by the native evidence gate"]
+fn ordinary_medium_integrity_native_junction_contract() {
+    require_windows_context(0);
+    a_real_junction_is_made_without_elevation();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires medium integrity and actual Redirection Guard traversal refusal; run by the native evidence gate"]
+fn system_linker_copy_under_actual_traversal_refusal() {
+    require_windows_context(1);
+    let stores = Stores::new();
+    let source = stores.source();
+    let destination = stores.agents.join("skill-a");
+    let error =
+        create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap_err();
+    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
+    assert_eq!(
+        error.io_error().and_then(io::Error::raw_os_error),
+        Some(448)
+    );
+    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
+    let outcome =
+        create(&stores.request(&destination, TargetStyle::Absolute, true, &source)).unwrap();
+    assert_eq!(outcome.link.kind, LinkKind::Copy);
+    assert!(
+        outcome
+            .fallback
+            .as_deref()
+            .unwrap()
+            .contains("os error 448")
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+        "# Skill A\n"
+    );
+    assert_eq!(
+        remove(&outcome.link, &[&stores.store]).unwrap(),
+        Removal::Removed
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("SKILL.md")).unwrap(),
+        "# Skill A\n"
+    );
+    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
 }

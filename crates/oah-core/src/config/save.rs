@@ -175,7 +175,22 @@ pub fn plan_project_save(
         }
     }
     text = patch::patch(&text, current.values(), &ops, file.where_())?;
-    let proposed = reread(file, &text)?;
+    let mut proposed = reread(file, &text)?;
+    if super::project::classify(&proposed) == Format::Legacy {
+        let (effective, _) = interpret(&proposed)?;
+        let marker = Op::Set {
+            path: vec!["sections".into(), "order".into()],
+            value: Value::Array(
+                effective
+                    .sections
+                    .iter()
+                    .map(|section| Value::from(section.id.as_str()))
+                    .collect(),
+            ),
+        };
+        text = patch::patch(&text, proposed.values(), &[marker], file.where_())?;
+        proposed = reread(file, &text)?;
+    }
     interpret(&proposed)?;
     if Some(text.as_bytes()) == file.source_bytes().map(strip_bom) {
         return Ok(SavePlan {

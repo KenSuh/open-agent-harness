@@ -9,6 +9,8 @@
 
 use super::atomic::Fingerprint;
 use super::error::{FsxError, FsxErrorKind};
+use super::identity::{self, Identity};
+use super::staging::CopyStage;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -108,6 +110,7 @@ pub struct ManagedLink {
     pub folders: Vec<PathBuf>,
     /// For a copy: every file below the root.
     pub files: Vec<CopiedFile>,
+    identity: Identity,
 }
 
 /// A request to link `destination` to the folder `source`.
@@ -126,7 +129,7 @@ pub struct LinkRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkOutcome {
     pub link: ManagedLink,
-    /// False when an identical managed link was already in place.
+    /// Whether this operation acquired the entry. Occupied entries are refused, never adopted.
     pub created: bool,
     /// Why the native link was not made, when the result is a copy.
     pub fallback: Option<String>,
@@ -160,21 +163,7 @@ impl NativeLinker for SystemLinker {
 
     #[cfg(windows)]
     fn link(&self, source: &Path, destination: &Path, _target: &Path) -> io::Result<()> {
-        match junction::create(source, destination) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(error),
-            Err(error) => {
-                // The crate creates the folder before making it a junction; remove that folder again when it
-                // is still a plain empty one, so a failed junction leaves nothing behind.
-                if let Ok(metadata) = fs::symlink_metadata(destination)
-                    && metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                {
-                    let _ = fs::remove_dir(destination);
-                }
-                Err(error)
-            }
-        }
+        junction::create(source, destination)
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -191,9 +180,8 @@ pub fn create(request: &LinkRequest<'_>) -> Result<LinkOutcome, FsxError> {
 
 /// [`create`] with an explicit native linker.
 ///
-/// An occupied destination is never replaced: an identical managed link is reported as already in place, and
-/// anything else is [`FsxErrorKind::LinkExists`]. When the linker fails, the copy fallback runs only if the
-/// request allows it, and the outcome then names the reason.
+/// An occupied destination is never adopted or replaced: it is [`FsxErrorKind::LinkExists`]. When the linker
+/// fails, the copy fallback runs only if the request allows it, and the outcome then names the reason.
 pub fn create_with(
     request: &LinkRequest<'_>,
     linker: &dyn NativeLinker,
@@ -242,13 +230,6 @@ pub fn create_with(
 
     let existing = inspect(destination)?;
     if existing != Entry::Missing {
-        if same_native_link(&existing, kind, &target, source) {
-            return Ok(LinkOutcome {
-                link: native_descriptor(request, kind, target),
-                created: false,
-                fallback: None,
-            });
-        }
         return Err(FsxError::new(
             FsxErrorKind::LinkExists,
             destination,
@@ -261,15 +242,12 @@ pub fn create_with(
     }
     match linker.link(source, destination, &target) {
         Ok(()) => match verify_native(destination, kind, &target, source) {
-            Ok(()) => Ok(LinkOutcome {
-                link: native_descriptor(request, kind, target),
+            Ok(identity) => Ok(LinkOutcome {
+                link: native_descriptor(request, kind, target, identity),
                 created: true,
                 fallback: None,
             }),
             Err(error) => {
-                // A link that was made but does not lead to the source has been removed again, so it is a failed
-                // link like any other: for example a junction Windows refuses to traverse because a redirection
-                // policy treats it as untrusted (os error 448).
                 let removed = error.kind() == FsxErrorKind::LinkUnsupported
                     && inspect(destination)? == Entry::Missing;
                 if request.allow_copy && removed {
@@ -329,6 +307,9 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
     let entry = inspect(&link.destination)?;
     if entry == Entry::Missing {
         return Ok(Removal::AlreadyGone);
+    }
+    if !identity::matches(&link.destination, &link.identity) {
+        return Err(not_owned(link, "another entry replaced the managed entry"));
     }
     match link.kind {
         LinkKind::Symlink | LinkKind::Junction => {
@@ -455,7 +436,12 @@ fn lexical(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-fn native_descriptor(request: &LinkRequest<'_>, kind: LinkKind, target: PathBuf) -> ManagedLink {
+fn native_descriptor(
+    request: &LinkRequest<'_>,
+    kind: LinkKind,
+    target: PathBuf,
+    identity: Identity,
+) -> ManagedLink {
     ManagedLink {
         destination: request.destination.to_path_buf(),
         source: request.source.to_path_buf(),
@@ -463,6 +449,7 @@ fn native_descriptor(request: &LinkRequest<'_>, kind: LinkKind, target: PathBuf)
         target: Some(target),
         folders: Vec::new(),
         files: Vec::new(),
+        identity,
     }
 }
 
@@ -486,19 +473,48 @@ fn verify_native(
     kind: LinkKind,
     target: &Path,
     source: &Path,
-) -> Result<(), FsxError> {
+) -> Result<Identity, FsxError> {
     let entry = inspect(destination)?;
+    if !same_native_link(&entry, kind, target, source) {
+        return Err(FsxError::new(
+            FsxErrorKind::NotOwned,
+            destination,
+            "the new entry is not the requested link; it was left alone",
+        ));
+    }
+    let identity = identity::capture(destination).map_err(|error| {
+        FsxError::io(
+            FsxErrorKind::LinkUnsupported,
+            destination,
+            "cannot retain the new link's identity",
+            error,
+        )
+    })?;
     let resolved = fs::canonicalize(destination);
     let reaches_source = match (&resolved, fs::canonicalize(source)) {
         (Ok(found), Ok(expected)) => *found == expected,
         _ => false,
     };
-    if same_native_link(&entry, kind, target, source) && reaches_source {
-        return Ok(());
+    if reaches_source && identity::matches(destination, &identity) {
+        return Ok(identity);
     }
-    if matches!(entry, Entry::Symlink { .. } | Entry::Junction { .. }) {
-        let _ = remove_link_entry(destination);
+    if !identity::matches(destination, &identity)
+        || !same_native_link(&inspect(destination)?, kind, target, source)
+    {
+        return Err(FsxError::new(
+            FsxErrorKind::NotOwned,
+            destination,
+            "another entry replaced the new link; it was left alone",
+        ));
     }
+    remove_link_entry(destination).map_err(|error| {
+        FsxError::io(
+            FsxErrorKind::LinkUnsupported,
+            destination,
+            "cannot remove the acquired unusable link",
+            error,
+        )
+    })?;
     let what = format!(
         "the new {} does not resolve to the source folder",
         kind_word(kind)
@@ -637,22 +653,40 @@ fn copy_fallback(
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    if let Err(error) = stage_copy(source, &staging, &folders, &files) {
-        let _ = fs::remove_dir_all(&staging);
+    copy_at(request, reason, &staging, folders, files)
+}
+
+fn copy_at(
+    request: &LinkRequest<'_>,
+    reason: Option<String>,
+    staging: &Path,
+    folders: Vec<PathBuf>,
+    files: Vec<CopiedFile>,
+) -> Result<LinkOutcome, FsxError> {
+    let destination = request.destination;
+    let mut stage = CopyStage::acquire(staging)?;
+    let populated = (|| {
+        for folder in &folders {
+            stage.directory(folder)?;
+        }
+        for file in &files {
+            stage.file(&request.source.join(&file.relative), &file.relative)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = populated {
+        stage.cleanup()?;
         return Err(error);
     }
-    if inspect(destination)? != Entry::Missing {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(FsxError::new(
-            FsxErrorKind::LinkExists,
-            destination,
-            "something appeared there while copying; it was left alone",
-        ));
-    }
-    if let Err(error) = fs::rename(&staging, destination) {
-        let _ = fs::remove_dir_all(&staging);
+    if let Err(error) = stage.publish(destination) {
+        stage.cleanup()?;
+        let kind = if inspect(destination)? != Entry::Missing {
+            FsxErrorKind::LinkExists
+        } else {
+            FsxErrorKind::Io
+        };
         return Err(FsxError::io(
-            FsxErrorKind::Io,
+            kind,
             destination,
             "cannot move the copy into place",
             error,
@@ -660,11 +694,12 @@ fn copy_fallback(
     }
     let link = ManagedLink {
         destination: destination.to_path_buf(),
-        source: source.to_path_buf(),
+        source: request.source.to_path_buf(),
         kind: LinkKind::Copy,
         target: None,
         folders,
         files,
+        identity: stage.identity.clone(),
     };
     let (found_folders, found_files) = walk(destination)?;
     let same_files = found_files.len() == link.files.len()
@@ -674,7 +709,10 @@ fn copy_fallback(
             .all(|(found, recorded)| {
                 found.relative == recorded.relative && found.fingerprint == recorded.fingerprint
             });
-    if found_folders != link.folders || !same_files {
+    if !identity::matches(destination, &link.identity)
+        || found_folders != link.folders
+        || !same_files
+    {
         return Err(FsxError::new(
             FsxErrorKind::Unverified,
             destination,
@@ -688,31 +726,73 @@ fn copy_fallback(
     })
 }
 
-fn stage_copy(
-    source: &Path,
-    staging: &Path,
-    folders: &[PathBuf],
-    files: &[CopiedFile],
-) -> Result<(), FsxError> {
-    fs::create_dir(staging)
-        .map_err(|error| FsxError::io(FsxErrorKind::Io, staging, "cannot create", error))?;
-    for folder in folders {
-        let path = staging.join(folder);
-        fs::create_dir(&path)
-            .map_err(|error| FsxError::io(FsxErrorKind::Io, &path, "cannot create", error))?;
-    }
-    for file in files {
-        let from = source.join(&file.relative);
-        let to = staging.join(&file.relative);
-        fs::copy(&from, &to)
-            .map_err(|error| FsxError::io(FsxErrorKind::Io, &to, "cannot copy", error))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_ownership_copy_collisions_and_replacements_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("keep.txt"), "source bytes").unwrap();
+        let destination = root.join("destination");
+        let request = LinkRequest {
+            source: &source,
+            destination: &destination,
+            style: TargetStyle::Absolute,
+            allow_copy: true,
+        };
+        let staging = root.join("staging");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("user.txt"), "user bytes").unwrap();
+        let (folders, files) = walk(&source).unwrap();
+        assert!(copy_at(&request, None, &staging, folders, files).is_err());
+        assert_eq!(fs::read(staging.join("user.txt")).unwrap(), b"user bytes");
+        let acquired_path = root.join("acquired-stage");
+        let acquired = CopyStage::acquire(&acquired_path).unwrap();
+        let staging = acquired_path;
+        fs::rename(&staging, root.join("original-staging")).unwrap();
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("replacement.txt"), "replacement bytes").unwrap();
+        assert_eq!(
+            acquired.cleanup().unwrap_err().kind(),
+            FsxErrorKind::NotOwned
+        );
+        assert_eq!(
+            fs::read(staging.join("replacement.txt")).unwrap(),
+            b"replacement bytes"
+        );
+
+        let unexpected = root.join("unexpected-child-stage");
+        let acquired = CopyStage::acquire(&unexpected).unwrap();
+        fs::write(unexpected.join("user.txt"), "foreign child").unwrap();
+        assert!(acquired.cleanup().is_err());
+        assert_eq!(
+            fs::read(unexpected.join("user.txt")).unwrap(),
+            b"foreign child"
+        );
+
+        fs::create_dir(&destination).unwrap();
+        let user_destination = identity::capture(&destination).unwrap();
+        let (folders, files) = walk(&source).unwrap();
+        let owned_stage = root.join("owned-stage");
+        assert_eq!(
+            copy_at(&request, None, &owned_stage, folders, files)
+                .unwrap_err()
+                .kind(),
+            FsxErrorKind::LinkExists
+        );
+        assert!(identity::matches(&destination, &user_destination));
+        assert!(!owned_stage.exists());
+
+        let (folders, files) = walk(&source).unwrap();
+        fs::remove_file(source.join("keep.txt")).unwrap();
+        let failed_stage = root.join("failed-stage");
+        assert!(copy_at(&request, None, &failed_stage, folders, files).is_err());
+        assert!(!failed_stage.exists());
+    }
 
     #[test]
     fn lexical_drops_dots_and_refuses_parent_steps() {
@@ -737,6 +817,7 @@ mod tests {
             target: Some(PathBuf::from("s")),
             folders: Vec::new(),
             files: Vec::new(),
+            identity: identity::capture(tempfile::NamedTempFile::new().unwrap().path()).unwrap(),
         };
         let store = PathBuf::from(if cfg!(windows) {
             r"C:\x\store"

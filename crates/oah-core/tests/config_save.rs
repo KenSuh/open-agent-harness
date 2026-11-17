@@ -112,6 +112,125 @@ fn a_new_project_file_is_created_without_approval_or_backup() {
 }
 
 #[test]
+fn new_project_saves_current_format_for_every_first_save_family() {
+    let families = [
+        (
+            Edit::set(&["models", "profile"], "efficient"),
+            Edit::set(&["models", "profile"], "performance"),
+        ),
+        (
+            Edit::set(&["skills", "update_interval_days"], 2i64),
+            Edit::set(&["skills", "update_interval_days"], 3i64),
+        ),
+        (
+            Edit::stage("review", AgentId::Claude),
+            Edit::stage("review", AgentId::Codex),
+        ),
+    ];
+    for (first, second) in families {
+        let project = Project::empty();
+        let first_outcome = save(&project, &[first]).unwrap();
+        assert!(!first_outcome.upgraded);
+        assert!(first_outcome.backup.is_none());
+        let reopened = project.read();
+        assert_eq!(reopened.format(), Format::Current);
+        assert!(reopened.upgrade_warning().is_none());
+        let second_outcome = save_project(&reopened, &[second], None, quick()).unwrap();
+        assert!(second_outcome.written.is_some());
+        assert!(!second_outcome.upgraded);
+        assert_eq!(project.read().format(), Format::Current);
+        assert_eq!(project.oah_entries(), ["config.toml"]);
+    }
+}
+
+#[test]
+fn preserve_assignment_comments_across_upgrade_and_removal_layouts() {
+    for newline in ["\n", "\r\n"] {
+        for terminated in [false, true] {
+            for bom in [false, true] {
+                let ending = if terminated { newline } else { "" };
+                let text = format!(
+                    "# lead{newline}[stages]{newline}initial = \"claude\"   # draft α{newline}review = \"codex\"{newline}correction = \"codex\"\t# final β{ending}"
+                );
+                let mut original = if bom {
+                    b"\xEF\xBB\xBF".to_vec()
+                } else {
+                    Vec::new()
+                };
+                original.extend_from_slice(text.as_bytes());
+                let project = Project::with_bytes(&original);
+                let snapshot = project.read();
+                let approval = snapshot.upgrade_warning().unwrap().approve();
+                save_project(
+                    &snapshot,
+                    &[Edit::stage("review", AgentId::Claude)],
+                    Some(&approval),
+                    quick(),
+                )
+                .unwrap();
+                assert_eq!(fs::read(project.backup()).unwrap(), original);
+                let expected = text
+                    .replace(
+                        "initial = \"claude\"   # draft α",
+                        &format!("plan = \"claude\"   # draft α{newline}build = \"claude\""),
+                    )
+                    .replace("review = \"codex\"", "review = \"claude\"")
+                    .replace("correction = \"codex\"", "fix = \"codex\"");
+                let mut expected_bytes = if bom {
+                    b"\xEF\xBB\xBF".to_vec()
+                } else {
+                    Vec::new()
+                };
+                expected_bytes.extend_from_slice(expected.as_bytes());
+                assert_eq!(project.bytes(), expected_bytes);
+                save(&project, &[Edit::remove(&["stages", "fix"])]).unwrap();
+                let removed = expected.replace("fix = \"codex\"\t# final β", "\t# final β");
+                let mut removed_bytes = if bom {
+                    b"\xEF\xBB\xBF".to_vec()
+                } else {
+                    Vec::new()
+                };
+                removed_bytes.extend_from_slice(removed.as_bytes());
+                assert_eq!(project.bytes(), removed_bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn final_key_removal_newline_matrix() {
+    for newline in ["\n", "\r\n"] {
+        for terminated in [false, true] {
+            for remove_two in [false, true] {
+                let ending = if terminated { newline } else { "" };
+                let original = format!(
+                    "[stages]{newline}plan = \"claude\"{newline}build = \"codex\"{newline}review = \"codex\"{ending}"
+                );
+                let project = Project::with(&original);
+                let edits = if remove_two {
+                    vec![
+                        Edit::remove(&["stages", "build"]),
+                        Edit::remove(&["stages", "review"]),
+                    ]
+                } else {
+                    vec![Edit::remove(&["stages", "review"])]
+                };
+                save(&project, &edits).unwrap();
+                let retained = if remove_two {
+                    String::new()
+                } else {
+                    format!("{newline}build = \"codex\"")
+                };
+                assert_eq!(
+                    project.text(),
+                    format!("[stages]{newline}plan = \"claude\"{retained}{ending}")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn an_edit_changes_only_its_own_bytes_and_keeps_everything_else() {
     let original = "# top comment\n\n[stages]   # where work goes\nplan  =  'claude'  # keep me\nbuild = \"claude\"\n\n\
                     [custom]\nweird =   [ 1,2 ,3 ]   # unowned\n\n[models]\nprofile = \"balanced\"\n";
@@ -174,13 +293,13 @@ fn bom_crlf_and_a_missing_final_newline_are_kept() {
 }
 
 #[test]
-fn removing_a_key_removes_only_its_line() {
+fn preserve_assignment_comments_on_key_removal() {
     let project =
         Project::with("[stages]\nplan = \"codex\"  # mine\nbuild = \"claude\"\n# trailing note\n");
     save(&project, &[Edit::remove(&["stages", "plan"])]).unwrap();
     assert_eq!(
         project.text(),
-        "[stages]\nbuild = \"claude\"\n# trailing note\n"
+        "[stages]\n  # mine\nbuild = \"claude\"\n# trailing note\n"
     );
 }
 
@@ -236,13 +355,12 @@ fn an_approved_upgrade_backs_up_first_then_writes_the_new_layout() {
         "the backup holds the original bytes"
     );
 
-    // Only the keys the file gives are carried over; the line of a removed v0.4.0 key goes with its comment.
     let text = project.text();
     assert_eq!(
         text,
         "# Team settings\n\
 [stages]\n\
-plan = \"codex\"\n\
+plan = \"codex\"   # writes the first draft\n\
 build = \"codex\"\n\
 review = \"codex\"\n\
 fix = \"codex\"\n\

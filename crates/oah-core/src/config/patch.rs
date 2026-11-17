@@ -89,7 +89,7 @@ pub(crate) fn patch(
     where_: &str,
 ) -> Result<String, ConfigError> {
     let document =
-        toml_edit::Document::parse(text).map_err(|error| invalid_toml(text, where_, &error))?;
+        toml_edit::ImDocument::parse(text).map_err(|error| invalid_toml(text, where_, &error))?;
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut edits: Vec<TextEdit> = Vec::new();
     let mut body_inserts: BTreeMap<usize, Vec<String>> = BTreeMap::new();
@@ -179,6 +179,13 @@ pub(crate) fn patch(
 
     let mut out = apply_edits(text, edits)
         .ok_or_else(|| layout(where_, &[], "two changes touch the same part of the file"))?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        if out.ends_with("\r\n") {
+            out.truncate(out.len() - 2);
+        } else if out.ends_with('\n') {
+            out.truncate(out.len() - 1);
+        }
+    }
     append_tables(&mut out, appends, newline);
 
     let expected = apply_to_tree(values, ops).map_err(|reason| layout(where_, &[], &reason))?;
@@ -209,7 +216,7 @@ enum Planned {
 /// appended table. `None` when the value is already there.
 fn plan_set(
     text: &str,
-    document: &toml_edit::Document<&str>,
+    document: &toml_edit::ImDocument<&str>,
     values: &Table,
     path: &[String],
     value: &Value,
@@ -288,21 +295,22 @@ fn plan_line_replacement(
         .ok_or_else(|| layout(where_, path, "its position is unknown"))?;
     let start = line_start(text, key_span.start);
     let end = line_end(text, value_span.end);
-    let replacement: Vec<String> = match op {
+    let mut replacement: Vec<String> = match op {
         Op::Rename { entries, .. } => entries
             .iter()
             .map(|(name, value)| format!("{} = {}", encode_key(name), value.to_toml()))
             .collect(),
         _ => Vec::new(),
     };
-    let edit = if replacement.is_empty() {
-        if end == text.len() && !text.ends_with('\n') && start > 0 {
-            // The last line has no final newline: remove the newline before it instead, keeping the file
-            // without one.
-            TextEdit::replace(start - 1, end, String::new())
-        } else {
-            TextEdit::replace(start, end, String::new())
+    let suffix = text[value_span.end..end].trim_end_matches(['\r', '\n']);
+    if suffix.trim_start().starts_with('#') {
+        match replacement.first_mut() {
+            Some(line) => line.push_str(suffix),
+            None => replacement.push(format!("{}{suffix}", &text[start..key_span.start])),
         }
+    }
+    let edit = if replacement.is_empty() {
+        TextEdit::replace(start, end, String::new())
     } else {
         let mut joined = replacement.join(newline);
         if text[..end].ends_with('\n') {
@@ -592,7 +600,7 @@ mod tests {
         let out = run(text, &[op]).unwrap();
         assert_eq!(
             out,
-            "[stages]\nplan = \"codex\"\nbuild = \"codex\"\nreview = \"claude\"\n"
+            "[stages]\nplan = \"codex\" # old\nbuild = \"codex\"\nreview = \"claude\"\n"
         );
     }
 

@@ -303,6 +303,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn post_publication_readback_failures_issue_no_receipt_or_self_write() {
+        use crate::fsx::{SelfWriteMatch, SelfWrites};
+        for replacement in [None, Some(b"external bytes".as_slice())] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let expected = b"published bytes";
+            let temp = write_temp(dir.path(), &path, expected).unwrap();
+            fs::rename(&temp, &path).unwrap();
+            sync_folder(dir.path()).unwrap();
+            match replacement {
+                None => fs::remove_file(&path).unwrap(),
+                Some(bytes) => fs::write(&path, bytes).unwrap(),
+            }
+            let registry = SelfWrites::new();
+            let result = verify(&path, expected);
+            if let Ok(receipt) = &result {
+                registry.record(receipt);
+            }
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), FsxErrorKind::Unverified);
+            assert_eq!(error.io_error().is_some(), replacement.is_none());
+            assert_eq!(registry.pending(&path), 0);
+            assert_eq!(registry.observe(&path, expected), SelfWriteMatch::External);
+            assert_eq!(read_optional(&path).unwrap().as_deref(), replacement);
+        }
+    }
+
+    #[test]
     fn fingerprint_hex_is_the_sha256_of_the_bytes() {
         assert_eq!(
             Fingerprint::of(b"abc").to_hex(),
