@@ -104,29 +104,12 @@ impl AreaReport {
 
 /// Runs every area under `root` (the `conformance/v0.4.0` folder), in name order.
 pub fn run_all(root: &Path) -> Vec<AreaReport> {
-    let mut reports: Vec<AreaReport> = crate::list_areas(root)
+    let areas: BTreeSet<String> = crate::REQUIRED_AREAS
         .iter()
-        .map(|area| run_area(root, area))
+        .map(|area| area.to_string())
+        .chain(crate::list_areas(root))
         .collect();
-    for enabled in ENABLED {
-        if !reports.iter().any(|report| report.area == *enabled) {
-            reports.push(AreaReport {
-                area: enabled.to_string(),
-                state: AreaState::Enabled,
-                cases: 0,
-                passed: 0,
-                failures: vec![Failure {
-                    area: enabled.to_string(),
-                    case: "MANIFEST.json".into(),
-                    detail: "the enabled area has no folder".into(),
-                }],
-                unchanged: 0,
-                design: 0,
-                deviations: 0,
-            });
-        }
-    }
-    reports
+    areas.iter().map(|area| run_area(root, area)).collect()
 }
 
 struct Case {
@@ -260,6 +243,9 @@ fn file_label(path: &Path) -> String {
 }
 
 fn read_manifest(folder: &Path, area: &str) -> Result<Manifest, String> {
+    if !crate::REQUIRED_AREAS.contains(&area) {
+        return Err(format!("{area} is not a registered fixture area"));
+    }
     let json = read_json(&folder.join("MANIFEST.json"))?;
     let object = json
         .as_object()
@@ -731,6 +717,7 @@ fn run_legacy_read(input: &Map<String, Json>, expect: &Json) -> Result<(), Strin
             let wanted = wanted
                 .as_object()
                 .ok_or("expect.json ok is not an object")?;
+            validate_legacy_expectation(wanted, &config)?;
             if let Some(key) = wanted
                 .keys()
                 .find(|key| !PROJECTION_KEYS.contains(&key.as_str()))
@@ -759,6 +746,62 @@ fn run_legacy_read(input: &Map<String, Json>, expect: &Json) -> Result<(), Strin
         (None, Some(wanted), Ok(_)) => Err(format!("expected the error {wanted}, got a reading")),
         _ => Err("expect.json must hold exactly ok or error".into()),
     }
+}
+
+fn validate_legacy_expectation(
+    wanted: &Map<String, Json>,
+    config: &ProjectConfig,
+) -> Result<(), String> {
+    let malformed = |field: &str| format!("expect.json design expectation requires {field}");
+    if !wanted.get("file_unchanged").is_some_and(Json::is_boolean) {
+        return Err(malformed("boolean file_unchanged"));
+    }
+    let string_list = |field: &str| {
+        wanted
+            .get(field)
+            .and_then(Json::as_array)
+            .is_some_and(|values| values.iter().all(Json::is_string))
+    };
+    if !string_list("notices") {
+        return Err(malformed(
+            "a notices list of strings (empty means no notices)",
+        ));
+    }
+    let source = config.file().values();
+    for (field, required) in [
+        ("stages", source.contains_key("stages")),
+        (
+            "agents",
+            source.contains_key("engines") || source.contains_key("agents"),
+        ),
+    ] {
+        let value = wanted.get(field);
+        if required || value.is_some() {
+            let object = value
+                .and_then(Json::as_object)
+                .filter(|object| !object.is_empty())
+                .ok_or_else(|| malformed(&format!("a nonempty {field} semantic projection")))?;
+            let valid = match field {
+                "stages" => object
+                    .values()
+                    .all(|value| value.as_str().is_some_and(|text| !text.is_empty())),
+                "agents" => object
+                    .values()
+                    .all(|value| value.as_object().is_some_and(|agent| !agent.is_empty())),
+                _ => unreachable!(),
+            };
+            if !valid {
+                return Err(malformed(&format!("nonempty typed {field} values")));
+            }
+        }
+    }
+    if !wanted.contains_key("stages") && !wanted.contains_key("agents") {
+        return Err(malformed("a semantic stages or agents projection"));
+    }
+    if wanted.contains_key("agents") && !string_list("unused_kept_in_file") {
+        return Err(malformed("an unused_kept_in_file list of strings"));
+    }
+    Ok(())
 }
 
 /// The effective reading in the shape of the design cases: assignments by section, the agent keys the file

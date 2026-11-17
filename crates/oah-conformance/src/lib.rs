@@ -5,6 +5,17 @@ pub mod runner;
 
 use std::path::Path;
 
+pub const REQUIRED_AREAS: &[&str] = &[
+    "config",
+    "doctor",
+    "hashes",
+    "license",
+    "models",
+    "review",
+    "rules",
+    "skills-roots",
+];
+
 /// Names of the areas (sub-folders) under `root`, sorted; empty when `root` is absent.
 pub fn list_areas(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {

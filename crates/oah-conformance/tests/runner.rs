@@ -142,6 +142,91 @@ fn a_wrong_design_projection_fails() {
 }
 
 #[test]
+fn design_expectation_contract_cannot_drop_assertions() {
+    let manifest: Json = serde_json::from_slice(
+        &std::fs::read(fixture_root().join("config/MANIFEST.json")).unwrap(),
+    )
+    .unwrap();
+    let design: Vec<&str> = manifest["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["source"] == "design")
+        .map(|case| case["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(design.len(), 4);
+    for name in design {
+        for mutation in [
+            "empty",
+            "missing-notices",
+            "bad-notices",
+            "missing-preservation",
+            "bad-preservation",
+            "missing-semantic",
+            "empty-semantic",
+            "bad-semantic",
+            "missing-unused",
+        ] {
+            let scratch = Scratch::new();
+            scratch.edit_json(&format!("config/{name}/expect.json"), |expect| {
+                let ok = expect["ok"].as_object_mut().unwrap();
+                let semantic = if ok.contains_key("stages") {
+                    "stages"
+                } else {
+                    "agents"
+                };
+                match mutation {
+                    "empty" => ok.clear(),
+                    "missing-notices" => {
+                        ok.remove("notices");
+                    }
+                    "bad-notices" => {
+                        ok.insert("notices".into(), Json::Null);
+                    }
+                    "missing-preservation" => {
+                        ok.remove("file_unchanged");
+                    }
+                    "bad-preservation" => {
+                        ok.insert("file_unchanged".into(), Json::Null);
+                    }
+                    "missing-semantic" => {
+                        ok.remove(semantic);
+                    }
+                    "empty-semantic" => {
+                        ok.insert(semantic.into(), serde_json::json!({}));
+                    }
+                    "bad-semantic" => {
+                        ok.insert(semantic.into(), serde_json::json!([]));
+                    }
+                    "missing-unused" if semantic == "agents" => {
+                        ok.remove("unused_kept_in_file");
+                    }
+                    "missing-unused" => {
+                        ok.remove("notices");
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            let report = scratch.config();
+            assert_eq!(
+                failed_cases(&report),
+                [name],
+                "{mutation}: {:#?}",
+                report.failures
+            );
+            assert_eq!(report.passed, 29, "{name}/{mutation}");
+            assert!(
+                report.failures[0]
+                    .detail
+                    .contains("expect.json design expectation requires"),
+                "{}",
+                report.failures[0]
+            );
+        }
+    }
+}
+
+#[test]
 fn a_deviation_must_carry_the_frozen_refusal_message() {
     let scratch = Scratch::new();
     scratch.edit_json("config/unknown-key-stages/expect.json", |json| {
@@ -202,16 +287,43 @@ fn a_malformed_enabled_manifest_fails_instead_of_turning_pending() {
 }
 
 #[test]
-fn a_missing_enabled_area_is_reported_not_skipped() {
-    let scratch = Scratch::new();
-    std::fs::remove_dir_all(scratch.path("config")).unwrap();
-    let reports = run_all(&scratch.root);
-    let config = reports
-        .iter()
-        .find(|report| report.area == "config")
-        .expect("still reported");
-    assert_eq!(config.state, AreaState::Enabled);
-    assert!(!config.is_ok());
+fn required_area_inventory_reports_missing_enabled_and_pending_inputs() {
+    let required = oah_conformance::list_areas(&fixture_root());
+    assert_eq!(required.len(), 8);
+    for area in &required {
+        for mutation in ["folder", "manifest", "case-list"] {
+            let scratch = Scratch::new();
+            match mutation {
+                "folder" => std::fs::remove_dir_all(scratch.path(area)).unwrap(),
+                "manifest" => {
+                    std::fs::remove_file(scratch.path(&format!("{area}/MANIFEST.json"))).unwrap()
+                }
+                "case-list" => scratch.edit_json(&format!("{area}/MANIFEST.json"), |json| {
+                    json["cases"].as_array_mut().unwrap().pop();
+                }),
+                _ => unreachable!(),
+            }
+            let reports = run_all(&scratch.root);
+            assert_eq!(
+                reports
+                    .iter()
+                    .map(|report| &report.area)
+                    .collect::<Vec<_>>(),
+                required.iter().collect::<Vec<_>>()
+            );
+            let report = reports.iter().find(|report| report.area == *area).unwrap();
+            assert_eq!(
+                report.state,
+                if area == "config" {
+                    AreaState::Enabled
+                } else {
+                    AreaState::Pending
+                }
+            );
+            assert!(!report.is_ok(), "missing {area}/{mutation} went unreported");
+            assert_eq!(reports.iter().filter(|report| !report.is_ok()).count(), 1);
+        }
+    }
 }
 
 #[test]
