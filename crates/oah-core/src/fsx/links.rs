@@ -14,6 +14,7 @@
 
 use super::atomic::Fingerprint;
 use super::error::{FsxError, FsxErrorKind};
+pub use super::identity::EntryIdentity;
 use super::identity::{self, EntryId, Now};
 use super::staging::{self, Attempted, Stage};
 use std::ffi::{OsStr, OsString};
@@ -109,12 +110,15 @@ pub struct CopiedFile {
 /// A plain record with no hidden state: the caller stores these fields (a [`Fingerprint`] round-trips through
 /// [`Fingerprint::to_hex`] and [`Fingerprint::from_hex`]) and may rebuild the record in a later process. It
 /// authorizes nothing by itself; [`remove`] acts only while the source lies in a known store and the disk still
-/// matches the record.
+/// matches the record, including the original entry identity. Restoring a record never captures a new identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedLink {
     pub destination: PathBuf,
     pub source: PathBuf,
     pub kind: LinkKind,
+    /// Identity captured from the created entry, retained unchanged across restoration. Missing or unsupported
+    /// evidence refuses removal; never substitute the identity of whatever is at the path when loading.
+    pub identity: Option<EntryIdentity>,
     /// The stored target of a symlink or junction; `None` for a copy.
     pub target: Option<PathBuf>,
     /// For a copy: every folder below the root, parents before children.
@@ -381,6 +385,7 @@ fn native(
         destination: destination.to_path_buf(),
         source: source.to_path_buf(),
         kind,
+        identity: Some(id.evidence()),
         target: Some(target.to_path_buf()),
         folders: Vec::new(),
         files: Vec::new(),
@@ -445,13 +450,12 @@ pub enum Removal {
 /// Removes a managed link, checking its record first.
 ///
 /// The record's source must lie inside one of `stores`, and the entry at its destination must still be the
-/// same symlink text, the same junction target, or a copy whose every folder and file matches the record.
+/// original entry identity plus the same symlink text, junction target, or copy folder/file inventory.
 /// Otherwise nothing is touched and the result is [`FsxErrorKind::NotOwned`]. Removing a link deletes only the
 /// link; removing a copy deletes only the recorded files and folders.
 ///
-/// The record may come from an earlier process. Durable data cannot tell two identical links apart, so a link
-/// that still matches the record is removed as the one OAH made; an entry that differs in any recorded way is
-/// left alone.
+/// The record may come from an earlier process. A same-target replacement with a different identity is refused.
+/// Entry-number reuse after deletion and concurrent check-to-path-use races remain limitations of plain evidence.
 pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError> {
     require_absolute(&link.source)?;
     require_absolute(&link.destination)?;
@@ -468,6 +472,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
     if entry == Entry::Missing {
         return Ok(Removal::AlreadyGone);
     }
+    require_record_identity(link)?;
     match link.kind {
         LinkKind::Symlink | LinkKind::Junction => {
             let target = link
@@ -484,6 +489,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
             if !same_native_link(&entry, link.kind, target, &link.source) {
                 return Err(not_owned(link, "the entry there is not this link"));
             }
+            require_record_identity(link)?;
             staging::remove_link(&link.destination).map_err(|error| {
                 FsxError::io(
                     FsxErrorKind::Io,
@@ -540,6 +546,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
                 ));
             }
             for file in &files {
+                require_record_identity(link)?;
                 let path = link.destination.join(&file.relative);
                 fs::remove_file(&path).map_err(|error| {
                     FsxError::io(
@@ -551,6 +558,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
                 })?;
             }
             for folder in folders.iter().rev() {
+                require_record_identity(link)?;
                 let path = link.destination.join(folder);
                 fs::remove_dir(&path).map_err(|error| {
                     FsxError::io(
@@ -561,6 +569,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
                     )
                 })?;
             }
+            require_record_identity(link)?;
             fs::remove_dir(&link.destination).map_err(|error| {
                 FsxError::io(
                     FsxErrorKind::Io,
@@ -576,6 +585,28 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
 
 fn not_owned(link: &ManagedLink, why: &str) -> FsxError {
     FsxError::new(FsxErrorKind::NotOwned, &link.destination, why)
+}
+
+/// Historical evidence is supplied by the record, never obtained by adopting the current entry.
+fn require_record_identity(link: &ManagedLink) -> Result<(), FsxError> {
+    let id = link
+        .identity
+        .and_then(EntryIdentity::entry_id)
+        .ok_or_else(|| not_owned(link, "the record has no supported original entry identity"))?;
+    match identity::now(&link.destination, id).map_err(|error| {
+        FsxError::io(
+            FsxErrorKind::Io,
+            &link.destination,
+            "cannot read the managed entry identity",
+            error,
+        )
+    })? {
+        Now::Same => Ok(()),
+        Now::Other | Now::Missing => Err(not_owned(
+            link,
+            "another entry replaced the recorded entry; it was left alone",
+        )),
+    }
 }
 
 fn kind_word(kind: LinkKind) -> &'static str {
@@ -803,6 +834,7 @@ fn copy_at(
         destination: destination.to_path_buf(),
         source: request.source.to_path_buf(),
         kind: LinkKind::Copy,
+        identity: Some(id.evidence()),
         target: None,
         folders,
         files,
@@ -1098,6 +1130,7 @@ mod tests {
                 "/x/elsewhere/s"
             }),
             kind: LinkKind::Symlink,
+            identity: None,
             target: Some(PathBuf::from("s")),
             folders: Vec::new(),
             files: Vec::new(),
@@ -1127,6 +1160,7 @@ mod tests {
             destination: destination.clone(),
             source,
             kind: LinkKind::Copy,
+            identity: Some(EntryId::of(&destination).unwrap().evidence()),
             target: None,
             folders: Vec::new(),
             files: vec![file],

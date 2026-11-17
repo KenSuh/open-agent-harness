@@ -1,7 +1,7 @@
 // 관리 링크 시험: 기본 링크(macOS 심볼릭 링크·Windows 정션)와 보고되는 복사 대체, 남의 항목 보존, 링크 삭제가 대상을 지우지 않는지 확인한다.
 use oah_core::fsx::links::{
-    CopiedFile, Entry, LinkKind, LinkRequest, ManagedLink, NativeLinker, Removal, SystemLinker,
-    TargetStyle, create, create_with, inspect, remove,
+    CopiedFile, Entry, EntryIdentity, LinkKind, LinkRequest, ManagedLink, NativeLinker, Removal,
+    SystemLinker, TargetStyle, create, create_with, inspect, remove,
 };
 use oah_core::fsx::{Fingerprint, FsxErrorKind};
 use std::cell::RefCell;
@@ -611,10 +611,6 @@ fn unowned_matching_link_cannot_be_adopted_and_removed() {
 
 #[test]
 fn cleanup_ownership_record_refuses_mismatching_replacements() {
-    // The record is durable data, so removal checks it against the disk: an entry that differs in any recorded
-    // way is refused and left as it is. Two identical links cannot be told apart from durable data, and the
-    // design counts a link as OAH's when it matches OAH's record and points into a known store, so an identical
-    // link is removed like the one OAH made, and only the link itself goes.
     let stores = Stores::new();
     let source = stores.source();
     let destination = stores.agents.join("skill-a");
@@ -649,11 +645,9 @@ fn cleanup_ownership_record_refuses_mismatching_replacements() {
     fs::remove_file(&destination).unwrap();
 
     SystemLinker.link(&source, &destination, &source).unwrap();
-    assert_eq!(
-        remove(&owned.link, &[&stores.store]).unwrap(),
-        Removal::Removed
-    );
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
+    let error = remove(&owned.link, &[&stores.store]).unwrap_err();
+    assert_eq!(error.kind(), FsxErrorKind::NotOwned);
+    assert_eq!(fs::canonicalize(&destination).unwrap(), source);
     assert_eq!(
         fs::read_to_string(source.join("SKILL.md")).unwrap(),
         "# Skill A\n"
@@ -1032,6 +1026,16 @@ fn record_text(link: &ManagedLink) -> String {
         format!("destination={}", text(&link.destination)),
         format!("source={}", text(&link.source)),
     ];
+    if let Some(identity) = link.identity {
+        let value = match identity {
+            EntryIdentity::Unix { device, inode } => format!("unix {device} {inode}"),
+            EntryIdentity::Windows {
+                volume_serial,
+                file_index,
+            } => format!("windows {volume_serial} {file_index}"),
+        };
+        lines.push(format!("identity={value}"));
+    }
     if let Some(target) = &link.target {
         lines.push(format!("target={}", text(target)));
     }
@@ -1080,10 +1084,28 @@ fn parse_record(text: &str) -> ManagedLink {
         "copy" => LinkKind::Copy,
         other => panic!("unknown kind {other}"),
     };
+    let identity = fields.get("identity").map(|text| {
+        let fields: Vec<_> = text.split(' ').collect();
+        assert_eq!(fields.len(), 3);
+        let first = fields[1].parse().unwrap();
+        let second = fields[2].parse().unwrap();
+        match fields[0] {
+            "unix" => EntryIdentity::Unix {
+                device: first,
+                inode: second,
+            },
+            "windows" => EntryIdentity::Windows {
+                volume_serial: first,
+                file_index: second,
+            },
+            other => panic!("unsupported identity tag {other}"),
+        }
+    });
     ManagedLink {
         destination: PathBuf::from(fields["destination"]),
         source: PathBuf::from(fields["source"]),
         kind,
+        identity,
         target: fields.get("target").map(|target| PathBuf::from(*target)),
         folders,
         files,
@@ -1108,6 +1130,10 @@ fn durable_record_survives_separate_processes() {
                     ("copied", true),
                     ("replaced", false),
                     ("edited", true),
+                    ("same-target", false),
+                    ("file", false),
+                    ("folder", false),
+                    ("same-copy", true),
                 ] {
                     let destination = agents.join(name);
                     let request = LinkRequest {
@@ -1141,7 +1167,14 @@ fn durable_record_survives_separate_processes() {
                     Removal::AlreadyGone
                 );
                 assert_eq!(remove(&read("copied"), &stores).unwrap(), Removal::Removed);
-                for name in ["replaced", "edited"] {
+                for name in [
+                    "replaced",
+                    "edited",
+                    "same-target",
+                    "file",
+                    "folder",
+                    "same-copy",
+                ] {
                     let error = remove(&read(name), &stores).unwrap_err();
                     assert_eq!(error.kind(), FsxErrorKind::NotOwned, "{name}: {error}");
                 }
@@ -1162,9 +1195,54 @@ fn durable_record_survives_separate_processes() {
     SystemLinker.link(&other, &replaced, &other).unwrap();
     let edited = stores.agents.join("edited").join("SKILL.md");
     fs::write(&edited, "# Edited by the user\n").unwrap();
+    for name in ["same-target", "file", "folder", "same-copy"] {
+        let destination = stores.agents.join(name);
+        fs::rename(&destination, root.join(format!("original-{name}"))).unwrap();
+        match name {
+            "same-target" => SystemLinker
+                .link(&stores.source(), &destination, &stores.source())
+                .unwrap(),
+            "file" => fs::write(&destination, "user file").unwrap(),
+            "folder" => fs::create_dir(&destination).unwrap(),
+            "same-copy" => {
+                create_with(
+                    &stores.request(&destination, TargetStyle::Absolute, true, &stores.source()),
+                    &Unavailable,
+                )
+                .unwrap();
+            }
+            other => panic!("unexpected replacement {other}"),
+        }
+    }
     let removed = rerun(TEST, "remove", &root, None);
     assert_ne!(reported_process(&created), reported_process(&removed));
-    assert_eq!(names(&stores.agents), ["edited", "replaced"]);
+    assert_eq!(
+        names(&stores.agents),
+        [
+            "edited",
+            "file",
+            "folder",
+            "replaced",
+            "same-copy",
+            "same-target"
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(stores.agents.join("file")).unwrap(),
+        "user file"
+    );
+    assert!(stores.agents.join("folder").is_dir());
+    assert_eq!(
+        fs::canonicalize(stores.agents.join("same-target")).unwrap(),
+        stores.source()
+    );
+    assert_eq!(
+        fs::read(stores.agents.join("same-copy/SKILL.md")).unwrap(),
+        b"# Skill A\n"
+    );
+    for name in ["same-target", "file", "folder", "same-copy"] {
+        assert!(fs::symlink_metadata(root.join(format!("original-{name}"))).is_ok());
+    }
     assert_eq!(fs::canonicalize(&replaced).unwrap(), other);
     assert_eq!(
         fs::read_to_string(&edited).unwrap(),
@@ -1185,14 +1263,11 @@ fn durable_record_link_target_must_point_at_its_store_source() {
     let outside = stores.agents.join("outside");
     fs::create_dir(&outside).unwrap();
     let destination = stores.agents.join("user-link");
-    SystemLinker.link(&outside, &destination, &outside).unwrap();
+    let outcome =
+        create(&stores.request(&destination, TargetStyle::Absolute, false, &outside)).unwrap();
     let minted = ManagedLink {
-        destination: destination.clone(),
         source: source.clone(),
-        kind: SystemLinker.kind(),
-        target: Some(outside.clone()),
-        folders: Vec::new(),
-        files: Vec::new(),
+        ..outcome.link
     };
     let error = remove(&minted, &[&stores.store]).unwrap_err();
     assert_eq!(error.kind(), FsxErrorKind::NotOwned, "{error}");
@@ -1242,7 +1317,11 @@ fn durable_record_many_links_and_files_stay_within_256_descriptors() {
                 style: TargetStyle::Absolute,
                 allow_copy: false,
             };
-            records.push(create(&request).unwrap().link);
+            let link = create(&request).unwrap().link;
+            let restored = parse_record(&record_text(&link));
+            assert_eq!(restored, link);
+            assert!(restored.identity.is_some());
+            records.push(restored);
         }
         let big = store.join("big");
         for index in 0..FILES {
@@ -1264,7 +1343,10 @@ fn durable_record_many_links_and_files_stay_within_256_descriptors() {
         let outcome = create_with(&request, &Unavailable).unwrap();
         assert_eq!(outcome.link.kind, LinkKind::Copy);
         assert_eq!(outcome.link.files.len(), FILES);
-        records.push(outcome.link);
+        let restored = parse_record(&record_text(&outcome.link));
+        assert_eq!(restored, outcome.link);
+        assert!(restored.identity.is_some());
+        records.push(restored);
         for record in &records {
             assert_eq!(remove(record, &[&store]).unwrap(), Removal::Removed);
         }
@@ -1323,8 +1405,17 @@ fn durable_record_descriptor_exhaustion_is_an_io_error_without_residue() {
             fs::read_to_string(destination.join("SKILL.md")).unwrap(),
             "# Skill A\n"
         );
-        assert_eq!(remove(&outcome.link, &[&store]).unwrap(), Removal::Removed);
         drop(held);
+        let held = hold_all_but(0);
+        let error = remove(&outcome.link, &[&store]).unwrap_err();
+        assert_eq!(error.kind(), FsxErrorKind::Io, "{error}");
+        assert_eq!(error.io_error().and_then(io::Error::raw_os_error), Some(24));
+        drop(held);
+        assert_eq!(
+            fs::read(destination.join("SKILL.md")).unwrap(),
+            b"# Skill A\n"
+        );
+        assert_eq!(remove(&outcome.link, &[&store]).unwrap(), Removal::Removed);
         assert_eq!(names(&agents), Vec::<String>::new());
         println!("ROLE_OK exhaust free=2 copied={}", outcome.link.files.len());
         return;
@@ -1334,4 +1425,55 @@ fn durable_record_descriptor_exhaustion_is_an_io_error_without_residue() {
     let output = rerun(TEST, "exhaust", &root, Some(256));
     assert!(output.contains("os error 24"), "{output}");
     assert_eq!(names(&stores.agents), Vec::<String>::new());
+}
+
+#[test]
+fn durable_record_missing_invalid_or_foreign_identity_refuses_without_adoption() {
+    let stores = Stores::new();
+    let source = stores.source();
+    for copy in [false, true] {
+        let destination = stores.agents.join(if copy { "copy" } else { "link" });
+        let request = stores.request(&destination, TargetStyle::Absolute, copy, &source);
+        let outcome = if copy {
+            create_with(&request, &Unavailable)
+        } else {
+            create(&request)
+        }
+        .unwrap();
+        let identity = outcome.link.identity.unwrap();
+        let (invalid, foreign) = match identity {
+            EntryIdentity::Unix { device, .. } => (
+                EntryIdentity::Unix { device, inode: 0 },
+                EntryIdentity::Windows {
+                    volume_serial: device,
+                    file_index: 1,
+                },
+            ),
+            EntryIdentity::Windows { volume_serial, .. } => (
+                EntryIdentity::Windows {
+                    volume_serial,
+                    file_index: 0,
+                },
+                EntryIdentity::Unix {
+                    device: volume_serial,
+                    inode: 1,
+                },
+            ),
+        };
+        for proof in [None, Some(invalid), Some(foreign)] {
+            let mut restored = parse_record(&record_text(&outcome.link));
+            restored.identity = proof;
+            let restored = parse_record(&record_text(&restored));
+            let error = remove(&restored, &[&stores.store]).unwrap_err();
+            assert_eq!(error.kind(), FsxErrorKind::NotOwned, "{error}");
+            assert_eq!(
+                fs::read(destination.join("SKILL.md")).unwrap(),
+                b"# Skill A\n"
+            );
+        }
+        assert_eq!(
+            remove(&parse_record(&record_text(&outcome.link)), &[&stores.store]).unwrap(),
+            Removal::Removed
+        );
+    }
 }

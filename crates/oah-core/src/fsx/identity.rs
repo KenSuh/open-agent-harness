@@ -1,14 +1,39 @@
 // 항목 신원 값: 링크를 따라가지 않고 장치·항목 번호를 잠깐 읽어 값으로만 남기며, 열린 핸들을 보관하지 않는다.
-//! Entry identities for one operation's own bookkeeping, and the rename that never replaces.
+//! Plain entry identities, and the rename that never replaces.
 //!
 //! An [`EntryId`] is a plain value (device and entry number on Unix, volume serial and file index on Windows)
 //! read without following links. Holding one keeps nothing open, so an operation may record one per entry it
-//! makes without using descriptors. It is never an ownership record: it only lets an operation tell, before it
-//! removes or publishes something, that the entry at a path is still the one it made a moment ago.
+//! makes without using descriptors. Its platform-tagged evidence can also accompany a caller's managed record:
+//! an identity alone never grants ownership, but a different identity disproves that it is the recorded entry.
 
 use std::fs::File;
 use std::io;
 use std::path::Path;
+
+/// Historical identity of a managed entry itself, without following a link or keeping an OS handle open.
+///
+/// The caller retains the platform tag and both numbers unchanged with its record. This is trusted caller
+/// evidence, not authentication. Only the current platform's nonzero inode/file index is supported. Filesystems
+/// must supply stable entry numbers across renames; unsupported proof is refused. Numbers may be reused after
+/// deletion, so this cannot detect reuse or close a concurrent check-to-path-use window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryIdentity {
+    Unix { device: u64, inode: u64 },
+    Windows { volume_serial: u64, file_index: u64 },
+}
+
+impl EntryIdentity {
+    pub(super) fn entry_id(self) -> Option<EntryId> {
+        let (volume, index, supported) = match self {
+            Self::Unix { device, inode } => (device, inode, cfg!(unix)),
+            Self::Windows {
+                volume_serial,
+                file_index,
+            } => (volume_serial, file_index, cfg!(windows)),
+        };
+        (supported && index != 0).then_some(EntryId { volume, index })
+    }
+}
 
 /// Which entry a path named when the value was read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +43,20 @@ pub(super) struct EntryId {
 }
 
 impl EntryId {
+    pub(super) fn evidence(self) -> EntryIdentity {
+        if cfg!(windows) {
+            EntryIdentity::Windows {
+                volume_serial: self.volume,
+                file_index: self.index,
+            }
+        } else {
+            EntryIdentity::Unix {
+                device: self.volume,
+                inode: self.index,
+            }
+        }
+    }
+
     /// The entry at `path` itself, never what a link there points to.
     #[cfg(unix)]
     pub(super) fn of(path: &Path) -> io::Result<EntryId> {
@@ -171,5 +210,66 @@ mod windows {
             .encode_wide()
             .chain(Some(0))
             .collect()
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::rename_new;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn windows_nonreplacing_rename_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let make = |path: &Path, folder: bool, bytes: &[u8]| {
+            if folder {
+                fs::create_dir(path).unwrap();
+                fs::write(path.join("keep.txt"), bytes).unwrap();
+            } else {
+                fs::write(path, bytes).unwrap();
+            }
+        };
+        let read = |path: &Path, folder: bool| {
+            fs::read(if folder {
+                path.join("keep.txt")
+            } else {
+                path.to_path_buf()
+            })
+            .unwrap()
+        };
+        for folder in [false, true] {
+            for occupied in [None, Some(false), Some(true)] {
+                let from = root.join(format!("원본-{folder}-{occupied:?}"));
+                let to = root.join(format!("대상-{folder}-{occupied:?}"));
+                make(&from, folder, b"original");
+                match occupied {
+                    Some(target_folder) => {
+                        make(&to, target_folder, b"user entry");
+                        rename_new(&from, &to).unwrap_err();
+                        assert_eq!(read(&from, folder), b"original");
+                        assert_eq!(read(&to, target_folder), b"user entry");
+                    }
+                    None => {
+                        rename_new(&from, &to).unwrap();
+                        assert!(!from.exists());
+                        assert_eq!(read(&to, folder), b"original");
+                    }
+                }
+            }
+        }
+        let mut long = root.to_path_buf();
+        for _ in 0..4 {
+            long.push("d".repeat(80));
+        }
+        fs::create_dir_all(&long).unwrap();
+        let from = long.join("긴-원본.txt");
+        let to = long.join("긴-대상.txt");
+        fs::write(&from, b"long path").unwrap();
+        rename_new(&from, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"long path");
+        rename_new(&to, Path::new("")).unwrap_err();
+        assert_eq!(fs::read(&to).unwrap(), b"long path");
     }
 }
