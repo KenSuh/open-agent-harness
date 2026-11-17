@@ -1,7 +1,7 @@
 // 항목 신원 값: 링크를 따라가지 않고 장치·항목 번호를 잠깐 읽어 값으로만 남기며, 열린 핸들을 보관하지 않는다.
 //! Plain entry identities, and the rename that never replaces.
 //!
-//! An [`EntryId`] is a plain value (device and entry number on Unix, volume serial and file index on Windows)
+//! An [`EntryId`] is a plain value (device and entry number on Unix, volume, file index and FAT directory allocation on Windows)
 //! read without following links. Holding one keeps nothing open, so an operation may record one per entry it
 //! makes without using descriptors. Its platform-tagged evidence can also accompany a caller's managed record:
 //! an identity alone never grants ownership, but a different identity disproves that it is the recorded entry.
@@ -12,26 +12,52 @@ use std::path::Path;
 
 /// Historical identity of a managed entry itself, without following a link or keeping an OS handle open.
 ///
-/// The caller retains the platform tag and both numbers unchanged with its record. This is trusted caller
+/// The caller retains the platform tag and all numbers unchanged with its record. This is trusted caller
 /// evidence, not authentication. Only the current platform's nonzero inode/file index is supported. Filesystems
-/// must supply stable entry numbers across renames; unsupported proof is refused. Numbers may be reused after
-/// deletion, so this cannot detect reuse or close a concurrent check-to-path-use window.
+/// FAT directory evidence also retains its first allocated cluster: its directory-slot index can change on
+/// rename and be reused while the original still exists. Allocation changes refuse ownership. Numbers may be
+/// reused after deletion, so this cannot detect that reuse or close a concurrent check-to-path-use window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryIdentity {
-    Unix { device: u64, inode: u64 },
-    Windows { volume_serial: u64, file_index: u64 },
+    Unix {
+        device: u64,
+        inode: u64,
+    },
+    Windows {
+        volume_serial: u64,
+        file_index: u64,
+    },
+    WindowsFatDirectory {
+        volume_serial: u64,
+        file_index: u64,
+        first_cluster: u64,
+    },
 }
 
 impl EntryIdentity {
     pub(super) fn entry_id(self) -> Option<EntryId> {
-        let (volume, index, supported) = match self {
-            Self::Unix { device, inode } => (device, inode, cfg!(unix)),
+        let (volume, index, first_cluster, supported) = match self {
+            Self::Unix { device, inode } => (device, inode, None, cfg!(unix)),
             Self::Windows {
                 volume_serial,
                 file_index,
-            } => (volume_serial, file_index, cfg!(windows)),
+            } => (volume_serial, file_index, None, cfg!(windows)),
+            Self::WindowsFatDirectory {
+                volume_serial,
+                file_index,
+                first_cluster,
+            } => (
+                volume_serial,
+                file_index,
+                Some(first_cluster),
+                cfg!(windows) && i64::try_from(first_cluster).is_ok(),
+            ),
         };
-        (supported && index != 0).then_some(EntryId { volume, index })
+        (supported && index != 0).then_some(EntryId {
+            volume,
+            index,
+            first_cluster,
+        })
     }
 }
 
@@ -40,14 +66,22 @@ impl EntryIdentity {
 pub(super) struct EntryId {
     volume: u64,
     index: u64,
+    first_cluster: Option<u64>,
 }
 
 impl EntryId {
     pub(super) fn evidence(self) -> EntryIdentity {
         if cfg!(windows) {
-            EntryIdentity::Windows {
-                volume_serial: self.volume,
-                file_index: self.index,
+            match self.first_cluster {
+                Some(first_cluster) => EntryIdentity::WindowsFatDirectory {
+                    volume_serial: self.volume,
+                    file_index: self.index,
+                    first_cluster,
+                },
+                None => EntryIdentity::Windows {
+                    volume_serial: self.volume,
+                    file_index: self.index,
+                },
             }
         } else {
             EntryIdentity::Unix {
@@ -65,20 +99,14 @@ impl EntryId {
         Ok(EntryId {
             volume: metadata.dev(),
             index: metadata.ino(),
+            first_cluster: None,
         })
     }
 
     /// The entry at `path` itself, never what a link there points to.
     #[cfg(windows)]
     pub(super) fn of(path: &Path) -> io::Result<EntryId> {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        // Attribute-only access opens folders and junctions themselves; the handle closes before returning.
-        let file = std::fs::OpenOptions::new()
-            .access_mode(0)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)?;
+        let file = windows::open(path)?;
         EntryId::of_file(&file)
     }
 
@@ -95,6 +123,7 @@ impl EntryId {
         Ok(EntryId {
             volume: metadata.dev(),
             index: metadata.ino(),
+            first_cluster: None,
         })
     }
 
@@ -105,12 +134,46 @@ impl EntryId {
         Ok(EntryId {
             volume: information.volume_serial_number(),
             index: information.file_index(),
+            first_cluster: windows::directory_cluster(file, information.file_attributes())?,
         })
     }
 
     #[cfg(not(any(unix, windows)))]
     pub(super) fn of_file(_file: &File) -> io::Result<EntryId> {
         Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// One operation's proof across its own move. Windows retains one attribute handle only until completion.
+#[derive(Debug)]
+pub(super) struct MoveProof {
+    before: EntryId,
+    #[cfg(windows)]
+    file: File,
+}
+
+impl MoveProof {
+    pub(super) fn acquire(path: &Path, before: EntryId) -> io::Result<Option<Self>> {
+        #[cfg(windows)]
+        {
+            let file = windows::open(path)?;
+            Ok((EntryId::of_file(&file)? == before).then_some(Self { before, file }))
+        }
+        #[cfg(not(windows))]
+        {
+            Ok((now(path, before)? == Now::Same).then_some(Self { before }))
+        }
+    }
+
+    pub(super) fn after(&self, destination: &Path) -> io::Result<Option<EntryId>> {
+        #[cfg(windows)]
+        let after = EntryId::of_file(&self.file)?;
+        #[cfg(not(windows))]
+        let after = self.before;
+        if after.volume != self.before.volume || after.first_cluster != self.before.first_cluster {
+            return Ok(None);
+        }
+        Ok((now(destination, after)? == Now::Same).then_some(after))
     }
 }
 
@@ -152,67 +215,10 @@ pub(super) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod move_tests;
 #[cfg(windows)]
-mod windows {
-    use std::ffi::OsString;
-    use std::io;
-    use std::os::windows::ffi::OsStrExt;
-    use std::path::{Component, Path, Prefix};
-
-    /// No `MOVEFILE_REPLACE_EXISTING`: an existing target, file or folder, is refused.
-    const NO_REPLACE: u32 = 0;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-
-    /// `std::fs::rename` asks Windows to replace an existing target; this never does. The refusal is
-    /// ERROR_ALREADY_EXISTS or ERROR_FILE_EXISTS, both `AlreadyExists`.
-    pub(super) fn move_new(from: &Path, to: &Path) -> io::Result<()> {
-        let from = wide(from);
-        let to = wide(to);
-        // SAFETY: both arguments are NUL-terminated UTF-16 buffers that live until the call returns.
-        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), NO_REPLACE) } == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-
-    /// The path as a NUL-terminated wide string. A plain drive path takes the verbatim form, which lifts the
-    /// 260-character limit; any other form is passed exactly as given.
-    fn wide(path: &Path) -> Vec<u16> {
-        let mut components = path.components();
-        let verbatim = match (components.next(), components.next()) {
-            (Some(Component::Prefix(prefix)), Some(Component::RootDir))
-                if matches!(prefix.kind(), Prefix::Disk(_)) =>
-            {
-                let mut text = OsString::from(r"\\?\");
-                text.push(prefix.as_os_str());
-                let mut plain = true;
-                for component in components {
-                    if let Component::Normal(part) = component {
-                        text.push(r"\");
-                        text.push(part);
-                    } else {
-                        plain = false;
-                        break;
-                    }
-                }
-                plain.then_some(text)
-            }
-            _ => None,
-        };
-        verbatim
-            .as_deref()
-            .unwrap_or(path.as_os_str())
-            .encode_wide()
-            .chain(Some(0))
-            .collect()
-    }
-}
-
+mod windows;
 #[cfg(all(test, windows))]
 mod tests {
     use super::rename_new;

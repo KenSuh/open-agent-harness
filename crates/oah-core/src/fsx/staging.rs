@@ -10,7 +10,7 @@
 //! kept. Publishing renames the root to the destination without replacing anything there.
 
 use super::error::{FsxError, FsxErrorKind};
-use super::identity::{self, EntryId, Now};
+use super::identity::{self, EntryId, MoveProof, Now};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -209,10 +209,15 @@ impl Stage {
             let primary = replaced(&self.entries[1].path);
             return Err(self.discard_after(primary));
         }
+        let proof = move_proof(&self.entries[1]).map_err(|error| self.discard_after(error))?;
         if let Err(error) = identity::rename_new(&self.entries[1].path, to) {
             let primary = io_error(to, "cannot move the new link to its private name", error);
             return Err(self.discard_after(primary));
         }
+        self.entries[1].path = to.to_path_buf();
+        self.entries[1].id = None;
+        let id = moved_id(&proof, to).map_err(|error| self.discard_after(error))?;
+        self.entries[1].id = Some(id);
         let link = self.entries.pop().expect("checked above");
         let taken = Stage {
             entries: vec![Acquired {
@@ -229,10 +234,17 @@ impl Stage {
     /// Renames the root to `destination` without replacing anything there, after checking it is still this
     /// operation's entry. On failure everything recorded is cleaned up; an occupied destination is
     /// [`FsxErrorKind::LinkExists`] and is left alone. Returns the published entry's identity for reading it back.
-    pub(super) fn publish(self, destination: &Path) -> Result<EntryId, FsxError> {
-        let id = self.require_root()?;
+    pub(super) fn publish(mut self, destination: &Path) -> Result<EntryId, FsxError> {
+        self.require_root()?;
+        let proof = move_proof(&self.entries[0]).map_err(|error| self.discard_after(error))?;
         match identity::rename_new(self.path(), destination) {
-            Ok(()) => Ok(id),
+            Ok(()) => {
+                self.entries[0].path = destination.to_path_buf();
+                self.entries[0].id = None;
+                let id =
+                    moved_id(&proof, destination).map_err(|error| self.discard_after(error))?;
+                Ok(id)
+            }
             Err(error) => {
                 let occupied = error.kind() == io::ErrorKind::AlreadyExists
                     || fs::symlink_metadata(destination).is_ok();
@@ -284,6 +296,26 @@ impl Stage {
             Err(cleanup) => primary.with_cleanup(cleanup),
         }
     }
+}
+
+fn move_proof(entry: &Acquired) -> Result<MoveProof, FsxError> {
+    let id = entry.id.ok_or_else(|| replaced(&entry.path))?;
+    MoveProof::acquire(&entry.path, id)
+        .map_err(|error| {
+            io_error(
+                &entry.path,
+                "cannot acquire the recorded entry for its move",
+                error,
+            )
+        })?
+        .ok_or_else(|| replaced(&entry.path))
+}
+
+fn moved_id(proof: &MoveProof, destination: &Path) -> Result<EntryId, FsxError> {
+    proof
+        .after(destination)
+        .map_err(|error| io_error(destination, "cannot read the entry after its move", error))?
+        .ok_or_else(|| replaced(destination))
 }
 
 fn remove(entry: &Acquired) -> Result<(), FsxError> {

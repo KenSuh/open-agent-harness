@@ -1033,6 +1033,11 @@ fn record_text(link: &ManagedLink) -> String {
                 volume_serial,
                 file_index,
             } => format!("windows {volume_serial} {file_index}"),
+            EntryIdentity::WindowsFatDirectory {
+                volume_serial,
+                file_index,
+                first_cluster,
+            } => format!("fat-directory {volume_serial} {file_index} {first_cluster}"),
         };
         lines.push(format!("identity={value}"));
     }
@@ -1086,7 +1091,10 @@ fn parse_record(text: &str) -> ManagedLink {
     };
     let identity = fields.get("identity").map(|text| {
         let fields: Vec<_> = text.split(' ').collect();
-        assert_eq!(fields.len(), 3);
+        assert_eq!(
+            fields.len(),
+            if fields[0] == "fat-directory" { 4 } else { 3 }
+        );
         let first = fields[1].parse().unwrap();
         let second = fields[2].parse().unwrap();
         match fields[0] {
@@ -1097,6 +1105,11 @@ fn parse_record(text: &str) -> ManagedLink {
             "windows" => EntryIdentity::Windows {
                 volume_serial: first,
                 file_index: second,
+            },
+            "fat-directory" => EntryIdentity::WindowsFatDirectory {
+                volume_serial: first,
+                file_index: second,
+                first_cluster: fields[3].parse().unwrap(),
             },
             other => panic!("unsupported identity tag {other}"),
         }
@@ -1252,6 +1265,196 @@ fn durable_record_survives_separate_processes() {
         fs::read_to_string(stores.source().join("SKILL.md")).unwrap(),
         "# Skill A\n"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn operation_identity_real_fat32_fallback_record() {
+    const TEST: &str = "operation_identity_real_fat32_fallback_record";
+    if let Some((role, root)) = child_role() {
+        let store = root.join("store");
+        let source = store.join("skill");
+        let agents = root.join("agents");
+        let records = root.join("records");
+        let read = |name: &str| parse_record(&fs::read_to_string(records.join(name)).unwrap());
+        match role.as_str() {
+            "create" => {
+                let destination = agents.join("copy");
+                let mut request = LinkRequest {
+                    source: &source,
+                    destination: &destination,
+                    style: TargetStyle::Absolute,
+                    allow_copy: false,
+                };
+                let error = create(&request).unwrap_err();
+                assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
+                assert_eq!(error.io_error().and_then(io::Error::raw_os_error), Some(1));
+                assert!(error.cleanup_error().is_none());
+                assert_eq!(names(&agents), ["unowned.txt"]);
+                request.allow_copy = true;
+                for name in ["copy", "replaced", "malformed"] {
+                    let destination = agents.join(name);
+                    let outcome = create(&LinkRequest {
+                        destination: &destination,
+                        ..request
+                    })
+                    .unwrap();
+                    assert_eq!(outcome.link.kind, LinkKind::Copy);
+                    assert!(outcome.created);
+                    assert!(outcome.fallback.as_deref().unwrap().contains("os error 1"));
+                    assert_eq!(
+                        fs::read(destination.join("스킬.txt")).unwrap(),
+                        b"synthetic bytes\r\n"
+                    );
+                    let text = record_text(&outcome.link);
+                    assert_eq!(parse_record(&text), outcome.link);
+                    fs::write(records.join(name), text).unwrap();
+                    println!("RETURNED_PROOF {name} {:?}", outcome.link.identity);
+                }
+            }
+            "replace" => {
+                let destination = agents.join("replaced");
+                fs::rename(
+                    &destination,
+                    root.join("retained-original-with-a-longer-name"),
+                )
+                .unwrap();
+                let original = read("replaced");
+                let EntryIdentity::WindowsFatDirectory {
+                    file_index: original_index,
+                    ..
+                } = original.identity.unwrap()
+                else {
+                    panic!("the actual returned record lacks FAT directory proof");
+                };
+                let mut reused = false;
+                for number in 0..128 {
+                    let replacement = create(&LinkRequest {
+                        source: &source,
+                        destination: &destination,
+                        style: TargetStyle::Absolute,
+                        allow_copy: true,
+                    })
+                    .unwrap();
+                    let EntryIdentity::WindowsFatDirectory { file_index, .. } =
+                        replacement.link.identity.unwrap()
+                    else {
+                        panic!("the replacement lacks actual FAT directory proof");
+                    };
+                    assert_ne!(original.identity, replacement.link.identity);
+                    println!(
+                        "REPLACEMENT_PROOF attempt={number} {:?}",
+                        replacement.link.identity
+                    );
+                    if file_index == original_index {
+                        fs::write(records.join("replacement"), record_text(&replacement.link))
+                            .unwrap();
+                        reused = true;
+                        break;
+                    }
+                    fs::rename(
+                        &destination,
+                        root.join(format!("retained-replacement-{number}")),
+                    )
+                    .unwrap();
+                }
+                assert!(
+                    reused,
+                    "the bounded actual FAT32 control did not exercise directory-slot reuse; no preservation pass"
+                );
+                println!("ACTUAL_FAT32_SLOT_REUSED_WITH_ORIGINAL_ALLOCATED index={original_index}");
+            }
+            "remove" => {
+                assert_eq!(remove(&read("copy"), &[&store]).unwrap(), Removal::Removed);
+                assert_eq!(
+                    remove(&read("copy"), &[&store]).unwrap(),
+                    Removal::AlreadyGone
+                );
+                let error = remove(&read("replaced"), &[&store]).unwrap_err();
+                assert_eq!(error.kind(), FsxErrorKind::NotOwned);
+                let original = read("malformed");
+                let EntryIdentity::WindowsFatDirectory {
+                    volume_serial,
+                    file_index,
+                    ..
+                } = original.identity.unwrap()
+                else {
+                    panic!(
+                        "the explicitly supplied native test filesystem is not FAT with directory allocation proof"
+                    );
+                };
+                for identity in [
+                    None,
+                    Some(EntryIdentity::Windows {
+                        volume_serial,
+                        file_index,
+                    }),
+                    Some(EntryIdentity::WindowsFatDirectory {
+                        volume_serial,
+                        file_index,
+                        first_cluster: u64::MAX,
+                    }),
+                    Some(EntryIdentity::WindowsFatDirectory {
+                        volume_serial,
+                        file_index: 0,
+                        first_cluster: 0,
+                    }),
+                ] {
+                    let restored = parse_record(&record_text(&ManagedLink {
+                        identity,
+                        ..original.clone()
+                    }));
+                    assert_eq!(
+                        remove(&restored, &[&store]).unwrap_err().kind(),
+                        FsxErrorKind::NotOwned
+                    );
+                    assert_eq!(
+                        fs::read(original.destination.join("스킬.txt")).unwrap(),
+                        b"synthetic bytes\r\n"
+                    );
+                }
+                assert_eq!(remove(&original, &[&store]).unwrap(), Removal::Removed);
+            }
+            other => panic!("unknown role {other}"),
+        }
+        println!("ROLE_OK {role} process={}", std::process::id());
+        return;
+    }
+    let Some(root) = std::env::var_os("OAH_FAT32_TEST_ROOT").map(PathBuf::from) else {
+        println!(
+            "SKIP actual FAT32 prerequisite: set OAH_FAT32_TEST_ROOT to a new owned path on a verified disposable FAT32 filesystem"
+        );
+        return;
+    };
+    assert!(root.is_absolute());
+    fs::create_dir(&root).unwrap();
+    for name in ["store", "store/skill", "agents", "records"] {
+        fs::create_dir(root.join(name)).unwrap();
+    }
+    fs::write(root.join("store/skill/스킬.txt"), b"synthetic bytes\r\n").unwrap();
+    fs::write(root.join("agents/unowned.txt"), b"unowned sibling").unwrap();
+    let created = rerun(TEST, "create", &root, None);
+    let replaced = rerun(TEST, "replace", &root, None);
+    let removed = rerun(TEST, "remove", &root, None);
+    assert_ne!(reported_process(&created), reported_process(&replaced));
+    assert_ne!(reported_process(&replaced), reported_process(&removed));
+    println!("{created}{replaced}{removed}");
+    assert_eq!(names(&root.join("agents")), ["replaced", "unowned.txt"]);
+    for folder in [
+        "store/skill",
+        "agents/replaced",
+        "retained-original-with-a-longer-name",
+    ] {
+        assert_eq!(
+            fs::read(root.join(folder).join("스킬.txt")).unwrap(),
+            b"synthetic bytes\r\n"
+        );
+    }
+    assert_eq!(
+        fs::read(root.join("agents/unowned.txt")).unwrap(),
+        b"unowned sibling"
+    );
+    println!("OPERATION_IDENTITY_REAL_FAT32_RECORD_OK");
 }
 
 #[test]
@@ -1449,7 +1652,8 @@ fn durable_record_missing_invalid_or_foreign_identity_refuses_without_adoption()
                     file_index: 1,
                 },
             ),
-            EntryIdentity::Windows { volume_serial, .. } => (
+            EntryIdentity::Windows { volume_serial, .. }
+            | EntryIdentity::WindowsFatDirectory { volume_serial, .. } => (
                 EntryIdentity::Windows {
                     volume_serial,
                     file_index: 0,
