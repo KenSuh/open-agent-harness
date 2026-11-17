@@ -166,10 +166,11 @@ impl NativeLinker for SystemLinker {
             Err(error) => {
                 // The crate creates the folder before making it a junction; remove that folder again when it
                 // is still a plain empty one, so a failed junction leaves nothing behind.
-                if let Ok(metadata) = fs::symlink_metadata(destination) {
-                    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                        let _ = fs::remove_dir(destination);
-                    }
+                if let Ok(metadata) = fs::symlink_metadata(destination)
+                    && metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                {
+                    let _ = fs::remove_dir(destination);
                 }
                 Err(error)
             }

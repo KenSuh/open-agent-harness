@@ -2,7 +2,7 @@
 use super::error::{FsxError, FsxErrorKind};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -267,7 +267,7 @@ fn verify(path: &Path, expected: &[u8]) -> Result<WriteReceipt, FsxError> {
 
 #[cfg(unix)]
 fn sync_folder(folder: &Path) -> io::Result<()> {
-    File::open(folder)?.sync_all()
+    fs::File::open(folder)?.sync_all()
 }
 
 #[cfg(not(unix))]

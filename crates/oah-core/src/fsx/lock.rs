@@ -46,6 +46,16 @@ impl FileLock {
     pub fn acquire(target: &Path, options: LockOptions) -> Result<FileLock, FsxError> {
         let lock_path = lock_path_of(target)?;
         let deadline = Instant::now() + options.wait;
+        let busy = || {
+            FsxError::new(
+                FsxErrorKind::Busy,
+                target,
+                format!(
+                    "another writer held the lock for {} ms; try again",
+                    options.wait.as_millis()
+                ),
+            )
+        };
         loop {
             match sys::try_acquire(&lock_path) {
                 Ok(Attempt::Held(file)) => {
@@ -55,7 +65,13 @@ impl FileLock {
                         file: Some(file),
                     });
                 }
-                Ok(Attempt::Retry) => continue,
+                // The lock file was replaced between opening and locking: try again at once, within the wait.
+                #[cfg(unix)]
+                Ok(Attempt::Retry) => {
+                    if Instant::now() >= deadline {
+                        return Err(busy());
+                    }
+                }
                 Ok(Attempt::Contended(last)) => {
                     if Instant::now() >= deadline {
                         return Err(match last {
@@ -65,14 +81,7 @@ impl FileLock {
                                 "cannot open the lock file",
                                 error,
                             ),
-                            None => FsxError::new(
-                                FsxErrorKind::Busy,
-                                target,
-                                format!(
-                                    "another writer held the lock for {} ms; try again",
-                                    options.wait.as_millis()
-                                ),
-                            ),
+                            None => busy(),
                         });
                     }
                     std::thread::sleep(options.poll);
@@ -144,6 +153,7 @@ enum Attempt {
     /// Someone else holds it. On Windows the last open error is kept when it was not a plain sharing conflict.
     Contended(Option<io::Error>),
     /// The lock file was replaced between opening and locking; try again at once.
+    #[cfg(unix)]
     Retry,
 }
 
