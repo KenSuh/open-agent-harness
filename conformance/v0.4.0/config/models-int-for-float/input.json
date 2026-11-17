@@ -1,0 +1,11 @@
+{
+  "defaults": {
+    "fetch_scores": true,
+    "profile": "balanced",
+    "ttl_hours": 24.0
+  },
+  "files": {
+    ".oah/config.toml": "[models]\nttl_hours = 2\nprofile = \"performance\"\n"
+  },
+  "section": "models"
+}

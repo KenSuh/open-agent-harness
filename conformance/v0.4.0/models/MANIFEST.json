@@ -1,0 +1,254 @@
+{
+  "area": "models",
+  "cases": [
+    {
+      "function": "oah.scoring.score_set",
+      "name": "packaged-codex",
+      "note": "every left-out reason: superseded, unscored (with stays), unknown-family; a hidden model",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.scoring.score_set",
+      "name": "packaged-codex-allowed",
+      "note": "allowed_models narrows the picks (not-allowed) and floors above it go unmet",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.scoring.score_set",
+      "name": "packaged-claude",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.scoring.score_set",
+      "name": "packaged-claude-allowed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.scoring.score_set",
+      "name": "packaged-codex-none-listed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.scoring.score_set",
+      "name": "packaged-claude-nothing-allowed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-pin-wins",
+      "note": "a pin needs no catalog entry and beats a pool and an order",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-pool-over-order",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-pool-not-listed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-pool-not-allowed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-pool-not-runnable",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-order-by-tier",
+      "note": "low takes the last, medium the second, high and max the first",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-order-one-model",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-order-filtered",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-order-not-runnable",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-claude-old-order-ignored",
+      "note": "the old template default is no user ranking, so the rule decides",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-rule",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-rule-floor-performance",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-rule-efficient",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-rule-effort-rules",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-no-catalog",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.models.map_tier",
+      "name": "precedence-no-scores",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.epoch_scores",
+      "name": "epoch-csv-basic",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.epoch_scores",
+      "name": "epoch-csv-crlf-multiline-field",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.epoch_scores",
+      "name": "epoch-csv-missing-column",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.epoch_scores",
+      "name": "epoch-csv-score-out-of-range",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.epoch_scores",
+      "name": "epoch-csv-unreadable-time",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.epoch_scores",
+      "name": "epoch-csv-no-allowed-rows",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.epoch_scores",
+      "name": "epoch-csv-not-utf8",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.benchmarks.read_stored",
+      "name": "stored-files",
+      "note": "a table: each call passes `raw` (the stored file's UTF-8 text, or null for no file)",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.engines.codex.read_models_cache",
+      "name": "codex-cache",
+      "note": "a table: each call writes the given text (UTF-8, null for no file) as models_cache.json in an empty CODEX_HOME and reads it",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.engines.claude.parse_help",
+      "name": "claude-help",
+      "note": "a table of parse_help calls",
+      "source": "v0.4.0"
+    }
+  ],
+  "deviations": [],
+  "functions": [
+    {
+      "file": "src/oah/scoring.py",
+      "module": "oah.scoring",
+      "name": "score_set"
+    },
+    {
+      "file": "src/oah/scoring.py",
+      "module": "oah.scoring",
+      "name": "choose"
+    },
+    {
+      "file": "src/oah/scoring.py",
+      "module": "oah.scoring",
+      "name": "band"
+    },
+    {
+      "file": "src/oah/scoring.py",
+      "module": "oah.scoring",
+      "name": "families"
+    },
+    {
+      "file": "src/oah/scoring.py",
+      "module": "oah.scoring",
+      "name": "bundled"
+    },
+    {
+      "file": "src/oah/models.py",
+      "module": "oah.models",
+      "name": "map_tier"
+    },
+    {
+      "file": "src/oah/benchmarks.py",
+      "module": "oah.benchmarks",
+      "name": "epoch_scores"
+    },
+    {
+      "file": "src/oah/benchmarks.py",
+      "module": "oah.benchmarks",
+      "name": "read_stored"
+    },
+    {
+      "file": "src/oah/engines/codex.py",
+      "module": "oah.engines.codex",
+      "name": "read_models_cache"
+    },
+    {
+      "file": "src/oah/engines/claude.py",
+      "module": "oah.engines.claude",
+      "name": "parse_help"
+    }
+  ],
+  "mined_from": [
+    "tests/test_scoring.py",
+    "tests/test_models.py",
+    "tests/test_benchmarks.py",
+    "tests/test_engines_claude.py"
+  ],
+  "notes": [
+    "packaged-* cases: the input files benchmarks.json and families.json are the files v0.4.0 ships in src/oah/templates/engines; score_set reads them. `choices` keys are tier/floor/profile; each value is the Choice with the candidate band, or {\"error\": code}. Scores are IEEE doubles as Python prints them; compare with a tolerance of 1e-9.",
+    "precedence-* cases: map_tier for every tier. `effort_ok` lists the models the effort rules allow (null: no rules). `pins` maps a tier to its pinned model. `scores` null means no score set.",
+    "epoch-csv-* error cases: epoch_scores raises DataError, which has no code; its only caller (fetch_epoch) turns it into a failed refresh, reported as OAH_SCORES_REFRESH_FAILED, so that is the code given.",
+    "Table cases give `calls` (row name -> arguments) and expect a map of row name -> result."
+  ],
+  "omitted": [
+    {
+      "behaviour": "catalog rebuilds, probes of the installed CLIs and score refreshes over the network",
+      "reason": "they spawn the agent CLIs or fetch from epoch.ai and artificialanalysis.ai; the parsers and the stored-file check they feed are pinned"
+    },
+    {
+      "behaviour": "the Artificial Analysis response parser and the API key lookup",
+      "reason": "the key comes from the user's keychain; stored AA files are pinned through read_stored"
+    },
+    {
+      "behaviour": "runnable() effort resolution per model",
+      "reason": "not in the area's listed behaviour; map_tier cases pass the effort rules as a list"
+    }
+  ],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

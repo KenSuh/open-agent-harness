@@ -1,0 +1,177 @@
+{
+  "area": "review",
+  "cases": [
+    {
+      "function": "oah.discovery.review._frontmatter",
+      "name": "frontmatter",
+      "note": "a table: the front matter fields a review records",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.parse_frontmatter",
+      "name": "parse-frontmatter",
+      "note": "a table: the top-level string fields of a front matter block",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.screening",
+      "name": "screening",
+      "note": "a table: flags per line (at most 64) and the marker collision",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.references",
+      "name": "references",
+      "note": "a table: `present` is the set of repository paths that exist",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.identity",
+      "name": "identity-not-github",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.identity",
+      "name": "identity-no-owner",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.identity",
+      "name": "identity-glob-path",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.identity",
+      "name": "identity-parent-path",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.identity",
+      "name": "identity",
+      "note": "a table: [source id, full identity, normalized fields]; refusals are identity-<row> cases",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.hit_paths",
+      "name": "hit-paths",
+      "note": "a table of calls",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-mit-reviewed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-screened-claude-only",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-no-license",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-apache-excluded",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-apache-allowed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-name-mismatch",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-malformed-frontmatter",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-size-at-limit",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-size-over-limit",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-path-missing",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.discovery.review.review",
+      "name": "record-no-skill-file",
+      "source": "v0.4.0"
+    }
+  ],
+  "deviations": [],
+  "functions": [
+    {
+      "file": "src/oah/discovery/review.py",
+      "module": "oah.discovery.review",
+      "name": "review"
+    },
+    {
+      "file": "src/oah/discovery/review.py",
+      "module": "oah.discovery.review",
+      "name": "screening"
+    },
+    {
+      "file": "src/oah/discovery/review.py",
+      "module": "oah.discovery.review",
+      "name": "references"
+    },
+    {
+      "file": "src/oah/discovery/review.py",
+      "module": "oah.discovery.review",
+      "name": "identity"
+    },
+    {
+      "file": "src/oah/discovery/review.py",
+      "module": "oah.discovery.review",
+      "name": "_frontmatter"
+    },
+    {
+      "file": "src/oah/discovery/review.py",
+      "module": "oah.discovery.review",
+      "name": "hit_paths"
+    },
+    {
+      "file": "src/oah/skillsel.py",
+      "module": "oah.skillsel",
+      "name": "parse_frontmatter"
+    }
+  ],
+  "mined_from": [
+    "tests/test_skill_discovery.py",
+    "tests/test_skillsel.py"
+  ],
+  "notes": [
+    "record-* cases: input.json `upstream` describes a one-commit Git repository (branch, author, e-mail field, date, message, files) that the collector reads instead of github.com; a file given as {\"text\", \"pad\", \"size\"} is `text` followed by `pad` repeated up to exactly `size` bytes. The commit is made with core.autocrlf=false, so its id is the same on every system.",
+    "record-* cases run review() with a fresh state folder, `now` as the clock and a public-explore admission with a budget of 4.",
+    "Refusals carry the exception text as `message`.",
+    "Source ids encode their leading letter with a JSON Unicode escape; decoded values are unchanged (see conformance/FORMAT.md).",
+    "Table cases give `calls` (row name -> keyword arguments) and expect a map of row name -> result."
+  ],
+  "omitted": [
+    {
+      "behaviour": "the identity-collision refusal and the 'unchanged' answer for a repeated review",
+      "reason": "both depend on state left by an earlier review, not on one call's input"
+    },
+    {
+      "behaviour": "review_hit over search results, and collector failures (network, proxy, timeouts)",
+      "reason": "they need the search service or a failing transport; the records pin the review itself"
+    }
+  ],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

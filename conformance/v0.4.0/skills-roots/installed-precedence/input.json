@@ -1,0 +1,62 @@
+{
+  "bytes": {
+    "userhome/.agents/skills/broken/SKILL.md": "2d2d2d0a6e616d653a20ff0a2d2d2d0a"
+  },
+  "files": {
+    "kit2/a/SKILL.md": "---\ndescription: only a\n---\n\nBody of a.\n",
+    "kit2/b/SKILL.md": "---\ndescription: not listed\n---\n\nBody of b.\n",
+    "plugin/skills/test-driven-development/SKILL.md": "---\nname: test-driven-development\ndescription: plugin tdd\n---\n\nBody of tdd.\n",
+    "plugin/skills/writing-plans/SKILL.md": "---\nname: writing-plans\ndescription: plugin plans\n---\n\nBody of plans.\n",
+    "repo/.claude/skills/test-driven-development/SKILL.md": "---\nname: test-driven-development\ndescription: project copy of tdd\n---\n\nBody of tdd.\n",
+    "state/skills-cache/test-driven-development/SKILL.md": "---\ndescription: kit copy\n---\n\nBody of tdd.\n",
+    "userhome/.agents/skills/.hidden/SKILL.md": "---\ndescription: hidden\n---\n\nBody of hidden.\n",
+    "userhome/.agents/skills/Mixed-Case/SKILL.md": "---\nname: Grill\ndescription: upper\n---\n\nBody of mixed.\n",
+    "userhome/.agents/skills/bom/SKILL.md": "\ufeff---\ndescription: byte order mark\n---\n\nBody of bom.\n",
+    "userhome/.agents/skills/empty-folder/README.md": "no skill here\n",
+    "userhome/.agents/skills/lower/SKILL.md": "---\nname: grill\ndescription: lower\n---\n\nBody of lower.\n",
+    "userhome/.agents/skills/unlazy/SKILL.md": "---\ndescription: gates\n---\n\nBody of unlazy.\n",
+    "userhome/.claude/skills/systematic-debugging/SKILL.md": "---\ndescription: find root causes\n---\n\nBody of debugging.\n",
+    "userhome/.claude/skills/unlazy/SKILL.md": "---\ndescription: user claude copy\n---\n\nBody of unlazy.\n"
+  },
+  "roots": [
+    {
+      "label": "~/plugin/skills",
+      "origin": "plugin",
+      "path": "<base>/plugin/skills",
+      "plugin": "superpowers"
+    },
+    {
+      "label": "~/.agents/skills",
+      "origin": "user",
+      "path": "<base>/userhome/.agents/skills"
+    },
+    {
+      "label": "~/.claude/skills",
+      "origin": "user",
+      "path": "<base>/userhome/.claude/skills"
+    },
+    {
+      "label": "kit cache",
+      "origin": "kit",
+      "path": "<base>/state/skills-cache"
+    },
+    {
+      "label": "kit two",
+      "only": [
+        "a"
+      ],
+      "origin": "kit",
+      "path": "<base>/kit2"
+    },
+    {
+      "label": ".claude/skills",
+      "origin": "project",
+      "path": "<base>/repo/.claude/skills"
+    },
+    {
+      "label": "~/nowhere",
+      "origin": "user",
+      "path": "<base>/nowhere"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "defaults": {
+    "correction": "codex",
+    "initial": "claude",
+    "review": "codex"
+  },
+  "section": "stages"
+}

@@ -1,0 +1,6 @@
+{
+  "files": {
+    ".oah/config.toml": "[engines.claude]\ncommand = [\"claude\", \"--verbose\"]\nquality_order = [\"opus\"]\npermission_mode = \"acceptEdits\"\ntools = [\"Read\"]\n[engines.claude.tiers]\nhigh = { model = \"\", effort = \"high\", timeout_min = 60 }\n"
+  },
+  "read": "legacy-to-1.0"
+}

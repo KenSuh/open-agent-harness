@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_INVALID",
+    "message": ".oah/config.toml: engines.claude.tiers.low.timeout_min must be an integer, not a string; change it to an integer or remove it to use the default"
+  }
+}

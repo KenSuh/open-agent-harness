@@ -1,0 +1,95 @@
+{
+  "ok": {
+    "aa-two-indexes-one-engine": {
+      "data": null,
+      "problem": "mixes two indexes for one engine"
+    },
+    "aa-valid": {
+      "data": {
+        "credit": "Artificial Analysis, https://artificialanalysis.ai/",
+        "date": "2026-11-02",
+        "fetched_at": "2026-11-02T10:00:00Z",
+        "min_tasks": 1,
+        "schema": 1,
+        "scores": {
+          "claude-opus-5-5": {
+            "Coding Index": 0.6
+          },
+          "gpt-6-sol": {
+            "Coding Index": 0.5
+          }
+        },
+        "source": "Artificial Analysis",
+        "source_url": "https://artificialanalysis.ai/api/v2/data/llms/models",
+        "url": "https://artificialanalysis.ai/"
+      },
+      "problem": null
+    },
+    "epoch-absent": {
+      "data": null,
+      "problem": null
+    },
+    "epoch-bad-credit": {
+      "data": null,
+      "problem": "has a credit that oah does not write"
+    },
+    "epoch-bad-fetch-time": {
+      "data": null,
+      "problem": "has no valid fetch time"
+    },
+    "epoch-bad-model-name": {
+      "data": null,
+      "problem": "has a model name oah does not write"
+    },
+    "epoch-date-not-fetch-date": {
+      "data": null,
+      "problem": "has a date that is not its fetch date"
+    },
+    "epoch-missing-field": {
+      "data": null,
+      "problem": "does not have the fields oah writes"
+    },
+    "epoch-nan-constant": {
+      "data": null,
+      "problem": "is not valid JSON"
+    },
+    "epoch-not-json": {
+      "data": null,
+      "problem": "is not valid JSON"
+    },
+    "epoch-score-out-of-range": {
+      "data": null,
+      "problem": "has a score that is not a number from 0 to 1"
+    },
+    "epoch-unknown-task": {
+      "data": null,
+      "problem": "has a task oah does not use"
+    },
+    "epoch-valid": {
+      "data": {
+        "credit": "Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.",
+        "date": "2026-11-02",
+        "fetched_at": "2026-11-02T10:00:00Z",
+        "license": "CC BY 4.0",
+        "schema": 1,
+        "scores": {
+          "claude-opus-5-5": {
+            "Chess Puzzles": 0.75
+          },
+          "gpt-6-sol": {
+            "Chess Puzzles": 0.5,
+            "EBR-bench": 0.25
+          }
+        },
+        "source": "Epoch AI",
+        "source_url": "https://epoch.ai/data/benchmarks.csv",
+        "url": "https://epoch.ai/benchmarks/use-this-data"
+      },
+      "problem": null
+    },
+    "epoch-wrong-license": {
+      "data": null,
+      "problem": "has a license that oah does not write"
+    }
+  }
+}

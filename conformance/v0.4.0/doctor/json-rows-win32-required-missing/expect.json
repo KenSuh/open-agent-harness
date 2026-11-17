@@ -1,0 +1,181 @@
+{
+  "ok": {
+    "mcp_notices": [],
+    "model_choices": [],
+    "model_notices": [],
+    "ok": false,
+    "platform": "win32",
+    "tools": [
+      {
+        "install": [
+          "winget install --id Git.Git -e --source winget"
+        ],
+        "name": "git",
+        "note": "fixture",
+        "requirement": "required",
+        "source": "fake/bin/git",
+        "status": "ok",
+        "url": "https://git-scm.com/install/windows",
+        "version": "git version 2.50.1"
+      },
+      {
+        "install": [
+          "uv python install 3.13",
+          "winget install Python.Python.3.13"
+        ],
+        "name": "python",
+        "note": "fixture",
+        "requirement": "required",
+        "source": "fake/bin/python",
+        "status": "ok",
+        "url": "https://www.python.org/downloads/",
+        "version": "1.0.0"
+      },
+      {
+        "install": [
+          "irm https://astral.sh/uv/install.ps1 | iex"
+        ],
+        "name": "uv",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/uv",
+        "status": "ok",
+        "url": "https://docs.astral.sh/uv/getting-started/installation/",
+        "version": "uv 0.11.7"
+      },
+      {
+        "install": [
+          "winget install OpenJS.NodeJS.LTS"
+        ],
+        "name": "node",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/node",
+        "status": "too-old",
+        "url": "https://nodejs.org/en/download",
+        "version": "v14.21.3"
+      },
+      {
+        "install": [
+          "irm https://claude.ai/install.ps1 | iex",
+          "winget install Anthropic.ClaudeCode"
+        ],
+        "name": "claude",
+        "note": "fixture",
+        "requirement": "required",
+        "source": "fake/bin/claude",
+        "status": "ok",
+        "url": "https://code.claude.com/docs/en/setup",
+        "version": "2.1.318 (Claude Code)"
+      },
+      {
+        "install": [
+          "irm https://chatgpt.com/codex/install.ps1 | iex"
+        ],
+        "name": "codex",
+        "note": "fixture",
+        "requirement": "required",
+        "source": null,
+        "status": "missing",
+        "url": "https://github.com/openai/codex",
+        "version": null
+      },
+      {
+        "install": [
+          "Run oah init --with-unlazy after lane P5 lands to install unlazy at P5's contract-tested pin, verified by commit and scripts digest. This guided setup does not install it."
+        ],
+        "name": "unlazy",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/unlazy",
+        "status": "ok",
+        "url": "https://github.com/Leonxlnx/unlazy",
+        "version": "1.0.0"
+      },
+      {
+        "install": [
+          "uv tool install graphifyy"
+        ],
+        "name": "graphify",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/graphify",
+        "status": "ok",
+        "url": "https://docs.graphify.com/installation",
+        "version": "graphify 0.9.93"
+      },
+      {
+        "install": [
+          "winget install --id GitHub.cli --source winget"
+        ],
+        "name": "gh",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/gh",
+        "status": "ok",
+        "url": "https://cli.github.com",
+        "version": "gh version 2.91.0 (2026-04-22)"
+      },
+      {
+        "install": [
+          "scoop install gitleaks"
+        ],
+        "name": "gitleaks",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/gitleaks",
+        "status": "ok",
+        "url": "https://github.com/gitleaks/gitleaks",
+        "version": "gitleaks version 8.30.1"
+      },
+      {
+        "install": [
+          "winget install jqlang.jq"
+        ],
+        "name": "jq",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": null,
+        "status": "missing",
+        "url": "https://jqlang.org/download/",
+        "version": null
+      },
+      {
+        "install": [
+          "winget install BurntSushi.ripgrep.MSVC"
+        ],
+        "name": "rg",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/rg",
+        "status": "ok",
+        "url": "https://github.com/BurntSushi/ripgrep#installation",
+        "version": "ripgrep 14.1.1"
+      },
+      {
+        "install": [
+          "winget install --id StablyAI.Orca -e"
+        ],
+        "name": "orca",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/orca",
+        "status": "ok",
+        "url": "https://www.onorca.dev/download",
+        "version": "1.4.237"
+      },
+      {
+        "install": [
+          "Download the official installer from the page below and run it. The aside command comes from Aside's CLI installer; python -m oah.setup.companions offers it."
+        ],
+        "name": "aside",
+        "note": "fixture",
+        "requirement": "recommended",
+        "source": "fake/bin/aside",
+        "status": "ok",
+        "url": "https://aside.com/download?os=win",
+        "version": "1.26.1010.1739"
+      }
+    ]
+  }
+}

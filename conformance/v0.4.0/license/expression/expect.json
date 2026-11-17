@@ -1,0 +1,51 @@
+{
+  "ok": {
+    "choice": [
+      "choice",
+      [
+        "MIT",
+        "Apache-2.0"
+      ]
+    ],
+    "conjunction-lowercase": [
+      "conjunction",
+      [
+        "MIT",
+        "ISC"
+      ]
+    ],
+    "dangling": null,
+    "empty": null,
+    "mixed-operators": null,
+    "nested": null,
+    "other-license": [
+      "single",
+      [
+        "GPL-3.0"
+      ]
+    ],
+    "parenthesized": [
+      "choice",
+      [
+        "MIT",
+        "ISC"
+      ]
+    ],
+    "repeated": null,
+    "single": [
+      "single",
+      [
+        "MIT"
+      ]
+    ],
+    "slash": [
+      "choice",
+      [
+        "MIT",
+        "Apache-2.0"
+      ]
+    ],
+    "unknown-id": null,
+    "with-exception": null
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "ok": [
+    {
+      "label": ".claude/skills",
+      "only": [],
+      "origin": "project",
+      "path": "<base>/repo/.claude/skills",
+      "plugin": ""
+    },
+    {
+      "label": ".agents/skills",
+      "only": [],
+      "origin": "project",
+      "path": "<base>/repo/.agents/skills",
+      "plugin": ""
+    },
+    {
+      "label": "~/.claude/skills",
+      "only": [],
+      "origin": "user",
+      "path": "<base>/userhome/.claude/skills",
+      "plugin": ""
+    },
+    {
+      "label": "~/.codex/skills",
+      "only": [],
+      "origin": "user",
+      "path": "<base>/userhome/.codex/skills",
+      "plugin": ""
+    },
+    {
+      "label": "~/.agents/skills",
+      "only": [],
+      "origin": "user",
+      "path": "<base>/userhome/.agents/skills",
+      "plugin": ""
+    },
+    {
+      "label": "~/.codex/plugins/cache/flat/skills",
+      "only": [],
+      "origin": "plugin-cache",
+      "path": "<base>/userhome/.codex/plugins/cache/flat/skills",
+      "plugin": "flat"
+    },
+    {
+      "label": "~/.codex/plugins/cache/market/helper/0.9/skills",
+      "only": [],
+      "origin": "plugin-cache",
+      "path": "<base>/userhome/.codex/plugins/cache/market/helper/0.9/skills",
+      "plugin": "helper"
+    },
+    {
+      "label": "~/.codex/plugins/cache/market/helper/1.0/skills",
+      "only": [],
+      "origin": "plugin-cache",
+      "path": "<base>/userhome/.codex/plugins/cache/market/helper/1.0/skills",
+      "plugin": "helper"
+    },
+    {
+      "label": "~/.codex/plugins/cache/Other/Zeta/1.0/skills",
+      "only": [],
+      "origin": "plugin-cache",
+      "path": "<base>/userhome/.codex/plugins/cache/Other/Zeta/1.0/skills",
+      "plugin": "Zeta"
+    },
+    {
+      "label": "~/.codex/plugins/cache/skills",
+      "only": [],
+      "origin": "plugin-cache",
+      "path": "<base>/userhome/.codex/plugins/cache/skills",
+      "plugin": ""
+    }
+  ]
+}

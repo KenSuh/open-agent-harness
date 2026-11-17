@@ -1,0 +1,16 @@
+{
+  "ok": {
+    "high": {
+      "error": "OAH_MODEL_UNRESOLVED"
+    },
+    "low": {
+      "error": "OAH_MODEL_UNRESOLVED"
+    },
+    "max": {
+      "error": "OAH_MODEL_UNRESOLVED"
+    },
+    "medium": {
+      "error": "OAH_MODEL_UNRESOLVED"
+    }
+  }
+}

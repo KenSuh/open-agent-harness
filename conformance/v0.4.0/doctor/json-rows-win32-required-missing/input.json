@@ -1,0 +1,117 @@
+{
+  "platform": "win32",
+  "statuses": [
+    {
+      "name": "git",
+      "note": "fixture",
+      "requirement": "required",
+      "source": "fake/bin/git",
+      "status": "ok",
+      "version": "git version 2.50.1"
+    },
+    {
+      "name": "python",
+      "note": "fixture",
+      "requirement": "required",
+      "source": "fake/bin/python",
+      "status": "ok",
+      "version": "1.0.0"
+    },
+    {
+      "name": "uv",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/uv",
+      "status": "ok",
+      "version": "uv 0.11.7"
+    },
+    {
+      "name": "node",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/node",
+      "status": "too-old",
+      "version": "v14.21.3"
+    },
+    {
+      "name": "claude",
+      "note": "fixture",
+      "requirement": "required",
+      "source": "fake/bin/claude",
+      "status": "ok",
+      "version": "2.1.318 (Claude Code)"
+    },
+    {
+      "name": "codex",
+      "note": "fixture",
+      "requirement": "required",
+      "source": null,
+      "status": "missing",
+      "version": null
+    },
+    {
+      "name": "unlazy",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/unlazy",
+      "status": "ok",
+      "version": "1.0.0"
+    },
+    {
+      "name": "graphify",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/graphify",
+      "status": "ok",
+      "version": "graphify 0.9.93"
+    },
+    {
+      "name": "gh",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/gh",
+      "status": "ok",
+      "version": "gh version 2.91.0 (2026-04-22)"
+    },
+    {
+      "name": "gitleaks",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/gitleaks",
+      "status": "ok",
+      "version": "gitleaks version 8.30.1"
+    },
+    {
+      "name": "jq",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": null,
+      "status": "missing",
+      "version": null
+    },
+    {
+      "name": "rg",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/rg",
+      "status": "ok",
+      "version": "ripgrep 14.1.1"
+    },
+    {
+      "name": "orca",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/orca",
+      "status": "ok",
+      "version": "1.4.237"
+    },
+    {
+      "name": "aside",
+      "note": "fixture",
+      "requirement": "recommended",
+      "source": "fake/bin/aside",
+      "status": "ok",
+      "version": "1.26.1010.1739"
+    }
+  ]
+}

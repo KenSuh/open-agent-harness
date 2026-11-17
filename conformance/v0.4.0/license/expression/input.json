@@ -1,0 +1,43 @@
+{
+  "calls": {
+    "choice": {
+      "text": "MIT OR Apache-2.0"
+    },
+    "conjunction-lowercase": {
+      "text": "mit and isc"
+    },
+    "dangling": {
+      "text": "MIT OR"
+    },
+    "empty": {
+      "text": ""
+    },
+    "mixed-operators": {
+      "text": "MIT OR ISC AND Apache-2.0"
+    },
+    "nested": {
+      "text": "(MIT OR (ISC))"
+    },
+    "other-license": {
+      "text": "GPL-3.0-only"
+    },
+    "parenthesized": {
+      "text": "(MIT OR ISC)"
+    },
+    "repeated": {
+      "text": "MIT OR MIT"
+    },
+    "single": {
+      "text": "MIT"
+    },
+    "slash": {
+      "text": "MIT/Apache-2.0"
+    },
+    "unknown-id": {
+      "text": "Foo-1.0"
+    },
+    "with-exception": {
+      "text": "GPL-2.0 WITH Classpath-exception-2.0"
+    }
+  }
+}

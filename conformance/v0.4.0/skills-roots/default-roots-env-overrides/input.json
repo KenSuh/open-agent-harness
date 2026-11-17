@@ -1,0 +1,10 @@
+{
+  "codex_plugin_cache": false,
+  "env": {
+    "CLAUDE_CONFIG_DIR": "<base>/userhome/cc",
+    "CODEX_HOME": "<base>/userhome/cx"
+  },
+  "home": "<base>/userhome",
+  "kit_cache": null,
+  "repo": "<base>/repo"
+}

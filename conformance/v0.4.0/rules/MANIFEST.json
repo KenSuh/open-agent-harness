@@ -1,0 +1,269 @@
+{
+  "area": "rules",
+  "cases": [
+    {
+      "function": "oah.rules.plan",
+      "name": "no-files",
+      "note": "AGENTS.md and CLAUDE.md are created",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "no-files-ko",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "lang-unknown",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "empty-agents",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "append-lf",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "append-lf-no-final-newline",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "append-lf-blank-line-end",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "append-crlf",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "append-crlf-no-final-newline",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "append-whitespace-only",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "replace-block-lf",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "replace-block-crlf",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "replace-block-mixed-outside",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "replace-block-at-end-no-newline",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "replace-block-marker-trailing-space",
+      "note": "marker lines may carry trailing whitespace",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "lang-detect-ko",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "lang-detect-unknown",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "lang-override",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "lang-param-on-append",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "mention-is-not-marker",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "claude-has-import",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "claude-no-final-newline",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "claude-crlf",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "claude-empty",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "claude-duplicate-import",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "claude-not-utf8",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "local-rules-appended",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "local-rules-blank",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "local-rules-crlf-agents",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "local-rules-reserved-marker",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "local-rules-not-utf8",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "agents-not-utf8",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-begin-only",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-end-only",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-reversed",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-no-version",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-version-zero",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-unclosed-comment",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-two-blocks",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "marker-newer-block",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "block-too-large",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "budget-at-limit",
+      "note": "32768 bytes after the append",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.rules.plan",
+      "name": "budget-over",
+      "note": "one byte over the budget",
+      "source": "v0.4.0"
+    }
+  ],
+  "deviations": [],
+  "functions": [
+    {
+      "file": "src/oah/rules.py",
+      "module": "oah.rules",
+      "name": "plan"
+    },
+    {
+      "file": "src/oah/rules.py",
+      "module": "oah.rules",
+      "name": "render_block"
+    },
+    {
+      "file": "src/oah/rules.py",
+      "module": "oah.rules",
+      "name": "find_block"
+    }
+  ],
+  "mined_from": [
+    "tests/test_rules.py"
+  ],
+  "notes": [
+    "The input files are the project root (AGENTS.md, CLAUDE.md, .oah/rules.local.md as present). input.json gives `lang` (the --lang value or null) and `block_bodies`, the text the packaged block.<lang>.md would hold.",
+    "ok values: `lang`, `agents_after` and `claude_after` (the files' new contents) and `block_bytes`."
+  ],
+  "omitted": [
+    {
+      "behaviour": "OAH_RULES_LINK (AGENTS.md or CLAUDE.md is a symbolic link)",
+      "reason": "a link cannot be stored as a portable fixture (Git checks links out as plain files on Windows without symlink support), and the message names the resolved absolute target"
+    },
+    {
+      "behaviour": "OAH_RULES_VERIFY (a written file does not read back)",
+      "reason": "raised by sync() after writing, never by plan(); it needs a failing disk"
+    },
+    {
+      "behaviour": "refusal messages",
+      "reason": "only the codes are pinned"
+    },
+    {
+      "behaviour": "the packaged v0.4.0 block bodies (block.en.md, block.ko.md)",
+      "reason": "1.0 replaces the body; the body is a fixture input so the algorithm is pinned on its own"
+    }
+  ],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

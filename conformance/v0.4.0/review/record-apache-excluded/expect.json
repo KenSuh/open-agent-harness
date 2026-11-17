@@ -1,0 +1,68 @@
+{
+  "ok": {
+    "candidate": {
+      "hit": null,
+      "provider": "github",
+      "query_id": null,
+      "seed": null
+    },
+    "checked_at": "2026-01-02T00:00:00+00:00",
+    "compatibility": {
+      "hosts": [
+        "claude",
+        "codex"
+      ],
+      "problems": [],
+      "requires_tools": [],
+      "scripts_present": false
+    },
+    "frontmatter": {
+      "allowed_tools": null,
+      "description": "tool guidance for testing",
+      "model_invocable": true,
+      "name": "tool",
+      "user_invocable": true
+    },
+    "id": "sha256:786651f29cd728dd2391c96c42de7f0d1426f212f51c6a0f4c82e4fb5ece5106",
+    "license": {
+      "eligibility": "excluded",
+      "expression": "Apache-2.0",
+      "form": "single",
+      "governing": [
+        {
+          "path": "LICENSE",
+          "sha256": "sha256:0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        }
+      ],
+      "verdict": "recognized"
+    },
+    "policy_digest": "sha256:866bbb01726daa0bad720fe32b93118d861350b0136a48f2c674877092942cce",
+    "reason": null,
+    "screening": {
+      "flags": [],
+      "marker_collision": false
+    },
+    "source": {
+      "commit": "da0427b42152d7bc23ce24658a30f2eb0838c173",
+      "files": [
+        {
+          "bytes": 80,
+          "path": "skills/tool/SKILL.md",
+          "sha256": "sha256:69cd915cf20fac2b05d4012bcb917707a4e9d57af35c9d73785f8d8133caaeae"
+        }
+      ],
+      "locator": "https://github.com/acme/apache",
+      "path": "skills/tool",
+      "provider": "github",
+      "references": [],
+      "skill_lf_sha256": "sha256:69cd915cf20fac2b05d4012bcb917707a4e9d57af35c9d73785f8d8133caaeae",
+      "skill_sha256": "sha256:69cd915cf20fac2b05d4012bcb917707a4e9d57af35c9d73785f8d8133caaeae",
+      "snapshot": "sha256:9f95fd68259db62ef1b87a2dbc3254bfa61910a4aeb5ac44c06e26c84f8fe235",
+      "source_id": "\u0073k-13c1ee80452628a119e0fe8d86f3ffbee3b9d",
+      "spec_digest": "sha256:8e25dd84b685ea7abdbaa4a87a1726bb9fc0ba9251b5da8fe32df404f1650e81",
+      "tree": "8d850cd88de1b06b8d3e9eb1adfe5e55f88a8c2b"
+    },
+    "status": "reviewed",
+    "version": 1
+  }
+}

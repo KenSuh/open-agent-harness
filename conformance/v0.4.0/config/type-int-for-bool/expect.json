@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_INVALID",
+    "message": ".oah/config.toml: models.fetch_scores must be true or false, not an integer; change it to true or false or remove it to use the default"
+  }
+}

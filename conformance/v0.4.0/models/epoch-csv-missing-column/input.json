@@ -1,0 +1,5 @@
+{
+  "files": {
+    "benchmarks.csv": "model,started_at,mean_score,original_task_name\ngpt-6-sol_max,2026-10-01T00:00:00Z,0.5,Chess Puzzles\n"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "ok": {
+    "agents_after": "<!-- OAH:RULES:BEGIN v1 -->\n<!-- oah rules lang=ko; managed by `oah rules sync`. Put project rules in .oah/rules.local.md, not here. -->\n## \uace0\uc815 \uc791\uc5c5 \uaddc\uce59\n\n1. \uace0\uc815 \uaddc\uce59\uc744 \uba3c\uc800 \uc77d\ub294\ub2e4.\n2. \ubc14\ub010 \ub9cc\ud07c\ub9cc \uace0\uce5c\ub2e4.\n<!-- OAH:RULES:END -->\n",
+    "block_bytes": 253,
+    "claude_after": "@AGENTS.md\n",
+    "lang": "ko"
+  }
+}

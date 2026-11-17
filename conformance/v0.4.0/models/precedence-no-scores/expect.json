@@ -1,0 +1,16 @@
+{
+  "ok": {
+    "high": {
+      "error": "OAH_MODEL_NO_SCORES"
+    },
+    "low": {
+      "error": "OAH_MODEL_NO_SCORES"
+    },
+    "max": {
+      "error": "OAH_MODEL_NO_SCORES"
+    },
+    "medium": {
+      "error": "OAH_MODEL_NO_SCORES"
+    }
+  }
+}

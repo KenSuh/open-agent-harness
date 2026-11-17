@@ -1,0 +1,13 @@
+{
+  "ok": {
+    "claude-false": false,
+    "claude-not-bool": false,
+    "claude-true": true,
+    "empty-output": true,
+    "exit-nonzero": false,
+    "json-list": true,
+    "json-without-flag": true,
+    "no-exit-code": false,
+    "plain-text": true
+  }
+}

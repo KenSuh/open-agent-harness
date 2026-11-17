@@ -1,0 +1,6 @@
+{
+  "files": {
+    ".oah/config.toml": "[engines.codex]\ncommand = [\"codex-old\"]\n[agents.codex]\ncommand = [\"codex\"]\n"
+  },
+  "read": "legacy-to-1.0"
+}

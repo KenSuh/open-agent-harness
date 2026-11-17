@@ -1,0 +1,546 @@
+{
+  "ok": {
+    "choices": {
+      "high/high/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "high/high/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "high/high/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "high/low/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "high/low/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "high/low/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "high/max/balanced": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "high/max/efficient": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "high/max/performance": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "high/medium/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "high/medium/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "high/medium/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "low/high/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "low/high/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "low/high/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "low/low/balanced": {
+        "band": [
+          "gpt-6-luna"
+        ],
+        "floor_step": 0,
+        "lowest_step": 0,
+        "model": "gpt-6-luna",
+        "required": 0.0,
+        "source": "Epoch AI",
+        "step": 0
+      },
+      "low/low/efficient": {
+        "band": [
+          "gpt-6.1-terra",
+          "gpt-6-luna"
+        ],
+        "floor_step": 0,
+        "lowest_step": 0,
+        "model": "gpt-6.1-terra",
+        "required": 0.0,
+        "source": "Epoch AI",
+        "step": 0
+      },
+      "low/low/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "low/max/balanced": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "low/max/efficient": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "low/max/performance": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "low/medium/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "low/medium/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "low/medium/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "max/high/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/high/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/high/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/low/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/low/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/low/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/max/balanced": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "max/max/efficient": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "max/max/performance": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "max/medium/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/medium/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "max/medium/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 3,
+        "model": "gpt-6.1-terra",
+        "required": 98.96103896103895,
+        "source": "Epoch AI",
+        "step": 3
+      },
+      "medium/high/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "medium/high/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "medium/high/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 2,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "medium/low/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "medium/low/efficient": {
+        "band": [
+          "gpt-6.1-terra",
+          "gpt-6-luna"
+        ],
+        "floor_step": 0,
+        "lowest_step": 0,
+        "model": "gpt-6.1-terra",
+        "required": 0.0,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "medium/low/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 0,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      },
+      "medium/max/balanced": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "medium/max/efficient": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "medium/max/performance": {
+        "error": "OAH_MODEL_UNRESOLVED"
+      },
+      "medium/medium/balanced": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "medium/medium/efficient": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 1,
+        "model": "gpt-6.1-terra",
+        "required": 32.98701298701298,
+        "source": "Epoch AI",
+        "step": 1
+      },
+      "medium/medium/performance": {
+        "band": [
+          "gpt-6.1-terra"
+        ],
+        "floor_step": 1,
+        "lowest_step": 2,
+        "model": "gpt-6.1-terra",
+        "required": 65.97402597402596,
+        "source": "Epoch AI",
+        "step": 2
+      }
+    },
+    "score_set": {
+      "credit": "Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.",
+      "date": "2026-11-02",
+      "engine": "codex",
+      "failure": "",
+      "fetched_at": "",
+      "left_out": {
+        "codex-mini": "unknown-family",
+        "gpt-5.6-terra": "superseded",
+        "gpt-6-astra": "not-allowed",
+        "gpt-6.1-sol": "not-allowed",
+        "gpt-7-luna": "unscored"
+      },
+      "models": [
+        {
+          "cost": 6,
+          "family": "terra",
+          "generation": [
+            6,
+            1
+          ],
+          "model": "gpt-6.1-terra",
+          "score": 89.79462398067048
+        },
+        {
+          "cost": 0.6,
+          "family": "luna",
+          "generation": [
+            6,
+            0
+          ],
+          "model": "gpt-6-luna",
+          "score": 0.0
+        }
+      ],
+      "retired": [
+        {
+          "cost": 0.6,
+          "family": "luna",
+          "generation": [
+            5,
+            6
+          ],
+          "model": "gpt-5.6-luna",
+          "score": 10.14430014430014
+        },
+        {
+          "cost": 12,
+          "family": "sol",
+          "generation": [
+            5,
+            6
+          ],
+          "model": "gpt-5.6-sol",
+          "score": 66.25524346454579
+        },
+        {
+          "cost": 6,
+          "family": "terra",
+          "generation": [
+            5,
+            6
+          ],
+          "model": "gpt-5.6-terra",
+          "score": 44.04459881204067
+        },
+        {
+          "cost": 60,
+          "family": "astra",
+          "generation": [
+            6,
+            0
+          ],
+          "model": "gpt-6-astra",
+          "score": 98.90666666666667
+        },
+        {
+          "cost": 12,
+          "family": "sol",
+          "generation": [
+            6,
+            0
+          ],
+          "model": "gpt-6-sol",
+          "score": 70.84059867780798
+        },
+        {
+          "cost": 12,
+          "family": "sol",
+          "generation": [
+            6,
+            1
+          ],
+          "model": "gpt-6.1-sol",
+          "score": 98.96103896103895
+        }
+      ],
+      "scale": [
+        0.0,
+        98.96103896103895
+      ],
+      "source": "Epoch AI",
+      "stays": {
+        "gpt-7-luna": "gpt-6-luna"
+      }
+    }
+  }
+}

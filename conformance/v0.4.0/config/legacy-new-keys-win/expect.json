@@ -1,0 +1,14 @@
+{
+  "ok": {
+    "file_unchanged": true,
+    "notices": [
+      "OAH_STAGES_LEGACY_IGNORED"
+    ],
+    "stages": {
+      "build": "claude",
+      "fix": "codex",
+      "plan": "claude",
+      "review": "codex"
+    }
+  }
+}

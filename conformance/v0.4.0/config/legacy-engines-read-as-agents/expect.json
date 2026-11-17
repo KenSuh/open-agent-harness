@@ -1,0 +1,28 @@
+{
+  "ok": {
+    "agents": {
+      "claude": {
+        "command": [
+          "claude",
+          "--verbose"
+        ],
+        "quality_order": [
+          "opus"
+        ],
+        "tiers": {
+          "high": {
+            "effort": "high",
+            "model": ""
+          }
+        }
+      }
+    },
+    "file_unchanged": true,
+    "notices": [],
+    "unused_kept_in_file": [
+      "permission_mode",
+      "tiers.high.timeout_min",
+      "tools"
+    ]
+  }
+}

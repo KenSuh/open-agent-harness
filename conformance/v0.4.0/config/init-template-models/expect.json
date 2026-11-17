@@ -1,0 +1,7 @@
+{
+  "ok": {
+    "fetch_scores": true,
+    "profile": "balanced",
+    "ttl_hours": 24.0
+  }
+}

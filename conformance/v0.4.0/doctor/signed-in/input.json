@@ -1,0 +1,40 @@
+{
+  "calls": {
+    "claude-false": {
+      "returncode": 0,
+      "stdout": "{\"loggedIn\": false}\n"
+    },
+    "claude-not-bool": {
+      "returncode": 0,
+      "stdout": "{\"loggedIn\": \"yes\"}"
+    },
+    "claude-true": {
+      "returncode": 0,
+      "stdout": "{\"loggedIn\": true}\n"
+    },
+    "empty-output": {
+      "returncode": 0,
+      "stdout": ""
+    },
+    "exit-nonzero": {
+      "returncode": 1,
+      "stdout": "{\"loggedIn\": true}"
+    },
+    "json-list": {
+      "returncode": 0,
+      "stdout": "[1]"
+    },
+    "json-without-flag": {
+      "returncode": 0,
+      "stdout": "{\"account\": \"x\"}"
+    },
+    "no-exit-code": {
+      "returncode": null,
+      "stdout": ""
+    },
+    "plain-text": {
+      "returncode": 0,
+      "stdout": "Logged in using ChatGPT\n"
+    }
+  }
+}

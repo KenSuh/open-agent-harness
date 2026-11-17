@@ -1,0 +1,12 @@
+{
+  "ok": {
+    "file_unchanged": true,
+    "notices": [],
+    "stages": {
+      "build": "codex",
+      "fix": "codex",
+      "plan": "codex",
+      "review": "claude"
+    }
+  }
+}

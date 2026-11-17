@@ -1,0 +1,5 @@
+{
+  "files": {
+    "benchmarks.csv": "model,started_at,Status,mean_score,original_task_name,extra\ngpt-6-sol_max,2026-10-01T00:00:00Z,Success,0.5,Chess Puzzles,a\ngpt-6-sol_max,2026-10-02T00:00:00Z,Success,0.6,Chess Puzzles,b\ngpt-6-sol_max,2026-10-03T00:00:00Z,Failed,0.9,Chess Puzzles,c\ngpt-6-sol_max,2026-09-30T00:00:00+00:00,Success,0.4,Chess Puzzles,d\ngpt-6-sol_max,2026-10-01T00:00:00,Success,0.7,EBR-bench,e\ngpt-6-sol,2026-10-01T00:00:00Z,Success,0.8,EBR-bench,not max\nclaude-opus-5-5_max,2026-10-01T00:00:00Z,Success,1,Mystery Game Puzzles,f\nclaude-opus-5-5_max,2026-10-01T00:00:00Z,Success,nan,Furniture Assembly,g\nclaude-opus-5-5_max,2026-10-01T00:00:00Z,Success,0.3,Other Task,h\nother-model_max,2026-10-01T00:00:00Z,Success,0.3,Chess Puzzles,i\n"
+  }
+}

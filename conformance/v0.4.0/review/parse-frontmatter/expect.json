@@ -1,0 +1,35 @@
+{
+  "ok": {
+    "crlf-quotes-blocks": {
+      "description": "folded text",
+      "literal": "one\ntwo",
+      "metadata": "",
+      "name": "it's",
+      "other": "a \"q\" b",
+      "plain": "first second"
+    },
+    "flags-and-tools": {
+      "allowed-tools": "Read, Bash(git log:*) TodoWrite",
+      "description": "odd guidance for testing",
+      "disable-model-invocation": "true",
+      "name": "odd",
+      "user-invocable": "false"
+    },
+    "flags-empty": {
+      "allowed-tools": "",
+      "description": "odd guidance for testing",
+      "disable-model-invocation": "",
+      "name": "odd",
+      "user-invocable": "maybe"
+    },
+    "no-description": {
+      "name": "bare"
+    },
+    "no-front-matter": {},
+    "plain": {
+      "description": "grill guidance for testing",
+      "name": "grill"
+    },
+    "unclosed": {}
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "codex_plugin_cache": false,
+  "env": {},
+  "files": {
+    "userhome/.codex/plugins/cache/.hidden/x/1.0/skills/no/SKILL.md": "---\ndescription: cached\n---\n\nBody of .hidden/x/1.0/skills/no.\n",
+    "userhome/.codex/plugins/cache/Other/Zeta/1.0/skills/tool/SKILL.md": "---\ndescription: cached\n---\n\nBody of Other/Zeta/1.0/skills/tool.\n",
+    "userhome/.codex/plugins/cache/flat/skills/one/SKILL.md": "---\ndescription: cached\n---\n\nBody of flat/skills/one.\n",
+    "userhome/.codex/plugins/cache/market/deep/a/b/skills/too-deep/SKILL.md": "---\ndescription: cached\n---\n\nBody of market/deep/a/b/skills/too-deep.\n",
+    "userhome/.codex/plugins/cache/market/helper/0.9/skills/unlazy/SKILL.md": "---\ndescription: cached\n---\n\nBody of market/helper/0.9/skills/unlazy.\n",
+    "userhome/.codex/plugins/cache/market/helper/1.0/skills/unlazy/SKILL.md": "---\ndescription: cached\n---\n\nBody of market/helper/1.0/skills/unlazy.\n",
+    "userhome/.codex/plugins/cache/skills/top/SKILL.md": "---\ndescription: cached\n---\n\nBody of skills/top.\n"
+  },
+  "home": "<base>/userhome",
+  "kit_cache": null,
+  "repo": "<base>/repo"
+}

@@ -1,0 +1,7 @@
+{
+  "ok": {
+    "fetch_scores": true,
+    "profile": "performance",
+    "ttl_hours": 2.0
+  }
+}

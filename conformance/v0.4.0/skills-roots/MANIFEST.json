@@ -1,0 +1,105 @@
+{
+  "area": "skills-roots",
+  "cases": [
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-layout",
+      "note": "installPath and projectPath in the stored manifest use the <base> placeholder; the extractor wrote the real folder",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-no-manifest",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-env-overrides",
+      "note": "installed_plugins.json is read from CLAUDE_CONFIG_DIR",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-bad-manifest",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-manifest-not-object",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-plugins-not-object",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-codex-cache-on",
+      "note": "Codex's plugin cache comes last, sorted case-insensitively; at most six parts deep",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.default_roots",
+      "name": "default-roots-codex-cache-off",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.installed",
+      "name": "installed-precedence",
+      "note": "precedence comes from the origin, then list order; ids compare case-insensitively",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.skillsel.installed",
+      "name": "installed-list-order-within-origin",
+      "source": "v0.4.0"
+    }
+  ],
+  "deviations": [],
+  "functions": [
+    {
+      "file": "src/oah/skillsel.py",
+      "module": "oah.skillsel",
+      "name": "default_roots"
+    },
+    {
+      "file": "src/oah/skillsel.py",
+      "module": "oah.skillsel",
+      "name": "_plugin_roots"
+    },
+    {
+      "file": "src/oah/skillsel.py",
+      "module": "oah.skillsel",
+      "name": "_codex_cache_roots"
+    },
+    {
+      "file": "src/oah/skillsel.py",
+      "module": "oah.skillsel",
+      "name": "installed"
+    }
+  ],
+  "mined_from": [
+    "tests/test_skillsel.py"
+  ],
+  "notes": [
+    "Paths are written as <base>/<relative path>, where <base> is the case's folder. The input files are the files under <base> (repo/, userhome/ and others). In input.json and in the stored installed_plugins.json, <base> stands for that folder; a runner substitutes its own folder before the call.",
+    "`path` values in the expectation are relative to <base>; labels are as v0.4.0 writes them."
+  ],
+  "omitted": [
+    {
+      "behaviour": "a SKILL.md larger than 1 MiB (OAH_SKILL_UNREADABLE)",
+      "reason": "a 1 MiB fixture for one size check"
+    },
+    {
+      "behaviour": "labels of roots outside both the home and the repository",
+      "reason": "v0.4.0 writes such a label as the native absolute path, which differs by system"
+    },
+    {
+      "behaviour": "kit_roots over the shipped toolkit catalog",
+      "reason": "it reads oah's state folder and the packaged catalog, not the roots logic"
+    }
+  ],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

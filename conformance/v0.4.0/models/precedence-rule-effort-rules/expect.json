@@ -1,0 +1,20 @@
+{
+  "ok": {
+    "high": {
+      "model": "gpt-6.1-terra",
+      "source": "scored"
+    },
+    "low": {
+      "model": "gpt-6-luna",
+      "source": "scored"
+    },
+    "max": {
+      "model": "gpt-6.1-terra",
+      "source": "scored"
+    },
+    "medium": {
+      "model": "gpt-6.1-terra",
+      "source": "scored"
+    }
+  }
+}

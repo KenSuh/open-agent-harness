@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_UNKNOWN_KEY",
+    "message": ".oah/config.toml: unknown key stages.reveiw; remove it or use one of: correction, initial, review"
+  }
+}

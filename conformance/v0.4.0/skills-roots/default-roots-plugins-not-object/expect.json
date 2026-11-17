@@ -1,0 +1,39 @@
+{
+  "ok": [
+    {
+      "label": ".claude/skills",
+      "only": [],
+      "origin": "project",
+      "path": "<base>/repo/.claude/skills",
+      "plugin": ""
+    },
+    {
+      "label": ".agents/skills",
+      "only": [],
+      "origin": "project",
+      "path": "<base>/repo/.agents/skills",
+      "plugin": ""
+    },
+    {
+      "label": "~/.claude/skills",
+      "only": [],
+      "origin": "user",
+      "path": "<base>/userhome/.claude/skills",
+      "plugin": ""
+    },
+    {
+      "label": "~/.codex/skills",
+      "only": [],
+      "origin": "user",
+      "path": "<base>/userhome/.codex/skills",
+      "plugin": ""
+    },
+    {
+      "label": "~/.agents/skills",
+      "only": [],
+      "origin": "user",
+      "path": "<base>/userhome/.agents/skills",
+      "plugin": ""
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "ok": {
+    "cargo": {
+      "declared": {
+        "field": "package.license",
+        "path": "Cargo.toml",
+        "value": "MIT OR Apache-2.0"
+      },
+      "problem": null
+    },
+    "cargo-invalid": {
+      "declared": null,
+      "problem": "the registered manifest could not be read"
+    },
+    "package-json": {
+      "declared": {
+        "field": "license",
+        "path": "package.json",
+        "value": "MIT"
+      },
+      "problem": null
+    },
+    "package-json-no-field": {
+      "declared": null,
+      "problem": "the registered manifest has no license expression"
+    },
+    "pyproject-table": {
+      "declared": {
+        "field": "project.license",
+        "path": "pyproject.toml",
+        "value": "ISC"
+      },
+      "problem": null
+    }
+  }
+}

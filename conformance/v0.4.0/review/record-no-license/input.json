@@ -1,0 +1,24 @@
+{
+  "allow": [
+    "MIT"
+  ],
+  "candidate": {
+    "hit": null,
+    "provider": "github",
+    "query_id": null,
+    "seed": null
+  },
+  "now": "2026-01-02T00:00:00+00:00",
+  "path": "skills/thing",
+  "repo": "acme/bare",
+  "upstream": {
+    "author": "Fixture",
+    "branch": "main",
+    "date": "2026-01-01T00:00:00+00:00",
+    "email": "fixture",
+    "files": {
+      "skills/thing/SKILL.md": "---\nname: thing\ndescription: thing guidance for testing\n---\n\nUse this skill well.\n"
+    },
+    "message": "skills"
+  }
+}

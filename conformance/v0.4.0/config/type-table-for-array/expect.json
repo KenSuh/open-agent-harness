@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_INVALID",
+    "message": ".oah/config.toml: engines.claude.command must be an array, not a table; change it to an array or remove it to use the default"
+  }
+}

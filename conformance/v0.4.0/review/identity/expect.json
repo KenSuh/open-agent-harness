@@ -1,0 +1,64 @@
+{
+  "ok": {
+    "flat": [
+      "\u0073k-dc06e0963888af390a3b7a129d0a273c23038",
+      "sha256:dc06e0963888af390a3b7a129d0a273c23038247451711906a64a08d40ab9713",
+      {
+        "locator": "https://github.com/acme/flat",
+        "manifest_path": null,
+        "paths": [
+          "pg-schema"
+        ],
+        "provider": "github",
+        "ref": "HEAD",
+        "track": "commit",
+        "verification_policy_version": "oah-skill-review/v1"
+      }
+    ],
+    "grill": [
+      "\u0073k-2212f2f480b62061b5c21d008053e8cdfd038",
+      "sha256:2212f2f480b62061b5c21d008053e8cdfd03838cdef3348eaaadb7454ac604fa",
+      {
+        "locator": "https://github.com/acme/skills",
+        "manifest_path": null,
+        "paths": [
+          "skills/grill"
+        ],
+        "provider": "github",
+        "ref": "HEAD",
+        "track": "commit",
+        "verification_policy_version": "oah-skill-review/v1"
+      }
+    ],
+    "nested": [
+      "\u0073k-adb2441b110a15c9f861d9395f73b2a8fa74d",
+      "sha256:adb2441b110a15c9f861d9395f73b2a8fa74d9a06db2882e23f998ca7219029e",
+      {
+        "locator": "https://github.com/mattpocock/skills",
+        "manifest_path": null,
+        "paths": [
+          "skills/productivity/grilling"
+        ],
+        "provider": "github",
+        "ref": "HEAD",
+        "track": "commit",
+        "verification_policy_version": "oah-skill-review/v1"
+      }
+    ],
+    "other-owner": [
+      "\u0073k-d3a6d1a9d99160bd28f1b7799f7c4a0684a25",
+      "sha256:d3a6d1a9d99160bd28f1b7799f7c4a0684a251809850ec795c4672977d132dd1",
+      {
+        "locator": "https://github.com/other/skills",
+        "manifest_path": null,
+        "paths": [
+          "skills/productivity/grilling"
+        ],
+        "provider": "github",
+        "ref": "HEAD",
+        "track": "commit",
+        "verification_policy_version": "oah-skill-review/v1"
+      }
+    ]
+  }
+}

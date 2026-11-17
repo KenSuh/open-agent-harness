@@ -1,0 +1,58 @@
+{
+  "ok": {
+    "crlf-quotes-blocks": {
+      "allowed_tools": null,
+      "description": "folded text",
+      "model_invocable": true,
+      "name": "it's",
+      "user_invocable": true
+    },
+    "flags-and-tools": {
+      "allowed_tools": [
+        "Read",
+        "Bash(git",
+        "log:*)",
+        "TodoWrite"
+      ],
+      "description": "odd guidance for testing",
+      "model_invocable": false,
+      "name": "odd",
+      "user_invocable": false
+    },
+    "flags-empty": {
+      "allowed_tools": null,
+      "description": "odd guidance for testing",
+      "model_invocable": null,
+      "name": "odd",
+      "user_invocable": true
+    },
+    "no-description": {
+      "allowed_tools": null,
+      "description": null,
+      "model_invocable": true,
+      "name": "bare",
+      "user_invocable": true
+    },
+    "no-front-matter": {
+      "allowed_tools": null,
+      "description": null,
+      "model_invocable": true,
+      "name": null,
+      "user_invocable": true
+    },
+    "plain": {
+      "allowed_tools": null,
+      "description": "grill guidance for testing",
+      "model_invocable": true,
+      "name": "grill",
+      "user_invocable": true
+    },
+    "unclosed": {
+      "allowed_tools": null,
+      "description": null,
+      "model_invocable": true,
+      "name": null,
+      "user_invocable": true
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_SKILL_REVIEW_FAILED",
+    "message": "OAH_SKILL_REVIEW_FAILED(path-unresolved): acme/skills/skills/empty has no SKILL.md"
+  }
+}

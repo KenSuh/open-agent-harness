@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_UNKNOWN_KEY",
+    "message": ".oah/config.toml: unknown key engines.claude.tiers.low.modle; remove it or use one of: effort, model, timeout_min"
+  }
+}

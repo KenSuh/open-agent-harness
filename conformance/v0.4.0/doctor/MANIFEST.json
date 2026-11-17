@@ -1,0 +1,106 @@
+{
+  "area": "doctor",
+  "cases": [
+    {
+      "function": "oah.setup.guide.signed_in",
+      "name": "signed-in",
+      "note": "a table of signed_in calls",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.doctor.first_line",
+      "name": "first-line",
+      "note": "a table of first_line calls: the version line doctor keeps",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.doctor._check_tool",
+      "name": "status-table",
+      "note": "the status decision table: one _check_tool call per row",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.doctor.python_status",
+      "name": "python-status",
+      "note": "`source` is sys.executable, written as <python-executable>",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.doctor.render_json",
+      "name": "json-rows-darwin",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.doctor.render_json",
+      "name": "json-rows-win32",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.doctor.render_json",
+      "name": "json-rows-linux",
+      "source": "v0.4.0"
+    },
+    {
+      "function": "oah.doctor.render_json",
+      "name": "json-rows-win32-required-missing",
+      "source": "v0.4.0"
+    }
+  ],
+  "deviations": [],
+  "functions": [
+    {
+      "file": "src/oah/setup/guide.py",
+      "module": "oah.setup.guide",
+      "name": "signed_in"
+    },
+    {
+      "file": "src/oah/doctor.py",
+      "module": "oah.doctor",
+      "name": "first_line"
+    },
+    {
+      "file": "src/oah/doctor.py",
+      "module": "oah.doctor",
+      "name": "_check_tool"
+    },
+    {
+      "file": "src/oah/doctor.py",
+      "module": "oah.doctor",
+      "name": "python_status"
+    },
+    {
+      "file": "src/oah/doctor.py",
+      "module": "oah.doctor",
+      "name": "render_json"
+    },
+    {
+      "file": "src/oah/doctor.py",
+      "module": "oah.doctor",
+      "name": "exit_code"
+    }
+  ],
+  "mined_from": [
+    "tests/test_doctor.py"
+  ],
+  "notes": [
+    "Table cases give `calls` (row name -> arguments) and expect a map of row name -> result.",
+    "status-table rows give the catalog tool, how the fake resolver answers (`resolve`: argv, source and kind; null for not found; or `unsupported_shim`), and how the fake runner answers each command line after the resolved argv (`runs`, keyed by the arguments joined with spaces; an `oserror` answer raises OSError with that text). `gates` says whether the project uses gates.",
+    "json-rows-* cases pass the given ToolStatus rows and platform to render_json; the expectation is the parsed JSON."
+  ],
+  "omitted": [
+    {
+      "behaviour": "check_tools over the whole catalog, with the python and unlazy rows",
+      "reason": "it reads the running interpreter and installed skill folders; each row's decision is pinned through _check_tool and python_status instead"
+    },
+    {
+      "behaviour": "the text output (render_text) and the MCP, model, agent, update and scratch notices",
+      "reason": "not in the area's listed behaviour; they read per-machine state"
+    },
+    {
+      "behaviour": "resolving real executables (resolve_command, npm shims, Windows batch files)",
+      "reason": "depends on the host's PATH and file system; the resolver is a fake here"
+    }
+  ],
+  "oracle": "v0.4.0",
+  "status": "pending"
+}

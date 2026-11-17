@@ -1,0 +1,5 @@
+{
+  "files": {
+    "benchmarks.csv": "model,started_at,Status,mean_score,original_task_name,extra\r\ngpt-6-luna_max,2026-10-01T00:00:00Z,Success,0.25,EBR-bench,\"two\r\nlines\"\r\n"
+  }
+}

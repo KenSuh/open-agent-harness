@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_CONFIG_INVALID",
+    "message": ".oah/config.toml: models.ttl_hours must be a number, not true or false; change it to a number or remove it to use the default"
+  }
+}

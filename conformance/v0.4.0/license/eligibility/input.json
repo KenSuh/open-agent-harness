@@ -1,0 +1,437 @@
+{
+  "calls": {
+    "choice": {
+      "allow": [
+        [
+          "ISC"
+        ],
+        [
+          "MIT",
+          "ISC"
+        ],
+        []
+      ],
+      "blobs": {
+        "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94": "ISC License\n\nCopyright (c) 2026 Acme\n\nPermission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\nWITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\nMERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\nANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\nWHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\nACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\nOR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n",
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": {
+          "field": "package.license",
+          "path": "Cargo.toml",
+          "value": "MIT OR ISC"
+        },
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE-MIT",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          },
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE-ISC",
+            "sha256": "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94",
+            "size": 735
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE-ISC",
+              "LICENSE-MIT"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "conjunction": {
+      "allow": [
+        [
+          "MIT"
+        ],
+        [
+          "ISC",
+          "MIT"
+        ]
+      ],
+      "blobs": {
+        "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94": "ISC License\n\nCopyright (c) 2026 Acme\n\nPermission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\nWITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\nMERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\nANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\nWHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\nACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\nOR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n",
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": {
+          "field": "package.license",
+          "path": "Cargo.toml",
+          "value": "MIT AND ISC"
+        },
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE-MIT",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          },
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE-ISC",
+            "sha256": "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94",
+            "size": 735
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE-ISC",
+              "LICENSE-MIT"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "declared-differs": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": {
+          "field": "package.license",
+          "path": "Cargo.toml",
+          "value": "MIT OR ISC"
+        },
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "evidence-problem": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": null,
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          }
+        ],
+        "notices": [],
+        "problems": [
+          "src holds a LICENSES folder"
+        ],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "gpl": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {
+        "8dbc4d1fecf9b1156ab95520c8aa0db6ede139aed8a70df1b4eb86f2673952a0": "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n\nEveryone is permitted to copy and distribute verbatim copies of this license document.\n"
+      },
+      "evidence": {
+        "declared": null,
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "COPYING",
+            "sha256": "8dbc4d1fecf9b1156ab95520c8aa0db6ede139aed8a70df1b4eb86f2673952a0",
+            "size": 139
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "COPYING"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "mit": {
+      "allow": [
+        [
+          "MIT"
+        ],
+        [
+          "ISC"
+        ],
+        []
+      ],
+      "blobs": {
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": null,
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "nested-disagrees": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {
+        "8dbc4d1fecf9b1156ab95520c8aa0db6ede139aed8a70df1b4eb86f2673952a0": "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n\nEveryone is permitted to copy and distribute verbatim copies of this license document.\n",
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": null,
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          },
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "src/vendor/LICENSE",
+            "sha256": "8dbc4d1fecf9b1156ab95520c8aa0db6ede139aed8a70df1b4eb86f2673952a0",
+            "size": 139
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE"
+            ],
+            "level": "",
+            "nested": [
+              "src/vendor/LICENSE"
+            ],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "no-license-file": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {},
+      "evidence": {
+        "declared": null,
+        "files": [],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "scopes-differ": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {
+        "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94": "ISC License\n\nCopyright (c) 2026 Acme\n\nPermission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\nWITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\nMERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\nANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\nWHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\nACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\nOR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n",
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": null,
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          },
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "lib/LICENSE",
+            "sha256": "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94",
+            "size": 735
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          },
+          {
+            "files": [
+              "lib/LICENSE"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "lib"
+          }
+        ]
+      }
+    },
+    "stored-text-missing": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {},
+      "evidence": {
+        "declared": null,
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    },
+    "two-texts-nothing-declared": {
+      "allow": [
+        [
+          "MIT",
+          "ISC"
+        ]
+      ],
+      "blobs": {
+        "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94": "ISC License\n\nCopyright (c) 2026 Acme\n\nPermission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\nWITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\nMERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\nANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\nWHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\nACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\nOR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n",
+        "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2": "MIT License\n\nCopyright (c) 2026 Acme\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+      },
+      "evidence": {
+        "declared": null,
+        "files": [
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE-MIT",
+            "sha256": "eadfe099bb1f2e2cfa6afea7df7def4229e5a34a12716f1e92aa7137149897d2",
+            "size": 1061
+          },
+          {
+            "blob": "0000000000000000000000000000000000000000",
+            "path": "LICENSE-ISC",
+            "sha256": "25988a7c9bb2d1bbb44f1abbdb08c536aeffa0b5d825caffc9595cc1c3546b94",
+            "size": 735
+          }
+        ],
+        "notices": [],
+        "problems": [],
+        "scopes": [
+          {
+            "files": [
+              "LICENSE-ISC",
+              "LICENSE-MIT"
+            ],
+            "level": "",
+            "nested": [],
+            "path": "src"
+          }
+        ]
+      }
+    }
+  }
+}

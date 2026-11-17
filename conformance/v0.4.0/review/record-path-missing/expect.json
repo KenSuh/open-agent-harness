@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "OAH_SKILL_REVIEW_FAILED",
+    "message": "OAH_SKILL_REVIEW_FAILED(path-unresolved): acme/skills has no folder skills/absent at its current commit"
+  }
+}

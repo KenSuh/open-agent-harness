@@ -1,0 +1,16 @@
+{
+  "calls": {
+    "changed": {
+      "text": "Usage: claude (help text changed)\n"
+    },
+    "crlf-other-lists": {
+      "text": "Usage: claude [options] [command] [prompt]\r\n\r\nOptions:\r\n  --effort <level>                      Effort level for the current session\r\n                                        (low, high, Bad Label, low)\r\n  --model <model>                       Model for the current session. Provide\r\n                                        an alias for the latest model (e.g.\r\n                                        'opus', 'haiku', 'opus') or a\r\n                                        model's full name.\r\n  --permission-mode <mode>              Permission mode to use for the session\r\n"
+    },
+    "default": {
+      "text": "Usage: claude [options] [command] [prompt]\n\nOptions:\n  --effort <level>                      Effort level for the current session\n                                        (low, medium, high, xhigh, max)\n  --model <model>                       Model for the current session. Provide\n                                        an alias for the latest model (e.g.\n                                        'fable', 'opus', 'sonnet') or a\n                                        model's full name.\n  --permission-mode <mode>              Permission mode to use for the session\n"
+    },
+    "options-later": {
+      "text": "  --model <model>  pick 'sonnet'\n  --verbose 'not-an-alias'\n  --effort  (low)\n"
+    }
+  }
+}

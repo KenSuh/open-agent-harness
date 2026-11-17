@@ -1,0 +1,6 @@
+{
+  "files": {
+    ".oah/config.toml": "[stages]\nplan = \"claude\"\nbuild = \"claude\"\nreview = \"codex\"\nfix = \"codex\"\ninitial = \"codex\"\ncorrection = \"claude\"\n"
+  },
+  "read": "legacy-to-1.0"
+}

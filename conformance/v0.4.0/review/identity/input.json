@@ -1,0 +1,20 @@
+{
+  "calls": {
+    "flat": {
+      "path": "pg-schema",
+      "repo": "acme/flat"
+    },
+    "grill": {
+      "path": "skills/grill",
+      "repo": "acme/skills"
+    },
+    "nested": {
+      "path": "skills/productivity/grilling",
+      "repo": "mattpocock/skills"
+    },
+    "other-owner": {
+      "path": "skills/productivity/grilling",
+      "repo": "other/skills"
+    }
+  }
+}
