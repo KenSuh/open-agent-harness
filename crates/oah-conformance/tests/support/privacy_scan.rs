@@ -157,7 +157,9 @@ fn document_layers(
                             }
                             let little_endian = bytes.starts_with(&[0xff, 0xfe]);
                             let units: Vec<_> = bytes[2..]
-                                .chunks_exact(2)
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
                                 .map(|pair| {
                                     if little_endian {
                                         u16::from_le_bytes([pair[0], pair[1]])
@@ -203,7 +205,9 @@ fn hex_bytes(text: &str) -> Option<Vec<u8>> {
         return None;
     }
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = char::from(pair[0]).to_digit(16)?;
             let low = char::from(pair[1]).to_digit(16)?;
