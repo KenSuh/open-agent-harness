@@ -260,14 +260,25 @@ pub fn create_with(
         return copy_fallback(request, None);
     }
     match linker.link(source, destination, &target) {
-        Ok(()) => {
-            verify_native(destination, kind, &target, source)?;
-            Ok(LinkOutcome {
+        Ok(()) => match verify_native(destination, kind, &target, source) {
+            Ok(()) => Ok(LinkOutcome {
                 link: native_descriptor(request, kind, target),
                 created: true,
                 fallback: None,
-            })
-        }
+            }),
+            Err(error) => {
+                // A link that was made but does not lead to the source has been removed again, so it is a failed
+                // link like any other: for example a junction Windows refuses to traverse because a redirection
+                // policy treats it as untrusted (os error 448).
+                let removed = error.kind() == FsxErrorKind::LinkUnsupported
+                    && inspect(destination)? == Entry::Missing;
+                if request.allow_copy && removed {
+                    copy_fallback(request, Some(error.detail().to_string()))
+                } else {
+                    Err(error)
+                }
+            }
+        },
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(FsxError::new(
             FsxErrorKind::LinkExists,
             destination,
@@ -477,20 +488,26 @@ fn verify_native(
     source: &Path,
 ) -> Result<(), FsxError> {
     let entry = inspect(destination)?;
-    if same_native_link(&entry, kind, target, source) && same_folder(destination, source) {
+    let resolved = fs::canonicalize(destination);
+    let reaches_source = match (&resolved, fs::canonicalize(source)) {
+        (Ok(found), Ok(expected)) => *found == expected,
+        _ => false,
+    };
+    if same_native_link(&entry, kind, target, source) && reaches_source {
         return Ok(());
     }
     if matches!(entry, Entry::Symlink { .. } | Entry::Junction { .. }) {
         let _ = remove_link_entry(destination);
     }
-    Err(FsxError::new(
-        FsxErrorKind::LinkUnsupported,
-        destination,
-        format!(
-            "the new {} does not resolve to the source folder",
-            kind_word(kind)
-        ),
-    ))
+    let what = format!(
+        "the new {} does not resolve to the source folder",
+        kind_word(kind)
+    );
+    Err(match resolved {
+        // Keep the operating system's reason, such as a junction that cannot be traversed.
+        Err(error) => FsxError::io(FsxErrorKind::LinkUnsupported, destination, &what, error),
+        Ok(_) => FsxError::new(FsxErrorKind::LinkUnsupported, destination, what),
+    })
 }
 
 #[cfg(windows)]

@@ -1,8 +1,8 @@
 // 관리 링크 시험: 기본 링크(macOS 심볼릭 링크·Windows 정션)와 보고되는 복사 대체, 남의 항목 보존, 링크 삭제가 대상을 지우지 않는지 확인한다.
 use oah_core::fsx::FsxErrorKind;
 use oah_core::fsx::links::{
-    Entry, LinkKind, LinkRequest, NativeLinker, Removal, TargetStyle, create, create_with, inspect,
-    remove,
+    Entry, LinkKind, LinkRequest, NativeLinker, Removal, SystemLinker, TargetStyle, create,
+    create_with, inspect, remove,
 };
 use std::fs;
 use std::io;
@@ -68,6 +68,21 @@ impl NativeLinker for Unavailable {
             io::ErrorKind::PermissionDenied,
             "links are switched off here",
         ))
+    }
+}
+
+/// A native linker that makes a real link to the wrong folder, as when a new link cannot be followed to its source.
+struct Misdirected {
+    elsewhere: PathBuf,
+}
+
+impl NativeLinker for Misdirected {
+    fn kind(&self) -> LinkKind {
+        SystemLinker.kind()
+    }
+
+    fn link(&self, _source: &Path, destination: &Path, _target: &Path) -> io::Result<()> {
+        SystemLinker.link(&self.elsewhere, destination, &self.elsewhere)
     }
 }
 
@@ -258,6 +273,55 @@ fn without_permission_to_copy_a_failed_link_is_an_error() {
     .unwrap_err();
     assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
     assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
+}
+
+#[test]
+fn a_new_link_that_misses_its_source_is_removed_and_replaced_by_a_reported_copy() {
+    let stores = Stores::new();
+    let source = stores.source();
+    let elsewhere = stores.store.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("keep.txt"), "kept\n").unwrap();
+    let linker = Misdirected {
+        elsewhere: elsewhere.clone(),
+    };
+    let destination = stores.agents.join("skill-a");
+
+    let error = create_with(
+        &stores.request(&destination, TargetStyle::Absolute, false, &source),
+        &linker,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
+    assert_eq!(
+        inspect(&destination).unwrap(),
+        Entry::Missing,
+        "the link that missed its source was left behind"
+    );
+
+    let outcome = create_with(
+        &stores.request(&destination, TargetStyle::Absolute, true, &source),
+        &linker,
+    )
+    .unwrap();
+    assert_eq!(outcome.link.kind, LinkKind::Copy);
+    let reason = outcome
+        .fallback
+        .expect("a copy reports why the native link was not kept");
+    assert!(
+        reason.contains("does not resolve to the source folder"),
+        "{reason}"
+    );
+    assert_eq!(inspect(&destination).unwrap(), Entry::Directory);
+    assert_eq!(
+        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+        "# Skill A\n"
+    );
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
+        "kept\n",
+        "removing the wrong link touched its target"
+    );
 }
 
 #[test]

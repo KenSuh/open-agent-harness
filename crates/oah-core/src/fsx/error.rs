@@ -86,6 +86,11 @@ impl FsxError {
     pub fn io_error(&self) -> Option<&io::Error> {
         self.source.as_ref()
     }
+
+    /// The reason without the code or the path, as a copy fallback records it.
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
 }
 
 impl fmt::Display for FsxError {
