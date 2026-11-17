@@ -226,6 +226,125 @@ fn design_expectation_contract_cannot_drop_assertions() {
     }
 }
 
+/// Turns the legacy-agents-win design case into one whose file names an agent with only a key 1.0 does not
+/// use, with the expectation the core gives for it: that agent has no keys, and its key is kept unused.
+fn empty_agent_case(scratch: &Scratch) {
+    scratch.edit_json("config/legacy-agents-win/input.json", |input| {
+        input["files"] = serde_json::json!({
+            ".oah/config.toml": "[engines.codex]\npermission_mode = \"acceptEdits\"\n"
+        });
+    });
+    scratch.edit_json("config/legacy-agents-win/expect.json", |expect| {
+        *expect = serde_json::json!({"ok": {
+            "agents": {"codex": {}},
+            "file_unchanged": true,
+            "notices": [],
+            "unused_kept_in_file": ["permission_mode"]
+        }});
+    });
+}
+
+#[test]
+fn empty_given_agent_projection_passes_when_it_is_the_core_reading() {
+    let scratch = Scratch::new();
+    empty_agent_case(&scratch);
+    let report = scratch.config();
+    assert!(report.is_ok(), "{:#?}", report.failures);
+    assert_eq!(report.passed, 30);
+}
+
+#[test]
+fn empty_given_agent_projection_keeps_every_other_requirement() {
+    // Allowing an empty object for one agent relaxes nothing else: the agents map, the notices, the
+    // preservation flag and the unused list stay required, and an agent value must still be an object.
+    for (mutation, wanted) in [
+        ("array-agent", "typed agents values"),
+        ("string-agent", "typed agents values"),
+        ("null-agent", "typed agents values"),
+        ("empty-map", "a nonempty agents semantic projection"),
+        ("missing-agents", "a nonempty agents semantic projection"),
+        ("missing-unused", "an unused_kept_in_file list of strings"),
+        ("missing-notices", "a notices list of strings"),
+        ("missing-preservation", "boolean file_unchanged"),
+    ] {
+        let scratch = Scratch::new();
+        empty_agent_case(&scratch);
+        scratch.edit_json("config/legacy-agents-win/expect.json", |expect| {
+            let ok = expect["ok"].as_object_mut().unwrap();
+            match mutation {
+                "array-agent" => ok["agents"]["codex"] = serde_json::json!([]),
+                "string-agent" => ok["agents"]["codex"] = serde_json::json!("codex"),
+                "null-agent" => ok["agents"]["codex"] = Json::Null,
+                "empty-map" => ok["agents"] = serde_json::json!({}),
+                "missing-agents" => drop(ok.remove("agents")),
+                "missing-unused" => drop(ok.remove("unused_kept_in_file")),
+                "missing-notices" => drop(ok.remove("notices")),
+                "missing-preservation" => drop(ok.remove("file_unchanged")),
+                _ => unreachable!(),
+            }
+        });
+        let report = scratch.config();
+        assert_eq!(
+            failed_cases(&report),
+            ["legacy-agents-win"],
+            "{mutation}: {:#?}",
+            report.failures
+        );
+        assert_eq!(report.passed, 29, "{mutation}");
+        let detail = &report.failures[0].detail;
+        assert!(
+            detail.contains("expect.json design expectation requires") && detail.contains(wanted),
+            "{mutation}: {detail}"
+        );
+    }
+}
+
+#[test]
+fn empty_given_agent_projection_is_compared_like_any_other() {
+    // An empty agent object is no wildcard: it fails where the core gives the agent keys, and a wrong unused
+    // list, an unused key claimed as used, or another agent still fails where the agent is empty.
+    for mutation in [
+        "fixture-agent-emptied",
+        "wrong-unused",
+        "unused-key-as-given",
+        "other-agent",
+    ] {
+        let scratch = Scratch::new();
+        if mutation == "fixture-agent-emptied" {
+            scratch.edit_json("config/legacy-agents-win/expect.json", |expect| {
+                expect["ok"]["agents"]["codex"] = serde_json::json!({});
+            });
+        } else {
+            empty_agent_case(&scratch);
+            scratch.edit_json("config/legacy-agents-win/expect.json", |expect| {
+                let ok = expect["ok"].as_object_mut().unwrap();
+                match mutation {
+                    "wrong-unused" => ok["unused_kept_in_file"] = serde_json::json!([]),
+                    "unused-key-as-given" => {
+                        ok["agents"]["codex"] =
+                            serde_json::json!({"permission_mode": "acceptEdits"})
+                    }
+                    "other-agent" => ok["agents"] = serde_json::json!({"claude": {}}),
+                    _ => unreachable!(),
+                }
+            });
+        }
+        let report = scratch.config();
+        assert_eq!(
+            failed_cases(&report),
+            ["legacy-agents-win"],
+            "{mutation}: {:#?}",
+            report.failures
+        );
+        assert_eq!(report.passed, 29, "{mutation}");
+        let detail = &report.failures[0].detail;
+        assert!(
+            !detail.contains("design expectation requires"),
+            "{mutation} is a mismatch, not a malformed expectation: {detail}"
+        );
+    }
+}
+
 #[test]
 fn a_deviation_must_carry_the_frozen_refusal_message() {
     let scratch = Scratch::new();

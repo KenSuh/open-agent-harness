@@ -48,6 +48,8 @@ pub struct FsxError {
     path: PathBuf,
     detail: String,
     source: Option<io::Error>,
+    /// A cleanup that failed after this failure; it never replaces this failure.
+    cleanup: Option<Box<FsxError>>,
 }
 
 impl FsxError {
@@ -57,6 +59,7 @@ impl FsxError {
             path: path.to_path_buf(),
             detail: detail.into(),
             source: None,
+            cleanup: None,
         }
     }
 
@@ -66,6 +69,7 @@ impl FsxError {
             path: path.to_path_buf(),
             detail: format!("{what}: {source}"),
             source: Some(source),
+            cleanup: None,
         }
     }
 
@@ -91,6 +95,20 @@ impl FsxError {
     pub(crate) fn detail(&self) -> &str {
         &self.detail
     }
+
+    /// Attaches a cleanup that failed after this failure. This failure keeps its kind, path and cause.
+    pub(crate) fn with_cleanup(mut self, cleanup: FsxError) -> Self {
+        self.cleanup = Some(Box::new(match self.cleanup.take() {
+            None => cleanup,
+            Some(first) => first.with_cleanup(cleanup),
+        }));
+        self
+    }
+
+    /// When cleaning up after this failure also failed: what was left in place, and why.
+    pub fn cleanup_error(&self) -> Option<&FsxError> {
+        self.cleanup.as_deref()
+    }
 }
 
 impl fmt::Display for FsxError {
@@ -101,7 +119,11 @@ impl fmt::Display for FsxError {
             self.kind.code(),
             self.detail,
             self.path.display()
-        )
+        )?;
+        match &self.cleanup {
+            Some(cleanup) => write!(f, "; cleanup also failed: {cleanup}"),
+            None => Ok(()),
+        }
     }
 }
 

@@ -32,6 +32,24 @@ impl Fingerprint {
     pub fn to_hex(&self) -> String {
         hex(&self.0)
     }
+
+    /// Reads back the form [`Fingerprint::to_hex`] writes: exactly 64 lowercase hexadecimal characters.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        let text = text.as_bytes();
+        if text.len() != 64 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        for (index, byte) in out.iter_mut().enumerate() {
+            *byte = (digit(text[2 * index])? << 4) | digit(text[2 * index + 1])?;
+        }
+        Some(Fingerprint(out))
+    }
 }
 
 impl fmt::Debug for Fingerprint {

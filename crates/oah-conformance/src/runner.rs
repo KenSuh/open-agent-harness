@@ -785,13 +785,17 @@ fn validate_legacy_expectation(
                 "stages" => object
                     .values()
                     .all(|value| value.as_str().is_some_and(|text| !text.is_empty())),
-                "agents" => object
-                    .values()
-                    .all(|value| value.as_object().is_some_and(|agent| !agent.is_empty())),
+                // An agent whose keys 1.0 does not use projects to an empty object; those keys are still
+                // checked through the required unused_kept_in_file list.
+                "agents" => object.values().all(Json::is_object),
                 _ => unreachable!(),
             };
             if !valid {
-                return Err(malformed(&format!("nonempty typed {field} values")));
+                return Err(malformed(if field == "stages" {
+                    "nonempty typed stages values"
+                } else {
+                    "typed agents values (an object for each agent)"
+                }));
             }
         }
     }

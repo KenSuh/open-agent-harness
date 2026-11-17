@@ -219,3 +219,26 @@ fn different_bytes_are_never_suppressed() {
         "an old write must not hide a later external change back to the same bytes"
     );
 }
+
+#[test]
+fn durable_record_fingerprints_read_back_only_their_hex_form() {
+    // A caller keeps fingerprints as text between processes; reading one back is exact and strict.
+    let fingerprint = Fingerprint::of(b"synthetic bytes");
+    let text = fingerprint.to_hex();
+    assert_eq!(Fingerprint::from_hex(&text), Some(fingerprint));
+    assert_eq!(
+        Fingerprint::from_hex(&Fingerprint::of(b"").to_hex()),
+        Some(Fingerprint::of(b""))
+    );
+    let upper = text.to_uppercase();
+    for bad in [
+        "",
+        &text[..62],
+        &format!("{text}0"),
+        &format!("{}g", &text[..63]),
+        &format!(" {}", &text[1..]),
+        upper.as_str(),
+    ] {
+        assert_eq!(Fingerprint::from_hex(bad), None, "{bad:?}");
+    }
+}
