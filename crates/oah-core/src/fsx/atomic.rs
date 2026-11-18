@@ -177,6 +177,44 @@ pub fn publish_new(path: &Path, bytes: &[u8]) -> Result<WriteReceipt, FsxError> 
     verify(path, bytes)
 }
 
+/// Publishes an executable at `path` only after `check` accepted it (CONTRACTS C7).
+///
+/// The bytes go to a new temporary sibling, whose name ends in `.exe` on Windows, and are flushed; on Unix it
+/// gets mode `0755`. Then `check` runs on the temporary path, before any rename. A rejection removes the
+/// temporary file, leaves `path` untouched and is returned as `Ok(Err(rejection))`. An accepted file is renamed
+/// over `path`, the folder synced and the result read back, with the classes of [`write_atomic`]: `Io` before
+/// the rename (destination untouched, temporary file removed), `Unverified` after it.
+pub fn publish_executable<E>(
+    path: &Path,
+    bytes: &[u8],
+    check: impl FnOnce(&Path) -> Result<(), E>,
+) -> Result<Result<WriteReceipt, E>, FsxError> {
+    let folder = parent_of(path)?;
+    let temp = create_temp(&folder, path, bytes, TempUse::Executable)?;
+    if let Err(rejection) = check(&temp) {
+        let _ = fs::remove_file(&temp);
+        return Ok(Err(rejection));
+    }
+    if let Err(error) = retry_sharing(|| fs::rename(&temp, path)) {
+        let _ = fs::remove_file(&temp);
+        return Err(FsxError::io(
+            FsxErrorKind::Io,
+            path,
+            "cannot replace",
+            error,
+        ));
+    }
+    sync_folder(&folder).map_err(|error| {
+        FsxError::io(
+            FsxErrorKind::Unverified,
+            path,
+            "replaced, but the folder could not be synced",
+            error,
+        )
+    })?;
+    verify(path, bytes).map(Ok)
+}
+
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), FsxError> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
@@ -212,6 +250,45 @@ fn parent_of(path: &Path) -> Result<PathBuf, FsxError> {
 /// Creates a uniquely named temporary file beside `path`, writes `bytes`, flushes them to disk and returns its
 /// path. The temporary file is removed again on any failure.
 fn write_temp(folder: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, FsxError> {
+    create_temp(folder, path, bytes, TempUse::Data)
+}
+
+/// What a temporary file is for: plain bytes, or an executable that is run before it is published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TempUse {
+    Data,
+    Executable,
+}
+
+impl TempUse {
+    fn suffix(self) -> &'static str {
+        match self {
+            TempUse::Executable if cfg!(windows) => ".tmp.exe",
+            TempUse::Data | TempUse::Executable => ".tmp",
+        }
+    }
+}
+
+#[cfg(unix)]
+fn make_executable(file: &fs::File, usage: TempUse) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match usage {
+        TempUse::Executable => file.set_permissions(fs::Permissions::from_mode(0o755)),
+        TempUse::Data => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn make_executable(_file: &fs::File, _usage: TempUse) -> io::Result<()> {
+    Ok(())
+}
+
+fn create_temp(
+    folder: &Path,
+    path: &Path,
+    bytes: &[u8],
+    usage: TempUse,
+) -> Result<PathBuf, FsxError> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let name = path
         .file_name()
@@ -224,24 +301,30 @@ fn write_temp(folder: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, FsxEr
             .map(|elapsed| elapsed.subsec_nanos())
             .unwrap_or(0);
         let temp = folder.join(format!(
-            ".{name}.{}.{nanos:08x}{:04x}.tmp",
+            ".{name}.{}.{nanos:08x}{:04x}{}",
             std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed) & 0xffff
+            COUNTER.fetch_add(1, Ordering::Relaxed) & 0xffff,
+            usage.suffix()
         ));
         match OpenOptions::new().write(true).create_new(true).open(&temp) {
             Ok(mut file) => {
-                let written = file.write_all(bytes).and_then(|()| file.sync_all());
+                let written = file
+                    .write_all(bytes)
+                    .map_err(|error| ("cannot write the temporary file", error))
+                    .and_then(|()| {
+                        make_executable(&file, usage)
+                            .map_err(|error| ("cannot make the temporary file executable", error))
+                    })
+                    .and_then(|()| {
+                        file.sync_all()
+                            .map_err(|error| ("cannot write the temporary file", error))
+                    });
                 drop(file);
                 return match written {
                     Ok(()) => Ok(temp),
-                    Err(error) => {
+                    Err((what, error)) => {
                         let _ = fs::remove_file(&temp);
-                        Err(FsxError::io(
-                            FsxErrorKind::Io,
-                            path,
-                            "cannot write the temporary file",
-                            error,
-                        ))
+                        Err(FsxError::io(FsxErrorKind::Io, path, what, error))
                     }
                 };
             }

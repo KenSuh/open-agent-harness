@@ -1,0 +1,20 @@
+{
+  "version": "0.0.0",
+  "os": "windows",
+  "oah_home": "~\\.oah",
+  "cli": {
+    "state": "kept-previous",
+    "path": "~\\.oah\\bin\\oah.exe",
+    "version": null
+  },
+  "notices": [
+    {
+      "id": "OAH_CLI_COPY_FAILED:cli-copy",
+      "level": "warning",
+      "code": "OAH_CLI_COPY_FAILED",
+      "message": "the CLI copy was not updated (bundled CLI not found): ~\\dev\\oah.exe",
+      "hint": "OAH keeps working. Agent hooks use the previous copy until a later start copies it again.",
+      "actions": []
+    }
+  ]
+}

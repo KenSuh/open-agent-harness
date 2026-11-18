@@ -1,0 +1,11 @@
+{
+  "version": "0.0.0",
+  "os": "macos",
+  "oah_home": "~/.oah",
+  "cli": {
+    "state": "copied",
+    "path": "~/.oah/bin/oah",
+    "version": "0.0.0"
+  },
+  "notices": []
+}

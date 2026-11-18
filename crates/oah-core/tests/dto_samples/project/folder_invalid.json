@@ -1,0 +1,14 @@
+{
+  "id": "9a8b7c6d5e4f3a2b",
+  "root": "~/notes",
+  "kind": "folder",
+  "config": {
+    "state": "invalid",
+    "error": {
+      "code": "OAH_CONFIG_INVALID",
+      "message": "~/notes/.oah/config.toml: not valid TOML",
+      "hint": "Fix the file, or remove it to use the defaults."
+    }
+  },
+  "notices": []
+}
