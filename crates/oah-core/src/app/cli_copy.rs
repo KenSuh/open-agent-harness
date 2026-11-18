@@ -30,9 +30,11 @@ pub struct CliCopy {
 /// Copies the bundled CLI at `bundled` (a path the shell supplies) to `paths::cli_bin`, and records the result
 /// in the session for `app_info`. It never fails: every failure is a state and a notice.
 ///
-/// The same bytes already in place are `unchanged`. Otherwise the bytes go to a temporary sibling that must
-/// print `oah <app version>` for `--version` before it is renamed into place. A failure before the rename keeps
-/// the previous copy (`kept-previous`); a failure after it is `unknown`, and the next start compares hashes again.
+/// The same bytes already in place are `unchanged` once the installed copy itself prints `oah <app version>`
+/// for `--version`; an installed copy that fails that check is left as it is and reported `kept-previous`.
+/// Otherwise the bytes go to a temporary sibling that must pass the same check before it is renamed into place.
+/// A failure before the rename keeps the previous copy (`kept-previous`); a failure after it is `unknown`, and
+/// the next start compares hashes again.
 pub fn cli_copy(ctx: &Ctx<'_>, bundled: &Path) -> CliCopy {
     let copy = copy(ctx, bundled);
     ctx.session.set_cli(copy.clone());
@@ -54,10 +56,14 @@ fn copy(ctx: &Ctx<'_>, bundled: &Path) -> CliCopy {
     if let Ok(Some(existing)) = fsx::read_optional(&dest)
         && Fingerprint::of(&existing) == Fingerprint::of(&bytes)
     {
-        return CliCopy {
-            state: CliState::Unchanged,
-            version: observed_version(ctx, &dest),
-            notice: None,
+        // Equal bytes skip the publish, never the validation: a copy that cannot run is reported, not repaired.
+        return match check(ctx, &dest) {
+            Ok(()) => CliCopy {
+                state: CliState::Unchanged,
+                version: Some(crate::VERSION.to_string()),
+                notice: None,
+            },
+            Err(reason) => kept(ctx, "checking the installed copy", &reason),
         };
     }
     if let Some(folder) = dest.parent()
@@ -70,20 +76,14 @@ fn copy(ctx: &Ctx<'_>, bundled: &Path) -> CliCopy {
     classify(ctx, &dest, published)
 }
 
-/// Requires the candidate to print exactly `oah <app version>` for `--version`.
-fn check(ctx: &Ctx<'_>, candidate: &Path) -> Result<(), String> {
+/// Requires `program` (a candidate or the installed copy) to print exactly `oah <app version>` for `--version`.
+fn check(ctx: &Ctx<'_>, program: &Path) -> Result<(), String> {
     let expected = format!("oah {}", crate::VERSION);
-    match version_line(ctx, candidate) {
+    match version_line(ctx, program) {
         Ok(line) if line == expected => Ok(()),
-        Ok(_) => Err(format!("the candidate did not print {expected:?}")),
+        Ok(_) => Err(format!("the --version run did not print {expected:?}")),
         Err(reason) => Err(reason),
     }
-}
-
-/// The version a `--version` run of `program` prints, when it prints `oah <version>`.
-fn observed_version(ctx: &Ctx<'_>, program: &Path) -> Option<String> {
-    let line = version_line(ctx, program).ok()?;
-    line.strip_prefix("oah ").map(str::to_string)
 }
 
 fn version_line(ctx: &Ctx<'_>, program: &Path) -> Result<String, String> {

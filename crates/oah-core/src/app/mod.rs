@@ -22,7 +22,7 @@ use crate::fsx::SelfWrites;
 use crate::paths::{self, Env};
 use crate::project::{self, OpenProject};
 use crate::tasks::{CancelToken, ProgressSink, TaskHandle, TaskRegistry, TaskState};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// The state of one process: its environment, the open project, the running tasks, OAH's own verified writes and
@@ -30,7 +30,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 #[derive(Debug)]
 pub struct Session {
     env: Env,
-    project: Mutex<Option<OpenProject>>,
+    project: Mutex<ProjectSlot>,
     tasks: TaskRegistry,
     self_writes: SelfWrites,
     cli: Mutex<Option<CliCopy>>,
@@ -46,6 +46,22 @@ pub struct Ctx<'a> {
     pub progress: &'a dyn ProgressSink,
 }
 
+/// The order of one project read: the explicit open that started its selection, then the read itself. Stamps are
+/// taken before the read's IO; a read is published only when its stamp is newer than the held one, so neither an
+/// older open nor a refresh of a selection that was replaced meanwhile (A, then B, then A again) can win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Stamp {
+    selection: u64,
+    read: u64,
+}
+
+/// The session's project with the stamp of the read that produced it, and the last number handed out.
+#[derive(Debug, Default)]
+struct ProjectSlot {
+    issued: u64,
+    held: Option<(Stamp, OpenProject)>,
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -54,7 +70,7 @@ impl Session {
     pub fn new(env: Env) -> Session {
         Session {
             env,
-            project: Mutex::new(None),
+            project: Mutex::default(),
             tasks: TaskRegistry::new(),
             self_writes: SelfWrites::new(),
             cli: Mutex::new(None),
@@ -76,7 +92,10 @@ impl Session {
 
     /// The open project, as last read.
     pub fn project(&self) -> Option<OpenProject> {
-        lock(&self.project).clone()
+        lock(&self.project)
+            .held
+            .as_ref()
+            .map(|(_, project)| project.clone())
     }
 
     /// The CLI copy of this start; `None` until [`cli_copy`] ran.
@@ -94,8 +113,37 @@ impl Session {
         }
     }
 
-    pub(crate) fn set_project(&self, project: OpenProject) {
-        *lock(&self.project) = Some(project);
+    /// A stamp for an explicit open, which starts a new selection.
+    pub(crate) fn stamp_open(&self) -> Stamp {
+        let mut slot = lock(&self.project);
+        slot.issued += 1;
+        Stamp {
+            selection: slot.issued,
+            read: slot.issued,
+        }
+    }
+
+    /// The root of the selected project with a stamp for re-reading it; `None` when no project is open.
+    pub(crate) fn stamp_refresh(&self) -> Option<(Stamp, PathBuf)> {
+        let mut slot = lock(&self.project);
+        let (held, project) = slot.held.as_ref()?;
+        let (selection, root) = (held.selection, project.project.root.clone());
+        slot.issued += 1;
+        let read = slot.issued;
+        Some((Stamp { selection, read }, root))
+    }
+
+    /// Publishes `read`, taken under `stamp`, unless the session holds a newer read; returns the project the
+    /// session holds afterwards, so the caller reports that instead of a result that lost to newer work.
+    pub(crate) fn publish_project(&self, stamp: Stamp, read: OpenProject) -> OpenProject {
+        let mut slot = lock(&self.project);
+        match &slot.held {
+            Some((held, newer)) if *held > stamp => newer.clone(),
+            _ => {
+                slot.held = Some((stamp, read.clone()));
+                read
+            }
+        }
     }
 
     pub(crate) fn set_cli(&self, copy: CliCopy) {
@@ -136,12 +184,12 @@ pub fn app_info(ctx: &Ctx<'_>, _req: Empty) -> Result<AppInfoDto, Error> {
 }
 
 /// Opens the folder the native picker returned, read-only, and makes it the session's project. The webview
-/// never sends a path: the shell calls this with the picker's answer (`project_open_dialog`).
+/// never sends a path: the shell calls this with the picker's answer (`project_open_dialog`). When a later open
+/// published first, this older one changes nothing and returns the project the session holds.
 pub fn project_open(ctx: &Ctx<'_>, folder: &Path) -> Result<ProjectDto, Error> {
+    let stamp = ctx.session.stamp_open();
     let opened = project::open(ctx.env, folder)?;
-    let dto = opened.to_dto(ctx.env);
-    ctx.session.set_project(opened);
-    Ok(dto)
+    Ok(ctx.session.publish_project(stamp, opened).to_dto(ctx.env))
 }
 
 /// `project_current`: the open project as last read, or `None`.
@@ -158,4 +206,36 @@ pub fn tasks_list(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<TaskSnapshotDto>, Er
 pub fn task_cancel(ctx: &Ctx<'_>, req: TaskCancelReq) -> Result<Empty, Error> {
     ctx.session.tasks().cancel(&req.id);
     Ok(Empty {})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_older_open_that_finishes_last_does_not_replace_the_newer_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let mut env = Env::new(&root).unwrap();
+        if let Some(path) = std::env::var_os("PATH") {
+            env.set("PATH", path);
+        }
+        env.set(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, &root);
+        env.set("GIT_CEILING_DIRECTORIES", &root);
+        let [a, b] = ["a", "b"].map(|name| root.join(name));
+        for folder in [&a, &b] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let session = Session::new(env);
+        let older = session.stamp_open();
+        let newer = session.stamp_open();
+        let held_b = session.publish_project(newer, project::open(session.env(), &b).unwrap());
+        let returned = session.publish_project(older, project::open(session.env(), &a).unwrap());
+        assert_eq!(held_b.project.root, b);
+        assert_eq!(
+            returned.project.root, b,
+            "the older open reports the held project"
+        );
+        assert_eq!(session.project().unwrap().project.root, b);
+    }
 }

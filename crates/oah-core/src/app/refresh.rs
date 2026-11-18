@@ -15,11 +15,12 @@ pub fn refresh_key() -> TaskKey {
     TaskKey::joinable(REFRESH, "")
 }
 
-/// The full refresh: re-reads the open project, if any, and replaces the session's copy. It writes nothing in
-/// this slice; later slices add steps. Cancellation is checked before each step.
+/// The full refresh: re-reads the open project, if any, and replaces the session's copy unless a project was
+/// opened or read again after this refresh started; the counts are those of the project the session then holds.
+/// It writes nothing in this slice; later slices add steps. Cancellation is checked before each step.
 pub fn refresh(ctx: &Ctx<'_>, _req: Empty) -> Result<RefreshDto, Error> {
     ctx.cancel.check()?;
-    let Some(current) = ctx.session.project() else {
+    let Some((stamp, root)) = ctx.session.stamp_refresh() else {
         ctx.progress.progress(Progress {
             phase: PHASE,
             done: 0,
@@ -35,10 +36,10 @@ pub fn refresh(ctx: &Ctx<'_>, _req: Empty) -> Result<RefreshDto, Error> {
         done: 0,
         total: Some(1),
     });
-    let reopened = project::open(ctx.env, &current.project.root)?;
+    let reopened = project::open(ctx.env, &root)?;
     ctx.cancel.check()?;
-    let notices = u32::try_from(reopened.notices.len()).unwrap_or(u32::MAX);
-    ctx.session.set_project(reopened);
+    let held = ctx.session.publish_project(stamp, reopened);
+    let notices = u32::try_from(held.notices.len()).unwrap_or(u32::MAX);
     ctx.progress.progress(Progress {
         phase: PHASE,
         done: 1,

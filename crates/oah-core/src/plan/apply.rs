@@ -95,10 +95,12 @@ impl ApplyReport {
 /// The accepted items are grouped by target in the order the targets first appear, so several edits to one
 /// target are one call of `write` and one publish. Before any write and with no lock held, every basis of the
 /// plan is re-read: a difference is `Err(OAH_PLAN_STALE)` and nothing is written; a read failure is returned the
-/// same way. A cancellation asked for by then stops here too. After that `write` runs for one target at a time
-/// and the first target that is not `done` stops the apply: its items carry its class, later items are
-/// `not-run`, and [`ApplyReport::stop`] holds the reason (`OAH_PLAN_STALE` for a stale target). No cancellation
-/// check follows the first write.
+/// same way. After that `write` runs for one target at a time and the first target that is not `done` stops the
+/// apply: its items carry its class, later items are `not-run`, and [`ApplyReport::stop`] holds the reason
+/// (`OAH_PLAN_STALE` for a stale target). Cancellation is checked before every target until a writer publishes
+/// something durable (a `done` with receipts; a `done` with none, such as a `keep` or an unchanged config save,
+/// published nothing) and then `Err(Cancelled)` is returned with nothing written. After the first durable publish
+/// no check follows: the apply finishes and reports what it did.
 pub fn apply<F>(
     accepted: &Accepted<'_>,
     cancel: &CancelToken,
@@ -122,6 +124,10 @@ where
         let status = if report.stop.is_some() {
             ItemStatus::NotRun
         } else {
+            // Receipts are the only proof of a durable publish; until one exists a cancellation changed nothing.
+            if report.receipts.is_empty() {
+                cancel.check()?;
+            }
             settle(&mut report, &target, write(&target))
         };
         statuses.push((target.path, status));
