@@ -13,6 +13,8 @@
 
 use super::error::{FsxError, FsxErrorKind};
 use super::identity::{self, EntryId, MoveProof, Now};
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,7 +35,7 @@ struct Acquired {
     shape: Shape,
     /// The text a recorded link stores, read right after its number and before that number is kept.
     #[cfg(unix)]
-    link_text: Option<PathBuf>,
+    link_text: Option<OsString>,
 }
 
 /// What a native-link attempt left at its private entry name.
@@ -104,7 +106,8 @@ impl Stage {
         #[cfg(unix)]
         let id = id.and_then(|id| {
             if shape == Shape::Link {
-                self.entries[last].link_text = Some(fs::read_link(&self.entries[last].path)?);
+                let text = fs::read_link(&self.entries[last].path)?;
+                self.entries[last].link_text = Some(text.into_os_string());
             }
             Ok(id)
         });
@@ -365,7 +368,7 @@ fn made_now(entry: &Acquired, path: &Path) -> io::Result<Now> {
         Shape::File => file_type.is_file(),
         Shape::Link if !file_type.is_symlink() => false,
         Shape::Link => match fs::read_link(path) {
-            Ok(text) => entry.link_text.as_deref() == Some(text.as_path()),
+            Ok(text) => entry.link_text.as_deref() == Some(text.as_os_str()),
             Err(error) => return missing(error),
         },
     };
@@ -470,6 +473,7 @@ fn replaced(path: &Path) -> FsxError {
 mod tests {
     // Every case starts from a stage whose recorded entry number names another writer's replacement.
     use super::*;
+    use std::ffi::OsString;
     use std::os::unix::fs::symlink;
 
     /// A source folder and another writer's folder, each holding one file.
@@ -509,7 +513,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Seen {
         Missing,
-        Link(PathBuf),
+        Link(OsString),
         File(Vec<u8>),
         /// Each child's name and, for a file, its bytes.
         Folder(Vec<(String, Vec<u8>)>),
@@ -525,7 +529,7 @@ mod tests {
         };
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
-            Seen::Link(fs::read_link(path).unwrap())
+            Seen::Link(fs::read_link(path).unwrap().into_os_string())
         } else if file_type.is_dir() {
             let mut children: Vec<_> = fs::read_dir(path)
                 .unwrap()
@@ -572,6 +576,7 @@ mod tests {
         LinkElsewhere,
         /// A symlink reaching the same source folder through other stored text.
         LinkOtherText,
+        LinkPathAlias(&'static str, &'static str),
         File,
         Folder,
     }
@@ -585,6 +590,15 @@ mod tests {
         match foreign {
             Foreign::LinkElsewhere => symlink(&case.elsewhere, path).unwrap(),
             Foreign::LinkOtherText => symlink("source", path).unwrap(),
+            Foreign::LinkPathAlias(prefix, suffix) => {
+                let mut text = OsString::from(prefix);
+                text.push(case.root.as_os_str());
+                text.push(suffix);
+                assert_eq!(Path::new(&text), case.source);
+                assert_ne!(text.as_os_str(), case.source.as_os_str());
+                symlink(&text, path).unwrap();
+                assert_eq!(fs::read_link(path).unwrap().into_os_string(), text);
+            }
             Foreign::File => fs::write(path, b"their file").unwrap(),
             Foreign::Folder => {
                 fs::create_dir(path).unwrap();
@@ -606,10 +620,10 @@ mod tests {
     }
 
     /// A link made in an attempt folder and moved to its private name, as a native link is before publishing.
-    fn taken_link(case: &Case) -> Stage {
+    fn taken_link(case: &Case, target: &Path) -> Stage {
         let folder = case.root.join(".skill.attempt.tmp");
         let mut attempt = Stage::folder(&folder).unwrap();
-        symlink(&case.source, folder.join("skill")).unwrap();
+        symlink(target, folder.join("skill")).unwrap();
         assert_eq!(
             attempt.record_attempt(&folder.join("skill")).unwrap(),
             Attempted::Link
@@ -619,23 +633,37 @@ mod tests {
             .unwrap()
     }
 
-    /// A staged native link swapped for another writer's entry is neither published nor removed.
-    fn link_stage(foreign: Foreign, publish: bool) -> (bool, Result<(), String>) {
+    #[derive(Debug, Clone, Copy)]
+    enum LinkStep {
+        Publish,
+        Discard,
+        VerifyMove,
+    }
+
+    fn link_stage(foreign: Foreign, step: LinkStep) -> (bool, Result<(), String>) {
         let case = Case::new();
-        let mut stage = taken_link(&case);
+        let mut stage = taken_link(&case, &case.source);
         let staged = stage.path().to_path_buf();
         replace(&case, &staged, foreign);
         let natural = reuse_number(&mut stage, 0);
         let before = seen(&staged);
         let destination = case.root.join("skill");
-        let refusal = if publish {
-            refused(stage.publish(&destination))
-        } else {
-            refused(stage.discard())
+        let (refusal, occupied, vacant) = match step {
+            LinkStep::Publish => (refused(stage.publish(&destination)), &staged, &destination),
+            LinkStep::Discard => (refused(stage.discard()), &staged, &destination),
+            LinkStep::VerifyMove => {
+                let entry = &mut stage.entries[0];
+                let proof = MoveProof::acquire(&staged, entry.id.take().unwrap())
+                    .unwrap()
+                    .unwrap();
+                identity::rename_new(&staged, &destination).unwrap();
+                entry.path = destination.clone();
+                (refused(moved_id(&proof, entry)), &destination, &staged)
+            }
         };
         let held = refusal
-            .and_then(|()| unchanged(&staged, &before))
-            .and_then(|()| unchanged(&destination, &Seen::Missing))
+            .and_then(|()| unchanged(occupied, &before))
+            .and_then(|()| unchanged(vacant, &Seen::Missing))
             .and_then(|()| case.untouched());
         (natural, held)
     }
@@ -725,10 +753,18 @@ mod tests {
     fn own_entries() -> Result<(), String> {
         let case = Case::new();
         let destination = case.root.join("skill");
-        taken_link(&case)
+        let mut text = case.source.clone().into_os_string();
+        text.push("/.");
+        let target = Path::new(&text);
+        taken_link(&case, target)
             .publish(&destination)
             .map_err(|error| format!("its own link was refused: {error}"))?;
-        unchanged(&destination, &Seen::Link(case.source.clone()))?;
+        let stage = taken_link(&case, target);
+        stage
+            .discard()
+            .map_err(|error| format!("its own link cleanup was refused: {error}"))?;
+        unchanged(stage.path(), &Seen::Missing)?;
+        unchanged(&destination, &Seen::Link(text))?;
         let path = case.root.join(".skill.copy.tmp");
         let mut stage = Stage::folder(&path).unwrap();
         stage
@@ -743,6 +779,7 @@ mod tests {
     #[test]
     fn reused_entry_number_never_adopts_another_kind_or_link_text() {
         own_entries().unwrap();
+        println!("OWN_ENTRIES accepted");
         let mut cases = Vec::new();
         for foreign in [
             Foreign::LinkElsewhere,
@@ -750,13 +787,29 @@ mod tests {
             Foreign::File,
             Foreign::Folder,
         ] {
-            for publish in [true, false] {
-                let step = if publish { "publish" } else { "discard" };
-                let name = format!("link-stage {step} over {foreign:?}");
-                cases.push((name, link_stage(foreign, publish)));
+            for step in [LinkStep::Publish, LinkStep::Discard] {
+                let name = format!("link-stage {step:?} over {foreign:?}");
+                cases.push((name, link_stage(foreign, step)));
             }
         }
         for foreign in [Foreign::LinkElsewhere, Foreign::File, Foreign::Folder] {
+            for take in [true, false] {
+                let step = if take { "take_link" } else { "discard" };
+                let name = format!("attempt-stage {step} over {foreign:?}");
+                cases.push((name, attempt_stage(foreign, take)));
+            }
+        }
+        for foreign in [
+            Foreign::LinkPathAlias("", "/source/"),
+            Foreign::LinkPathAlias("", "//source"),
+            Foreign::LinkPathAlias("/", "/source"),
+            Foreign::LinkPathAlias("", "/./source"),
+            Foreign::LinkPathAlias("", "/source/."),
+        ] {
+            for step in [LinkStep::Publish, LinkStep::Discard, LinkStep::VerifyMove] {
+                let name = format!("link-stage {step:?} over {foreign:?}");
+                cases.push((name, link_stage(foreign, step)));
+            }
             for take in [true, false] {
                 let step = if take { "take_link" } else { "discard" };
                 let name = format!("attempt-stage {step} over {foreign:?}");
