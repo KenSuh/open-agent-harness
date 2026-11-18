@@ -4,10 +4,12 @@
 //! A [`Stage`] starts from one entry this operation made exclusively under a private name next to the
 //! destination: a folder (a copy being filled, or the folder a native-link attempt runs in) or a native link that
 //! was moved out of such a folder. Every entry it makes is recorded before the next step that can fail, with a
-//! plain identity value read right after making it, so no file stays open. Cleanup removes only recorded entries
-//! that are still the ones this operation made, one at a time and never recursively: a collision, a replacement
-//! or anything another writer put inside is left exactly as it is, and the failure that started the cleanup is
-//! kept. Publishing renames the root to the destination without replacing anything there.
+//! plain identity value read right after making it, so no file stays open. On Unix the record also keeps the
+//! entry's kind and, for a link, its stored text: a file system such as ext4 hands a deleted entry's number to the
+//! next entry made, so a number alone never shows that an entry is still this operation's. Cleanup removes only
+//! recorded entries that are still the ones this operation made, one at a time and never recursively: a
+//! collision, a replacement or anything another writer put inside is left exactly as it is, and the failure that
+//! started the cleanup is kept. Publishing renames the root to the destination without replacing anything there.
 
 use super::error::{FsxError, FsxErrorKind};
 use super::identity::{self, EntryId, MoveProof, Now};
@@ -29,6 +31,9 @@ struct Acquired {
     /// Read right after the entry was made; `None` when that read failed, and then the entry is never removed.
     id: Option<EntryId>,
     shape: Shape,
+    /// The text a recorded link stores, read right after its number and before that number is kept.
+    #[cfg(unix)]
+    link_text: Option<PathBuf>,
 }
 
 /// What a native-link attempt left at its private entry name.
@@ -92,8 +97,17 @@ impl Stage {
             path,
             id: None,
             shape,
+            #[cfg(unix)]
+            link_text: None,
         });
         let last = self.entries.len() - 1;
+        #[cfg(unix)]
+        let id = id.and_then(|id| {
+            if shape == Shape::Link {
+                self.entries[last].link_text = Some(fs::read_link(&self.entries[last].path)?);
+            }
+            Ok(id)
+        });
         match id {
             Ok(id) => {
                 self.entries[last].id = Some(id);
@@ -107,7 +121,8 @@ impl Stage {
         }
     }
 
-    /// Whether a recorded entry is still the one this operation made. An unreadable identity is an error.
+    /// Whether a recorded entry is still the one this operation made. On Unix a matching number counts only
+    /// together with the recorded kind and link text. An unreadable identity is an error.
     fn now(entry: &Acquired) -> Result<Now, FsxError> {
         let id = entry.id.ok_or_else(|| {
             FsxError::new(
@@ -116,7 +131,13 @@ impl Stage {
                 "its identity was never read, so it was left in place",
             )
         })?;
-        identity::now(&entry.path, id).map_err(|error| {
+        let found = identity::now(&entry.path, id);
+        #[cfg(unix)]
+        let found = match found {
+            Ok(Now::Same) => made_now(entry, &entry.path),
+            other => other,
+        };
+        found.map_err(|error| {
             io_error(
                 &entry.path,
                 "cannot read the identity of an entry OAH made",
@@ -216,7 +237,7 @@ impl Stage {
         }
         self.entries[1].path = to.to_path_buf();
         self.entries[1].id = None;
-        let id = moved_id(&proof, to).map_err(|error| self.discard_after(error))?;
+        let id = moved_id(&proof, &self.entries[1]).map_err(|error| self.discard_after(error))?;
         self.entries[1].id = Some(id);
         let link = self.entries.pop().expect("checked above");
         let taken = Stage {
@@ -241,8 +262,8 @@ impl Stage {
             Ok(()) => {
                 self.entries[0].path = destination.to_path_buf();
                 self.entries[0].id = None;
-                let id =
-                    moved_id(&proof, destination).map_err(|error| self.discard_after(error))?;
+                let id = moved_id(&proof, &self.entries[0])
+                    .map_err(|error| self.discard_after(error))?;
                 Ok(id)
             }
             Err(error) => {
@@ -311,11 +332,44 @@ fn move_proof(entry: &Acquired) -> Result<MoveProof, FsxError> {
         .ok_or_else(|| replaced(&entry.path))
 }
 
-fn moved_id(proof: &MoveProof, destination: &Path) -> Result<EntryId, FsxError> {
-    proof
+/// The identity of the entry `proof` moved to `entry`'s new path while it is still the recorded entry, on Unix
+/// with the recorded kind and link text too. Anything else is a replacement and is never adopted.
+fn moved_id(proof: &MoveProof, entry: &Acquired) -> Result<EntryId, FsxError> {
+    let destination = &entry.path;
+    let unreadable = |error| io_error(destination, "cannot read the entry after its move", error);
+    let id = proof
         .after(destination)
-        .map_err(|error| io_error(destination, "cannot read the entry after its move", error))?
-        .ok_or_else(|| replaced(destination))
+        .map_err(unreadable)?
+        .ok_or_else(|| replaced(destination))?;
+    #[cfg(unix)]
+    if made_now(entry, destination).map_err(unreadable)? != Now::Same {
+        return Err(replaced(destination));
+    }
+    Ok(id)
+}
+
+/// What `path` holds now, compared with the kind and, for a link, the stored text recorded for `entry`, once its
+/// number matched. A missing entry is an answer; any other failure to read stays an error.
+#[cfg(unix)]
+fn made_now(entry: &Acquired, path: &Path) -> io::Result<Now> {
+    let missing = |error: io::Error| match error.kind() {
+        io::ErrorKind::NotFound => Ok(Now::Missing),
+        _ => Err(error),
+    };
+    let file_type = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) => return missing(error),
+    };
+    let same = match entry.shape {
+        Shape::Folder => file_type.is_dir(),
+        Shape::File => file_type.is_file(),
+        Shape::Link if !file_type.is_symlink() => false,
+        Shape::Link => match fs::read_link(path) {
+            Ok(text) => entry.link_text.as_deref() == Some(text.as_path()),
+            Err(error) => return missing(error),
+        },
+    };
+    Ok(if same { Now::Same } else { Now::Other })
 }
 
 fn remove(entry: &Acquired) -> Result<(), FsxError> {
@@ -410,4 +464,345 @@ fn replaced(path: &Path) -> FsxError {
         path,
         "another entry replaced what OAH made here; it was left alone",
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    // Every case starts from a stage whose recorded entry number names another writer's replacement.
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// A source folder and another writer's folder, each holding one file.
+    struct Case {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        source: PathBuf,
+        elsewhere: PathBuf,
+    }
+
+    impl Case {
+        fn new() -> Case {
+            let dir = tempfile::tempdir().unwrap();
+            let root = fs::canonicalize(dir.path()).unwrap();
+            let source = root.join("source");
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("keep.txt"), b"source bytes").unwrap();
+            let elsewhere = root.join("elsewhere");
+            fs::create_dir(&elsewhere).unwrap();
+            fs::write(elsewhere.join("theirs.txt"), b"their bytes").unwrap();
+            Case {
+                _dir: dir,
+                root,
+                source,
+                elsewhere,
+            }
+        }
+
+        /// Neither the source nor the other writer's folder gained, lost or changed anything.
+        fn untouched(&self) -> Result<(), String> {
+            unchanged(&self.source, &folder_of("keep.txt", b"source bytes"))?;
+            unchanged(&self.elsewhere, &folder_of("theirs.txt", b"their bytes"))
+        }
+    }
+
+    /// An entry itself, without following a link.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Seen {
+        Missing,
+        Link(PathBuf),
+        File(Vec<u8>),
+        /// Each child's name and, for a file, its bytes.
+        Folder(Vec<(String, Vec<u8>)>),
+    }
+
+    fn folder_of(name: &str, bytes: &[u8]) -> Seen {
+        Seen::Folder(vec![(name.to_string(), bytes.to_vec())])
+    }
+
+    fn seen(path: &Path) -> Seen {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return Seen::Missing;
+        };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            Seen::Link(fs::read_link(path).unwrap())
+        } else if file_type.is_dir() {
+            let mut children: Vec<_> = fs::read_dir(path)
+                .unwrap()
+                .map(|child| {
+                    let child = child.unwrap().path();
+                    let name = child.file_name().unwrap().to_string_lossy().into_owned();
+                    (name, fs::read(&child).unwrap_or_default())
+                })
+                .collect();
+            children.sort();
+            Seen::Folder(children)
+        } else {
+            Seen::File(fs::read(path).unwrap())
+        }
+    }
+
+    fn unchanged(path: &Path, before: &Seen) -> Result<(), String> {
+        let after = seen(path);
+        if after == *before {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} changed from {before:?} to {after:?}",
+                path.display()
+            ))
+        }
+    }
+
+    fn refused<T>(result: Result<T, FsxError>) -> Result<(), String> {
+        match result {
+            Err(error) if error.kind() == FsxErrorKind::NotOwned => Ok(()),
+            Err(error) => Err(format!(
+                "failed as {:?}, not NotOwned: {error}",
+                error.kind()
+            )),
+            Ok(_) => Err("adopted the replacement".to_string()),
+        }
+    }
+
+    /// What another writer makes after deleting the recorded entry.
+    #[derive(Debug, Clone, Copy)]
+    enum Foreign {
+        /// A symlink storing the other writer's folder, as in the failing Linux run.
+        LinkElsewhere,
+        /// A symlink reaching the same source folder through other stored text.
+        LinkOtherText,
+        File,
+        Folder,
+    }
+
+    fn replace(case: &Case, path: &Path, foreign: Foreign) {
+        if fs::symlink_metadata(path).unwrap().is_dir() {
+            fs::remove_dir_all(path).unwrap();
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+        match foreign {
+            Foreign::LinkElsewhere => symlink(&case.elsewhere, path).unwrap(),
+            Foreign::LinkOtherText => symlink("source", path).unwrap(),
+            Foreign::File => fs::write(path, b"their file").unwrap(),
+            Foreign::Folder => {
+                fs::create_dir(path).unwrap();
+                fs::write(path.join("theirs.txt"), b"their bytes").unwrap();
+            }
+        }
+    }
+
+    /// Records for entry `index` the number its replacement holds now and reports whether the file system had
+    /// already handed it over. Linux file systems such as ext4 give a deleted entry's number to the next entry
+    /// made, so this is the record such a stage holds after another writer swaps its entry; setting it shows
+    /// that case on every Unix file system.
+    fn reuse_number(stage: &mut Stage, index: usize) -> bool {
+        let entry = &mut stage.entries[index];
+        let now = EntryId::of(&entry.path).unwrap();
+        let natural = entry.id == Some(now);
+        entry.id = Some(now);
+        natural
+    }
+
+    /// A link made in an attempt folder and moved to its private name, as a native link is before publishing.
+    fn taken_link(case: &Case) -> Stage {
+        let folder = case.root.join(".skill.attempt.tmp");
+        let mut attempt = Stage::folder(&folder).unwrap();
+        symlink(&case.source, folder.join("skill")).unwrap();
+        assert_eq!(
+            attempt.record_attempt(&folder.join("skill")).unwrap(),
+            Attempted::Link
+        );
+        attempt
+            .take_link(&case.root.join(".skill.link.tmp"))
+            .unwrap()
+    }
+
+    /// A staged native link swapped for another writer's entry is neither published nor removed.
+    fn link_stage(foreign: Foreign, publish: bool) -> (bool, Result<(), String>) {
+        let case = Case::new();
+        let mut stage = taken_link(&case);
+        let staged = stage.path().to_path_buf();
+        replace(&case, &staged, foreign);
+        let natural = reuse_number(&mut stage, 0);
+        let before = seen(&staged);
+        let destination = case.root.join("skill");
+        let refusal = if publish {
+            refused(stage.publish(&destination))
+        } else {
+            refused(stage.discard())
+        };
+        let held = refusal
+            .and_then(|()| unchanged(&staged, &before))
+            .and_then(|()| unchanged(&destination, &Seen::Missing))
+            .and_then(|()| case.untouched());
+        (natural, held)
+    }
+
+    /// The link an attempt recorded, swapped for another writer's entry, is neither moved out nor removed.
+    fn attempt_stage(foreign: Foreign, take: bool) -> (bool, Result<(), String>) {
+        let case = Case::new();
+        let folder = case.root.join(".skill.attempt.tmp");
+        let mut stage = Stage::folder(&folder).unwrap();
+        let entry = folder.join("skill");
+        symlink(&case.source, &entry).unwrap();
+        assert_eq!(stage.record_attempt(&entry).unwrap(), Attempted::Link);
+        replace(&case, &entry, foreign);
+        let natural = reuse_number(&mut stage, 1);
+        let before = seen(&entry);
+        let to = case.root.join(".skill.link.tmp");
+        let refusal = if take {
+            refused(stage.take_link(&to))
+        } else {
+            refused(stage.discard())
+        };
+        let held = refusal
+            .and_then(|()| unchanged(&entry, &before))
+            .and_then(|()| unchanged(&to, &Seen::Missing))
+            .and_then(|()| case.untouched());
+        (natural, held)
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum CopyStep {
+        Directory,
+        File,
+        Publish,
+        Discard,
+    }
+
+    /// A copy whose root folder another writer swapped makes, publishes and removes nothing, and nothing is made
+    /// through a swapped-in link.
+    fn copy_root(foreign: Foreign, step: CopyStep) -> (bool, Result<(), String>) {
+        let case = Case::new();
+        let path = case.root.join(".skill.copy.tmp");
+        let mut stage = Stage::folder(&path).unwrap();
+        replace(&case, &path, foreign);
+        let natural = reuse_number(&mut stage, 0);
+        let before = seen(&path);
+        let destination = case.root.join("skill");
+        let refusal = match step {
+            CopyStep::Directory => refused(stage.directory(Path::new("made"))),
+            CopyStep::File => {
+                refused(stage.file(&case.source.join("keep.txt"), Path::new("keep.txt")))
+            }
+            CopyStep::Publish => refused(stage.publish(&destination)),
+            CopyStep::Discard => refused(stage.discard()),
+        };
+        let held = refusal
+            .and_then(|()| unchanged(&path, &before))
+            .and_then(|()| unchanged(&destination, &Seen::Missing))
+            .and_then(|()| case.untouched());
+        (natural, held)
+    }
+
+    /// A copied file or folder another writer swapped stops the cleanup before anything is removed.
+    fn copy_child(folder: bool, foreign: Foreign) -> (bool, Result<(), String>) {
+        let case = Case::new();
+        let path = case.root.join(".skill.copy.tmp");
+        let mut stage = Stage::folder(&path).unwrap();
+        stage.directory(Path::new("made")).unwrap();
+        stage
+            .file(&case.source.join("keep.txt"), Path::new("keep.txt"))
+            .unwrap();
+        let (index, child) = if folder {
+            (1, path.join("made"))
+        } else {
+            (2, path.join("keep.txt"))
+        };
+        replace(&case, &child, foreign);
+        let natural = reuse_number(&mut stage, index);
+        let before = (seen(&path), seen(&child));
+        let held = refused(stage.discard())
+            .and_then(|()| unchanged(&path, &before.0))
+            .and_then(|()| unchanged(&child, &before.1))
+            .and_then(|()| case.untouched());
+        (natural, held)
+    }
+
+    /// The same steps still accept this operation's own entries.
+    fn own_entries() -> Result<(), String> {
+        let case = Case::new();
+        let destination = case.root.join("skill");
+        taken_link(&case)
+            .publish(&destination)
+            .map_err(|error| format!("its own link was refused: {error}"))?;
+        unchanged(&destination, &Seen::Link(case.source.clone()))?;
+        let path = case.root.join(".skill.copy.tmp");
+        let mut stage = Stage::folder(&path).unwrap();
+        stage
+            .directory(Path::new("made"))
+            .and_then(|()| stage.file(&case.source.join("keep.txt"), Path::new("keep.txt")))
+            .and_then(|()| stage.discard())
+            .map_err(|error| format!("its own copy was refused: {error}"))?;
+        unchanged(&path, &Seen::Missing)?;
+        case.untouched()
+    }
+
+    #[test]
+    fn reused_entry_number_never_adopts_another_kind_or_link_text() {
+        own_entries().unwrap();
+        let mut cases = Vec::new();
+        for foreign in [
+            Foreign::LinkElsewhere,
+            Foreign::LinkOtherText,
+            Foreign::File,
+            Foreign::Folder,
+        ] {
+            for publish in [true, false] {
+                let step = if publish { "publish" } else { "discard" };
+                let name = format!("link-stage {step} over {foreign:?}");
+                cases.push((name, link_stage(foreign, publish)));
+            }
+        }
+        for foreign in [Foreign::LinkElsewhere, Foreign::File, Foreign::Folder] {
+            for take in [true, false] {
+                let step = if take { "take_link" } else { "discard" };
+                let name = format!("attempt-stage {step} over {foreign:?}");
+                cases.push((name, attempt_stage(foreign, take)));
+            }
+        }
+        for foreign in [Foreign::LinkElsewhere, Foreign::File] {
+            for step in [
+                CopyStep::Directory,
+                CopyStep::File,
+                CopyStep::Publish,
+                CopyStep::Discard,
+            ] {
+                let name = format!("copy-root {step:?} over {foreign:?}");
+                cases.push((name, copy_root(foreign, step)));
+            }
+        }
+        for (folder, foreign) in [
+            (false, Foreign::LinkElsewhere),
+            (false, Foreign::Folder),
+            (true, Foreign::File),
+            (true, Foreign::LinkElsewhere),
+        ] {
+            let child = if folder { "folder" } else { "file" };
+            let name = format!("copy-{child} discard over {foreign:?}");
+            cases.push((name, copy_child(folder, foreign)));
+        }
+        let mut adopted = Vec::new();
+        for (name, (natural, held)) in &cases {
+            match held {
+                Ok(()) => println!("REFUSED {name} natural_reuse={natural}"),
+                Err(why) => {
+                    println!("ADOPTED {name} natural_reuse={natural}: {why}");
+                    adopted.push(name.as_str());
+                }
+            }
+        }
+        println!(
+            "REUSE_GUARD cases={} refused={} adopted={}",
+            cases.len(),
+            cases.len() - adopted.len(),
+            adopted.len()
+        );
+        assert!(
+            adopted.is_empty(),
+            "a reused entry number adopted another writer's entry: {adopted:?}"
+        );
+    }
 }
