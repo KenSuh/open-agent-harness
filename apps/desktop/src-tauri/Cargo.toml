@@ -1,0 +1,26 @@
+[package]
+name = "oah-desktop"
+description = "OAH desktop app: a thin Tauri v2 shell over oah-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "oah-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "oah_desktop_lib"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.5", features = [] }
+
+[dependencies]
+oah-core = { path = "../../../crates/oah-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tauri = { version = "2.12.6", features = [] }
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-single-instance = "2.5.5"

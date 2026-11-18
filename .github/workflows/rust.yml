@@ -43,8 +43,83 @@ jobs:
       - name: Format check
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
+      # The desktop shell needs the system webview libraries, so the every-PR job leaves it out; the manual
+      # desktop job below builds and starts it on macOS and Windows.
       - name: Clippy
         if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --exclude oah-desktop -- -D warnings
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --exclude oah-desktop
+
+  ui:
+    name: ui (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install the UI dependencies
+        working-directory: apps/desktop/ui
+        run: npm ci
+      - name: Type check
+        working-directory: apps/desktop/ui
+        run: npm run typecheck
+      - name: UI tests
+        working-directory: apps/desktop/ui
+        run: npm test
+      - name: Install the stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+      - name: Sidecar staging tests against the built CLI
+        shell: bash
+        run: |
+          cargo build -p oah-cli --locked
+          OAH_STAGE_TEST_CLI="$PWD/target/debug/oah" node --test apps/desktop/scripts/stage-cli.test.mjs
+
+  desktop:
+    name: desktop (${{ matrix.os }}, manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install the stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Build the UI
+        working-directory: apps/desktop/ui
+        run: |
+          npm ci
+          npm run build
+      - name: Stage the bundled CLI
+        run: node apps/desktop/scripts/stage-cli.mjs
+      - name: Build the desktop app
+        run: cargo build -p oah-desktop --release --locked
+      - name: Start, check the CLI copy, stop, start again
+        shell: bash
+        run: |
+          app="target/release/oah-desktop"
+          if [ "$RUNNER_OS" = "Windows" ]; then app="$app.exe"; fi
+          node apps/desktop/scripts/smoke-start.mjs --app "$app"
