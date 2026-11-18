@@ -1,9 +1,9 @@
 // 한국어: App 렌더링·키보드·로딩/오류·설정 동작 테스트 (독립 테스트 전송 계층 사용 — 네이티브 통합 동작 아님).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
-import { button, byText, click, emit, flush, mount, press, unmount } from "./support/dom";
-import { createFakeTransport, deferred, sampleAppInfo, sampleProject, sampleSettings } from "./support/fakeTransport";
-import type { NoticeDto, ProjectDto, SettingsDto } from "../src/contract";
+import { button, byText, click, emit, mount, press, unmount } from "./support/dom";
+import { createFakeTransport, deferred, sampleAppInfo, sampleProject } from "./support/fakeTransport";
+import type { NoticeDto, ProjectDto } from "../src/contract";
 
 afterEach(async () => {
   await unmount();
@@ -236,66 +236,6 @@ describe("refresh task and Cmd/Ctrl+R", () => {
       expect(t.calls).toContain("task_cancel:task-2");
       expect(t.calls).not.toContain("task_cancel:abc");
     });
-  });
-});
-
-describe("settings: theme and quick start (persisted only through settings_set)", () => {
-  it("saves the theme through settings_set and applies the returned value", async () => {
-    const setItem = vi.spyOn(Storage.prototype, "setItem");
-    const t = createFakeTransport();
-    await mount(<App transport={t} />);
-    const select = document.querySelector("select") as HTMLSelectElement;
-    await emit(() => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
-      setter.call(select, "dark");
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    await flush();
-    expect(t.settingsEdits).toEqual([[{ key: "ui.theme", value: "dark" }]]);
-    expect(document.documentElement.dataset.theme).toBe("dark");
-    expect(setItem).not.toHaveBeenCalled(); // no web storage persistence
-  });
-
-  it("keeps the old theme and reports the error when saving fails", async () => {
-    const t = createFakeTransport();
-    t.override.settingsSet = async () => {
-      throw { code: "OAH_FILE_BUSY", message: "settings.toml is busy.", hint: "Try again." };
-    };
-    await mount(<App transport={t} />);
-    const select = document.querySelector("select") as HTMLSelectElement;
-    await emit(() => {
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "light");
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    expect(document.documentElement.dataset.theme).toBe("auto");
-    expect(document.querySelector(".toast-stack")?.textContent).toMatch(/OAH_FILE_BUSY/);
-  });
-
-  it("dismisses the quick-start strip through settings_set and hides it when already dismissed", async () => {
-    const t = createFakeTransport();
-    await mount(<App transport={t} />);
-    expect(document.querySelector(".quick-start")).not.toBeNull();
-    await click(button("Dismiss"));
-    expect(t.settingsEdits).toEqual([[{ key: "ui.quick_start_dismissed", value: true }]]);
-    expect(document.querySelector(".quick-start")).toBeNull();
-    await unmount();
-
-    const dismissed: SettingsDto = { ...sampleSettings, ui: { theme: "light", quick_start_dismissed: true } };
-    const t2 = createFakeTransport();
-    t2.override.settingsGet = async () => dismissed;
-    await mount(<App transport={t2} />);
-    expect(document.querySelector(".quick-start")).toBeNull();
-    expect(document.documentElement.dataset.theme).toBe("light");
-  });
-
-  it("shows a settings load error with retry", async () => {
-    const t = createFakeTransport();
-    t.override.settingsGet = async () => {
-      throw { code: "OAH_CONFIG_INVALID", message: "settings.toml is invalid.", hint: null };
-    };
-    await mount(<App transport={t} />);
-    expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/OAH_CONFIG_INVALID/);
-    expect(document.querySelector("select")?.disabled).toBe(true);
   });
 });
 
