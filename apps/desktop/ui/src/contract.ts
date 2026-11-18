@@ -3,7 +3,8 @@
 export interface ErrorDto {
   code: string;
   message: string;
-  hint?: string | null;
+  /** Always present on the wire; `null` when there is no hint. */
+  hint: string | null;
 }
 
 export type NoticeLevel = "info" | "warning";
@@ -13,17 +14,26 @@ export interface NoticeDto {
   level: NoticeLevel;
   code: string;
   message: string;
-  hint?: string | null;
+  hint: string | null;
   actions: string[];
 }
 
 export type CliState = "copied" | "unchanged" | "kept-previous" | "unknown";
 
+export interface CliDto {
+  state: CliState;
+  path: string;
+  version: string | null;
+}
+
 export interface AppInfoDto {
   version: string;
   os: string;
   oah_home: string;
-  cli: { state: CliState; path: string; version: string | null };
+  /** `null` until the shell has run the startup CLI copy. */
+  cli: CliDto | null;
+  /** Startup notices (CLI copy) kept so a webview that subscribes late still sees them. */
+  notices: NoticeDto[];
 }
 
 export type ProjectKind = "git" | "folder";
@@ -71,7 +81,8 @@ export interface SettingsDto {
 
 export interface SettingsEdit {
   key: string;
-  value: string | boolean;
+  /** Untagged on the wire: bool, integer or string. */
+  value: string | boolean | number;
 }
 
 /** Task channel event: JSON `{"event": "...", "data": ...}` (C4). */

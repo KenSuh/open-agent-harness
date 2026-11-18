@@ -35,16 +35,24 @@ export interface Toast {
 
 const TOAST_MS = 6000;
 
+/** One entry per notice id; a later list updates an earlier entry in place. */
+function mergeNotices(...lists: ReadonlyArray<readonly NoticeDto[]>): NoticeDto[] {
+  const byId = new Map<string, NoticeDto>();
+  for (const list of lists) for (const notice of list) byId.set(notice.id, notice);
+  return [...byId.values()];
+}
+
 export function useController(transport: Transport) {
   const [info, setInfo] = useState<Load<AppInfoDto>>({ status: "loading" });
   const [settings, setSettings] = useState<Load<SettingsDto>>({ status: "loading" });
   const [project, setProject] = useState<ProjectDto | null>(null);
   const [projectBusy, setProjectBusy] = useState(false);
-  const [notices, setNotices] = useState<NoticeDto[]>([]);
+  const [eventNotices, setEventNotices] = useState<NoticeDto[]>([]);
   const [refresh, setRefresh] = useState<RefreshTask | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastKey = useRef(0);
   const refreshRunning = useRef(false);
+  const refreshRun = useRef(0);
   const projectRef = useRef<ProjectDto | null>(null);
 
   const pushToast = useCallback((toast: Omit<Toast, "key">) => {
@@ -72,8 +80,61 @@ export function useController(transport: Transport) {
   const applyProject = useCallback((next: ProjectDto | null) => {
     projectRef.current = next;
     setProject(next);
-    setNotices(next ? next.notices : []);
   }, []);
+
+  /**
+   * Follows one refresh task through a channel until its terminal event. A new start and a
+   * restored task both go through start_refresh: core joins a running refresh and returns its id.
+   */
+  const followRefresh = useCallback(
+    async (initial: RefreshTask) => {
+      const run = ++refreshRun.current;
+      const current = () => refreshRun.current === run;
+      let settled = false;
+      refreshRunning.current = true;
+      setRefresh(initial);
+      const finish = (state: TaskStateName): boolean => {
+        if (settled || !current()) return false;
+        settled = true;
+        refreshRunning.current = false;
+        setRefresh((task) => (task ? { ...task, state } : task));
+        return true;
+      };
+      const onEvent = (event: TaskEvent<RefreshDto>) => {
+        switch (event.event) {
+          case "progress":
+            if (!settled && current()) setRefresh((task) => (task ? { ...task, progress: event.data } : task));
+            break;
+          case "done":
+            if (finish("done")) {
+              pushToast({
+                level: "info",
+                text: `Refreshed: ${event.data.projects} project(s), ${event.data.notices} notice(s).`,
+              });
+            }
+            break;
+          case "failed":
+            if (finish("failed")) toastError(event.data);
+            break;
+          case "cancelled":
+            if (finish("cancelled")) pushToast({ level: "info", text: "Refresh cancelled." });
+            break;
+        }
+      };
+      try {
+        const id = await transport.startRefresh(onEvent);
+        // The terminal event may arrive before this response; the id is still the task's id.
+        if (current()) setRefresh((task) => (task ? { ...task, id } : task));
+      } catch (error) {
+        if (settled || !current()) return;
+        settled = true;
+        refreshRunning.current = false;
+        setRefresh(null);
+        toastError(toErrorDto(error));
+      }
+    },
+    [transport, pushToast, toastError],
+  );
 
   const loadInfo = useCallback(() => {
     setInfo({ status: "loading" });
@@ -95,18 +156,18 @@ export function useController(transport: Transport) {
     loadInfo();
     loadSettings();
     transport.projectCurrent().then(applyProject, (error) => toastError(toErrorDto(error)));
-    // A reloaded webview shows tasks that are still running (C4 tasks_list).
+    // A reloaded webview shows tasks that are still running (C4 tasks_list) and joins the
+    // running refresh so this webview receives its remaining events, including the terminal one.
     transport.tasksList().then(
       (tasks) => {
         const running = tasks.find((task) => task.kind === "refresh" && task.state === "running");
         if (running && !refreshRunning.current) {
-          refreshRunning.current = true;
-          setRefresh({ id: running.id, state: "running", progress: running.progress });
+          void followRefresh({ id: running.id, state: "running", progress: running.progress });
         }
       },
       (error) => toastError(toErrorDto(error)),
     );
-  }, [transport, loadInfo, loadSettings, applyProject, toastError]);
+  }, [transport, loadInfo, loadSettings, applyProject, toastError, followRefresh]);
 
   useEffect(() => {
     let disposed = false;
@@ -118,7 +179,7 @@ export function useController(transport: Transport) {
       );
     keep(
       transport.onNotice((notice) => {
-        setNotices((current) => [...current.filter((item) => item.id !== notice.id), notice]);
+        setEventNotices((current) => mergeNotices(current, [notice]));
         pushToast({ level: notice.level === "warning" ? "warning" : "info", text: notice.message, hint: notice.hint });
       }),
     );
@@ -147,48 +208,13 @@ export function useController(transport: Transport) {
   }, [transport, applyProject, toastError]);
 
   const startRefresh = useCallback(async () => {
-    if (refreshRunning.current) return; // one running refresh; a second start joins it
+    if (refreshRunning.current) return; // one running refresh at a time
     if (!projectRef.current) {
       pushToast({ level: "info", text: "Open a project folder first." });
       return;
     }
-    refreshRunning.current = true;
-    setRefresh({ id: null, state: "running", progress: null });
-    const finish = (state: TaskStateName) => {
-      refreshRunning.current = false;
-      setRefresh((current) => (current ? { ...current, state } : current));
-    };
-    const onEvent = (event: TaskEvent<RefreshDto>) => {
-      switch (event.event) {
-        case "progress":
-          setRefresh((current) => (current ? { ...current, progress: event.data } : current));
-          break;
-        case "done":
-          finish("done");
-          pushToast({
-            level: "info",
-            text: `Refreshed: ${event.data.projects} project(s), ${event.data.notices} notice(s).`,
-          });
-          break;
-        case "failed":
-          finish("failed");
-          toastError(event.data);
-          break;
-        case "cancelled":
-          finish("cancelled");
-          pushToast({ level: "info", text: "Refresh cancelled." });
-          break;
-      }
-    };
-    try {
-      const id = await transport.startRefresh(onEvent);
-      setRefresh((current) => (current ? { ...current, id } : current));
-    } catch (error) {
-      refreshRunning.current = false;
-      setRefresh(null);
-      toastError(toErrorDto(error));
-    }
-  }, [transport, pushToast, toastError]);
+    await followRefresh({ id: null, state: "running", progress: null });
+  }, [pushToast, followRefresh]);
 
   const cancelRefresh = useCallback(
     async (id: string) => {
@@ -218,6 +244,9 @@ export function useController(transport: Transport) {
     () => saveSettings([{ key: "ui.quick_start_dismissed", value: true }]),
     [saveSettings],
   );
+
+  // Startup notices from app_info stay visible across project reads; ids keep one entry each.
+  const notices = mergeNotices(info.status === "ready" ? info.value.notices : [], project?.notices ?? [], eventNotices);
 
   return {
     info,

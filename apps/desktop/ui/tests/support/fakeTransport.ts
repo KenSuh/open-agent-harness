@@ -1,4 +1,4 @@
-// 한국어: 테스트 전용 전송 계층 — 운영 코드가 import 하지 않는다. 공유 DTO 샘플을 돌려주고 호출을 기록한다.
+// 한국어: 테스트 전용 전송 계층 — 운영 코드가 import 하지 않는다. UI 전용 합성 샘플(공유 core DTO 샘플 아님)을 돌려주고 호출을 기록한다.
 import type {
   AppInfoDto,
   NoticeDto,
@@ -46,6 +46,9 @@ export interface FakeTransport extends Transport {
 
 export function createFakeTransport(initial: { project?: ProjectDto | null; tasks?: TaskSnapshotDto[] } = {}): FakeTransport {
   let current: SettingsDto = structuredClone(sampleSettings);
+  // Like core: start_refresh while a refresh runs joins it and returns the same id.
+  let runningRefresh: string | null =
+    initial.tasks?.find((task) => task.kind === "refresh" && task.state === "running")?.id ?? null;
   let refreshSink: ((event: TaskEvent<RefreshDto>) => void) | null = null;
   let noticeSink: ((notice: NoticeDto) => void) | null = null;
   let scanSink: ((change: ScanChanged) => void) | null = null;
@@ -68,7 +71,9 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
     async startRefresh(onEvent) {
       fake.calls.push("start_refresh");
       refreshSink = onEvent;
-      return fake.override.startRefresh ? fake.override.startRefresh(onEvent) : "task-1";
+      if (fake.override.startRefresh) return fake.override.startRefresh(onEvent);
+      runningRefresh ??= "task-1";
+      return runningRefresh;
     },
     async taskCancel(id) {
       fake.calls.push(`task_cancel:${id}`);
@@ -102,7 +107,10 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       scanSink = handler;
       return () => undefined;
     },
-    emitRefresh: (event) => refreshSink?.(event),
+    emitRefresh: (event) => {
+      if (event.event !== "progress") runningRefresh = null;
+      refreshSink?.(event);
+    },
     emitNotice: (notice) => noticeSink?.(notice),
     emitScan: (change) => scanSink?.(change),
   };

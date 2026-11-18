@@ -1,1 +1,1 @@
-{ "automation_level": "balanced", "ui": { "theme": "auto", "quick_start_dismissed": false } }
+{ "automation_level": "auto-safe", "ui": { "theme": "auto", "quick_start_dismissed": false } }

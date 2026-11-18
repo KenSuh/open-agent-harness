@@ -2,8 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { button, byText, click, emit, flush, mount, press, unmount } from "./support/dom";
-import { createFakeTransport, deferred, sampleProject, sampleSettings } from "./support/fakeTransport";
-import type { ProjectDto, SettingsDto } from "../src/contract";
+import { createFakeTransport, deferred, sampleAppInfo, sampleProject, sampleSettings } from "./support/fakeTransport";
+import type { NoticeDto, ProjectDto, SettingsDto } from "../src/contract";
 
 afterEach(async () => {
   await unmount();
@@ -44,6 +44,58 @@ describe("layout A (standalone test transport)", () => {
     await click(button("Retry"));
     expect(document.querySelector('[role="alert"]')).toBeNull();
     expect(document.body.textContent).toMatch(/Version 0\.0\.0/);
+  });
+
+  it("renders app_info with cli:null (CLI copy not run yet) without an error", async () => {
+    const t = createFakeTransport();
+    t.override.appInfo = async () => ({ ...sampleAppInfo, cli: null });
+    await mount(<App transport={t} />);
+    expect(document.body.textContent).toMatch(/Version 0\.0\.0 · macos · CLI copy: not run yet/);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe("startup notices from app_info", () => {
+  const copyWarning: NoticeDto = {
+    id: "OAH_CLI_COPY_FAILED:cli-copy",
+    level: "warning",
+    code: "OAH_CLI_COPY_FAILED",
+    message: "The CLI copy was not updated.",
+    hint: "OAH keeps working with the previous copy.",
+    actions: [],
+  };
+  const withWarning = () => {
+    const t = createFakeTransport();
+    t.override.appInfo = async () => ({
+      ...sampleAppInfo,
+      cli: { state: "kept-previous", path: "~/.oah/bin/oah", version: null },
+      notices: [copyWarning],
+    });
+    return t;
+  };
+  const warningItems = () => Array.from(document.querySelectorAll("li")).filter((li) => /OAH_CLI_COPY_FAILED/.test(li.textContent ?? ""));
+
+  it("shows a warning emitted before the webview subscribed and keeps it after project open and re-read", async () => {
+    const t = withWarning();
+    const projectNotice: NoticeDto = { ...copyWarning, id: "OAH_X:project", code: "OAH_PROJECT_NOTE", level: "info", hint: null };
+    t.override.projectOpenDialog = async () => ({ ...sampleProject, notices: [projectNotice] });
+    t.override.projectCurrent = async () => sampleProject;
+    await mount(<App transport={t} />);
+    expect(warningItems()).toHaveLength(1);
+    expect(warningItems()[0]?.textContent).toMatch(/OAH keeps working with the previous copy\./);
+    await click(button("+ Open…"));
+    expect(warningItems()).toHaveLength(1);
+    expect(byText("li", /OAH_PROJECT_NOTE/)).not.toBeNull();
+    await emit(() => t.emitScan({ scope: "all", keys: [] }));
+    expect(warningItems()).toHaveLength(1);
+  });
+
+  it("does not multiply the warning when the same notice also arrives as events", async () => {
+    const t = withWarning();
+    await mount(<App transport={t} />);
+    await emit(() => t.emitNotice(copyWarning));
+    await emit(() => t.emitNotice(copyWarning));
+    expect(warningItems()).toHaveLength(1);
   });
 });
 
@@ -137,15 +189,53 @@ describe("refresh task and Cmd/Ctrl+R", () => {
     expect(document.querySelector(".toast-stack")?.textContent).toMatch(/Open a project folder first/);
   });
 
-  it("re-shows a task that is still running after a webview reload", async () => {
-    const t = createFakeTransport({
-      project: sampleProject,
-      tasks: [{ id: "abc", kind: "refresh", state: "running", progress: { phase: "read-project", done: 0, total: 1 } }],
+  describe("a refresh restored after a webview reload", () => {
+    const restored = () =>
+      createFakeTransport({
+        project: sampleProject,
+        tasks: [{ id: "abc", kind: "refresh", state: "running", progress: { phase: "read-project", done: 0, total: 1 } }],
+      });
+
+    it("re-shows the running task, joins it once and releases the UI when it is done", async () => {
+      const t = restored();
+      await mount(<App transport={t} />);
+      expect(document.querySelector(".task-bar")?.textContent).toMatch(/read-project\) 0 \/ 1/);
+      expect(button(/Refresh/).disabled).toBe(true);
+      expect(t.calls.filter((c) => c === "start_refresh")).toHaveLength(1);
+      await emit(() => t.emitRefresh({ event: "done", data: { projects: 1, notices: 0 } }));
+      expect(document.querySelector(".task-bar")).toBeNull();
+      expect(button(/Refresh/).disabled).toBe(false);
     });
-    await mount(<App transport={t} />);
-    expect(document.querySelector(".task-bar")?.textContent).toMatch(/read-project\) 0 \/ 1/);
-    await click(button("Cancel"));
-    expect(t.calls).toContain("task_cancel:abc");
+
+    it("cancels the restored task by its id and releases the UI on the cancelled event", async () => {
+      const t = restored();
+      await mount(<App transport={t} />);
+      await click(button("Cancel"));
+      expect(t.calls).toContain("task_cancel:abc");
+      await emit(() => t.emitRefresh({ event: "cancelled" }));
+      expect(document.querySelector(".task-bar")).toBeNull();
+      expect(button(/Refresh/).disabled).toBe(false);
+      expect(document.querySelector(".toast-stack")?.textContent).toMatch(/Refresh cancelled\./);
+    });
+
+    it("releases on a terminal event that arrives before the join response, which then cannot touch a newer refresh", async () => {
+      const t = restored();
+      const joined = deferred<string>();
+      t.override.startRefresh = (onEvent) => {
+        onEvent({ event: "done", data: { projects: 1, notices: 0 } });
+        return joined.promise;
+      };
+      await mount(<App transport={t} />);
+      expect(document.querySelector(".task-bar")).toBeNull();
+      expect(button(/Refresh/).disabled).toBe(false);
+
+      t.override.startRefresh = async () => "task-2";
+      await click(button(/Refresh/));
+      await emit(() => joined.resolve("abc"));
+      await click(button("Cancel"));
+      expect(t.calls).toContain("task_cancel:task-2");
+      expect(t.calls).not.toContain("task_cancel:abc");
+    });
   });
 });
 

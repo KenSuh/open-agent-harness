@@ -93,8 +93,8 @@ function AppInfoLine({ info, onRetry }: { info: Load<import("./contract").AppInf
   const { version, os, cli } = info.value;
   return (
     <p className="muted">
-      Version {version} · {os} · CLI copy: {cli.state}
-      {cli.version ? ` (oah ${cli.version})` : ""}
+      Version {version} · {os} · CLI copy: {cli ? cli.state : "not run yet"}
+      {cli?.version ? ` (oah ${cli.version})` : ""}
     </p>
   );
 }
