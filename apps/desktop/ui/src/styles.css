@@ -1,0 +1,242 @@
+/* 한국어: 디자인 토큰과 레이아웃 A 스타일. 외부 폰트·이미지 없음, 시스템 폰트만 사용. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #d3d8e0;
+  --text: #1a1f29;
+  --muted: #566074;
+  --accent: #1f5fd6;
+  --accent-text: #ffffff;
+  --danger: #a31f2a;
+  --danger-bg: #fdecee;
+  --warn-bg: #fff4dc;
+  --focus: #1f5fd6;
+  --radius: 6px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #14171c;
+  --surface: #1d2129;
+  --border: #353c49;
+  --text: #e8ebf0;
+  --muted: #a3adbf;
+  --accent: #6f9cff;
+  --accent-text: #0b1220;
+  --danger: #ff8d96;
+  --danger-bg: #3a1d21;
+  --warn-bg: #3a3017;
+  --focus: #9dbcff;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]),
+  :root[data-theme="auto"] {
+    --bg: #14171c;
+    --surface: #1d2129;
+    --border: #353c49;
+    --text: #e8ebf0;
+    --muted: #a3adbf;
+    --accent: #6f9cff;
+    --accent-text: #0b1220;
+    --danger: #ff8d96;
+    --danger-bg: #3a1d21;
+    --warn-bg: #3a3017;
+    --focus: #9dbcff;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+button,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:disabled,
+select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 600;
+}
+
+.project-name {
+  flex: 1;
+  color: var(--muted);
+}
+
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.body {
+  display: flex;
+  flex: 1;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 180px;
+  padding: 12px 8px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.rail-item {
+  text-align: left;
+  border-color: transparent;
+}
+
+.rail-item.active {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.content {
+  flex: 1;
+  padding: 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.quick-start,
+.task-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.project-card,
+.error-box,
+.notice {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.project-card h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.error-box {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.notices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notice-warning {
+  background: var(--warn-bg);
+}
+
+.page h1 {
+  font-size: 20px;
+  margin: 8px 0;
+}
+
+.empty {
+  color: var(--muted);
+}
+
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.toast-error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.toast-warning {
+  background: var(--warn-bg);
+}
