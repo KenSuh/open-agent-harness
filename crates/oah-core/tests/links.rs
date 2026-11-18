@@ -663,7 +663,8 @@ fn cleanup_ownership_record_refuses_mismatching_replacements() {
 fn a_copy_is_removed_only_while_it_matches_its_record() {
     let stores = Stores::new();
     let source = stores.source();
-    let destination = stores.agents.join("skill-a");
+    let name = if cfg!(unix) { r"skill-a\." } else { "skill-a" };
+    let destination = stores.agents.join(name);
     let outcome = create_with(
         &stores.request(&destination, TargetStyle::Absolute, true, &source),
         &Unavailable,
@@ -694,6 +695,72 @@ fn a_copy_is_removed_only_while_it_matches_its_record() {
         source.join("SKILL.md").is_file(),
         "removing a copy left the source alone"
     );
+}
+
+#[test]
+fn ambiguous_copy_destinations_are_refused_even_when_absent() {
+    let separator = std::path::MAIN_SEPARATOR_STR;
+    let terminal_dot = format!("{separator}.");
+    for (suffix, reason) in [
+        (separator, "trailing separator"),
+        (terminal_dot.as_str(), "dot component"),
+    ] {
+        let stores = Stores::new();
+        let source = stores.source();
+        let destination = stores.agents.join("skill.v1");
+        let canonical = create_with(
+            &stores.request(&destination, TargetStyle::Absolute, true, &source),
+            &Unavailable,
+        )
+        .unwrap()
+        .link;
+        assert_eq!(canonical.kind, LinkKind::Copy);
+
+        let mut legacy = canonical.clone();
+        legacy.destination.as_mut_os_string().push(suffix);
+        let record_path = stores._dir.path().join("managed-record");
+        let saved_record = record_text(&legacy);
+        fs::write(&record_path, &saved_record).unwrap();
+        let restored = parse_record(&fs::read_to_string(&record_path).unwrap());
+        let assert_refused = || {
+            let error = remove(&restored, &[&stores.store]).unwrap_err();
+            assert_eq!(error.code(), "OAH_LINK_NOT_OWNED");
+            assert_eq!(error.path().as_os_str(), legacy.destination.as_os_str());
+            assert!(error.to_string().contains(reason), "{error}");
+            assert_eq!(fs::read(&record_path).unwrap(), saved_record.as_bytes());
+        };
+
+        assert_refused();
+        assert_eq!(names(&stores.agents), ["skill.v1"]);
+        assert_eq!(inspect(&destination).unwrap(), Entry::Directory);
+        assert_eq!(names(&destination), ["SKILL.md", "scripts"]);
+        assert_eq!(names(&destination.join("scripts")), ["run.sh"]);
+        assert_eq!(
+            fs::read(destination.join("SKILL.md")).unwrap(),
+            b"# Skill A\n"
+        );
+        assert_eq!(
+            fs::read(destination.join("scripts").join("run.sh")).unwrap(),
+            b"echo run\n"
+        );
+
+        assert_eq!(
+            remove(&canonical, &[&stores.store]).unwrap(),
+            Removal::Removed
+        );
+        assert!(names(&stores.agents).is_empty());
+        assert_refused();
+        assert_eq!(
+            remove(&canonical, &[&stores.store]).unwrap(),
+            Removal::AlreadyGone
+        );
+        assert!(names(&stores.agents).is_empty());
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), b"# Skill A\n");
+        assert_eq!(
+            fs::read(source.join("scripts").join("run.sh")).unwrap(),
+            b"echo run\n"
+        );
+    }
 }
 
 #[cfg(unix)]

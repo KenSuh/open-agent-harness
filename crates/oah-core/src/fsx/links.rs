@@ -449,6 +449,7 @@ pub enum Removal {
 
 /// Removes a managed link, checking its record first.
 ///
+/// A destination ending in a separator or a `.` component is refused before lookup.
 /// The record's source must lie inside one of `stores`, and the entry at its destination must still be the
 /// original entry identity plus the same symlink text, junction target, or copy folder/file inventory.
 /// Otherwise nothing is touched and the result is [`FsxErrorKind::NotOwned`]. Removing a link deletes only the
@@ -457,8 +458,24 @@ pub enum Removal {
 /// The record may come from an earlier process. A same-target replacement with a different identity is refused.
 /// Entry-number reuse after deletion and concurrent check-to-path-use races remain limitations of plain evidence.
 pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError> {
+    let destination = link.destination.as_path();
     require_absolute(&link.source)?;
-    require_absolute(&link.destination)?;
+    require_absolute(destination)?;
+    let raw_leaf = destination
+        .as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|&byte| std::path::is_separator(char::from(byte)))
+        .next();
+    match raw_leaf {
+        Some([]) => return Err(not_owned(link, "its destination has a trailing separator")),
+        Some([b'.']) => {
+            return Err(not_owned(
+                link,
+                "its destination has a terminal dot component",
+            ));
+        }
+        _ => {}
+    }
     let source =
         lexical(&link.source).ok_or_else(|| not_owned(link, "its source is not a plain path"))?;
     let in_store = stores.iter().any(|store| match lexical(store) {
@@ -468,7 +485,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
     if !in_store {
         return Err(not_owned(link, "its source is outside the known stores"));
     }
-    let entry = inspect(&link.destination)?;
+    let entry = inspect(destination)?;
     if entry == Entry::Missing {
         return Ok(Removal::AlreadyGone);
     }
@@ -480,7 +497,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
                 .as_ref()
                 .ok_or_else(|| not_owned(link, "the record has no link target"))?;
             // The source's store decides ownership only when the recorded target really points at that source.
-            if !target_points_at(&link.destination, target, &link.source) {
+            if !target_points_at(destination, target, &link.source) {
                 return Err(not_owned(
                     link,
                     "the record's link target does not point at its source",
@@ -490,10 +507,10 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
                 return Err(not_owned(link, "the entry there is not this link"));
             }
             require_record_identity(link)?;
-            staging::remove_link(&link.destination).map_err(|error| {
+            staging::remove_link(destination).map_err(|error| {
                 FsxError::io(
                     FsxErrorKind::Io,
-                    &link.destination,
+                    destination,
                     "cannot remove the link",
                     error,
                 )
@@ -514,7 +531,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
             if entry != Entry::Directory {
                 return Err(not_owned(link, "the entry there is not a folder"));
             }
-            let (folders, files) = match walk(&link.destination) {
+            let (folders, files) = match walk(destination) {
                 Ok(found) => found,
                 Err(error) if error.kind() == FsxErrorKind::TreeHasLink => {
                     return Err(not_owned(
@@ -547,7 +564,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
             }
             for file in &files {
                 require_record_identity(link)?;
-                let path = link.destination.join(&file.relative);
+                let path = destination.join(&file.relative);
                 fs::remove_file(&path).map_err(|error| {
                     FsxError::io(
                         FsxErrorKind::Io,
@@ -559,7 +576,7 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
             }
             for folder in folders.iter().rev() {
                 require_record_identity(link)?;
-                let path = link.destination.join(folder);
+                let path = destination.join(folder);
                 fs::remove_dir(&path).map_err(|error| {
                     FsxError::io(
                         FsxErrorKind::Io,
@@ -570,10 +587,10 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
                 })?;
             }
             require_record_identity(link)?;
-            fs::remove_dir(&link.destination).map_err(|error| {
+            fs::remove_dir(destination).map_err(|error| {
                 FsxError::io(
                     FsxErrorKind::Io,
-                    &link.destination,
+                    destination,
                     "cannot remove the copy",
                     error,
                 )
