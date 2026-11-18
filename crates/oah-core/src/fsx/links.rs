@@ -839,7 +839,41 @@ fn copy_at(
         folders,
         files,
     };
-    let (found_folders, found_files) = walk(destination)?;
+    read_back_copy(&link)?;
+    Ok(LinkOutcome {
+        link,
+        created: true,
+        fallback: Some(reason.unwrap_or_else(|| "a copy was requested".to_string())),
+    })
+}
+
+fn read_back_copy(link: &ManagedLink) -> Result<(), FsxError> {
+    let destination = &link.destination;
+    // A trailing separator or dot can make a no-follow lookup traverse the final link.
+    let root = destination.components().as_path();
+    let unreadable = |error| {
+        FsxError::io(
+            FsxErrorKind::Io,
+            destination,
+            "copied, but the copy cannot be read back",
+            error,
+        )
+    };
+    let different = || {
+        FsxError::new(
+            FsxErrorKind::Unverified,
+            destination,
+            "copied, but the copy read back differs from the source",
+        )
+    };
+    if !copy_root_is_directory(root).map_err(unreadable)? {
+        return Err(different());
+    }
+    let id = link
+        .identity
+        .and_then(EntryIdentity::entry_id)
+        .ok_or_else(different)?;
+    let (found_folders, found_files) = walk(root)?;
     let same_files = found_files.len() == link.files.len()
         && found_files
             .iter()
@@ -847,26 +881,29 @@ fn copy_at(
             .all(|(found, recorded)| {
                 found.relative == recorded.relative && found.fingerprint == recorded.fingerprint
             });
-    let same_entry = identity::now(destination, id).map_err(|error| {
-        FsxError::io(
-            FsxErrorKind::Io,
-            destination,
-            "copied, but the copy cannot be read back",
-            error,
-        )
-    })? == Now::Same;
+    let same_entry = identity::now(root, id).map_err(unreadable)? == Now::Same;
     if !same_entry || found_folders != link.folders || !same_files {
-        return Err(FsxError::new(
-            FsxErrorKind::Unverified,
-            destination,
-            "copied, but the copy read back differs from the source",
-        ));
+        return Err(different());
     }
-    Ok(LinkOutcome {
-        link,
-        created: true,
-        fallback: Some(reason.unwrap_or_else(|| "a copy was requested".to_string())),
-    })
+    match copy_root_is_directory(root) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(different()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(different()),
+        Err(error) => Err(unreadable(error)),
+    }
+}
+
+fn copy_root_is_directory(root: &Path) -> io::Result<bool> {
+    let metadata = fs::symlink_metadata(root)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(metadata.is_dir())
 }
 
 #[cfg(test)]
@@ -890,6 +927,53 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("keep.txt"), "source bytes").unwrap();
         (dir, root, source)
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn copy_read_back_requires_a_real_root() {
+        let (_dir, root, source) = folder_with_source();
+        let destination = root.join("destination");
+        let request = LinkRequest {
+            source: &source,
+            destination: &destination,
+            style: TargetStyle::Absolute,
+            allow_copy: true,
+        };
+        let (folders, files) = walk(&source).unwrap();
+        let copy = copy_at(&request, None, &root.join("staging"), folders, files).unwrap();
+        assert_eq!(copy.link.kind, LinkKind::Copy);
+
+        let published = root.join("published-directory");
+        fs::rename(&destination, &published).unwrap();
+        SystemLinker
+            .link(&published, &destination, &published)
+            .unwrap();
+        // Supply a matching number deterministically while keeping the real copy's inventory.
+        let id = EntryId::of(&destination).unwrap();
+        let mut link = ManagedLink {
+            identity: Some(id.evidence()),
+            ..copy.link
+        };
+        let error = read_back_copy(&link).unwrap_err();
+        assert_eq!(error.kind(), FsxErrorKind::Unverified);
+
+        let child = published.join("foreign-link");
+        SystemLinker.link(&source, &child, &source).unwrap();
+        for spelling in [destination.clone(), destination.join("")] {
+            link.destination = spelling;
+            let error = read_back_copy(&link).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                FsxErrorKind::Unverified,
+                "the root must be rejected before its children are read"
+            );
+        }
+        assert_eq!(identity::now(&destination, id).unwrap(), Now::Same);
+        assert_eq!(
+            fs::read(published.join("keep.txt")).unwrap(),
+            b"source bytes"
+        );
     }
 
     #[test]
