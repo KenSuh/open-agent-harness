@@ -23,6 +23,9 @@ impl ReferenceKind {
 }
 
 /// Persistable reference to a symlink or directory copy acquired in an enrolled namespace.
+///
+/// Keep the encoded reference and any private record or stage name derived from it
+/// out of shared logs.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProtectedLinkRef {
     kind: ReferenceKind,
@@ -122,8 +125,11 @@ impl fmt::Debug for ProtectedLinkRef {
 /// restoring state from backup, or losing proof requires a new incarnation.
 ///
 /// # Errors
-/// Unsupported enrollment is refused. Publication or sync failures can leave a private stage,
-/// a journal and a published entry for inspection. An error returns no usable reference.
+/// Unsupported enrollment is refused. After preparation begins, a partial journal or a
+/// staged symlink may remain. Publication retains the staged symlink as a private pin.
+/// If publication succeeded before a sync, read-back, or journal confirmation failure,
+/// the public symlink may already be present alongside the pin. An error returns no
+/// usable reference. See the [operator guidance](remove_protected#operator-triage).
 pub fn create_protected(
     anchor: &Path,
     request: &LinkRequest<'_>,
@@ -162,8 +168,11 @@ pub fn create_protected(
 ///
 /// # Errors
 /// An unsupported source or namespace and an occupied destination are refused. Once
-/// preparation has begun, a failure may leave the private journal, a stage or a published
-/// copy for inspection. A reference is issued only after verified, synchronized publication.
+/// preparation has begun, a failure may leave a partial journal or a partially built
+/// private stage. Publication moves the stage to the public destination. A subsequent
+/// sync, read-back, or journal confirmation failure may leave a public copy with no
+/// private stage and no usable reference. See the
+/// [operator guidance](remove_protected#operator-triage).
 pub fn create_protected_copy(
     anchor: &Path,
     source: &Path,
@@ -188,18 +197,40 @@ pub fn create_protected_copy(
 ///
 /// Uses the same namespace and writer requirements as [`create_protected`].
 /// The recorded source must be in `stores`. A retired reference reports [`Removal::AlreadyGone`]
-/// when both the destination and its private pin or stage are absent. Removal preserves
-/// the source. A copy is removed only after the entire acquired inventory is verified.
+/// when both the destination and its private pin or stage are absent. If either is present,
+/// removal refuses. Retain retired journal tombstones for the lifetime of the active
+/// enrollment incarnation. Removal preserves the source. A copy is removed only after
+/// the entire acquired inventory is verified.
 ///
 /// # Errors
 /// Refuses unsupported authority, unknown proof or a pending journal from an interrupted
 /// acquisition or removal. Once this call persists the removal marker, a later failure
-/// returns [`FsxErrorKind::Unverified`]. An unlink error identifies the name whose unlink failed.
-/// A directory sync error follows a successful unlink, with durability unconfirmed.
+/// returns [`FsxErrorKind::Unverified`]. An unlink error identifies the entry whose unlink
+/// failed. Earlier unlinks may already have succeeded. A directory sync error follows
+/// a successful unlink of the reported entry and leaves the durability of that unlink
+/// unconfirmed.
 ///
-/// Preserve the partial journal and remaining entries for inspection by the trusted
-/// operator. Report the anchor, destination, error detail and underlying OS error when
-/// available. A subsequent call refuses the interrupted state and leaves it in place.
+/// # Operator triage
+///
+/// A journal that records preparation or staging without confirmed publication marks
+/// an incomplete acquisition. The private stage may still be present, or publication
+/// may already have placed the entry at the destination before the caller received a
+/// usable reference. Even a visible publication record cannot establish that a
+/// reference was returned. A durable removal marker without completed retirement
+/// marks an interrupted removal. The public symlink or private pin may remain, or part
+/// or all of the public copy may already be gone. A retired journal records completed
+/// removal and gives no authority to delete an entry now found at the destination.
+///
+/// If the journal is incomplete or ownership is uncertain, stop automatic retries and
+/// escalate to the trusted operator for the enrolled namespace. Preserve the journal
+/// and remaining entries in place. With existing authorization, inspect the journal
+/// and observe which destination and private entries remain without following symlinks
+/// or changing the partial state. Treat missing or unreadable records as unresolved.
+/// Preserve the exact error detail and the underlying OS error, including its raw code
+/// when available via [`FsxError::io_error`]. Share those diagnostics and the anchor
+/// and destination privately with the trusted operator. Error paths and detail can
+/// include names derived from the reference. Keep those names and the opaque reference
+/// material out of shared logs.
 pub fn remove_protected(
     anchor: &Path,
     reference: &ProtectedLinkRef,
