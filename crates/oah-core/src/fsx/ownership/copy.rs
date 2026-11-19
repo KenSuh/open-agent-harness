@@ -655,8 +655,16 @@ pub(super) fn create(
     destination: &Path,
 ) -> Result<ProtectedLinkRef, FsxError> {
     destination_parent(anchor, destination)?;
-    let (_, leaf) = location(destination)?;
     let namespace = Namespace::open(anchor)?;
+    create_locked(&namespace, source, destination)
+}
+
+pub(super) fn create_locked(
+    namespace: &Namespace<'_>,
+    source: &Path,
+    destination: &Path,
+) -> Result<ProtectedLinkRef, FsxError> {
+    let (_, leaf) = location(destination)?;
     if probe(&namespace.public_folder()?, leaf, destination)?.is_some() {
         return Err(FsxError::new(
             FsxErrorKind::LinkExists,
@@ -664,13 +672,13 @@ pub(super) fn create(
             "the destination is occupied",
         ));
     }
-    let source_tree = Tree::new(&namespace, source)?;
+    let source_tree = Tree::new(namespace, source)?;
     let sources = source_inventory(&source_tree)?;
-    let reference = new_reference(&namespace, ReferenceKind::Copy)?;
-    let journal = Journal::new(&namespace, &reference);
+    let reference = new_reference(namespace, ReferenceKind::Copy)?;
+    let journal = Journal::new(namespace, &reference);
     let stage_root = namespace.private_path(&journal.pin);
-    let stage = Tree::new(&namespace, &stage_root)?;
-    let published = Tree::new(&namespace, destination)?;
+    let stage = Tree::new(namespace, &stage_root)?;
+    let published = Tree::new(namespace, destination)?;
     let unconfirmed = |err| {
         changed(
             err,

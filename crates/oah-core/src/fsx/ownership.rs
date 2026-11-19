@@ -82,11 +82,13 @@ impl fmt::Debug for ProtectedLinkRef {
     }
 }
 
-/// Publishes a native symlink under an externally enrolled Linux anchor.
+/// Publishes a native symlink or an authorized directory copy under an enrolled Linux anchor.
 ///
 /// The destination is a direct child of `anchor/links`. Both request paths use canonical syntax.
-/// The reference is issued after publication read-back and journal sync. This entry point uses
-/// native symlinks for both target styles.
+/// The reference is issued after publication read-back and journal sync. Before preparing a
+/// symlink, this attempts a protected copy if [`LinkRequest::allow_copy`] is set and the
+/// formatted target, including its terminating NUL, exceeds a confirmed 1 KiB or 2 KiB ext4
+/// block size. The source and publication requirements of [`create_protected_copy`] apply.
 ///
 /// # Enrollment
 /// The anchor is an absolute non-root path with single separators and no dot components,
@@ -129,7 +131,8 @@ impl fmt::Debug for ProtectedLinkRef {
 /// staged symlink may remain. Publication retains the staged symlink as a private pin.
 /// If publication succeeded before a sync, read-back, or journal confirmation failure,
 /// the public symlink may already be present alongside the pin. An error returns no
-/// usable reference. See the [operator guidance](remove_protected#operator-triage).
+/// usable reference. A selected copy has the failure behavior of [`create_protected_copy`].
+/// See the [operator guidance](remove_protected#operator-triage).
 pub fn create_protected(
     anchor: &Path,
     request: &LinkRequest<'_>,
@@ -272,6 +275,7 @@ mod linux {
 
     const JOURNAL_MAGIC: &[u8] = b"oah-native-symlink-v1";
     const MAX_JOURNAL: u64 = 16_384;
+    const EXT4_SUPER_MAGIC: rx::FsWord = 0xef53;
 
     struct LinkPaths {
         source: PathBuf,
@@ -549,6 +553,16 @@ mod linux {
         }
     }
 
+    fn exceeds_ext4_target_capacity(
+        fs_type: rx::FsWord,
+        block_size: usize,
+        target: &OsStr,
+    ) -> bool {
+        fs_type == EXT4_SUPER_MAGIC
+            && matches!(block_size, 1024 | 2048)
+            && target.as_bytes().len() + 1 > block_size
+    }
+
     pub(super) fn create(
         anchor: &Path,
         request: &LinkRequest<'_>,
@@ -587,6 +601,13 @@ mod linux {
                 destination,
                 "the destination is occupied",
             ));
+        }
+        if request.allow_copy
+            && let Ok(stat) = rx::fstatfs(&namespace.private)
+            && let Ok(block_size) = usize::try_from(stat.f_bsize)
+            && exceeds_ext4_target_capacity(stat.f_type, block_size, paths.target.as_os_str())
+        {
+            return copy::create_locked(&namespace, source, destination);
         }
         let reference = new_reference(&namespace, ReferenceKind::Symlink)?;
         let journal = Journal::new(&namespace, &reference);
@@ -772,5 +793,45 @@ mod linux {
         })?;
         journal.append(b"X").map_err(incomplete)?;
         Ok(Removal::Removed)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{EXT4_SUPER_MAGIC, OsStr, OsStrExt, exceeds_ext4_target_capacity, rx};
+
+        #[test]
+        fn ext4_target_capacity_counts_bytes_and_the_terminating_nul() {
+            for block_size in [1024, 2048] {
+                let target = "é".repeat(block_size / 2);
+                let fits = OsStr::from_bytes(&target.as_bytes()[..block_size - 1]);
+                assert!(!exceeds_ext4_target_capacity(
+                    EXT4_SUPER_MAGIC,
+                    block_size,
+                    fits
+                ));
+                assert!(exceeds_ext4_target_capacity(
+                    EXT4_SUPER_MAGIC,
+                    block_size,
+                    target.as_ref()
+                ));
+            }
+        }
+
+        #[test]
+        fn target_capacity_requires_ext4_with_a_supported_block_size() {
+            let target = "a".repeat(4096);
+            for block_size in [0, 512, 4096] {
+                assert!(!exceeds_ext4_target_capacity(
+                    EXT4_SUPER_MAGIC,
+                    block_size,
+                    target.as_ref()
+                ));
+            }
+            assert!(!exceeds_ext4_target_capacity(
+                rx::PROC_SUPER_MAGIC,
+                1024,
+                target.as_ref()
+            ));
+        }
     }
 }

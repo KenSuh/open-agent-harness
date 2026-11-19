@@ -1,6 +1,9 @@
 // 보호된 디렉터리 복사의 공개 API와 등록된 리눅스 작동 범위를 검증한다.
 use oah_core::fsx::FsxErrorKind;
-use oah_core::fsx::links::{ProtectedLinkRef, create_protected_copy, remove_protected};
+use oah_core::fsx::links::{
+    LinkRequest, ProtectedLinkRef, TargetStyle, create_protected, create_protected_copy,
+    remove_protected,
+};
 use std::fs;
 
 #[test]
@@ -21,6 +24,18 @@ fn an_unenrolled_copy_request_preserves_existing_files() {
             .kind(),
         FsxErrorKind::NotOwned
     );
+    for allow_copy in [false, true] {
+        let request = LinkRequest {
+            source: &source,
+            destination: &destination,
+            style: TargetStyle::Absolute,
+            allow_copy,
+        };
+        assert_eq!(
+            create_protected(&anchor, &request).unwrap_err().kind(),
+            FsxErrorKind::NotOwned
+        );
+    }
     assert_eq!(
         remove_protected(&anchor, &reference, &[&source])
             .unwrap_err()
