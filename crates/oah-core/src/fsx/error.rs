@@ -91,20 +91,6 @@ impl FsxError {
         self.source.as_ref()
     }
 
-    /// The reason without the code or the path, as a copy fallback records it.
-    pub(crate) fn detail(&self) -> &str {
-        &self.detail
-    }
-
-    /// Attaches a cleanup that failed after this failure. This failure keeps its kind, path and cause.
-    pub(crate) fn with_cleanup(mut self, cleanup: FsxError) -> Self {
-        self.cleanup = Some(Box::new(match self.cleanup.take() {
-            None => cleanup,
-            Some(first) => first.with_cleanup(cleanup),
-        }));
-        self
-    }
-
     /// When cleaning up after this failure also failed: what was left in place, and why.
     pub fn cleanup_error(&self) -> Option<&FsxError> {
         self.cleanup.as_deref()

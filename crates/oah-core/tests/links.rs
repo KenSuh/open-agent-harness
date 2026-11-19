@@ -1,4 +1,4 @@
-// 관리 링크 시험: 기본 링크(macOS 심볼릭 링크·Windows 정션)와 보고되는 복사 대체, 남의 항목 보존, 링크 삭제가 대상을 지우지 않는지 확인한다.
+// 관리 링크 시험: 권한 없는 생성 거절과 레거시 기록 보존을 확인하고 Windows 네이티브 계약을 명시한다.
 use oah_core::fsx::links::{
     CopiedFile, Entry, EntryIdentity, LinkKind, LinkRequest, ManagedLink, NativeLinker, Removal,
     SystemLinker, TargetStyle, create, create_with, inspect, remove,
@@ -127,8 +127,21 @@ fn legacy_native(source: &Path, destination: &Path, target: &Path) -> ManagedLin
 
 fn legacy_copy(source: &Path, destination: &Path) -> ManagedLink {
     let scripts = PathBuf::from("scripts");
-    fs::create_dir_all(destination.join(&scripts)).unwrap();
-    let files = [PathBuf::from("SKILL.md"), scripts.join("run.sh")]
+    let files = [PathBuf::from("SKILL.md"), scripts.join("run.sh")];
+    legacy_copy_from_inventory(source, destination, vec![scripts], files)
+}
+
+fn legacy_copy_from_inventory(
+    source: &Path,
+    destination: &Path,
+    folders: Vec<PathBuf>,
+    files: impl IntoIterator<Item = PathBuf>,
+) -> ManagedLink {
+    fs::create_dir(destination).unwrap();
+    for folder in &folders {
+        fs::create_dir(destination.join(folder)).unwrap();
+    }
+    let files = files
         .into_iter()
         .map(|relative| {
             let bytes = fs::read(source.join(&relative)).unwrap();
@@ -146,7 +159,7 @@ fn legacy_copy(source: &Path, destination: &Path) -> ManagedLink {
         kind: LinkKind::Copy,
         identity: Some(legacy_identity(destination)),
         target: None,
-        folders: vec![scripts],
+        folders,
         files,
     }
 }
@@ -200,6 +213,13 @@ fn general_staging_refuses_before_any_change() {
             let assert_refused = |error: oah_core::fsx::FsxError| {
                 assert_eq!(error.code(), "OAH_LINK_UNSUPPORTED", "{error}");
                 assert_eq!(error.path(), destination);
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "OAH_LINK_UNSUPPORTED: cannot prove authority for managed link staging at this destination ({})",
+                        destination.display()
+                    )
+                );
                 assert!(error.io_error().is_none(), "{error}");
                 assert!(error.cleanup_error().is_none(), "{error}");
             };
@@ -559,26 +579,52 @@ fn an_existing_junction_keeps_its_absolute_target_and_is_preserved() {
 
 #[cfg(windows)]
 #[test]
-fn a_long_junction_target_is_refused_before_starting_the_attempt() {
+#[ignore = "requires authority-backed Windows staging at ordinary medium integrity, verified by the native evidence gate"]
+fn a_junction_refused_after_its_folder_was_made_leaves_nothing_and_can_be_copied() {
+    use std::os::windows::ffi::OsStrExt;
+
+    require_windows_context(0);
     let stores = Stores::new();
     let mut source = stores.store.clone();
-    while source.as_os_str().len() <= 4200 {
+    while source.as_os_str().encode_wide().count() <= 4200 {
         source.push("d".repeat(120));
     }
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("SKILL.md"), "# Long\n").unwrap();
     let destination = stores.agents.join("skill-long");
-    for allow_copy in [false, true] {
-        let error =
-            create(&stores.request(&destination, TargetStyle::Absolute, allow_copy, &source))
-                .unwrap_err();
-        assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
-        assert_eq!(error.path(), destination);
-        assert!(error.io_error().is_none(), "{error}");
-        assert!(error.cleanup_error().is_none(), "{error}");
-        assert!(names(&stores.agents).is_empty());
-        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), b"# Long\n");
-    }
+    let error =
+        create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap_err();
+    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported, "{error}");
+    assert_eq!(error.path(), destination);
+    let cause = error
+        .io_error()
+        .expect("the native junction attempt failed");
+    assert!(
+        cause.to_string().contains("`target` is too long"),
+        "{error}"
+    );
+    assert!(error.cleanup_error().is_none(), "{error}");
+    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
+    assert!(names(&stores.agents).is_empty());
+
+    let outcome =
+        create(&stores.request(&destination, TargetStyle::Absolute, true, &source)).unwrap();
+    assert!(outcome.created);
+    assert_eq!(outcome.link.kind, LinkKind::Copy);
+    let reason = outcome.fallback.as_deref().unwrap();
+    assert!(
+        reason.contains("junction unavailable") && reason.contains("`target` is too long"),
+        "{reason}"
+    );
+    assert_eq!(
+        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
+    );
+    assert_eq!(inspect(&destination).unwrap(), Entry::Directory);
+    assert_eq!(names(&stores.agents), ["skill-long"]);
+    assert_eq!(names(&destination), ["SKILL.md"]);
+    assert_eq!(fs::read(destination.join("SKILL.md")).unwrap(), b"# Long\n");
+    assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), b"# Long\n");
 }
 
 #[cfg(windows)]
@@ -674,12 +720,15 @@ fn child_role() -> Option<(String, PathBuf)> {
 fn rerun(test: &str, role: &str, root: &Path, limit: Option<u32>) -> String {
     let exe = std::env::current_exe().unwrap();
     let args = ["--exact", test, "--nocapture", "--test-threads=1"];
+    let limit = limit.filter(|_| cfg!(unix));
     let mut command = match limit {
-        Some(limit) if cfg!(unix) => {
+        Some(limit) => {
             let mut command = Command::new("/bin/sh");
             command
                 .arg("-c")
-                .arg(format!("ulimit -n {limit} && exec \"$0\" \"$@\""))
+                .arg(format!(
+                    "ulimit -n {limit} && test \"$(ulimit -n)\" -eq {limit} && exec \"$0\" \"$@\""
+                ))
                 .arg(&exe)
                 .args(args);
             command
@@ -1159,15 +1208,17 @@ fn durable_record_legacy_native_records_preserve_absolute_and_relative_links() {
 }
 
 #[test]
-fn many_existing_native_records_remain_readable_under_descriptor_limit() {
-    const TEST: &str = "many_existing_native_records_remain_readable_under_descriptor_limit";
+fn durable_record_many_links_and_files_stay_within_256_descriptors() {
+    const TEST: &str = "durable_record_many_links_and_files_stay_within_256_descriptors";
     const LINKS: usize = 600;
+    const FILES: usize = 600;
+    const PARTS: usize = 8;
     if let Some((role, root)) = child_role() {
         assert_eq!(role, "many");
         let store = root.join("store");
         let agents = root.join("agents");
         let source = store.join("skill-a");
-        let mut records = Vec::new();
+        let mut records = Vec::with_capacity(LINKS);
         for index in 0..LINKS {
             let destination = agents.join(format!("link-{index:04}"));
             let record = legacy_native(&source, &destination, &source);
@@ -1176,31 +1227,99 @@ fn many_existing_native_records_remain_readable_under_descriptor_limit() {
             records.push(restored);
         }
 
-        for record in &records {
-            assert_eq!(
-                remove(record, &[&store]).unwrap_err().kind(),
-                FsxErrorKind::NotOwned
-            );
+        let big = store.join("big");
+        let copy = agents.join("big");
+        let folders: Vec<_> = (0..PARTS)
+            .map(|part| PathBuf::from(format!("part-{part:02}")))
+            .collect();
+        for folder in &folders {
+            fs::create_dir_all(big.join(folder)).unwrap();
         }
-        assert_eq!(names(&agents).len(), LINKS);
-        println!("ROLE_OK many legacy_links={LINKS}");
+        let file_name = |index| format!("file-{index:04}.md");
+        let file_bytes = |index| format!("synthetic {index}\n");
+        let files = (0..FILES).map(|index| folders[index % PARTS].join(file_name(index)));
+        for (index, relative) in files.clone().enumerate() {
+            fs::write(big.join(relative), file_bytes(index)).unwrap();
+        }
+        let copy_record = legacy_copy_from_inventory(&big, &copy, folders.clone(), files);
+        let saved = record_text(&copy_record);
+
+        #[cfg(unix)]
+        let held = hold_all_but(2);
+        let restored = parse_record(&saved);
+        assert_eq!(restored, copy_record);
+        assert_eq!(restored.files.len(), FILES);
+        for record in records.iter().chain(std::iter::once(&restored)) {
+            let error = remove(record, &[&store]).unwrap_err();
+            assert_eq!(error.kind(), FsxErrorKind::NotOwned, "{error}");
+            assert_eq!(error.path(), record.destination);
+        }
+        #[cfg(unix)]
+        drop(held);
+
+        for record in records {
+            let path = &record.destination;
+            assert_eq!(Some(legacy_identity(path)), record.identity);
+            match (record.kind, inspect(path).unwrap()) {
+                (LinkKind::Symlink, Entry::Symlink { target }) => {
+                    assert_eq!(target.as_os_str(), source.as_os_str());
+                }
+                (LinkKind::Junction, Entry::Junction { target }) => {
+                    assert_eq!(fs::canonicalize(target).unwrap(), source);
+                }
+                (kind, entry) => panic!("expected {kind:?} at {path:?}, found {entry:?}"),
+            }
+        }
+        assert_eq!(Some(legacy_identity(&copy)), restored.identity);
+        let folder_names: Vec<_> = folders
+            .iter()
+            .map(|folder| folder.to_str().unwrap())
+            .collect();
+        for tree in [&big, &copy] {
+            assert_eq!(inspect(tree).unwrap(), Entry::Directory);
+            assert_eq!(names(tree), folder_names);
+            for (part, folder) in folders.iter().enumerate() {
+                let directory = tree.join(folder);
+                let indices = (part..FILES).step_by(PARTS);
+                assert_eq!(inspect(&directory).unwrap(), Entry::Directory);
+                assert_eq!(
+                    names(&directory),
+                    indices.clone().map(file_name).collect::<Vec<_>>()
+                );
+                for index in indices {
+                    let file = directory.join(file_name(index));
+                    assert_eq!(inspect(&file).unwrap(), Entry::File);
+                    assert_eq!(
+                        fs::read(&file).unwrap(),
+                        file_bytes(index).as_bytes(),
+                        "{file:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(names(&agents).len(), LINKS + 1);
+        println!("ROLE_OK many legacy_links={LINKS} legacy_copy_files={FILES} folders={PARTS}");
         return;
     }
 
     let stores = Stores::new();
     let root = stores.store.parent().unwrap();
     rerun(TEST, "many", root, Some(256));
-    assert_eq!(names(&stores.agents).len(), LINKS);
+    assert_eq!(names(&stores.agents).len(), LINKS + 1);
     assert_eq!(
         fs::read(stores.source().join("SKILL.md")).unwrap(),
         b"# Skill A\n"
+    );
+    assert_eq!(
+        fs::read(stores.source().join("scripts/run.sh")).unwrap(),
+        b"echo run\n"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn staging_refusal_does_not_require_opening_a_descriptor() {
-    const TEST: &str = "staging_refusal_does_not_require_opening_a_descriptor";
+fn durable_record_staging_refusal_does_not_require_opening_a_descriptor() {
+    const TEST: &str = "durable_record_staging_refusal_does_not_require_opening_a_descriptor";
     if let Some((role, root)) = child_role() {
         assert_eq!(role, "exhaust");
         let source = root.join("store/skill-a");
@@ -1215,16 +1334,20 @@ fn staging_refusal_does_not_require_opening_a_descriptor() {
 
         let held = hold_all_but(0);
         let native = create(&request);
-        let copy = create_with(&request, &StagingProbe::new(LinkKind::Copy));
+        let linker = StagingProbe::new(LinkKind::Copy);
+        let copy = create_with(&request, &linker);
         drop(held);
 
+        assert!(!linker.classified.get());
         for result in [native, copy] {
             let error = result.unwrap_err();
             assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported, "{error}");
+            assert_eq!(error.path(), destination);
             assert!(error.io_error().is_none());
             assert!(error.cleanup_error().is_none());
         }
         assert!(names(&agents).is_empty());
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), b"# Skill A\n");
         println!("ROLE_OK exhaust free=0");
         return;
     }

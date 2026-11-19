@@ -1,4 +1,4 @@
-// 관리 링크: 심볼릭 링크·윈도 정션·복사 대체를 만들고 살피고 지우며, 소유 증거가 파일 시스템과 맞을 때만 지운다.
+// 관리 링크의 상태를 읽고, 등록된 Linux 네임스페이스의 링크·복사 작업을 제공한다.
 //! Managed links from an agent's folder to a store folder.
 //!
 //! [`remove`] preserves present entries described by legacy [`ManagedLink`] records. In an enrolled Linux
@@ -8,17 +8,15 @@
 
 use super::atomic::Fingerprint;
 use super::error::{FsxError, FsxErrorKind};
+#[cfg(test)]
+use super::identity::EntryId;
 pub use super::identity::EntryIdentity;
-use super::identity::{self, EntryId, Now};
 pub use super::ownership::{
     ProtectedLinkRef, create_protected, create_protected_copy, remove_protected,
 };
-use super::staging::{Attempted, GeneralStaging, Stage};
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// What exists at a path, read without following it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +100,7 @@ pub struct CopiedFile {
     pub executable: bool,
 }
 
-/// Inventory for one managed link, returned by [`create`] and accepted by [`remove`].
+/// Legacy inventory for one previously recorded managed link, accepted by [`remove`].
 ///
 /// A plain record with no hidden state: the caller stores these fields (a [`Fingerprint`] round-trips through
 /// [`Fingerprint::to_hex`] and [`Fingerprint::from_hex`]) and may rebuild the record in a later process.
@@ -150,12 +148,15 @@ pub trait NativeLinker {
     fn kind(&self) -> LinkKind;
     /// Creates the link at `destination`; `target` is the text to store (symlinks) and `source` the folder.
     ///
-    /// A staged attempt would pass a path inside the stage and a `target` relative to the public
-    /// destination's folder. [`create_with`] currently refuses before invoking this method.
+    /// [`create_with`] currently reports unavailable staging before invoking this method.
     fn link(&self, source: &Path, destination: &Path, target: &Path) -> io::Result<()>;
 }
 
-/// The operating system's own links: symlinks on Unix, directory junctions on Windows.
+/// A direct, unmanaged primitive for Unix symlinks and Windows directory junctions.
+///
+/// [`NativeLinker::link`] acts at the supplied destination and returns an I/O result. The caller
+/// owns validation, staging and cleanup, including any directory left by a failed Windows junction
+/// attempt. For an ownership record, use the protected APIs in an enrolled namespace.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemLinker;
 
@@ -198,7 +199,7 @@ pub fn create(request: &LinkRequest<'_>) -> Result<LinkOutcome, FsxError> {
 /// [`FsxErrorKind::LinkUnsupported`] without calling [`NativeLinker::link`] or starting a copy.
 pub fn create_with(
     request: &LinkRequest<'_>,
-    linker: &dyn NativeLinker,
+    _linker: &dyn NativeLinker,
 ) -> Result<LinkOutcome, FsxError> {
     let source = request.source;
     let destination = request.destination;
@@ -225,7 +226,7 @@ pub fn create_with(
     let parent = destination
         .parent()
         .ok_or_else(|| FsxError::new(FsxErrorKind::Io, destination, "has no parent folder"))?;
-    let name = destination
+    destination
         .file_name()
         .ok_or_else(|| FsxError::new(FsxErrorKind::Io, destination, "has no file name"))?;
     if !parent.is_dir() {
@@ -245,193 +246,11 @@ pub fn create_with(
         ));
     }
 
-    let staging = GeneralStaging::preflight(destination)?;
-    let kind = linker.kind();
-    if kind == LinkKind::Copy {
-        return copy_fallback(&staging, request, parent, name, None);
-    }
-    let target = match kind {
-        LinkKind::Symlink => match request.style {
-            TargetStyle::Absolute => source.to_path_buf(),
-            TargetStyle::Relative => relative_target(parent, source)?,
-        },
-        LinkKind::Junction | LinkKind::Copy => source.to_path_buf(),
-    };
-    match native(&staging, request, linker, kind, &target, parent, name) {
-        Ok(link) => Ok(LinkOutcome {
-            link,
-            created: true,
-            fallback: None,
-        }),
-        Err(Failure::Unsupported { reason, .. }) if request.allow_copy => {
-            copy_fallback(&staging, request, parent, name, Some(reason))
-        }
-        Err(Failure::Unsupported { error, .. } | Failure::Fatal(error)) => Err(error),
-    }
-}
-
-/// Why a native attempt gave no link. Either way the attempt's own entries were cleaned up first, or the
-/// error carries the cleanup that could not finish.
-enum Failure {
-    /// The link cannot be made or used here, and the attempt left nothing behind; a copy may stand in.
-    /// `reason` is what the copy reports.
-    Unsupported { error: FsxError, reason: String },
-    /// Anything else, reported as it is and never replaced by a copy.
-    Fatal(FsxError),
-}
-
-/// Attempt numbers of this process; with the process id they make the private names unique.
-static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
-
-/// Makes the native link in a private folder, moves it next to the destination where it resolves exactly as it
-/// will once published, checks it, renames it into place without replacing anything and reads it back.
-fn native(
-    staging: &GeneralStaging,
-    request: &LinkRequest<'_>,
-    linker: &dyn NativeLinker,
-    kind: LinkKind,
-    target: &Path,
-    parent: &Path,
-    name: &OsStr,
-) -> Result<ManagedLink, Failure> {
-    let source = request.source;
-    let destination = request.destination;
-    let number = ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-    let mut attempt = staging
-        .folder(&private_name(parent, name, number, "attempt"))
-        .map_err(Failure::Fatal)?;
-    let entry = attempt.path().join(name);
-    let made = linker.link(source, &entry, target);
-    if let Err(error) = &made
-        && error.kind() == io::ErrorKind::AlreadyExists
-    {
-        // The private name was taken before the attempt could make anything, so that entry is not its own.
-        let primary = FsxError::new(
-            FsxErrorKind::NotOwned,
-            &entry,
-            "something else appeared in OAH's private attempt folder; it was left alone",
-        );
-        return Err(Failure::Fatal(attempt.discard_after(primary)));
-    }
-    // Record what the attempt left before anything else can fail.
-    let attempted = attempt
-        .record_attempt(&entry)
-        .map_err(|error| Failure::Fatal(attempt.discard_after(error)))?;
-    if let Err(error) = made {
-        let reason = format!("{} unavailable: {error}", kind_word(kind));
-        let primary = FsxError::io(
-            FsxErrorKind::LinkUnsupported,
-            destination,
-            &format!("cannot make a {}", kind_word(kind)),
-            error,
-        );
-        return Err(unsupported(&attempt, primary, Some(reason)));
-    }
-    let made_link = attempted == Attempted::Link
-        && same_native_link(
-            &inspect(&entry).map_err(|error| Failure::Fatal(attempt.discard_after(error)))?,
-            kind,
-            target,
-            source,
-        );
-    if !made_link {
-        let primary = FsxError::new(
-            FsxErrorKind::LinkUnsupported,
-            destination,
-            format!(
-                "the {} attempt did not make a link storing the requested target",
-                kind_word(kind)
-            ),
-        );
-        return Err(unsupported(&attempt, primary, None));
-    }
-    let staged = attempt
-        .take_link(&private_name(parent, name, number, "link"))
-        .map_err(Failure::Fatal)?;
-    let expected = fs::canonicalize(source).map_err(|error| {
-        let primary = FsxError::io(
-            FsxErrorKind::Io,
-            source,
-            "cannot resolve the source folder",
-            error,
-        );
-        Failure::Fatal(staged.discard_after(primary))
-    })?;
-    match fs::canonicalize(staged.path()) {
-        Ok(found) if found == expected => {}
-        resolved => {
-            let what = format!(
-                "the new {} does not resolve to the source folder",
-                kind_word(kind)
-            );
-            let primary = match resolved {
-                // Keep the operating system's reason, such as a junction that cannot be traversed.
-                Err(error) => {
-                    FsxError::io(FsxErrorKind::LinkUnsupported, destination, &what, error)
-                }
-                Ok(_) => FsxError::new(FsxErrorKind::LinkUnsupported, destination, what),
-            };
-            return Err(unsupported(&staged, primary, None));
-        }
-    }
-    let id = staged.publish(destination).map_err(Failure::Fatal)?;
-    read_back_native(destination, id, kind, target, source).map_err(Failure::Fatal)?;
-    Ok(ManagedLink {
-        destination: destination.to_path_buf(),
-        source: source.to_path_buf(),
-        kind,
-        identity: Some(id.evidence()),
-        target: Some(target.to_path_buf()),
-        folders: Vec::new(),
-        files: Vec::new(),
-    })
-}
-
-/// Cleans up an attempt that gave no usable link. A copy may stand in only when nothing was left behind.
-fn unsupported(stage: &Stage, error: FsxError, reason: Option<String>) -> Failure {
-    match stage.discard() {
-        Ok(()) => Failure::Unsupported {
-            reason: reason.unwrap_or_else(|| error.detail().to_string()),
-            error,
-        },
-        Err(cleanup) => Failure::Fatal(error.with_cleanup(cleanup)),
-    }
-}
-
-/// The published destination must still be the entry this call renamed there and still store the requested
-/// target. Anything else means another writer replaced it, and that entry is left alone.
-fn read_back_native(
-    destination: &Path,
-    id: EntryId,
-    kind: LinkKind,
-    target: &Path,
-    source: &Path,
-) -> Result<(), FsxError> {
-    let now = identity::now(destination, id).map_err(|error| {
-        FsxError::io(
-            FsxErrorKind::Io,
-            destination,
-            "cannot read back the new link",
-            error,
-        )
-    })?;
-    if now == Now::Same && same_native_link(&inspect(destination)?, kind, target, source) {
-        Ok(())
-    } else {
-        Err(FsxError::new(
-            FsxErrorKind::NotOwned,
-            destination,
-            "another entry replaced the new link; it was left alone",
-        ))
-    }
-}
-
-/// A hidden name next to the destination that only this process and this number use.
-fn private_name(parent: &Path, name: &OsStr, number: u64, role: &str) -> PathBuf {
-    let mut text = OsString::from(".");
-    text.push(name);
-    text.push(format!(".{}.{number}.{role}.tmp", std::process::id()));
-    parent.join(text)
+    Err(FsxError::new(
+        FsxErrorKind::LinkUnsupported,
+        destination,
+        "cannot prove authority for managed link staging at this destination",
+    ))
 }
 
 /// Whether a removal deleted something.
@@ -542,14 +361,6 @@ pub(super) fn source_in_stores(source: &Path, stores: &[&Path]) -> bool {
     })
 }
 
-fn kind_word(kind: LinkKind) -> &'static str {
-    match kind {
-        LinkKind::Symlink => "symlink",
-        LinkKind::Junction => "junction",
-        LinkKind::Copy => "copy",
-    }
-}
-
 fn require_absolute(path: &Path) -> Result<(), FsxError> {
     if path.is_absolute() {
         Ok(())
@@ -575,36 +386,7 @@ fn lexical(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-fn same_native_link(entry: &Entry, kind: LinkKind, target: &Path, source: &Path) -> bool {
-    match (entry, kind) {
-        (Entry::Symlink { target: found }, LinkKind::Symlink) => {
-            found.as_os_str() == target.as_os_str()
-        }
-        // The stored target itself, or the same folder when both still resolve.
-        (Entry::Junction { target: found }, LinkKind::Junction) => {
-            found == target || same_folder(found, source)
-        }
-        _ => false,
-    }
-}
-
-fn same_folder(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
-/// The target text for a symlink in `folder` that reaches `source`, computed between the real locations of
-/// both so the link resolves even when a parent folder is itself reached through a link.
-fn relative_target(folder: &Path, source: &Path) -> Result<PathBuf, FsxError> {
-    let from = fs::canonicalize(folder)
-        .map_err(|error| FsxError::io(FsxErrorKind::Io, folder, "cannot resolve", error))?;
-    let to = fs::canonicalize(source)
-        .map_err(|error| FsxError::io(FsxErrorKind::Io, source, "cannot resolve", error))?;
-    relative_between(&from, &to)
-}
-
+#[cfg(target_os = "linux")]
 pub(super) fn relative_between(folder: &Path, source: &Path) -> Result<PathBuf, FsxError> {
     let from: Vec<Component<'_>> = folder.components().collect();
     let to: Vec<Component<'_>> = source.components().collect();
@@ -627,159 +409,6 @@ pub(super) fn relative_between(folder: &Path, source: &Path) -> Result<PathBuf, 
         out.push(".");
     }
     Ok(out)
-}
-
-/// Walks a real folder without following links: folders (parents first) and files, both relative to `root`.
-/// Any link or special entry inside is [`FsxErrorKind::TreeHasLink`].
-fn walk(root: &Path) -> Result<(Vec<PathBuf>, Vec<CopiedFile>), FsxError> {
-    let mut folders = Vec::new();
-    let mut files = Vec::new();
-    let mut pending = vec![PathBuf::new()];
-    while let Some(relative) = pending.pop() {
-        let folder = root.join(&relative);
-        let mut children: Vec<_> = fs::read_dir(&folder)
-            .map_err(|error| FsxError::io(FsxErrorKind::Io, &folder, "cannot list", error))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| FsxError::io(FsxErrorKind::Io, &folder, "cannot list", error))?;
-        children.sort_by_key(|child| child.file_name());
-        let mut subfolders = Vec::new();
-        for child in children {
-            let child_relative = relative.join(child.file_name());
-            let path = root.join(&child_relative);
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| FsxError::io(FsxErrorKind::Io, &path, "cannot inspect", error))?;
-            let file_type = metadata.file_type();
-            if file_type.is_symlink() {
-                return Err(FsxError::new(
-                    FsxErrorKind::TreeHasLink,
-                    &path,
-                    "is a link; links inside a copied folder are never followed",
-                ));
-            } else if file_type.is_dir() {
-                folders.push(child_relative.clone());
-                subfolders.push(child_relative);
-            } else if file_type.is_file() {
-                let bytes = fs::read(&path)
-                    .map_err(|error| FsxError::io(FsxErrorKind::Io, &path, "cannot read", error))?;
-                files.push(CopiedFile {
-                    relative: child_relative,
-                    fingerprint: Fingerprint::of(&bytes),
-                    executable: is_executable(&metadata),
-                });
-            } else {
-                return Err(FsxError::new(
-                    FsxErrorKind::TreeHasLink,
-                    &path,
-                    "is neither a file nor a folder and cannot be copied",
-                ));
-            }
-        }
-        // Depth-first in name order, keeping parents before their children.
-        pending.extend(subfolders.into_iter().rev());
-    }
-    Ok((folders, files))
-}
-
-#[cfg(unix)]
-fn is_executable(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_metadata: &fs::Metadata) -> bool {
-    false
-}
-
-/// Copy numbers of this process, counted apart from native attempts.
-static COPIES: AtomicU64 = AtomicU64::new(0);
-
-/// Copies the source tree into a hidden sibling folder and renames it into place, then checks the copy.
-fn copy_fallback(
-    staging: &GeneralStaging,
-    request: &LinkRequest<'_>,
-    parent: &Path,
-    name: &OsStr,
-    reason: Option<String>,
-) -> Result<LinkOutcome, FsxError> {
-    let destination = request.destination;
-    let (folders, files) = walk(request.source)?;
-    let number = COPIES.fetch_add(1, Ordering::Relaxed);
-    let mut stage = staging.folder(&private_name(parent, name, number, "copy"))?;
-    let populated = (|| {
-        for folder in &folders {
-            stage.directory(folder)?;
-        }
-        for file in &files {
-            stage.file(&request.source.join(&file.relative), &file.relative)?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = populated {
-        return Err(stage.discard_after(error));
-    }
-    let id = stage.publish(destination)?;
-    let link = ManagedLink {
-        destination: destination.to_path_buf(),
-        source: request.source.to_path_buf(),
-        kind: LinkKind::Copy,
-        identity: Some(id.evidence()),
-        target: None,
-        folders,
-        files,
-    };
-    read_back_copy(&link)?;
-    Ok(LinkOutcome {
-        link,
-        created: true,
-        fallback: Some(reason.unwrap_or_else(|| "a copy was requested".to_string())),
-    })
-}
-
-fn read_back_copy(link: &ManagedLink) -> Result<(), FsxError> {
-    let destination = &link.destination;
-    // A trailing separator or dot can make a no-follow lookup traverse the final link.
-    let root = destination.components().as_path();
-    let unreadable = |error| {
-        FsxError::io(
-            FsxErrorKind::Io,
-            destination,
-            "copied, but the copy cannot be read back",
-            error,
-        )
-    };
-    let different = || {
-        FsxError::new(
-            FsxErrorKind::Unverified,
-            destination,
-            "copied, but the copy read back differs from the source",
-        )
-    };
-    if !copy_root_is_directory(root).map_err(unreadable)? {
-        return Err(different());
-    }
-    let id = link
-        .identity
-        .and_then(EntryIdentity::entry_id)
-        .ok_or_else(different)?;
-    let (found_folders, found_files) = walk(root)?;
-    let same_files = found_files.len() == link.files.len()
-        && found_files
-            .iter()
-            .zip(&link.files)
-            .all(|(found, recorded)| {
-                found.relative == recorded.relative && found.fingerprint == recorded.fingerprint
-            });
-    let same_entry = identity::now(root, id).map_err(unreadable)? == Now::Same;
-    if !same_entry || found_folders != link.folders || !same_files {
-        return Err(different());
-    }
-    match copy_root_is_directory(root) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(different()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(different()),
-        Err(error) => Err(unreadable(error)),
-    }
 }
 
 fn copy_root_is_directory(root: &Path) -> io::Result<bool> {
@@ -806,71 +435,6 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("keep.txt"), "source bytes").unwrap();
         (dir, root, source)
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn copy_read_back_requires_a_real_root() {
-        let (_dir, root, source) = folder_with_source();
-        let published = root.join("published-directory");
-        fs::create_dir(&published).unwrap();
-        fs::copy(source.join("keep.txt"), published.join("keep.txt")).unwrap();
-        let (folders, files) = walk(&source).unwrap();
-        let mut link = ManagedLink {
-            destination: published.clone(),
-            source: source.clone(),
-            kind: LinkKind::Copy,
-            identity: Some(EntryId::of(&published).unwrap().evidence()),
-            target: None,
-            folders,
-            files,
-        };
-        read_back_copy(&link).unwrap();
-
-        let alias = root.join("alias");
-        SystemLinker.link(&published, &alias, &published).unwrap();
-        let id = EntryId::of(&alias).unwrap();
-        link.identity = Some(id.evidence());
-        link.destination = alias.clone();
-        let error = read_back_copy(&link).unwrap_err();
-        assert_eq!(error.kind(), FsxErrorKind::Unverified);
-        assert_eq!(identity::now(&alias, id).unwrap(), Now::Same);
-
-        SystemLinker
-            .link(&source, &published.join("foreign-link"), &source)
-            .unwrap();
-        for spelling in [alias.clone(), alias.join(""), alias.join(".")] {
-            link.destination = spelling;
-            let error = read_back_copy(&link).unwrap_err();
-            assert_eq!(
-                error.kind(),
-                FsxErrorKind::Unverified,
-                "the root must be rejected before its children are read"
-            );
-        }
-        assert_eq!(
-            fs::read(published.join("keep.txt")).unwrap(),
-            b"source bytes"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn native_read_back_requires_the_recorded_entry_and_exact_link_text() {
-        let (_dir, root, source) = folder_with_source();
-        let original = root.join("original");
-        let other = root.join("other");
-        SystemLinker.link(&source, &original, &source).unwrap();
-        SystemLinker.link(&source, &other, &source).unwrap();
-        let id = EntryId::of(&original).unwrap();
-        read_back_native(&original, id, LinkKind::Symlink, &source, &source).unwrap();
-
-        for (path, target) in [(&other, source.clone()), (&original, source.join("."))] {
-            let error =
-                read_back_native(path, id, LinkKind::Symlink, &target, &source).unwrap_err();
-            assert_eq!(error.kind(), FsxErrorKind::NotOwned);
-            assert_eq!(fs::read_link(path).unwrap(), source);
-        }
     }
 
     #[test]

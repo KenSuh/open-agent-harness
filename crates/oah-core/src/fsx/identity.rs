@@ -1,13 +1,13 @@
 // 항목 신원 값: 링크를 따라가지 않고 장치·항목 번호를 잠깐 읽어 값으로만 남기며, 열린 핸들을 보관하지 않는다.
-//! Plain entry identities, and the rename that never replaces.
+//! Plain entry identities for legacy link records.
 //!
-//! An [`EntryId`] is a plain value (device and entry number on Unix, volume, file index and FAT directory allocation on Windows)
-//! read without following links. Holding one keeps nothing open, so an operation may record one per entry it
-//! makes without using descriptors. Its platform-tagged evidence can also accompany a caller's managed record:
-//! an identity alone never grants ownership, but a different identity disproves that it is the recorded entry.
+//! An [`EntryIdentity`] stores platform-tagged evidence without holding an open handle.
 
+#[cfg(all(test, windows))]
 use std::fs::File;
+#[cfg(test)]
 use std::io;
+#[cfg(test)]
 use std::path::Path;
 
 /// Historical identity of a managed entry itself, without following a link or keeping an OS handle open.
@@ -34,34 +34,8 @@ pub enum EntryIdentity {
     },
 }
 
-impl EntryIdentity {
-    pub(super) fn entry_id(self) -> Option<EntryId> {
-        let (volume, index, first_cluster, supported) = match self {
-            Self::Unix { device, inode } => (device, inode, None, cfg!(unix)),
-            Self::Windows {
-                volume_serial,
-                file_index,
-            } => (volume_serial, file_index, None, cfg!(windows)),
-            Self::WindowsFatDirectory {
-                volume_serial,
-                file_index,
-                first_cluster,
-            } => (
-                volume_serial,
-                file_index,
-                Some(first_cluster),
-                cfg!(windows) && i64::try_from(first_cluster).is_ok(),
-            ),
-        };
-        (supported && index != 0).then_some(EntryId {
-            volume,
-            index,
-            first_cluster,
-        })
-    }
-}
-
 /// Which entry a path named when the value was read.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct EntryId {
     volume: u64,
@@ -69,6 +43,7 @@ pub(super) struct EntryId {
     first_cluster: Option<u64>,
 }
 
+#[cfg(test)]
 impl EntryId {
     pub(super) fn evidence(self) -> EntryIdentity {
         if cfg!(windows) {
@@ -116,18 +91,6 @@ impl EntryId {
     }
 
     /// The entry an open file refers to, read through that file without opening anything else.
-    #[cfg(unix)]
-    pub(super) fn of_file(file: &File) -> io::Result<EntryId> {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file.metadata()?;
-        Ok(EntryId {
-            volume: metadata.dev(),
-            index: metadata.ino(),
-            first_cluster: None,
-        })
-    }
-
-    /// The entry an open file refers to, read through that file without opening anything else.
     #[cfg(windows)]
     pub(super) fn of_file(file: &File) -> io::Result<EntryId> {
         let information = winapi_util::file::information(file)?;
@@ -137,14 +100,10 @@ impl EntryId {
             first_cluster: windows::directory_cluster(file, information.file_attributes())?,
         })
     }
-
-    #[cfg(not(any(unix, windows)))]
-    pub(super) fn of_file(_file: &File) -> io::Result<EntryId> {
-        Err(io::ErrorKind::Unsupported.into())
-    }
 }
 
 /// One operation's proof across its own move. Windows retains one attribute handle only until completion.
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) struct MoveProof {
     before: EntryId,
@@ -152,6 +111,7 @@ pub(super) struct MoveProof {
     file: File,
 }
 
+#[cfg(test)]
 impl MoveProof {
     pub(super) fn acquire(path: &Path, before: EntryId) -> io::Result<Option<Self>> {
         #[cfg(windows)]
@@ -178,6 +138,7 @@ impl MoveProof {
 }
 
 /// What a path names now, compared with an entry recorded earlier in the same operation.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Now {
     Same,
@@ -187,6 +148,7 @@ pub(super) enum Now {
 
 /// Compares `path` with a recorded entry. Only a missing entry is an answer; any other failure to read the
 /// identity stays an error and is never taken for a replacement.
+#[cfg(test)]
 pub(super) fn now(path: &Path, recorded: EntryId) -> io::Result<Now> {
     match EntryId::of(path) {
         Ok(found) if found == recorded => Ok(Now::Same),
@@ -197,6 +159,7 @@ pub(super) fn now(path: &Path, recorded: EntryId) -> io::Result<Now> {
 }
 
 /// Renames `from` to `to` without ever replacing what is at `to`; an occupied `to` is `AlreadyExists`.
+#[cfg(test)]
 pub(super) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     {
@@ -217,7 +180,7 @@ pub(super) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod move_tests;
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 mod windows;
 #[cfg(all(test, windows))]
 mod tests {
