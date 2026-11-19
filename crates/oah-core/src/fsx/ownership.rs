@@ -4,11 +4,28 @@ use super::{Fingerprint, FsxError, FsxErrorKind};
 use std::fmt;
 use std::path::Path;
 
-const REFERENCE_VERSION: &str = "oah-link-v1";
+#[cfg(target_os = "linux")]
+mod copy;
 
-/// Persistable reference to a native symlink acquired in an enrolled namespace.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReferenceKind {
+    Symlink,
+    Copy,
+}
+
+impl ReferenceKind {
+    const fn version(self) -> &'static str {
+        match self {
+            Self::Symlink => "oah-link-v1",
+            Self::Copy => "oah-copy-v1",
+        }
+    }
+}
+
+/// Persistable reference to a symlink or directory copy acquired in an enrolled namespace.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProtectedLinkRef {
+    kind: ReferenceKind,
     incarnation: Fingerprint,
     secret: Fingerprint,
 }
@@ -17,7 +34,8 @@ impl ProtectedLinkRef {
     /// Encodes the reference for the caller's persistent record.
     pub fn encode(&self) -> String {
         format!(
-            "{REFERENCE_VERSION}:{}:{}",
+            "{}:{}:{}",
+            self.kind.version(),
             self.incarnation.to_hex(),
             self.secret.to_hex()
         )
@@ -29,9 +47,15 @@ impl ProtectedLinkRef {
     /// Returns [`FsxErrorKind::NotOwned`] if the reference is malformed or has an unknown version.
     pub fn restore(text: &str) -> Result<Self, FsxError> {
         let parse = || {
-            let body = text.strip_prefix(REFERENCE_VERSION)?.strip_prefix(':')?;
+            let (version, body) = text.split_once(':')?;
+            let kind = match version {
+                "oah-link-v1" => ReferenceKind::Symlink,
+                "oah-copy-v1" => ReferenceKind::Copy,
+                _ => return None,
+            };
             let (incarnation, secret) = body.split_once(':')?;
             Some(Self {
+                kind,
                 incarnation: Fingerprint::from_hex(incarnation)?,
                 secret: Fingerprint::from_hex(secret)?,
             })
@@ -48,7 +72,10 @@ impl ProtectedLinkRef {
 
 impl fmt::Debug for ProtectedLinkRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ProtectedLinkRef(v1)")
+        formatter.write_str(match self.kind {
+            ReferenceKind::Symlink => "ProtectedLinkRef(v1)",
+            ReferenceKind::Copy => "ProtectedLinkRef(copy-v1)",
+        })
     }
 }
 
@@ -116,11 +143,53 @@ pub fn create_protected(
     }
 }
 
+/// Copies an ordinary directory to a direct child of the enrolled `anchor/links`.
+///
+/// This explicit operation uses the same enrollment and exclusive writer lock as
+/// [`create_protected`]. The source must be a canonical descendant of the anchor on the
+/// same ext4 mount. The trusted provisioner must supply a stable tree and ancestor
+/// directories owned by root:root, without POSIX ACLs, group or other write bits,
+/// special mode bits, or outstanding write handles or writable mappings. The writer
+/// must be able to read the tree. Directories require owner rwx. Regular files require
+/// owner read and one hard link. Symlinks and special files are refused.
+///
+/// The copy preserves file bytes and rwx bits and is owned by the enrolled writer.
+/// The operation needs Linux `openat2`, an umask that preserves owner directory access,
+/// two free descriptors during the call, and a cooperating enrolled writer for the
+/// entire acquisition lifetime. Limits include 4096 entries (including the root),
+/// a depth of 32 below the source root, 1024 bytes per inventory path, and 1 GiB of file
+/// data per tree. Source and destination observations may update filesystem access times.
+///
+/// # Errors
+/// An unsupported source or namespace and an occupied destination are refused. Once
+/// preparation has begun, a failure may leave the private journal, a stage or a published
+/// copy for inspection. A reference is issued only after verified, synchronized publication.
+pub fn create_protected_copy(
+    anchor: &Path,
+    source: &Path,
+    destination: &Path,
+) -> Result<ProtectedLinkRef, FsxError> {
+    #[cfg(target_os = "linux")]
+    {
+        copy::create(anchor, source, destination)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, destination);
+        Err(FsxError::new(
+            FsxErrorKind::NotOwned,
+            anchor,
+            "protected managed copies require Linux",
+        ))
+    }
+}
+
 /// Removes the enrolled acquisition identified by a restored reference.
 ///
 /// Uses the same namespace and writer requirements as [`create_protected`].
 /// The recorded source must be in `stores`. A retired reference reports [`Removal::AlreadyGone`]
-/// when both the destination and private pin are absent. The link target is preserved.
+/// when both the destination and its private pin or stage are absent. Removal preserves
+/// the source. A copy is removed only after the entire acquired inventory is verified.
 ///
 /// # Errors
 /// Refuses unsupported authority, unknown proof or a pending journal from an interrupted
@@ -154,7 +223,8 @@ pub fn remove_protected(
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        Fingerprint, FsxError, FsxErrorKind, LinkRequest, Path, ProtectedLinkRef, Removal,
+        Fingerprint, FsxError, FsxErrorKind, LinkRequest, Path, ProtectedLinkRef, ReferenceKind,
+        Removal, copy,
     };
     use crate::fsx::links::{TargetStyle, relative_between, source_in_stores};
     use crate::fsx::staging::protected::{
@@ -186,7 +256,10 @@ mod linux {
         }
     }
 
-    fn destination_parent<'a>(anchor: &Path, destination: &'a Path) -> Result<&'a Path, FsxError> {
+    pub(super) fn destination_parent<'a>(
+        anchor: &Path,
+        destination: &'a Path,
+    ) -> Result<&'a Path, FsxError> {
         destination
             .parent()
             .filter(|parent| {
@@ -210,15 +283,15 @@ mod linux {
         Retired,
     }
 
-    struct Journal<'a, 'path> {
+    pub(super) struct Journal<'a, 'path> {
         namespace: &'a Namespace<'path>,
-        id: String,
+        pub(super) id: String,
         file: String,
-        pin: String,
+        pub(super) pin: String,
     }
 
     impl<'a, 'path> Journal<'a, 'path> {
-        fn new(namespace: &'a Namespace<'path>, reference: &ProtectedLinkRef) -> Self {
+        pub(super) fn new(namespace: &'a Namespace<'path>, reference: &ProtectedLinkRef) -> Self {
             let id = Fingerprint::of(reference.secret.as_bytes()).to_hex();
             Self {
                 namespace,
@@ -229,23 +302,33 @@ mod linux {
         }
 
         fn prepare(&self, paths: &LinkPaths) -> Result<(), FsxError> {
+            let mut record = self.header(JOURNAL_MAGIC, &paths.source, &paths.destination);
+            record.extend_from_slice(paths.target.as_os_str().as_bytes());
+            record.push(0);
+            self.prepare_record(&record)
+        }
+
+        pub(super) fn header(&self, magic: &[u8], source: &Path, destination: &Path) -> Vec<u8> {
+            let incarnation = self.namespace.incarnation().to_hex();
+            let mut record = Vec::new();
+            for field in [
+                magic,
+                incarnation.as_bytes(),
+                self.id.as_bytes(),
+                source.as_os_str().as_bytes(),
+                destination.as_os_str().as_bytes(),
+            ] {
+                record.extend_from_slice(field);
+                record.push(0);
+            }
+            record
+        }
+
+        pub(super) fn prepare_record(&self, record: &[u8]) -> Result<(), FsxError> {
             let path = self.namespace.private_path(&self.file);
             let pin = self.namespace.private_path(&self.pin);
             if probe(&self.namespace.private, OsStr::new(&self.pin), &pin)?.is_some() {
                 return Err(refuse(&pin, "the acquisition's staging name is occupied"));
-            }
-            let incarnation = self.namespace.incarnation().to_hex();
-            let mut record = Vec::new();
-            for field in [
-                JOURNAL_MAGIC,
-                incarnation.as_bytes(),
-                self.id.as_bytes(),
-                paths.source.as_os_str().as_bytes(),
-                paths.destination.as_os_str().as_bytes(),
-                paths.target.as_os_str().as_bytes(),
-            ] {
-                record.extend_from_slice(field);
-                record.push(0);
             }
             let fd = rx::openat(
                 &self.namespace.private,
@@ -259,26 +342,21 @@ mod linux {
             })?;
             rx::fchmod(&fd, Mode::RUSR | Mode::WUSR)
                 .map_err(|err| io(&path, "cannot set the acquisition journal mode", err))?;
-            persist(File::from(fd), &record)
+            persist(File::from(fd), record)
                 .and_then(|()| rx::fsync(&self.namespace.private).map_err(Into::into))
                 .map_err(|err| io(&path, "cannot persist preparation before staging", err))
         }
 
         fn load(&self) -> Result<(LinkPaths, Phase), FsxError> {
             let path = self.namespace.private_path(&self.file);
-            let mut bytes = Vec::new();
-            self.open(OFlags::RDONLY)?
-                .take(MAX_JOURNAL + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|err| io(&path, "cannot read the ownership journal", err))?;
+            let bytes = self.read(MAX_JOURNAL)?;
             let parse = || {
                 let [magic, incarnation, id, source, destination, target, phase] = bytes
                     .splitn(7, |&byte| byte == 0)
                     .collect::<Vec<_>>()
                     .try_into()
                     .ok()?;
-                if bytes.len() > 16_384
-                    || magic != JOURNAL_MAGIC
+                if magic != JOURNAL_MAGIC
                     || incarnation != self.namespace.incarnation().to_hex().as_bytes()
                     || id != self.id.as_bytes()
                     || target.is_empty()
@@ -306,7 +384,20 @@ mod linux {
             parse().ok_or_else(|| refuse(&path, "unrecognized or incomplete ownership journal"))
         }
 
-        fn append(&self, transition: &[u8]) -> Result<(), FsxError> {
+        pub(super) fn read(&self, limit: u64) -> Result<Vec<u8>, FsxError> {
+            let path = self.namespace.private_path(&self.file);
+            let mut bytes = Vec::new();
+            self.open(OFlags::RDONLY)?
+                .take(limit + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|err| io(&path, "cannot read the ownership journal", err))?;
+            if bytes.len() as u64 > limit {
+                return Err(refuse(&path, "the ownership journal is too large"));
+            }
+            Ok(bytes)
+        }
+
+        pub(super) fn append(&self, transition: &[u8]) -> Result<(), FsxError> {
             let path = self.namespace.private_path(&self.file);
             persist(self.open(OFlags::WRONLY | OFlags::APPEND)?, transition)
                 .map_err(|err| io(&path, "cannot sync an ownership transition", err))
@@ -374,6 +465,17 @@ mod linux {
         file.sync_all()
     }
 
+    pub(super) fn new_reference(
+        namespace: &Namespace<'_>,
+        kind: ReferenceKind,
+    ) -> Result<ProtectedLinkRef, FsxError> {
+        Ok(ProtectedLinkRef {
+            kind,
+            incarnation: namespace.incarnation(),
+            secret: secret()?,
+        })
+    }
+
     fn secret() -> Result<Fingerprint, FsxError> {
         let path = Path::new("/dev/urandom");
         let fd = rx::open(path, FILE_FLAGS | OFlags::RDONLY, Mode::empty())
@@ -394,7 +496,7 @@ mod linux {
         Ok(Fingerprint::of(&bytes))
     }
 
-    fn changed(error: FsxError, destination: &Path, what: &str) -> FsxError {
+    pub(super) fn changed(error: FsxError, destination: &Path, what: &str) -> FsxError {
         match error.io_error() {
             Some(cause) => {
                 let cause = cause.raw_os_error().map_or_else(
@@ -455,10 +557,7 @@ mod linux {
                 "the destination is occupied",
             ));
         }
-        let reference = ProtectedLinkRef {
-            incarnation: namespace.incarnation(),
-            secret: secret()?,
-        };
+        let reference = new_reference(&namespace, ReferenceKind::Symlink)?;
         let journal = Journal::new(&namespace, &reference);
         journal.prepare(&paths)?;
         let pin = namespace.private_path(&journal.pin);
@@ -545,6 +644,10 @@ mod linux {
             ));
         }
         let journal = Journal::new(&namespace, reference);
+        match reference.kind {
+            ReferenceKind::Copy => return copy::remove(&namespace, &journal, stores),
+            ReferenceKind::Symlink => {}
+        }
         let (paths, phase) = journal.load()?;
         let destination = &paths.destination;
         let parent = destination_parent(anchor, destination)?;

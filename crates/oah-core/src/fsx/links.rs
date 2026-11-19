@@ -8,14 +8,17 @@
 //! link, like a finished copy, is renamed into place without replacing anything.
 //!
 //! Creating returns a [`ManagedLink`] inventory record. [`remove`] preserves present entries described by
-//! these legacy records. For an enrolled Linux namespace, [`create_protected`] issues a persistable
-//! [`ProtectedLinkRef`] that [`remove_protected`] can use to remove the original symlink.
+//! these legacy records. In an enrolled Linux namespace, [`create_protected`] acquires a native
+//! symlink and [`create_protected_copy`] acquires a directory copy. Both issue a persistable
+//! [`ProtectedLinkRef`] for [`remove_protected`].
 
 use super::atomic::Fingerprint;
 use super::error::{FsxError, FsxErrorKind};
 pub use super::identity::EntryIdentity;
 use super::identity::{self, EntryId, Now};
-pub use super::ownership::{ProtectedLinkRef, create_protected, remove_protected};
+pub use super::ownership::{
+    ProtectedLinkRef, create_protected, create_protected_copy, remove_protected,
+};
 use super::staging::{Attempted, Stage};
 use std::ffi::{OsStr, OsString};
 use std::fs;

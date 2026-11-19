@@ -719,7 +719,11 @@ pub(super) mod protected {
         Ok(stat)
     }
 
-    fn mode_only(fd: &OwnedFd, path: &Path, directory: bool) -> Result<(), FsxError> {
+    pub(in crate::fsx) fn mode_only(
+        fd: &OwnedFd,
+        path: &Path,
+        directory: bool,
+    ) -> Result<(), FsxError> {
         for name in ["system.posix_acl_access", "system.posix_acl_default"]
             .into_iter()
             .take(if directory { 2 } else { 1 })
