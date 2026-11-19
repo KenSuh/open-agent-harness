@@ -447,8 +447,10 @@ pub enum Removal {
 
 /// Checks a legacy link record for ordinary absence.
 ///
-/// A present entry is preserved and returns [`FsxErrorKind::NotOwned`]. A destination ending in a
-/// separator or a dot component is refused before lookup.
+/// [`Removal::AlreadyGone`] is an advisory metadata observation with no durability or
+/// concurrent ownership guarantee. A present entry or an unverified ancestor, including a
+/// symlink or Windows reparse point, returns [`FsxErrorKind::NotOwned`]. A destination ending
+/// in a separator or a dot component is refused before lookup. The check leaves entries in place.
 pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError> {
     let destination = link.destination.as_path();
     require_absolute(&link.source)?;
@@ -486,29 +488,19 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
             "its source is outside the known stores or is not a plain path",
         ));
     }
-    match fs::symlink_metadata(destination) {
-        Ok(_) => {
-            return Err(not_owned(
-                link,
-                "a legacy record cannot prove ownership of the present entry",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(FsxError::io(
-                FsxErrorKind::Io,
-                destination,
-                "cannot inspect",
-                error,
-            ));
-        }
-    }
-    // A missing ancestor is ordinary absence. A dangling or opaque parent is an ambiguous lookup.
-    for parent in destination.ancestors().skip(1) {
+    // Probe complete absolute ancestors from the root down, without opening a bare drive prefix.
+    let parents: Vec<_> = destination
+        .ancestors()
+        .skip(1)
+        .take_while(|parent| parent.is_absolute())
+        .collect();
+    for &parent in parents.iter().rev() {
         match copy_root_is_directory(parent) {
-            Ok(true) => return Ok(Removal::AlreadyGone),
+            Ok(true) => {}
             Ok(false) => return Err(not_owned(link, "its destination has an unverified parent")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Removal::AlreadyGone);
+            }
             Err(error) => {
                 return Err(FsxError::io(
                     FsxErrorKind::Io,
@@ -519,7 +511,25 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
             }
         }
     }
-    Err(not_owned(link, "its destination has no observable parent"))
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(not_owned(
+            link,
+            "a legacy record cannot prove ownership of the present entry",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if parents.is_empty() {
+                Err(not_owned(link, "its destination has no observable parent"))
+            } else {
+                Ok(Removal::AlreadyGone)
+            }
+        }
+        Err(error) => Err(FsxError::io(
+            FsxErrorKind::Io,
+            destination,
+            "cannot inspect",
+            error,
+        )),
+    }
 }
 
 fn not_owned(link: &ManagedLink, why: &str) -> FsxError {

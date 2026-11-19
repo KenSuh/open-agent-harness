@@ -287,6 +287,45 @@ fn legacy_native_record_preserves_the_link_and_reports_ordinary_absence() {
     );
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn legacy_absence_requires_ordinary_destination_ancestors() {
+    let stores = Stores::new();
+    let source = stores.source();
+    let alias = stores.agents.join("alias");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&source, &alias).unwrap();
+    #[cfg(windows)]
+    junction::create(&source, &alias).unwrap();
+
+    let remove_at = |parent: &Path| {
+        remove(
+            &ManagedLink {
+                destination: parent.join("absent"),
+                source: source.clone(),
+                kind: native_kind(),
+                identity: None,
+                target: None,
+                files: Vec::new(),
+                folders: Vec::new(),
+            },
+            &[&stores.store],
+        )
+    };
+    for parent in [source.join("scripts"), source.join("missing")] {
+        assert_eq!(remove_at(&parent).unwrap(), Removal::AlreadyGone);
+    }
+    for parent in [
+        alias.join("scripts"),
+        alias.join("missing"),
+        alias,
+        source.join("SKILL.md"),
+    ] {
+        let error = remove_at(&parent).expect_err("unverified ancestor reported ordinary absence");
+        assert_eq!(error.kind(), FsxErrorKind::NotOwned, "{parent:?}: {error}");
+    }
+}
+
 #[test]
 fn a_link_that_is_no_longer_ours_is_not_removed() {
     let stores = Stores::new();

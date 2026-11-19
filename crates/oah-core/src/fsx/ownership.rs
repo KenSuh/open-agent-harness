@@ -59,18 +59,40 @@ impl fmt::Debug for ProtectedLinkRef {
 /// native symlinks for both target styles.
 ///
 /// # Enrollment
-/// A trusted provisioner supplies an ext4 anchor and root-owned 0755 ancestors. The anchor
-/// contains writer-owned `links` (0755) and `.oah-links` (0700) directories, and a root-owned
-/// 0644 `.oah-enrollment` file. Its six lines are `oah-protected-links-v1`, the nonzero writer
-/// UID and GID separated by a space, a fresh random 64-digit lowercase hex incarnation, then
-/// the anchor, public and private directory bindings in that order. A binding is five decimal
-/// fields separated by spaces from Linux statx: device major, device minor, inode, birth seconds
-/// and birth nanoseconds. All three directories and the enrollment file share one mount.
+/// The anchor is an absolute non-root path with single separators and no dot components,
+/// trailing separator or NUL bytes. The backend opens it from `/` without following
+/// symlinks. The root filesystem must have overlayfs or ext-family magic, and every
+/// directory before the anchor must be on the root mount. The anchor alone may cross a mount
+/// boundary. Its mount ID must be listed as `ext4` in `/proc/thread-self/mountinfo`.
 ///
-/// Keep the mount namespace, procfs and mount administration trusted and the writer UID dedicated
-/// to authorized code. Use ordinary unmapped ownership and mode bits. The writer runs with
-/// matching real, effective, saved and filesystem IDs, no active privileges and no-new-privileges.
-/// Reprovisioning, restoring state from backup, or losing proof requires a new incarnation.
+/// The path from `/` through the anchor requires root:root directories with exact mode 0755.
+/// Within the anchor, `links` (0755) and `.oah-links` (0700) must be directories owned by the
+/// enrolled UID and GID. `.oah-enrollment` must be a root:root regular file with mode 0644 and
+/// a single hard link. These three entries must share the anchor's mount. The checked directories
+/// must have no POSIX access or default ACL xattrs. The file is checked for an access ACL xattr.
+/// An absent or unsupported ACL xattr is accepted.
+///
+/// The backend requires `statx` basic stats and mount ID. The anchor and the two writer
+/// directories also need birth time for the enrollment bindings. The file contains six UTF-8
+/// lines in order. They hold `oah-protected-links-v1`, the nonzero writer UID and GID separated
+/// by a space, a fresh random 64-digit lowercase hex incarnation, and the bindings of the
+/// anchor, public and private directories. Each binding gives device major, device minor,
+/// inode, birth seconds and birth nanoseconds as five space-separated decimal fields.
+///
+/// The thread must expose readable regular files on genuine procfs under `/proc/thread-self`.
+/// Both `uid_map` and `gid_map` must contain only the mapping `0 0 4294967295`. The real,
+/// effective, saved and filesystem IDs in `status` must all match the enrolled UID and GID.
+/// `NoNewPrivs` must be 1, and `CapInh`, `CapPrm`, `CapEff` and `CapAmb` must all be zero.
+///
+/// The backend limits UTF-8 reads to 1 KiB for `.oah-enrollment`, 1 MiB for `mountinfo`,
+/// 256 bytes each for `uid_map` and `gid_map`, and 64 KiB for `status`. Canonical paths are
+/// limited to fewer than 4096 bytes, and journal reads to 16 KiB. Calls need two available
+/// file descriptors. Creation also needs a readable `/dev/urandom` character device (1:9).
+///
+/// The trusted provisioner is responsible for local ext4 storage, ordinary unmapped
+/// ownership and stable, trusted mount topology and procfs. Dedicate the writer UID to
+/// authorized code, since the UID can modify the writer directories. Reprovisioning,
+/// restoring state from backup, or losing proof requires a new incarnation.
 ///
 /// # Errors
 /// Unsupported enrollment is refused. Publication or sync failures can leave a private stage,
@@ -96,12 +118,19 @@ pub fn create_protected(
 
 /// Removes the enrolled acquisition identified by a restored reference.
 ///
+/// Uses the same namespace and writer requirements as [`create_protected`].
 /// The recorded source must be in `stores`. A retired reference reports [`Removal::AlreadyGone`]
-/// when its destination is absent. The link target is preserved.
+/// when both the destination and private pin are absent. The link target is preserved.
 ///
 /// # Errors
-/// Refuses unsupported authority, unknown proof or an interrupted transaction. If deletion starts
-/// and fails, the returned error identifies the failed step and the journal bars automatic retry.
+/// Refuses unsupported authority, unknown proof or a pending journal from an interrupted
+/// acquisition or removal. Once this call persists the removal marker, a later failure
+/// returns [`FsxErrorKind::Unverified`]. An unlink error identifies the name whose unlink failed.
+/// A directory sync error follows a successful unlink, with durability unconfirmed.
+///
+/// Preserve the partial journal and remaining entries for inspection by the trusted
+/// operator. Report the anchor, destination, error detail and underlying OS error when
+/// available. A subsequent call refuses the interrupted state and leaves it in place.
 pub fn remove_protected(
     anchor: &Path,
     reference: &ProtectedLinkRef,
@@ -589,18 +618,24 @@ mod linux {
         };
         let folder = namespace.public_folder().map_err(incomplete)?;
         rx::unlinkat(&folder, leaf, AtFlags::empty())
-            .and_then(|()| rx::fsync(&folder))
-            .map_err(|err| {
-                incomplete(io(
-                    destination,
-                    "cannot unlink or sync the public symlink",
-                    err,
-                ))
-            })?;
+            .map_err(|err| incomplete(io(destination, "cannot unlink the public symlink", err)))?;
+        rx::fsync(&folder).map_err(|err| {
+            incomplete(io(
+                destination,
+                "cannot sync the public directory after unlinking the symlink",
+                err,
+            ))
+        })?;
         drop(folder);
         rx::unlinkat(&namespace.private, &journal.pin, AtFlags::empty())
-            .and_then(|()| rx::fsync(&namespace.private))
-            .map_err(|err| incomplete(io(&pin, "cannot unlink or sync the private pin", err)))?;
+            .map_err(|err| incomplete(io(&pin, "cannot unlink the private pin", err)))?;
+        rx::fsync(&namespace.private).map_err(|err| {
+            incomplete(io(
+                &pin,
+                "cannot sync the private directory after unlinking the pin",
+                err,
+            ))
+        })?;
         journal.append(b"X").map_err(incomplete)?;
         Ok(Removal::Removed)
     }
