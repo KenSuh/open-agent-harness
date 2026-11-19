@@ -16,8 +16,6 @@ use super::error::{FsxError, FsxErrorKind};
 pub use super::identity::EntryIdentity;
 use super::identity::{self, EntryId, Now};
 pub use super::ownership::{ProtectedLinkRef, create_protected, remove_protected};
-#[cfg(all(test, unix))]
-use super::staging;
 use super::staging::{Attempted, Stage};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -808,6 +806,7 @@ fn copy_root_is_directory(root: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fsx::staging;
 
     /// Every name in `folder`, sorted.
     fn names(folder: &Path) -> Vec<String> {

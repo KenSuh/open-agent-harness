@@ -1,3 +1,4 @@
+// 보호된 링크의 저장 가능한 참조와 생성·삭제 진입점을 정의한다.
 use super::links::{LinkRequest, Removal};
 use super::{Fingerprint, FsxError, FsxErrorKind};
 use std::fmt;

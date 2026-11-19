@@ -1,3 +1,4 @@
+// 보호된 링크의 참조 형식과 플랫폼별 동작을 검증한다.
 use oah_core::fsx::FsxErrorKind;
 use oah_core::fsx::links::ProtectedLinkRef;
 

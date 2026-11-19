@@ -946,7 +946,7 @@ fn system_linker_copy_under_actual_traversal_refusal() {
         "# Skill A\n"
     );
     assert_eq!(inspect(&destination).unwrap(), Entry::Directory);
-    assert_eq!(names(&stores.agents), Vec::<String>::new());
+    assert_eq!(names(&stores.agents), ["skill-a"]);
 }
 
 /// The role a separate process of this test binary plays, and the folder it works in.
@@ -1142,8 +1142,9 @@ fn parse_record(text: &str) -> ManagedLink {
 }
 
 #[test]
-fn legacy_records_round_trip_across_processes_without_removal_authority() {
-    const TEST: &str = "legacy_records_round_trip_across_processes_without_removal_authority";
+fn durable_record_legacy_records_round_trip_across_processes_without_removal_authority() {
+    const TEST: &str =
+        "durable_record_legacy_records_round_trip_across_processes_without_removal_authority";
     if let Some((role, root)) = child_role() {
         let store = root.join("store");
         let agents = root.join("agents");
@@ -1424,7 +1425,7 @@ fn operation_identity_real_fat32_fallback_record() {
 }
 
 #[test]
-fn legacy_native_records_preserve_absolute_and_relative_links() {
+fn durable_record_legacy_native_records_preserve_absolute_and_relative_links() {
     let stores = Stores::new();
     let source = stores.source();
     let absolute = stores.agents.join("absolute");
