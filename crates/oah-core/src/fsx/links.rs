@@ -1,15 +1,9 @@
 // 관리 링크: 심볼릭 링크·윈도 정션·복사 대체를 만들고 살피고 지우며, 소유 증거가 파일 시스템과 맞을 때만 지운다.
 //! Managed links from an agent's folder to a store folder.
 //!
-//! A link is made natively (a symlink on macOS and Linux, a directory junction on Windows, which needs no
-//! elevation) or, when the caller allows it and the native link cannot be made, as a reported copy. The native
-//! attempt runs inside a private folder that the call makes exclusively next to the destination, so whatever a
-//! failed attempt leaves behind is the call's own to clean up and never occupies the destination. A verified
-//! link, like a finished copy, is renamed into place without replacing anything.
-//!
-//! Creating returns a [`ManagedLink`] inventory record. [`remove`] preserves present entries described by
-//! these legacy records. In an enrolled Linux namespace, [`create_protected`] acquires a native
-//! symlink and [`create_protected_copy`] acquires a directory copy. Both issue a persistable
+//! [`remove`] preserves present entries described by legacy [`ManagedLink`] records. In an enrolled Linux
+//! namespace, [`create_protected`] acquires a native symlink and [`create_protected_copy`] acquires a
+//! directory copy. Both issue a persistable
 //! [`ProtectedLinkRef`] for [`remove_protected`].
 
 use super::atomic::Fingerprint;
@@ -19,7 +13,7 @@ use super::identity::{self, EntryId, Now};
 pub use super::ownership::{
     ProtectedLinkRef, create_protected, create_protected_copy, remove_protected,
 };
-use super::staging::{Attempted, Stage};
+use super::staging::{Attempted, GeneralStaging, Stage};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
@@ -156,9 +150,8 @@ pub trait NativeLinker {
     fn kind(&self) -> LinkKind;
     /// Creates the link at `destination`; `target` is the text to store (symlinks) and `source` the folder.
     ///
-    /// [`create_with`] passes a path inside a private folder it made for this attempt, never the public
-    /// destination, and `target` exactly as it must read at the public destination: a relative target is
-    /// relative to the destination's folder and is never rewritten for the private folder.
+    /// A staged attempt would pass a path inside the stage and a `target` relative to the public
+    /// destination's folder. [`create_with`] currently refuses before invoking this method.
     fn link(&self, source: &Path, destination: &Path, target: &Path) -> io::Result<()>;
 }
 
@@ -191,19 +184,18 @@ impl NativeLinker for SystemLinker {
     }
 }
 
-/// Links `request.destination` to `request.source` with the system's native link, falling back to a reported
-/// copy when allowed.
+/// Requests a managed native link, with a copy fallback when allowed and staging authority is available.
+///
+/// Valid ordinary requests currently return [`FsxErrorKind::LinkUnsupported`] before staging on every
+/// platform. Enrolled Linux callers can use [`create_protected`] or [`create_protected_copy`].
 pub fn create(request: &LinkRequest<'_>) -> Result<LinkOutcome, FsxError> {
     create_with(request, &SystemLinker)
 }
 
 /// [`create`] with an explicit native linker.
 ///
-/// An occupied destination is never adopted or replaced: it is [`FsxErrorKind::LinkExists`]. The linker runs in
-/// a private folder this call makes exclusively; everything the attempt leaves there is removed again, so a
-/// failed or unusable native link never occupies the destination. When the native link cannot be made or used,
-/// the copy fallback runs only if the request allows it and that cleanup succeeded, and the outcome then names
-/// the reason. A cleanup that cannot finish is reported with the original failure and no fallback.
+/// An occupied destination is [`FsxErrorKind::LinkExists`]. A request that reaches staging currently returns
+/// [`FsxErrorKind::LinkUnsupported`] without calling [`NativeLinker::link`] or starting a copy.
 pub fn create_with(
     request: &LinkRequest<'_>,
     linker: &dyn NativeLinker,
@@ -244,15 +236,6 @@ pub fn create_with(
         ));
     }
 
-    let kind = linker.kind();
-    let target = match kind {
-        LinkKind::Symlink => match request.style {
-            TargetStyle::Absolute => source.to_path_buf(),
-            TargetStyle::Relative => relative_target(parent, source)?,
-        },
-        LinkKind::Junction | LinkKind::Copy => source.to_path_buf(),
-    };
-
     let existing = inspect(destination)?;
     if existing != Entry::Missing {
         return Err(FsxError::new(
@@ -262,17 +245,26 @@ pub fn create_with(
         ));
     }
 
+    let staging = GeneralStaging::preflight(destination)?;
+    let kind = linker.kind();
     if kind == LinkKind::Copy {
-        return copy_fallback(request, parent, name, None);
+        return copy_fallback(&staging, request, parent, name, None);
     }
-    match native(request, linker, kind, &target, parent, name) {
+    let target = match kind {
+        LinkKind::Symlink => match request.style {
+            TargetStyle::Absolute => source.to_path_buf(),
+            TargetStyle::Relative => relative_target(parent, source)?,
+        },
+        LinkKind::Junction | LinkKind::Copy => source.to_path_buf(),
+    };
+    match native(&staging, request, linker, kind, &target, parent, name) {
         Ok(link) => Ok(LinkOutcome {
             link,
             created: true,
             fallback: None,
         }),
         Err(Failure::Unsupported { reason, .. }) if request.allow_copy => {
-            copy_fallback(request, parent, name, Some(reason))
+            copy_fallback(&staging, request, parent, name, Some(reason))
         }
         Err(Failure::Unsupported { error, .. } | Failure::Fatal(error)) => Err(error),
     }
@@ -294,6 +286,7 @@ static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 /// Makes the native link in a private folder, moves it next to the destination where it resolves exactly as it
 /// will once published, checks it, renames it into place without replacing anything and reads it back.
 fn native(
+    staging: &GeneralStaging,
     request: &LinkRequest<'_>,
     linker: &dyn NativeLinker,
     kind: LinkKind,
@@ -304,8 +297,9 @@ fn native(
     let source = request.source;
     let destination = request.destination;
     let number = ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-    let mut attempt =
-        Stage::folder(&private_name(parent, name, number, "attempt")).map_err(Failure::Fatal)?;
+    let mut attempt = staging
+        .folder(&private_name(parent, name, number, "attempt"))
+        .map_err(Failure::Fatal)?;
     let entry = attempt.path().join(name);
     let made = linker.link(source, &entry, target);
     if let Err(error) = &made
@@ -702,31 +696,16 @@ static COPIES: AtomicU64 = AtomicU64::new(0);
 
 /// Copies the source tree into a hidden sibling folder and renames it into place, then checks the copy.
 fn copy_fallback(
+    staging: &GeneralStaging,
     request: &LinkRequest<'_>,
     parent: &Path,
     name: &OsStr,
     reason: Option<String>,
 ) -> Result<LinkOutcome, FsxError> {
+    let destination = request.destination;
     let (folders, files) = walk(request.source)?;
     let number = COPIES.fetch_add(1, Ordering::Relaxed);
-    copy_at(
-        request,
-        reason,
-        &private_name(parent, name, number, "copy"),
-        folders,
-        files,
-    )
-}
-
-fn copy_at(
-    request: &LinkRequest<'_>,
-    reason: Option<String>,
-    staging: &Path,
-    folders: Vec<PathBuf>,
-    files: Vec<CopiedFile>,
-) -> Result<LinkOutcome, FsxError> {
-    let destination = request.destination;
-    let mut stage = Stage::folder(staging)?;
+    let mut stage = staging.folder(&private_name(parent, name, number, "copy"))?;
     let populated = (|| {
         for folder in &folders {
             stage.directory(folder)?;
@@ -819,17 +798,6 @@ fn copy_root_is_directory(root: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsx::staging;
-
-    /// Every name in `folder`, sorted.
-    fn names(folder: &Path) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(folder)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
-    }
 
     fn folder_with_source() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -844,34 +812,34 @@ mod tests {
     #[test]
     fn copy_read_back_requires_a_real_root() {
         let (_dir, root, source) = folder_with_source();
-        let destination = root.join("destination");
-        let request = LinkRequest {
-            source: &source,
-            destination: &destination,
-            style: TargetStyle::Absolute,
-            allow_copy: true,
-        };
-        let (folders, files) = walk(&source).unwrap();
-        let copy = copy_at(&request, None, &root.join("staging"), folders, files).unwrap();
-        assert_eq!(copy.link.kind, LinkKind::Copy);
-
         let published = root.join("published-directory");
-        fs::rename(&destination, &published).unwrap();
-        SystemLinker
-            .link(&published, &destination, &published)
-            .unwrap();
-        // Supply a matching number deterministically while keeping the real copy's inventory.
-        let id = EntryId::of(&destination).unwrap();
+        fs::create_dir(&published).unwrap();
+        fs::copy(source.join("keep.txt"), published.join("keep.txt")).unwrap();
+        let (folders, files) = walk(&source).unwrap();
         let mut link = ManagedLink {
-            identity: Some(id.evidence()),
-            ..copy.link
+            destination: published.clone(),
+            source: source.clone(),
+            kind: LinkKind::Copy,
+            identity: Some(EntryId::of(&published).unwrap().evidence()),
+            target: None,
+            folders,
+            files,
         };
+        read_back_copy(&link).unwrap();
+
+        let alias = root.join("alias");
+        SystemLinker.link(&published, &alias, &published).unwrap();
+        let id = EntryId::of(&alias).unwrap();
+        link.identity = Some(id.evidence());
+        link.destination = alias.clone();
         let error = read_back_copy(&link).unwrap_err();
         assert_eq!(error.kind(), FsxErrorKind::Unverified);
+        assert_eq!(identity::now(&alias, id).unwrap(), Now::Same);
 
-        let child = published.join("foreign-link");
-        SystemLinker.link(&source, &child, &source).unwrap();
-        for spelling in [destination.clone(), destination.join("")] {
+        SystemLinker
+            .link(&source, &published.join("foreign-link"), &source)
+            .unwrap();
+        for spelling in [alias.clone(), alias.join(""), alias.join(".")] {
             link.destination = spelling;
             let error = read_back_copy(&link).unwrap_err();
             assert_eq!(
@@ -880,229 +848,29 @@ mod tests {
                 "the root must be rejected before its children are read"
             );
         }
-        assert_eq!(identity::now(&destination, id).unwrap(), Now::Same);
         assert_eq!(
             fs::read(published.join("keep.txt")).unwrap(),
             b"source bytes"
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn cleanup_ownership_copy_collisions_and_replacements_are_preserved() {
+    fn native_read_back_requires_the_recorded_entry_and_exact_link_text() {
         let (_dir, root, source) = folder_with_source();
-        let destination = root.join("destination");
-        let request = LinkRequest {
-            source: &source,
-            destination: &destination,
-            style: TargetStyle::Absolute,
-            allow_copy: true,
-        };
-        // A colliding private name is never used or cleaned.
-        let staging = root.join("staging");
-        fs::create_dir(&staging).unwrap();
-        fs::write(staging.join("user.txt"), "user bytes").unwrap();
-        let (folders, files) = walk(&source).unwrap();
-        assert!(copy_at(&request, None, &staging, folders, files).is_err());
-        assert_eq!(fs::read(staging.join("user.txt")).unwrap(), b"user bytes");
+        let original = root.join("original");
+        let other = root.join("other");
+        SystemLinker.link(&source, &original, &source).unwrap();
+        SystemLinker.link(&source, &other, &source).unwrap();
+        let id = EntryId::of(&original).unwrap();
+        read_back_native(&original, id, LinkKind::Symlink, &source, &source).unwrap();
 
-        // A stage whose root another writer replaced removes nothing below that path.
-        let acquired_path = root.join("acquired-stage");
-        let acquired = Stage::folder(&acquired_path).unwrap();
-        fs::rename(&acquired_path, root.join("original-staging")).unwrap();
-        fs::create_dir(&acquired_path).unwrap();
-        fs::write(acquired_path.join("replacement.txt"), "replacement bytes").unwrap();
-        assert_eq!(
-            acquired.discard().unwrap_err().kind(),
-            FsxErrorKind::NotOwned
-        );
-        assert_eq!(
-            fs::read(acquired_path.join("replacement.txt")).unwrap(),
-            b"replacement bytes"
-        );
-
-        // A foreign child keeps the stage folder in place.
-        let unexpected = root.join("unexpected-child-stage");
-        let acquired = Stage::folder(&unexpected).unwrap();
-        fs::write(unexpected.join("user.txt"), "foreign child").unwrap();
-        assert!(acquired.discard().is_err());
-        assert_eq!(
-            fs::read(unexpected.join("user.txt")).unwrap(),
-            b"foreign child"
-        );
-
-        // An occupied destination is refused and the stage is cleaned.
-        fs::create_dir(&destination).unwrap();
-        let user_destination = EntryId::of(&destination).unwrap();
-        let (folders, files) = walk(&source).unwrap();
-        let owned_stage = root.join("owned-stage");
-        assert_eq!(
-            copy_at(&request, None, &owned_stage, folders, files)
-                .unwrap_err()
-                .kind(),
-            FsxErrorKind::LinkExists
-        );
-        assert_eq!(
-            identity::now(&destination, user_destination).unwrap(),
-            Now::Same
-        );
-        assert!(!owned_stage.exists());
-        fs::remove_dir(&destination).unwrap();
-
-        // A failed copy cleans its stage.
-        let (folders, files) = walk(&source).unwrap();
-        fs::remove_file(source.join("keep.txt")).unwrap();
-        let failed_stage = root.join("failed-stage");
-        assert!(copy_at(&request, None, &failed_stage, folders, files).is_err());
-        assert!(!failed_stage.exists());
-    }
-
-    #[test]
-    fn cleanup_ownership_keeps_the_primary_failure_when_cleanup_cannot_finish() {
-        let (_dir, root, source) = folder_with_source();
-        let path = root.join("stage");
-        let mut stage = Stage::folder(&path).unwrap();
-        stage.directory(Path::new("made")).unwrap();
-        fs::write(path.join("foreign.txt"), "foreign bytes").unwrap();
-        let primary = stage
-            .file(&source.join("missing.txt"), Path::new("copied.txt"))
-            .unwrap_err();
-        let error = stage.discard_after(primary);
-        assert_eq!(error.kind(), FsxErrorKind::Io);
-        assert_eq!(
-            error.io_error().map(io::Error::kind),
-            Some(io::ErrorKind::NotFound),
-            "the primary cause survives"
-        );
-        let cleanup = error
-            .cleanup_error()
-            .expect("the cleanup failure is attached");
-        assert_eq!(cleanup.path(), path.as_path());
-        assert!(error.to_string().contains("cleanup also failed"), "{error}");
-        assert!(!path.join("made").exists(), "its own folder was removed");
-        assert_eq!(
-            fs::read(path.join("foreign.txt")).unwrap(),
-            b"foreign bytes"
-        );
-    }
-
-    #[test]
-    fn cleanup_ownership_attempt_folder_cleans_only_its_own_entries() {
-        let (_dir, root, source) = folder_with_source();
-        let name = OsStr::new("skill");
-
-        // A half-made junction (a plain folder) left by a failed attempt is the attempt's own.
-        let folder = private_name(&root, name, 0, "attempt");
-        let mut attempt = Stage::folder(&folder).unwrap();
-        fs::create_dir(folder.join(name)).unwrap();
-        assert_eq!(
-            attempt.record_attempt(&folder.join(name)).unwrap(),
-            Attempted::Other
-        );
-        attempt.discard().unwrap();
-        assert_eq!(names(&root), ["source"]);
-
-        // A link is moved next to the destination and the emptied folder goes.
-        let folder = private_name(&root, name, 1, "attempt");
-        let mut attempt = Stage::folder(&folder).unwrap();
-        SystemLinker
-            .link(&source, &folder.join(name), &source)
-            .unwrap();
-        assert_eq!(
-            attempt.record_attempt(&folder.join(name)).unwrap(),
-            Attempted::Link
-        );
-        let staged_path = private_name(&root, name, 1, "link");
-        let staged = attempt.take_link(&staged_path).unwrap();
-        assert!(!folder.exists());
-        assert_eq!(fs::canonicalize(&staged_path).unwrap(), source);
-        staged.discard().unwrap();
-        assert_eq!(names(&root), ["source"]);
-        assert_eq!(fs::read(source.join("keep.txt")).unwrap(), b"source bytes");
-
-        // Something else inside the private folder stays, and so does the folder.
-        let folder = private_name(&root, name, 2, "attempt");
-        let mut attempt = Stage::folder(&folder).unwrap();
-        fs::write(folder.join("other.txt"), "foreign bytes").unwrap();
-        assert_eq!(
-            attempt.record_attempt(&folder.join(name)).unwrap(),
-            Attempted::Nothing
-        );
-        assert!(attempt.discard().is_err());
-        assert_eq!(
-            fs::read(folder.join("other.txt")).unwrap(),
-            b"foreign bytes"
-        );
-
-        // A replaced attempt folder is left exactly as the other writer made it.
-        let folder = private_name(&root, name, 3, "attempt");
-        let mut attempt = Stage::folder(&folder).unwrap();
-        fs::create_dir(folder.join(name)).unwrap();
-        attempt.record_attempt(&folder.join(name)).unwrap();
-        fs::rename(&folder, root.join("moved-attempt")).unwrap();
-        fs::create_dir_all(folder.join(name)).unwrap();
-        fs::write(folder.join(name).join("theirs.txt"), "their bytes").unwrap();
-        assert_eq!(
-            attempt.discard().unwrap_err().kind(),
-            FsxErrorKind::NotOwned
-        );
-        assert_eq!(
-            fs::read(folder.join(name).join("theirs.txt")).unwrap(),
-            b"their bytes"
-        );
-
-        // A staged link another writer replaced is never published or removed.
-        let folder = private_name(&root, name, 4, "attempt");
-        let mut attempt = Stage::folder(&folder).unwrap();
-        SystemLinker
-            .link(&source, &folder.join(name), &source)
-            .unwrap();
-        attempt.record_attempt(&folder.join(name)).unwrap();
-        let staged_path = private_name(&root, name, 4, "link");
-        let staged = attempt.take_link(&staged_path).unwrap();
-        let elsewhere = root.join("elsewhere");
-        fs::create_dir(&elsewhere).unwrap();
-        staging::remove_link(&staged_path).unwrap();
-        SystemLinker
-            .link(&elsewhere, &staged_path, &elsewhere)
-            .unwrap();
-        let destination = root.join("skill");
-        assert_eq!(
-            staged.publish(&destination).unwrap_err().kind(),
-            FsxErrorKind::NotOwned
-        );
-        assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-        assert_eq!(fs::canonicalize(&staged_path).unwrap(), elsewhere);
-    }
-
-    #[test]
-    fn cleanup_ownership_published_link_replacement_is_left_alone() {
-        let (_dir, root, source) = folder_with_source();
-        let name = OsStr::new("skill");
-        let kind = SystemLinker.kind();
-        let elsewhere = root.join("elsewhere");
-        fs::create_dir(&elsewhere).unwrap();
-        for (number, replacement) in [(0, &elsewhere), (1, &source)] {
-            let destination = root.join(format!("skill-{number}"));
-            let folder = private_name(&root, name, number, "attempt");
-            let mut attempt = Stage::folder(&folder).unwrap();
-            SystemLinker
-                .link(&source, &folder.join(name), &source)
-                .unwrap();
-            attempt.record_attempt(&folder.join(name)).unwrap();
-            let staged = attempt
-                .take_link(&private_name(&root, name, number, "link"))
-                .unwrap();
-            let id = staged.publish(&destination).unwrap();
-            // Another writer swaps the published link before it is read back, even for an identical one.
-            fs::rename(&destination, root.join(format!("ours-{number}"))).unwrap();
-            SystemLinker
-                .link(replacement, &destination, replacement)
-                .unwrap();
-            let error = read_back_native(&destination, id, kind, &source, &source).unwrap_err();
+        for (path, target) in [(&other, source.clone()), (&original, source.join("."))] {
+            let error =
+                read_back_native(path, id, LinkKind::Symlink, &target, &source).unwrap_err();
             assert_eq!(error.kind(), FsxErrorKind::NotOwned);
-            assert_eq!(fs::canonicalize(&destination).unwrap(), *replacement);
+            assert_eq!(fs::read_link(path).unwrap(), source);
         }
-        assert_eq!(fs::read(source.join("keep.txt")).unwrap(), b"source bytes");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use oah_core::fsx::links::{
     SystemLinker, TargetStyle, create, create_with, inspect, remove,
 };
 use oah_core::fsx::{Fingerprint, FsxErrorKind};
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -62,112 +62,92 @@ impl Stores {
     }
 }
 
-/// A native linker that always fails, to drive the copy fallback deterministically.
-struct Unavailable;
-
-impl NativeLinker for Unavailable {
-    fn kind(&self) -> LinkKind {
-        LinkKind::Symlink
-    }
-
-    fn link(&self, _source: &Path, _destination: &Path, _target: &Path) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "links are switched off here",
-        ))
-    }
-}
-
-struct Misdirected {
-    elsewhere: PathBuf,
-}
-
-impl NativeLinker for Misdirected {
-    fn kind(&self) -> LinkKind {
-        SystemLinker.kind()
-    }
-
-    fn link(&self, source: &Path, destination: &Path, target: &Path) -> io::Result<()> {
-        SystemLinker.link(source, destination, target)?;
-        #[cfg(windows)]
-        fs::remove_dir(destination)?;
-        #[cfg(not(windows))]
-        fs::remove_file(destination)?;
-        SystemLinker.link(&self.elsewhere, destination, &self.elsewhere)
-    }
-}
-
-/// Another writer that takes the public destination while OAH's native attempt runs.
-struct DestinationTaken {
-    destination: PathBuf,
-    elsewhere: PathBuf,
-}
-
-impl NativeLinker for DestinationTaken {
-    fn kind(&self) -> LinkKind {
-        SystemLinker.kind()
-    }
-
-    fn link(&self, source: &Path, destination: &Path, target: &Path) -> io::Result<()> {
-        SystemLinker.link(source, destination, target)?;
-        SystemLinker.link(&self.elsewhere, &self.destination, &self.elsewhere)
-    }
-}
-
-/// What a failing native linker leaves at the path it was given before it reports the failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Leaves {
-    Nothing,
-    /// junction 2.1.0 makes the folder first and then sets the reparse data, which a volume without reparse
-    /// points refuses; it does not remove the folder again.
-    Folder,
-    Link,
-    FolderWithFile,
-}
-
-struct FailsAfter {
-    leaves: Leaves,
+struct StagingProbe {
     kind: LinkKind,
+    classified: Cell<bool>,
 }
 
-impl NativeLinker for FailsAfter {
+impl StagingProbe {
+    fn new(kind: LinkKind) -> Self {
+        Self {
+            kind,
+            classified: Cell::new(false),
+        }
+    }
+}
+
+impl NativeLinker for StagingProbe {
     fn kind(&self) -> LinkKind {
+        self.classified.set(true);
         self.kind
     }
 
-    fn link(&self, source: &Path, destination: &Path, target: &Path) -> io::Result<()> {
-        match self.leaves {
-            Leaves::Nothing => {}
-            Leaves::Folder => fs::create_dir(destination)?,
-            Leaves::Link => SystemLinker.link(source, destination, target)?,
-            Leaves::FolderWithFile => {
-                fs::create_dir(destination)?;
-                fs::write(destination.join("partial.txt"), "partial")?;
+    fn link(&self, _source: &Path, _destination: &Path, _target: &Path) -> io::Result<()> {
+        panic!("a path-only request reached the custom linker");
+    }
+}
+
+#[cfg(unix)]
+fn legacy_identity(path: &Path) -> EntryIdentity {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path).unwrap();
+    EntryIdentity::Unix {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+#[cfg(windows)]
+fn legacy_identity(path: &Path) -> EntryIdentity {
+    use std::os::windows::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(0x0200_0000 | 0x0020_0000)
+        .open(path)
+        .unwrap();
+    let info = winapi_util::file::information(file).unwrap();
+    EntryIdentity::Windows {
+        volume_serial: info.volume_serial_number(),
+        file_index: info.file_index(),
+    }
+}
+
+fn legacy_native(source: &Path, destination: &Path, target: &Path) -> ManagedLink {
+    SystemLinker.link(source, destination, target).unwrap();
+    ManagedLink {
+        destination: destination.to_path_buf(),
+        source: source.to_path_buf(),
+        kind: native_kind(),
+        identity: Some(legacy_identity(destination)),
+        target: Some(target.to_path_buf()),
+        folders: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+fn legacy_copy(source: &Path, destination: &Path) -> ManagedLink {
+    let scripts = PathBuf::from("scripts");
+    fs::create_dir_all(destination.join(&scripts)).unwrap();
+    let files = [PathBuf::from("SKILL.md"), scripts.join("run.sh")]
+        .into_iter()
+        .map(|relative| {
+            let bytes = fs::read(source.join(&relative)).unwrap();
+            fs::write(destination.join(&relative), &bytes).unwrap();
+            CopiedFile {
+                relative,
+                fingerprint: Fingerprint::of(&bytes),
+                executable: false,
             }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "synthetic: this volume has no reparse points",
-        ))
-    }
-}
-
-/// The system linker, noting every path and target it was handed.
-#[derive(Default)]
-struct Recording {
-    seen: RefCell<Vec<(PathBuf, PathBuf)>>,
-}
-
-impl NativeLinker for Recording {
-    fn kind(&self) -> LinkKind {
-        SystemLinker.kind()
-    }
-
-    fn link(&self, source: &Path, destination: &Path, target: &Path) -> io::Result<()> {
-        self.seen
-            .borrow_mut()
-            .push((destination.to_path_buf(), target.to_path_buf()));
-        SystemLinker.link(source, destination, target)
+        })
+        .collect();
+    ManagedLink {
+        destination: destination.to_path_buf(),
+        source: source.to_path_buf(),
+        kind: LinkKind::Copy,
+        identity: Some(legacy_identity(destination)),
+        target: None,
+        folders: vec![scripts],
+        files,
     }
 }
 
@@ -199,48 +179,77 @@ fn unlink(path: &Path) {
 }
 
 #[test]
-fn a_native_link_points_at_the_store_and_is_reported_once() {
+fn general_staging_refuses_before_any_change() {
     let stores = Stores::new();
     let source = stores.source();
-    let destination = stores.agents.join("skill-a");
-    let request = stores.request(&destination, TargetStyle::Absolute, false, &source);
-    let outcome = create(&request).unwrap();
-    assert!(outcome.created);
-    assert!(outcome.fallback.is_none());
-    assert_eq!(outcome.link.kind, native_kind());
-    assert_eq!(outcome.link.target.as_deref(), Some(source.as_path()));
-    match inspect(&destination).unwrap() {
-        Entry::Symlink { target } | Entry::Junction { target } => {
-            assert_eq!(fs::canonicalize(target).unwrap(), source);
+    let destination = stores.agents.join("도구");
+    let sibling = stores.agents.join(".existing-stage");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("keep"), b"pre-existing stage bytes").unwrap();
+
+    #[cfg(unix)]
+    let stamps = [&stores.agents, &sibling, &source].map(|folder| {
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_234_567_890);
+        fs::File::open(folder).unwrap().set_modified(past).unwrap();
+        (folder, fs::metadata(folder).unwrap().modified().unwrap())
+    });
+
+    for style in [TargetStyle::Absolute, TargetStyle::Relative] {
+        for allow_copy in [false, true] {
+            let request = stores.request(&destination, style, allow_copy, &source);
+            let assert_refused = |error: oah_core::fsx::FsxError| {
+                assert_eq!(error.code(), "OAH_LINK_UNSUPPORTED", "{error}");
+                assert_eq!(error.path(), destination);
+                assert!(error.io_error().is_none(), "{error}");
+                assert!(error.cleanup_error().is_none(), "{error}");
+            };
+            assert_refused(create(&request).unwrap_err());
+            for kind in [LinkKind::Symlink, LinkKind::Junction, LinkKind::Copy] {
+                let linker = StagingProbe::new(kind);
+                assert_refused(create_with(&request, &linker).unwrap_err());
+                assert!(!linker.classified.get(), "{kind:?}");
+            }
+
+            assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
+            assert_eq!(names(&stores.agents), [".existing-stage"]);
+            assert_eq!(names(&sibling), ["keep"]);
+            assert_eq!(
+                fs::read(sibling.join("keep")).unwrap(),
+                b"pre-existing stage bytes"
+            );
+            assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), b"# Skill A\n");
+            #[cfg(unix)]
+            for (folder, modified) in stamps {
+                assert_eq!(fs::metadata(folder).unwrap().modified().unwrap(), modified);
+            }
         }
-        other => panic!("not a link: {other:?}"),
     }
-    assert_eq!(
-        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-        "# Skill A\n"
-    );
-    assert_eq!(
-        create(&request).unwrap_err().kind(),
-        FsxErrorKind::LinkExists
-    );
-    assert_eq!(
-        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-        "# Skill A\n"
-    );
 }
 
-#[cfg(unix)]
 #[test]
-fn a_project_link_stores_a_relative_target() {
+fn invalid_requests_are_rejected_before_the_staging_decision() {
     let stores = Stores::new();
     let source = stores.source();
     let destination = stores.agents.join("skill-a");
-    let outcome =
-        create(&stores.request(&destination, TargetStyle::Relative, false, &source)).unwrap();
-    let target = outcome.link.target.clone().unwrap();
-    assert!(target.is_relative(), "{target:?}");
-    assert_eq!(fs::read_link(&destination).unwrap(), target);
-    assert_eq!(fs::canonicalize(&destination).unwrap(), source);
+    let relative = Path::new("relative");
+    let source_file = source.join("SKILL.md");
+    let missing_source = source.join("missing");
+    let missing_parent = destination.join("missing-parent");
+
+    let cases: [(&Path, &Path, &Path); 5] = [
+        (relative, &destination, relative),
+        (&source, relative, relative),
+        (&source_file, &destination, &source_file),
+        (&missing_source, &destination, &missing_source),
+        (&source, &missing_parent, &missing_parent),
+    ];
+    for (source, destination, error_path) in cases {
+        let request = stores.request(destination, TargetStyle::Absolute, true, source);
+        let error = create(&request).unwrap_err();
+        assert_eq!(error.kind(), FsxErrorKind::Io, "{error}");
+        assert_eq!(error.path(), error_path);
+    }
+    assert!(names(&stores.agents).is_empty());
 }
 
 #[test]
@@ -250,8 +259,16 @@ fn an_occupied_destination_is_left_alone() {
     let folder = stores.agents.join("mine");
     fs::create_dir(&folder).unwrap();
     fs::write(folder.join("notes.md"), "user text").unwrap();
-    let error = create(&stores.request(&folder, TargetStyle::Absolute, true, &source)).unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::LinkExists);
+    let request = stores.request(&folder, TargetStyle::Absolute, true, &source);
+    for error in [
+        create(&request).unwrap_err(),
+        create_with(&request, &StagingProbe::new(native_kind())).unwrap_err(),
+        create_with(&request, &StagingProbe::new(LinkKind::Copy)).unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), FsxErrorKind::LinkExists);
+        assert_eq!(error.path(), folder);
+        assert!(error.cleanup_error().is_none());
+    }
     assert_eq!(
         fs::read_to_string(folder.join("notes.md")).unwrap(),
         "user text"
@@ -268,10 +285,9 @@ fn legacy_native_record_preserves_the_link_and_reports_ordinary_absence() {
     let stores = Stores::new();
     let source = stores.source();
     let destination = stores.agents.join("skill-a");
-    let outcome =
-        create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap();
+    let record = legacy_native(&source, &destination, &source);
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        remove(&record, &[&stores.store]).unwrap_err().kind(),
         FsxErrorKind::NotOwned
     );
     assert_eq!(fs::canonicalize(&destination).unwrap(), source);
@@ -282,7 +298,7 @@ fn legacy_native_record_preserves_the_link_and_reports_ordinary_absence() {
     assert!(source.join("scripts").join("run.sh").is_file());
     unlink(&destination);
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap(),
+        remove(&record, &[&stores.store]).unwrap(),
         Removal::AlreadyGone
     );
 }
@@ -331,11 +347,10 @@ fn a_link_that_is_no_longer_ours_is_not_removed() {
     let stores = Stores::new();
     let source = stores.source();
     let destination = stores.agents.join("skill-a");
-    let outcome =
-        create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap();
+    let record = legacy_native(&source, &destination, &source);
 
     let elsewhere = stores.agents.join("unrelated-store");
-    let error = remove(&outcome.link, &[&elsewhere]).unwrap_err();
+    let error = remove(&record, &[&elsewhere]).unwrap_err();
     assert_eq!(
         error.kind(),
         FsxErrorKind::NotOwned,
@@ -349,287 +364,18 @@ fn a_link_that_is_no_longer_ours_is_not_removed() {
     let other = stores.store.join("skill-b");
     fs::create_dir(&other).unwrap();
     unlink(&destination);
-    let replaced =
-        create(&stores.request(&destination, TargetStyle::Absolute, false, &other)).unwrap();
-    let error = remove(&outcome.link, &[&stores.store]).unwrap_err();
+    let replaced = legacy_native(&other, &destination, &other);
+    let error = remove(&record, &[&stores.store]).unwrap_err();
     assert_eq!(
         error.code(),
         "OAH_LINK_NOT_OWNED",
         "the link now points somewhere else"
     );
     assert_eq!(
-        remove(&replaced.link, &[&stores.store]).unwrap_err().kind(),
+        remove(&replaced, &[&stores.store]).unwrap_err().kind(),
         FsxErrorKind::NotOwned
     );
     assert_eq!(fs::canonicalize(&destination).unwrap(), other);
-}
-
-#[test]
-fn a_failed_native_link_falls_back_to_a_reported_copy() {
-    let stores = Stores::new();
-    let source = stores.source();
-    let destination = stores.agents.join("skill-a");
-    let outcome = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, true, &source),
-        &Unavailable,
-    )
-    .unwrap();
-    assert_eq!(outcome.link.kind, LinkKind::Copy);
-    let reason = outcome
-        .fallback
-        .expect("a copy reports why the native link was not made");
-    assert!(
-        reason.contains("unavailable") && reason.contains("links are switched off here"),
-        "{reason}"
-    );
-    assert!(outcome.link.target.is_none());
-    assert_eq!(inspect(&destination).unwrap(), Entry::Directory);
-    let files: Vec<&Path> = outcome
-        .link
-        .files
-        .iter()
-        .map(|file| file.relative.as_path())
-        .collect();
-    assert_eq!(
-        files,
-        [Path::new("SKILL.md"), &Path::new("scripts").join("run.sh")]
-    );
-    assert_eq!(outcome.link.folders, [PathBuf::from("scripts")]);
-    assert_eq!(
-        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-        "# Skill A\n"
-    );
-
-    fs::write(source.join("SKILL.md"), "# Changed\n").unwrap();
-    assert_eq!(
-        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-        "# Skill A\n",
-        "a copy does not follow the source"
-    );
-}
-
-#[test]
-fn without_permission_to_copy_a_failed_link_is_an_error() {
-    let stores = Stores::new();
-    let source = stores.source();
-    let destination = stores.agents.join("skill-a");
-    let error = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, false, &source),
-        &Unavailable,
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-}
-
-#[test]
-fn cleanup_ownership_native_replacement_survives_with_or_without_copy() {
-    // The attempt runs in OAH's private folder, so another writer can only take the public destination. A
-    // destination taken before publication is refused by the non-replacing rename and is left exactly as it is.
-    let stores = Stores::new();
-    let source = stores.source();
-    let elsewhere = stores.store.join("elsewhere");
-    fs::create_dir_all(&elsewhere).unwrap();
-    fs::write(elsewhere.join("keep.txt"), "kept\n").unwrap();
-    for allow_copy in [false, true] {
-        let destination = stores.agents.join(format!("skill-{allow_copy}"));
-        let linker = DestinationTaken {
-            destination: destination.clone(),
-            elsewhere: elsewhere.clone(),
-        };
-        let error = create_with(
-            &stores.request(&destination, TargetStyle::Absolute, allow_copy, &source),
-            &linker,
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), FsxErrorKind::LinkExists, "{error}");
-        assert!(error.cleanup_error().is_none(), "{error}");
-        assert!(matches!(
-            inspect(&destination).unwrap(),
-            Entry::Symlink { .. } | Entry::Junction { .. }
-        ));
-        assert_eq!(fs::canonicalize(&destination).unwrap(), elsewhere);
-    }
-    assert_eq!(names(&stores.agents), ["skill-false", "skill-true"]);
-    assert_eq!(
-        fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
-        "kept\n",
-        "removing the wrong link touched its target"
-    );
-}
-
-#[test]
-fn cleanup_ownership_misdirected_attempt_is_discarded_privately() {
-    // A link that does not store the requested target is the attempt's own unusable result inside OAH's
-    // private folder: it is removed there (never its target), never published, and a copy may stand in.
-    let stores = Stores::new();
-    let source = stores.source();
-    let elsewhere = stores.store.join("elsewhere");
-    fs::create_dir_all(&elsewhere).unwrap();
-    fs::write(elsewhere.join("keep.txt"), "kept\n").unwrap();
-    let linker = Misdirected {
-        elsewhere: elsewhere.clone(),
-    };
-    let refused = stores.agents.join("refused");
-    let error = create_with(
-        &stores.request(&refused, TargetStyle::Absolute, false, &source),
-        &linker,
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
-    assert_eq!(inspect(&refused).unwrap(), Entry::Missing);
-    let copied = stores.agents.join("copied");
-    let outcome = create_with(
-        &stores.request(&copied, TargetStyle::Absolute, true, &source),
-        &linker,
-    )
-    .unwrap();
-    assert_eq!(outcome.link.kind, LinkKind::Copy);
-    assert!(
-        outcome
-            .fallback
-            .as_deref()
-            .unwrap()
-            .contains("did not make a link storing the requested target")
-    );
-    assert_eq!(
-        fs::read_to_string(copied.join("SKILL.md")).unwrap(),
-        "# Skill A\n"
-    );
-    assert_eq!(names(&stores.agents), ["copied"]);
-    assert_eq!(
-        fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
-        "kept\n"
-    );
-}
-
-#[test]
-fn cleanup_ownership_residue_from_failed_native_attempts_is_cleaned() {
-    // Whatever a failed attempt leaves is inside OAH's private attempt folder, so it is the attempt's own:
-    // it is removed and the destination stays free for the designed copy fallback (never LinkExists).
-    let stores = Stores::new();
-    let source = stores.source();
-    for (index, leaves) in [Leaves::Nothing, Leaves::Folder, Leaves::Link]
-        .into_iter()
-        .enumerate()
-    {
-        let kind = if leaves == Leaves::Folder {
-            LinkKind::Junction
-        } else {
-            native_kind()
-        };
-        let linker = FailsAfter { leaves, kind };
-        let destination = stores.agents.join(format!("skill-{index}"));
-        let error = create_with(
-            &stores.request(&destination, TargetStyle::Absolute, false, &source),
-            &linker,
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported, "{leaves:?}");
-        assert!(error.cleanup_error().is_none(), "{leaves:?}: {error}");
-        assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-        assert_eq!(names(&stores.agents), Vec::<String>::new(), "{leaves:?}");
-
-        let outcome = create_with(
-            &stores.request(&destination, TargetStyle::Absolute, true, &source),
-            &linker,
-        )
-        .unwrap();
-        assert_eq!(outcome.link.kind, LinkKind::Copy, "{leaves:?}");
-        let reason = outcome.fallback.as_deref().unwrap();
-        assert!(
-            reason.contains("unavailable")
-                && reason.contains("synthetic: this volume has no reparse points"),
-            "{reason}"
-        );
-        assert_eq!(
-            fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-            "# Skill A\n"
-        );
-        assert_eq!(names(&stores.agents), [format!("skill-{index}")]);
-        fs::remove_dir_all(&destination).unwrap();
-    }
-
-    // A residue the attempt cannot remove (something was put inside its folder) stays where it is and is
-    // reported together with the original failure; no copy papers over it.
-    let linker = FailsAfter {
-        leaves: Leaves::FolderWithFile,
-        kind: LinkKind::Junction,
-    };
-    let destination = stores.agents.join("kept");
-    let error = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, true, &source),
-        &linker,
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported, "{error}");
-    let cleanup = error.cleanup_error().expect("the residue is reported");
-    assert!(cleanup.path().starts_with(&stores.agents), "{cleanup}");
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-    let left = names(&stores.agents);
-    assert_eq!(left.len(), 1, "{left:?}");
-    assert!(
-        left[0].starts_with(".kept.") && left[0].ends_with(".attempt.tmp"),
-        "{left:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(
-            stores
-                .agents
-                .join(&left[0])
-                .join("kept")
-                .join("partial.txt")
-        )
-        .unwrap(),
-        "partial"
-    );
-    assert_eq!(
-        fs::read_to_string(source.join("SKILL.md")).unwrap(),
-        "# Skill A\n"
-    );
-}
-
-#[test]
-fn cleanup_ownership_native_attempt_never_touches_the_destination() {
-    let stores = Stores::new();
-    let source = stores.source();
-    let linker = Recording::default();
-    let destination = stores.agents.join("skill-a");
-    let outcome = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, false, &source),
-        &linker,
-    )
-    .unwrap();
-    let (given, target) = linker.seen.borrow()[0].clone();
-    assert_ne!(given, destination);
-    assert_eq!(given.file_name(), destination.file_name());
-    let folder = given.parent().unwrap();
-    assert_eq!(folder.parent().unwrap(), stores.agents);
-    let folder_name = folder.file_name().unwrap().to_string_lossy();
-    assert!(
-        folder_name.starts_with(".skill-a.") && folder_name.ends_with(".attempt.tmp"),
-        "{folder_name}"
-    );
-    assert_eq!(outcome.link.target.as_deref(), Some(target.as_path()));
-    assert_eq!(fs::canonicalize(&destination).unwrap(), source);
-    assert_eq!(names(&stores.agents), ["skill-a"]);
-
-    if cfg!(unix) {
-        // A relative target is handed over exactly as it must read at the destination, relative to the
-        // destination's folder; it is never rewritten for the private folder and resolves once published.
-        let relative = stores.agents.join("skill-relative");
-        let outcome = create_with(
-            &stores.request(&relative, TargetStyle::Relative, false, &source),
-            &linker,
-        )
-        .unwrap();
-        let (_, target) = linker.seen.borrow()[1].clone();
-        assert!(target.is_relative(), "{target:?}");
-        assert_eq!(outcome.link.target.as_deref(), Some(target.as_path()));
-        assert_eq!(fs::read_link(&relative).unwrap(), target);
-        assert_eq!(fs::canonicalize(&relative).unwrap(), source);
-        assert_eq!(names(&stores.agents), ["skill-a", "skill-relative"]);
-    }
 }
 
 #[test]
@@ -653,8 +399,7 @@ fn cleanup_ownership_record_refuses_mismatching_replacements() {
     let stores = Stores::new();
     let source = stores.source();
     let destination = stores.agents.join("skill-a");
-    let owned =
-        create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap();
+    let owned = legacy_native(&source, &destination, &source);
     let saved = stores.agents.join("original-link");
     fs::rename(&destination, &saved).unwrap();
 
@@ -662,14 +407,14 @@ fn cleanup_ownership_record_refuses_mismatching_replacements() {
     fs::create_dir(&other).unwrap();
     fs::write(other.join("SKILL.md"), "# Skill B\n").unwrap();
     SystemLinker.link(&other, &destination, &other).unwrap();
-    let error = remove(&owned.link, &[&stores.store]).unwrap_err();
+    let error = remove(&owned, &[&stores.store]).unwrap_err();
     assert_eq!(error.kind(), FsxErrorKind::NotOwned);
     assert_eq!(fs::canonicalize(&destination).unwrap(), other);
     unlink(&destination);
 
     fs::create_dir(&destination).unwrap();
     fs::write(destination.join("notes.md"), "user text").unwrap();
-    let error = remove(&owned.link, &[&stores.store]).unwrap_err();
+    let error = remove(&owned, &[&stores.store]).unwrap_err();
     assert_eq!(error.kind(), FsxErrorKind::NotOwned);
     assert_eq!(
         fs::read_to_string(destination.join("notes.md")).unwrap(),
@@ -678,13 +423,13 @@ fn cleanup_ownership_record_refuses_mismatching_replacements() {
     fs::remove_dir_all(&destination).unwrap();
 
     fs::write(&destination, "a user file").unwrap();
-    let error = remove(&owned.link, &[&stores.store]).unwrap_err();
+    let error = remove(&owned, &[&stores.store]).unwrap_err();
     assert_eq!(error.kind(), FsxErrorKind::NotOwned);
     assert_eq!(fs::read_to_string(&destination).unwrap(), "a user file");
     fs::remove_file(&destination).unwrap();
 
     SystemLinker.link(&source, &destination, &source).unwrap();
-    let error = remove(&owned.link, &[&stores.store]).unwrap_err();
+    let error = remove(&owned, &[&stores.store]).unwrap_err();
     assert_eq!(error.kind(), FsxErrorKind::NotOwned);
     assert_eq!(fs::canonicalize(&destination).unwrap(), source);
     assert_eq!(
@@ -700,13 +445,9 @@ fn legacy_copy_records_preserve_matching_copies_and_ordinary_children() {
     let source = stores.source();
     let name = if cfg!(unix) { r"skill-a\." } else { "skill-a" };
     let destination = stores.agents.join(name);
-    let outcome = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, true, &source),
-        &Unavailable,
-    )
-    .unwrap();
+    let record = legacy_copy(&source, &destination);
     fs::write(destination.join("SKILL.md"), "# Edited by the user\n").unwrap();
-    let error = remove(&outcome.link, &[&stores.store]).unwrap_err();
+    let error = remove(&record, &[&stores.store]).unwrap_err();
     assert_eq!(error.kind(), FsxErrorKind::NotOwned);
     assert_eq!(
         fs::read_to_string(destination.join("SKILL.md")).unwrap(),
@@ -716,13 +457,13 @@ fn legacy_copy_records_preserve_matching_copies_and_ordinary_children() {
     fs::write(destination.join("SKILL.md"), "# Skill A\n").unwrap();
     fs::write(destination.join("added.txt"), "new").unwrap();
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        remove(&record, &[&stores.store]).unwrap_err().kind(),
         FsxErrorKind::NotOwned
     );
 
     fs::remove_file(destination.join("added.txt")).unwrap();
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        remove(&record, &[&stores.store]).unwrap_err().kind(),
         FsxErrorKind::NotOwned
     );
     assert_eq!(
@@ -743,12 +484,7 @@ fn ambiguous_copy_destinations_are_refused_even_when_absent() {
         let stores = Stores::new();
         let source = stores.source();
         let destination = stores.agents.join("skill.v1");
-        let canonical = create_with(
-            &stores.request(&destination, TargetStyle::Absolute, true, &source),
-            &Unavailable,
-        )
-        .unwrap()
-        .link;
+        let canonical = legacy_copy(&source, &destination);
         assert_eq!(canonical.kind, LinkKind::Copy);
 
         let mut legacy = canonical.clone();
@@ -799,92 +535,31 @@ fn ambiguous_copy_destinations_are_refused_even_when_absent() {
     }
 }
 
-#[cfg(unix)]
-#[test]
-fn copying_never_follows_links() {
-    let stores = Stores::new();
-    let source = stores.source();
-    let outside = stores.agents.join("outside");
-    fs::create_dir(&outside).unwrap();
-    fs::write(outside.join("private.txt"), "not part of the skill").unwrap();
-    std::os::unix::fs::symlink(&outside, source.join("escape")).unwrap();
-    let destination = stores.agents.join("skill-a");
-    let error = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, true, &source),
-        &Unavailable,
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::TreeHasLink);
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-    let leftovers: Vec<_> = fs::read_dir(&stores.agents)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(
-        leftovers,
-        ["outside"],
-        "the staging copy was not cleaned up"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_copy_keeps_the_executable_bit() {
-    use std::os::unix::fs::PermissionsExt;
-    let stores = Stores::new();
-    let source = stores.source();
-    let script = source.join("scripts").join("run.sh");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    let destination = stores.agents.join("skill-a");
-    let outcome = create_with(
-        &stores.request(&destination, TargetStyle::Absolute, true, &source),
-        &Unavailable,
-    )
-    .unwrap();
-    let recorded = outcome
-        .link
-        .files
-        .iter()
-        .find(|file| file.relative.ends_with("run.sh"))
-        .unwrap();
-    assert!(recorded.executable);
-    let mode = fs::metadata(destination.join("scripts").join("run.sh"))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_ne!(mode & 0o111, 0);
-}
-
 #[cfg(windows)]
 #[test]
-fn a_real_junction_is_made_without_elevation() {
+fn an_existing_junction_keeps_its_absolute_target_and_is_preserved() {
     let stores = Stores::new();
     let source = stores.source();
     let destination = stores.agents.join("skill-a");
-    let outcome =
-        create(&stores.request(&destination, TargetStyle::Relative, false, &source)).unwrap();
-    assert_eq!(outcome.link.kind, LinkKind::Junction);
-    assert_eq!(
-        outcome.link.target.as_deref(),
-        Some(source.as_path()),
-        "junctions store an absolute target"
-    );
+    let record = legacy_native(&source, &destination, &source);
+    assert_eq!(record.kind, LinkKind::Junction);
     assert!(junction::exists(&destination).unwrap());
-    assert_eq!(names(&stores.agents), ["skill-a"]);
+    let target = junction::get_target(&destination).unwrap();
+    assert!(target.is_absolute());
+    assert_eq!(fs::canonicalize(target).unwrap(), source);
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        remove(&record, &[&stores.store]).unwrap_err().kind(),
         FsxErrorKind::NotOwned
     );
-    assert!(source.join("SKILL.md").is_file());
-    assert!(junction::exists(&destination).unwrap());
+    assert_eq!(
+        fs::read(destination.join("SKILL.md")).unwrap(),
+        b"# Skill A\n"
+    );
 }
 
 #[cfg(windows)]
 #[test]
-fn a_junction_refused_after_its_folder_was_made_leaves_nothing_and_can_be_copied() {
-    // junction 2.1.0 makes the folder before it checks that the target fits the reparse data, and leaves the
-    // folder when it does not. That folder lands in OAH's private attempt folder, so it is removed again and the
-    // destination stays free for the reported copy.
+fn a_long_junction_target_is_refused_before_starting_the_attempt() {
     let stores = Stores::new();
     let mut source = stores.store.clone();
     while source.as_os_str().len() <= 4200 {
@@ -893,33 +568,17 @@ fn a_junction_refused_after_its_folder_was_made_leaves_nothing_and_can_be_copied
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("SKILL.md"), "# Long\n").unwrap();
     let destination = stores.agents.join("skill-long");
-    let error =
-        create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported, "{error}");
-    assert!(
-        error.to_string().contains("`target` is too long"),
-        "{error}"
-    );
-    assert!(error.cleanup_error().is_none(), "{error}");
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-    assert_eq!(names(&stores.agents), Vec::<String>::new());
-    let outcome =
-        create(&stores.request(&destination, TargetStyle::Absolute, true, &source)).unwrap();
-    assert_eq!(outcome.link.kind, LinkKind::Copy);
-    let reason = outcome.fallback.as_deref().unwrap();
-    assert!(
-        reason.contains("junction unavailable") && reason.contains("`target` is too long"),
-        "{reason}"
-    );
-    assert_eq!(
-        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-        "# Long\n"
-    );
-    assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
-        FsxErrorKind::NotOwned
-    );
-    assert_eq!(fs::read(destination.join("SKILL.md")).unwrap(), b"# Long\n");
+    for allow_copy in [false, true] {
+        let error =
+            create(&stores.request(&destination, TargetStyle::Absolute, allow_copy, &source))
+                .unwrap_err();
+        assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported);
+        assert_eq!(error.path(), destination);
+        assert!(error.io_error().is_none(), "{error}");
+        assert!(error.cleanup_error().is_none(), "{error}");
+        assert!(names(&stores.agents).is_empty());
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), b"# Long\n");
+    }
 }
 
 #[cfg(windows)]
@@ -940,7 +599,21 @@ fn require_windows_context(guard: u32) {
 #[ignore = "requires ordinary medium integrity with Redirection Guard disabled; run by the native evidence gate"]
 fn ordinary_medium_integrity_native_junction_contract() {
     require_windows_context(0);
-    a_real_junction_is_made_without_elevation();
+    let stores = Stores::new();
+    let source = stores.source();
+    let destination = stores.agents.join("skill-a");
+    let outcome =
+        create(&stores.request(&destination, TargetStyle::Relative, false, &source)).unwrap();
+    assert_eq!(outcome.link.kind, LinkKind::Junction);
+    assert_eq!(outcome.link.target.as_deref(), Some(source.as_path()));
+    assert!(junction::exists(&destination).unwrap());
+    assert_eq!(names(&stores.agents), ["skill-a"]);
+    assert_eq!(
+        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
+    );
+    assert!(source.join("SKILL.md").is_file());
+    assert!(junction::exists(&destination).unwrap());
 }
 
 #[cfg(windows)]
@@ -1054,6 +727,7 @@ fn reported_process(output: &str) -> &str {
 
 /// Opens files until this process has no descriptor left (failing if 300 open without a limit), then frees
 /// `free` of them. The others stay open until the returned files are dropped.
+#[cfg(unix)]
 fn hold_all_but(free: usize) -> Vec<fs::File> {
     let mut held = Vec::new();
     let error = loop {
@@ -1194,24 +868,13 @@ fn durable_record_legacy_records_round_trip_across_processes_without_removal_aut
                 let source = store.join("skill-a");
                 for (name, copy) in [("linked", false), ("copied", true)] {
                     let destination = agents.join(name);
-                    let request = LinkRequest {
-                        source: &source,
-                        destination: &destination,
-                        style: TargetStyle::Absolute,
-                        allow_copy: copy,
-                    };
-                    let outcome = if copy {
-                        create_with(&request, &Unavailable)
+                    let record = if copy {
+                        legacy_copy(&source, &destination)
                     } else {
-                        create(&request)
-                    }
-                    .unwrap();
-                    let text = record_text(&outcome.link);
-                    assert_eq!(
-                        parse_record(&text),
-                        outcome.link,
-                        "the text is the whole record"
-                    );
+                        legacy_native(&source, &destination, &source)
+                    };
+                    let text = record_text(&record);
+                    assert_eq!(parse_record(&text), record, "the text is the whole record");
                     fs::write(records.join(name), text).unwrap();
                 }
             }
@@ -1469,17 +1132,26 @@ fn durable_record_legacy_native_records_preserve_absolute_and_relative_links() {
     let source = stores.source();
     let absolute = stores.agents.join("absolute");
     let relative = stores.agents.join("relative");
+    let target = if cfg!(unix) {
+        Path::new("../store/skill-a")
+    } else {
+        source.as_path()
+    };
     let made = [
-        create(&stores.request(&absolute, TargetStyle::Absolute, false, &source)).unwrap(),
-        create(&stores.request(&relative, TargetStyle::Relative, false, &source)).unwrap(),
+        legacy_native(&source, &absolute, &source),
+        legacy_native(&source, &relative, target),
     ];
+    if cfg!(unix) {
+        assert_eq!(fs::read_link(&relative).unwrap(), target);
+        assert_eq!(fs::canonicalize(&relative).unwrap(), source);
+    }
     if cfg!(unix) {
         // A symlink's stored text still names its source once the source is gone.
         fs::rename(&source, stores.store.join("moved-away")).unwrap();
     }
-    for outcome in &made {
+    for record in &made {
         assert_eq!(
-            remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+            remove(record, &[&stores.store]).unwrap_err().kind(),
             FsxErrorKind::NotOwned
         );
     }
@@ -1487,90 +1159,52 @@ fn durable_record_legacy_native_records_preserve_absolute_and_relative_links() {
 }
 
 #[test]
-fn durable_record_many_links_and_files_stay_within_256_descriptors() {
-    // Records keep nothing open, so a run that holds hundreds of records, or copies hundreds of files, fits in a
-    // process limited to 256 open descriptors.
-    const TEST: &str = "durable_record_many_links_and_files_stay_within_256_descriptors";
+fn many_existing_native_records_remain_readable_under_descriptor_limit() {
+    const TEST: &str = "many_existing_native_records_remain_readable_under_descriptor_limit";
     const LINKS: usize = 600;
-    const FILES: usize = 600;
     if let Some((role, root)) = child_role() {
         assert_eq!(role, "many");
-        if cfg!(unix) {
-            drop(hold_all_but(0));
-        }
         let store = root.join("store");
         let agents = root.join("agents");
         let source = store.join("skill-a");
         let mut records = Vec::new();
         for index in 0..LINKS {
             let destination = agents.join(format!("link-{index:04}"));
-            let request = LinkRequest {
-                source: &source,
-                destination: &destination,
-                style: TargetStyle::Absolute,
-                allow_copy: false,
-            };
-            let link = create(&request).unwrap().link;
-            let restored = parse_record(&record_text(&link));
-            assert_eq!(restored, link);
-            assert!(restored.identity.is_some());
+            let record = legacy_native(&source, &destination, &source);
+            let restored = parse_record(&record_text(&record));
+            assert_eq!(restored, record);
             records.push(restored);
         }
-        let big = store.join("big");
-        for index in 0..FILES {
-            let folder = big.join(format!("part-{:02}", index % 8));
-            fs::create_dir_all(&folder).unwrap();
-            fs::write(
-                folder.join(format!("file-{index:04}.md")),
-                format!("synthetic {index}\n"),
-            )
-            .unwrap();
-        }
-        let copied = agents.join("big");
-        let request = LinkRequest {
-            source: &big,
-            destination: &copied,
-            style: TargetStyle::Absolute,
-            allow_copy: true,
-        };
-        let outcome = create_with(&request, &Unavailable).unwrap();
-        assert_eq!(outcome.link.kind, LinkKind::Copy);
-        assert_eq!(outcome.link.files.len(), FILES);
-        let restored = parse_record(&record_text(&outcome.link));
-        assert_eq!(restored, outcome.link);
-        assert!(restored.identity.is_some());
-        records.push(restored);
+
         for record in &records {
             assert_eq!(
                 remove(record, &[&store]).unwrap_err().kind(),
                 FsxErrorKind::NotOwned
             );
         }
-        assert_eq!(names(&agents).len(), LINKS + 1);
-        println!("ROLE_OK many links={LINKS} files={FILES}");
+        assert_eq!(names(&agents).len(), LINKS);
+        println!("ROLE_OK many legacy_links={LINKS}");
         return;
     }
+
     let stores = Stores::new();
-    let root = stores.store.parent().unwrap().to_path_buf();
-    rerun(TEST, "many", &root, Some(256));
-    assert_eq!(names(&stores.agents).len(), LINKS + 1);
+    let root = stores.store.parent().unwrap();
+    rerun(TEST, "many", root, Some(256));
+    assert_eq!(names(&stores.agents).len(), LINKS);
     assert_eq!(
-        fs::read_to_string(stores.source().join("SKILL.md")).unwrap(),
-        "# Skill A\n"
+        fs::read(stores.source().join("SKILL.md")).unwrap(),
+        b"# Skill A\n"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn durable_record_descriptor_exhaustion_is_an_io_error_without_residue() {
-    // Running out of descriptors during a copy is reported as the IO error it is and leaves nothing behind, and a
-    // copy needs no more than two free descriptors.
-    const TEST: &str = "durable_record_descriptor_exhaustion_is_an_io_error_without_residue";
+fn staging_refusal_does_not_require_opening_a_descriptor() {
+    const TEST: &str = "staging_refusal_does_not_require_opening_a_descriptor";
     if let Some((role, root)) = child_role() {
         assert_eq!(role, "exhaust");
-        let store = root.join("store");
+        let source = root.join("store/skill-a");
         let agents = root.join("agents");
-        let source = store.join("skill-a");
         let destination = agents.join("skill-a");
         let request = LinkRequest {
             source: &source,
@@ -1578,39 +1212,27 @@ fn durable_record_descriptor_exhaustion_is_an_io_error_without_residue() {
             style: TargetStyle::Absolute,
             allow_copy: true,
         };
-        // One free descriptor is too few: a folder stays open while one of its files is fingerprinted.
-        let held = hold_all_but(1);
-        let result = create_with(&request, &Unavailable);
+
+        let held = hold_all_but(0);
+        let native = create(&request);
+        let copy = create_with(&request, &StagingProbe::new(LinkKind::Copy));
         drop(held);
-        let error = result.unwrap_err();
-        assert_eq!(error.kind(), FsxErrorKind::Io, "{error}");
-        assert_eq!(
-            error.io_error().and_then(io::Error::raw_os_error),
-            Some(24),
-            "{error}"
-        );
-        assert!(error.cleanup_error().is_none(), "{error}");
-        assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-        assert_eq!(names(&agents), Vec::<String>::new());
-        println!("ROLE_OK exhaust free=1 error={error}");
-        // Two are enough: copying keeps at most two files open, and neither the copy nor its record keeps any.
-        let held = hold_all_but(2);
-        let outcome = create_with(&request, &Unavailable).unwrap();
-        assert_eq!(outcome.link.kind, LinkKind::Copy);
-        assert_eq!(
-            fs::read_to_string(destination.join("SKILL.md")).unwrap(),
-            "# Skill A\n"
-        );
-        drop(held);
-        assert_eq!(names(&agents), ["skill-a"]);
-        println!("ROLE_OK exhaust free=2 copied={}", outcome.link.files.len());
+
+        for result in [native, copy] {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), FsxErrorKind::LinkUnsupported, "{error}");
+            assert!(error.io_error().is_none());
+            assert!(error.cleanup_error().is_none());
+        }
+        assert!(names(&agents).is_empty());
+        println!("ROLE_OK exhaust free=0");
         return;
     }
+
     let stores = Stores::new();
-    let root = stores.store.parent().unwrap().to_path_buf();
-    let output = rerun(TEST, "exhaust", &root, Some(256));
-    assert!(output.contains("os error 24"), "{output}");
-    assert_eq!(names(&stores.agents), ["skill-a"]);
+    let root = stores.store.parent().unwrap();
+    rerun(TEST, "exhaust", root, Some(256));
+    assert!(names(&stores.agents).is_empty());
 }
 
 #[test]
@@ -1619,14 +1241,12 @@ fn durable_record_missing_invalid_or_foreign_identity_refuses_without_adoption()
     let source = stores.source();
     for copy in [false, true] {
         let destination = stores.agents.join(if copy { "copy" } else { "link" });
-        let request = stores.request(&destination, TargetStyle::Absolute, copy, &source);
-        let outcome = if copy {
-            create_with(&request, &Unavailable)
+        let record = if copy {
+            legacy_copy(&source, &destination)
         } else {
-            create(&request)
-        }
-        .unwrap();
-        let identity = outcome.link.identity.unwrap();
+            legacy_native(&source, &destination, &source)
+        };
+        let identity = record.identity.unwrap();
         let (invalid, foreign) = match identity {
             EntryIdentity::Unix { device, .. } => (
                 EntryIdentity::Unix { device, inode: 0 },
@@ -1648,7 +1268,7 @@ fn durable_record_missing_invalid_or_foreign_identity_refuses_without_adoption()
             ),
         };
         for proof in [None, Some(invalid), Some(foreign)] {
-            let mut restored = parse_record(&record_text(&outcome.link));
+            let mut restored = parse_record(&record_text(&record));
             restored.identity = proof;
             let restored = parse_record(&record_text(&restored));
             let error = remove(&restored, &[&stores.store]).unwrap_err();
@@ -1659,7 +1279,7 @@ fn durable_record_missing_invalid_or_foreign_identity_refuses_without_adoption()
             );
         }
         assert_eq!(
-            remove(&parse_record(&record_text(&outcome.link)), &[&stores.store])
+            remove(&parse_record(&record_text(&record)), &[&stores.store])
                 .unwrap_err()
                 .kind(),
             FsxErrorKind::NotOwned
