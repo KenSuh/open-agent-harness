@@ -15,6 +15,7 @@ mod error;
 mod identity;
 pub mod links;
 mod lock;
+mod ownership;
 mod selfwrite;
 mod staging;
 

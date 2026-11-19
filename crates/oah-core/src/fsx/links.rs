@@ -7,16 +7,18 @@
 //! failed attempt leaves behind is the call's own to clean up and never occupies the destination. A verified
 //! link, like a finished copy, is renamed into place without replacing anything.
 //!
-//! Creating returns a [`ManagedLink`] record: plain data the caller keeps in its own state, also across
-//! processes, as ownership evidence. [`remove`] deletes an entry only when the record points into a known store
-//! and still matches what is on disk, and it never deletes the link's target. Anything else at a destination is
-//! left exactly as it is.
+//! Creating returns a [`ManagedLink`] inventory record. [`remove`] preserves present entries described by
+//! these legacy records. For an enrolled Linux namespace, [`create_protected`] issues a persistable
+//! [`ProtectedLinkRef`] that [`remove_protected`] can use to remove the original symlink.
 
 use super::atomic::Fingerprint;
 use super::error::{FsxError, FsxErrorKind};
 pub use super::identity::EntryIdentity;
 use super::identity::{self, EntryId, Now};
-use super::staging::{self, Attempted, Stage};
+pub use super::ownership::{ProtectedLinkRef, create_protected, remove_protected};
+#[cfg(all(test, unix))]
+use super::staging;
+use super::staging::{Attempted, Stage};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
@@ -105,19 +107,17 @@ pub struct CopiedFile {
     pub executable: bool,
 }
 
-/// Ownership evidence for one managed link, returned by [`create`] and needed by [`remove`].
+/// Inventory for one managed link, returned by [`create`] and accepted by [`remove`].
 ///
 /// A plain record with no hidden state: the caller stores these fields (a [`Fingerprint`] round-trips through
-/// [`Fingerprint::to_hex`] and [`Fingerprint::from_hex`]) and may rebuild the record in a later process. It
-/// authorizes nothing by itself; [`remove`] acts only while the source lies in a known store and the disk still
-/// matches the record, including the original entry identity. Restoring a record never captures a new identity.
+/// [`Fingerprint::to_hex`] and [`Fingerprint::from_hex`]) and may rebuild the record in a later process.
+/// The record has no authority to delete a present entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedLink {
     pub destination: PathBuf,
     pub source: PathBuf,
     pub kind: LinkKind,
-    /// Identity captured from the created entry, retained unchanged across restoration. Missing or unsupported
-    /// evidence refuses removal; never substitute the identity of whatever is at the path when loading.
+    /// Identity captured from the created entry, retained unchanged across restoration.
     pub identity: Option<EntryIdentity>,
     /// The stored target of a symlink or junction; `None` for a copy.
     pub target: Option<PathBuf>,
@@ -447,16 +447,10 @@ pub enum Removal {
     AlreadyGone,
 }
 
-/// Removes a managed link, checking its record first.
+/// Checks a legacy link record for ordinary absence.
 ///
-/// A destination ending in a separator or a `.` component is refused before lookup.
-/// The record's source must lie inside one of `stores`, and the entry at its destination must still be the
-/// original entry identity plus the same symlink text, junction target, or copy folder/file inventory.
-/// Otherwise nothing is touched and the result is [`FsxErrorKind::NotOwned`]. Removing a link deletes only the
-/// link; removing a copy deletes only the recorded files and folders.
-///
-/// The record may come from an earlier process. A same-target replacement with a different identity is refused.
-/// Entry-number reuse after deletion and concurrent check-to-path-use races remain limitations of plain evidence.
+/// A present entry is preserved and returns [`FsxErrorKind::NotOwned`]. A destination ending in a
+/// separator or a dot component is refused before lookup.
 pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError> {
     let destination = link.destination.as_path();
     require_absolute(&link.source)?;
@@ -474,156 +468,73 @@ pub fn remove(link: &ManagedLink, stores: &[&Path]) -> Result<Removal, FsxError>
                 "its destination has a terminal dot component",
             ));
         }
+        Some([b'.', b'.']) => {
+            return Err(not_owned(
+                link,
+                "its destination has a terminal parent component",
+            ));
+        }
         _ => {}
     }
-    let source =
-        lexical(&link.source).ok_or_else(|| not_owned(link, "its source is not a plain path"))?;
-    let in_store = stores.iter().any(|store| match lexical(store) {
-        Some(store) => source.starts_with(&store),
-        None => false,
-    });
-    if !in_store {
-        return Err(not_owned(link, "its source is outside the known stores"));
+    if lexical(destination).is_none() {
+        return Err(not_owned(
+            link,
+            "its destination contains a parent component",
+        ));
     }
-    let entry = inspect(destination)?;
-    if entry == Entry::Missing {
-        return Ok(Removal::AlreadyGone);
+    if !source_in_stores(&link.source, stores) {
+        return Err(not_owned(
+            link,
+            "its source is outside the known stores or is not a plain path",
+        ));
     }
-    require_record_identity(link)?;
-    match link.kind {
-        LinkKind::Symlink | LinkKind::Junction => {
-            let target = link
-                .target
-                .as_ref()
-                .ok_or_else(|| not_owned(link, "the record has no link target"))?;
-            // The source's store decides ownership only when the recorded target really points at that source.
-            if !target_points_at(destination, target, &link.source) {
-                return Err(not_owned(
-                    link,
-                    "the record's link target does not point at its source",
-                ));
-            }
-            if !same_native_link(&entry, link.kind, target, &link.source) {
-                return Err(not_owned(link, "the entry there is not this link"));
-            }
-            require_record_identity(link)?;
-            staging::remove_link(destination).map_err(|error| {
-                FsxError::io(
-                    FsxErrorKind::Io,
-                    destination,
-                    "cannot remove the link",
-                    error,
-                )
-            })?;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            return Err(not_owned(
+                link,
+                "a legacy record cannot prove ownership of the present entry",
+            ));
         }
-        LinkKind::Copy => {
-            let plain = |path: &Path| {
-                path.components().next().is_some()
-                    && path
-                        .components()
-                        .all(|component| matches!(component, Component::Normal(_)))
-            };
-            let paths_plain = link.folders.iter().all(|folder| plain(folder))
-                && link.files.iter().all(|file| plain(&file.relative));
-            if link.target.is_some() || !paths_plain {
-                return Err(not_owned(link, "the record is not a copy record"));
-            }
-            if entry != Entry::Directory {
-                return Err(not_owned(link, "the entry there is not a folder"));
-            }
-            let (folders, files) = match walk(destination) {
-                Ok(found) => found,
-                Err(error) if error.kind() == FsxErrorKind::TreeHasLink => {
-                    return Err(not_owned(
-                        link,
-                        "the copy now contains a link; it was left alone",
-                    ));
-                }
-                Err(error) => return Err(error),
-            };
-            let mut recorded_files: Vec<(PathBuf, Fingerprint)> = link
-                .files
-                .iter()
-                .map(|file| (file.relative.clone(), file.fingerprint))
-                .collect();
-            recorded_files.sort();
-            let mut found_files: Vec<(PathBuf, Fingerprint)> = files
-                .iter()
-                .map(|file| (file.relative.clone(), file.fingerprint))
-                .collect();
-            found_files.sort();
-            let mut recorded_folders = link.folders.clone();
-            recorded_folders.sort();
-            let mut found_folders = folders.clone();
-            found_folders.sort();
-            if recorded_files != found_files || recorded_folders != found_folders {
-                return Err(not_owned(
-                    link,
-                    "the copy was changed since OAH made it; it was left alone",
-                ));
-            }
-            for file in &files {
-                require_record_identity(link)?;
-                let path = destination.join(&file.relative);
-                fs::remove_file(&path).map_err(|error| {
-                    FsxError::io(
-                        FsxErrorKind::Io,
-                        &path,
-                        "cannot remove a copied file",
-                        error,
-                    )
-                })?;
-            }
-            for folder in folders.iter().rev() {
-                require_record_identity(link)?;
-                let path = destination.join(folder);
-                fs::remove_dir(&path).map_err(|error| {
-                    FsxError::io(
-                        FsxErrorKind::Io,
-                        &path,
-                        "cannot remove a copied folder",
-                        error,
-                    )
-                })?;
-            }
-            require_record_identity(link)?;
-            fs::remove_dir(destination).map_err(|error| {
-                FsxError::io(
-                    FsxErrorKind::Io,
-                    destination,
-                    "cannot remove the copy",
-                    error,
-                )
-            })?;
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(FsxError::io(
+                FsxErrorKind::Io,
+                destination,
+                "cannot inspect",
+                error,
+            ));
         }
     }
-    Ok(Removal::Removed)
+    // A missing ancestor is ordinary absence. A dangling or opaque parent is an ambiguous lookup.
+    for parent in destination.ancestors().skip(1) {
+        match copy_root_is_directory(parent) {
+            Ok(true) => return Ok(Removal::AlreadyGone),
+            Ok(false) => return Err(not_owned(link, "its destination has an unverified parent")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(FsxError::io(
+                    FsxErrorKind::Io,
+                    parent,
+                    "cannot inspect the destination parent",
+                    error,
+                ));
+            }
+        }
+    }
+    Err(not_owned(link, "its destination has no observable parent"))
 }
 
 fn not_owned(link: &ManagedLink, why: &str) -> FsxError {
     FsxError::new(FsxErrorKind::NotOwned, &link.destination, why)
 }
 
-/// Historical evidence is supplied by the record, never obtained by adopting the current entry.
-fn require_record_identity(link: &ManagedLink) -> Result<(), FsxError> {
-    let id = link
-        .identity
-        .and_then(EntryIdentity::entry_id)
-        .ok_or_else(|| not_owned(link, "the record has no supported original entry identity"))?;
-    match identity::now(&link.destination, id).map_err(|error| {
-        FsxError::io(
-            FsxErrorKind::Io,
-            &link.destination,
-            "cannot read the managed entry identity",
-            error,
-        )
-    })? {
-        Now::Same => Ok(()),
-        Now::Other | Now::Missing => Err(not_owned(
-            link,
-            "another entry replaced the recorded entry; it was left alone",
-        )),
-    }
+pub(super) fn source_in_stores(source: &Path, stores: &[&Path]) -> bool {
+    lexical(source).is_some_and(|source| {
+        stores
+            .iter()
+            .filter(|store| store.is_absolute())
+            .any(|store| lexical(store).is_some_and(|store| source.starts_with(&store)))
+    })
 }
 
 fn kind_word(kind: LinkKind) -> &'static str {
@@ -659,44 +570,11 @@ fn lexical(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Whether a link at `destination` storing `target` points at `source`. A relative target is read from the real
-/// folder of the link, as [`relative_target`] computed it, so a link whose source is gone is still recognized.
-fn target_points_at(destination: &Path, target: &Path, source: &Path) -> bool {
-    let pointed = if target.is_absolute() {
-        lexical(target)
-    } else {
-        destination
-            .parent()
-            .and_then(|folder| fs::canonicalize(folder).ok())
-            .and_then(|folder| resolve_dots(&folder.join(target)))
-    };
-    pointed.is_some_and(|pointed| {
-        lexical(source).is_some_and(|source| source == pointed)
-            || fs::canonicalize(source).is_ok_and(|source| source == pointed)
-    })
-}
-
-/// The path with `.` removed and each `..` taking away the component before it; `None` when a `..` would climb
-/// above the root.
-fn resolve_dots(path: &Path) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    return None;
-                }
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    Some(out)
-}
-
 fn same_native_link(entry: &Entry, kind: LinkKind, target: &Path, source: &Path) -> bool {
     match (entry, kind) {
-        (Entry::Symlink { target: found }, LinkKind::Symlink) => found == target,
+        (Entry::Symlink { target: found }, LinkKind::Symlink) => {
+            found.as_os_str() == target.as_os_str()
+        }
         // The stored target itself, or the same folder when both still resolve.
         (Entry::Junction { target: found }, LinkKind::Junction) => {
             found == target || same_folder(found, source)
@@ -719,8 +597,12 @@ fn relative_target(folder: &Path, source: &Path) -> Result<PathBuf, FsxError> {
         .map_err(|error| FsxError::io(FsxErrorKind::Io, folder, "cannot resolve", error))?;
     let to = fs::canonicalize(source)
         .map_err(|error| FsxError::io(FsxErrorKind::Io, source, "cannot resolve", error))?;
-    let from: Vec<Component<'_>> = from.components().collect();
-    let to: Vec<Component<'_>> = to.components().collect();
+    relative_between(&from, &to)
+}
+
+pub(super) fn relative_between(folder: &Path, source: &Path) -> Result<PathBuf, FsxError> {
+    let from: Vec<Component<'_>> = folder.components().collect();
+    let to: Vec<Component<'_>> = source.components().collect();
     let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
     if common == 0 {
         return Err(FsxError::new(

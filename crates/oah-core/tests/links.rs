@@ -264,22 +264,23 @@ fn an_occupied_destination_is_left_alone() {
 }
 
 #[test]
-fn removing_a_link_never_removes_its_target() {
+fn legacy_native_record_preserves_the_link_and_reports_ordinary_absence() {
     let stores = Stores::new();
     let source = stores.source();
     let destination = stores.agents.join("skill-a");
     let outcome =
         create(&stores.request(&destination, TargetStyle::Absolute, false, &source)).unwrap();
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap(),
-        Removal::Removed
+        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
     );
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
+    assert_eq!(fs::canonicalize(&destination).unwrap(), source);
     assert_eq!(
         fs::read_to_string(source.join("SKILL.md")).unwrap(),
         "# Skill A\n"
     );
     assert!(source.join("scripts").join("run.sh").is_file());
+    unlink(&destination);
     assert_eq!(
         remove(&outcome.link, &[&stores.store]).unwrap(),
         Removal::AlreadyGone
@@ -308,10 +309,7 @@ fn a_link_that_is_no_longer_ours_is_not_removed() {
 
     let other = stores.store.join("skill-b");
     fs::create_dir(&other).unwrap();
-    assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap(),
-        Removal::Removed
-    );
+    unlink(&destination);
     let replaced =
         create(&stores.request(&destination, TargetStyle::Absolute, false, &other)).unwrap();
     let error = remove(&outcome.link, &[&stores.store]).unwrap_err();
@@ -321,9 +319,10 @@ fn a_link_that_is_no_longer_ours_is_not_removed() {
         "the link now points somewhere else"
     );
     assert_eq!(
-        remove(&replaced.link, &[&stores.store]).unwrap(),
-        Removal::Removed
+        remove(&replaced.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
     );
+    assert_eq!(fs::canonicalize(&destination).unwrap(), other);
 }
 
 #[test]
@@ -509,10 +508,7 @@ fn cleanup_ownership_residue_from_failed_native_attempts_is_cleaned() {
             "# Skill A\n"
         );
         assert_eq!(names(&stores.agents), [format!("skill-{index}")]);
-        assert_eq!(
-            remove(&outcome.link, &[&stores.store]).unwrap(),
-            Removal::Removed
-        );
+        fs::remove_dir_all(&destination).unwrap();
     }
 
     // A residue the attempt cannot remove (something was put inside its folder) stays where it is and is
@@ -660,7 +656,7 @@ fn cleanup_ownership_record_refuses_mismatching_replacements() {
 }
 
 #[test]
-fn a_copy_is_removed_only_while_it_matches_its_record() {
+fn legacy_copy_records_preserve_matching_copies_and_ordinary_children() {
     let stores = Stores::new();
     let source = stores.source();
     let name = if cfg!(unix) { r"skill-a\." } else { "skill-a" };
@@ -687,14 +683,14 @@ fn a_copy_is_removed_only_while_it_matches_its_record() {
 
     fs::remove_file(destination.join("added.txt")).unwrap();
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap(),
-        Removal::Removed
+        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
     );
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
-    assert!(
-        source.join("SKILL.md").is_file(),
-        "removing a copy left the source alone"
+    assert_eq!(
+        fs::read(destination.join("SKILL.md")).unwrap(),
+        b"# Skill A\n"
     );
+    assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), b"# Skill A\n");
 }
 
 #[test]
@@ -745,9 +741,10 @@ fn ambiguous_copy_destinations_are_refused_even_when_absent() {
         );
 
         assert_eq!(
-            remove(&canonical, &[&stores.store]).unwrap(),
-            Removal::Removed
+            remove(&canonical, &[&stores.store]).unwrap_err().kind(),
+            FsxErrorKind::NotOwned
         );
+        fs::remove_dir_all(&destination).unwrap();
         assert!(names(&stores.agents).is_empty());
         assert_refused();
         assert_eq!(
@@ -836,11 +833,11 @@ fn a_real_junction_is_made_without_elevation() {
     assert!(junction::exists(&destination).unwrap());
     assert_eq!(names(&stores.agents), ["skill-a"]);
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap(),
-        Removal::Removed
+        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
     );
     assert!(source.join("SKILL.md").is_file());
-    assert_eq!(names(&stores.agents), Vec::<String>::new());
+    assert!(junction::exists(&destination).unwrap());
 }
 
 #[cfg(windows)]
@@ -880,10 +877,10 @@ fn a_junction_refused_after_its_folder_was_made_leaves_nothing_and_can_be_copied
         "# Long\n"
     );
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap(),
-        Removal::Removed
+        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
     );
-    assert_eq!(names(&stores.agents), Vec::<String>::new());
+    assert_eq!(fs::read(destination.join("SKILL.md")).unwrap(), b"# Long\n");
 }
 
 #[cfg(windows)]
@@ -941,14 +938,14 @@ fn system_linker_copy_under_actual_traversal_refusal() {
         "# Skill A\n"
     );
     assert_eq!(
-        remove(&outcome.link, &[&stores.store]).unwrap(),
-        Removal::Removed
+        remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+        FsxErrorKind::NotOwned
     );
     assert_eq!(
         fs::read_to_string(source.join("SKILL.md")).unwrap(),
         "# Skill A\n"
     );
-    assert_eq!(inspect(&destination).unwrap(), Entry::Missing);
+    assert_eq!(inspect(&destination).unwrap(), Entry::Directory);
     assert_eq!(names(&stores.agents), Vec::<String>::new());
 }
 
@@ -1145,10 +1142,8 @@ fn parse_record(text: &str) -> ManagedLink {
 }
 
 #[test]
-fn durable_record_survives_separate_processes() {
-    // A record is plain data. One process makes links and keeps their records as text; a later process
-    // rebuilds them and removes exactly the entries that still match, leaving replaced or edited ones alone.
-    const TEST: &str = "durable_record_survives_separate_processes";
+fn legacy_records_round_trip_across_processes_without_removal_authority() {
+    const TEST: &str = "legacy_records_round_trip_across_processes_without_removal_authority";
     if let Some((role, root)) = child_role() {
         let store = root.join("store");
         let agents = root.join("agents");
@@ -1157,16 +1152,7 @@ fn durable_record_survives_separate_processes() {
             "create" => {
                 fs::create_dir_all(&records).unwrap();
                 let source = store.join("skill-a");
-                for (name, copy) in [
-                    ("linked", false),
-                    ("copied", true),
-                    ("replaced", false),
-                    ("edited", true),
-                    ("same-target", false),
-                    ("file", false),
-                    ("folder", false),
-                    ("same-copy", true),
-                ] {
+                for (name, copy) in [("linked", false), ("copied", true)] {
                     let destination = agents.join(name);
                     let request = LinkRequest {
                         source: &source,
@@ -1190,25 +1176,15 @@ fn durable_record_survives_separate_processes() {
                 }
             }
             "remove" => {
-                let read =
-                    |name: &str| parse_record(&fs::read_to_string(records.join(name)).unwrap());
                 let stores = [store.as_path()];
-                assert_eq!(remove(&read("linked"), &stores).unwrap(), Removal::Removed);
-                assert_eq!(
-                    remove(&read("linked"), &stores).unwrap(),
-                    Removal::AlreadyGone
-                );
-                assert_eq!(remove(&read("copied"), &stores).unwrap(), Removal::Removed);
-                for name in [
-                    "replaced",
-                    "edited",
-                    "same-target",
-                    "file",
-                    "folder",
-                    "same-copy",
-                ] {
-                    let error = remove(&read(name), &stores).unwrap_err();
+                for name in ["linked", "copied"] {
+                    let path = records.join(name);
+                    let saved = fs::read_to_string(&path).unwrap();
+                    let record = parse_record(&saved);
+                    assert!(record.identity.is_some());
+                    let error = remove(&record, &stores).unwrap_err();
                     assert_eq!(error.kind(), FsxErrorKind::NotOwned, "{name}: {error}");
+                    assert_eq!(fs::read(&path).unwrap(), saved.as_bytes());
                 }
             }
             other => panic!("unknown role {other}"),
@@ -1219,66 +1195,16 @@ fn durable_record_survives_separate_processes() {
     let stores = Stores::new();
     let root = stores.store.parent().unwrap().to_path_buf();
     let created = rerun(TEST, "create", &root, None);
-    // Between the two processes the user replaces one link and edits one copy.
-    let other = stores.store.join("skill-b");
-    fs::create_dir(&other).unwrap();
-    let replaced = stores.agents.join("replaced");
-    unlink(&replaced);
-    SystemLinker.link(&other, &replaced, &other).unwrap();
-    let edited = stores.agents.join("edited").join("SKILL.md");
-    fs::write(&edited, "# Edited by the user\n").unwrap();
-    for name in ["same-target", "file", "folder", "same-copy"] {
-        let destination = stores.agents.join(name);
-        fs::rename(&destination, root.join(format!("original-{name}"))).unwrap();
-        match name {
-            "same-target" => SystemLinker
-                .link(&stores.source(), &destination, &stores.source())
-                .unwrap(),
-            "file" => fs::write(&destination, "user file").unwrap(),
-            "folder" => fs::create_dir(&destination).unwrap(),
-            "same-copy" => {
-                create_with(
-                    &stores.request(&destination, TargetStyle::Absolute, true, &stores.source()),
-                    &Unavailable,
-                )
-                .unwrap();
-            }
-            other => panic!("unexpected replacement {other}"),
-        }
-    }
-    let removed = rerun(TEST, "remove", &root, None);
-    assert_ne!(reported_process(&created), reported_process(&removed));
+    let refused = rerun(TEST, "remove", &root, None);
+    assert_ne!(reported_process(&created), reported_process(&refused));
+    assert_eq!(names(&stores.agents), ["copied", "linked"]);
     assert_eq!(
-        names(&stores.agents),
-        [
-            "edited",
-            "file",
-            "folder",
-            "replaced",
-            "same-copy",
-            "same-target"
-        ]
-    );
-    assert_eq!(
-        fs::read_to_string(stores.agents.join("file")).unwrap(),
-        "user file"
-    );
-    assert!(stores.agents.join("folder").is_dir());
-    assert_eq!(
-        fs::canonicalize(stores.agents.join("same-target")).unwrap(),
+        fs::canonicalize(stores.agents.join("linked")).unwrap(),
         stores.source()
     );
     assert_eq!(
-        fs::read(stores.agents.join("same-copy/SKILL.md")).unwrap(),
+        fs::read(stores.agents.join("copied/SKILL.md")).unwrap(),
         b"# Skill A\n"
-    );
-    for name in ["same-target", "file", "folder", "same-copy"] {
-        assert!(fs::symlink_metadata(root.join(format!("original-{name}"))).is_ok());
-    }
-    assert_eq!(fs::canonicalize(&replaced).unwrap(), other);
-    assert_eq!(
-        fs::read_to_string(&edited).unwrap(),
-        "# Edited by the user\n"
     );
     assert_eq!(
         fs::read_to_string(stores.source().join("SKILL.md")).unwrap(),
@@ -1387,12 +1313,7 @@ fn operation_identity_real_fat32_fallback_record() {
                 );
             }
             "remove" => {
-                assert_eq!(remove(&read("copy"), &[&store]).unwrap(), Removal::Removed);
-                assert_eq!(
-                    remove(&read("copy"), &[&store]).unwrap(),
-                    Removal::AlreadyGone
-                );
-                for name in ["replaced", "reused-original"] {
+                for name in ["copy", "replaced", "reused-original"] {
                     let error = remove(&read(name), &[&store]).unwrap_err();
                     assert_eq!(error.kind(), FsxErrorKind::NotOwned);
                 }
@@ -1437,7 +1358,10 @@ fn operation_identity_real_fat32_fallback_record() {
                         b"synthetic bytes\r\n"
                     );
                 }
-                assert_eq!(remove(&original, &[&store]).unwrap(), Removal::Removed);
+                assert_eq!(
+                    remove(&original, &[&store]).unwrap_err().kind(),
+                    FsxErrorKind::NotOwned
+                );
             }
             other => panic!("unknown role {other}"),
         }
@@ -1463,9 +1387,14 @@ fn operation_identity_real_fat32_fallback_record() {
     assert_ne!(reported_process(&created), reported_process(&replaced));
     assert_ne!(reported_process(&replaced), reported_process(&removed));
     println!("{created}{replaced}{removed}");
-    assert_eq!(names(&root.join("agents")), ["replaced", "unowned.txt"]);
+    assert_eq!(
+        names(&root.join("agents")),
+        ["copy", "malformed", "replaced", "unowned.txt"]
+    );
     for folder in [
         "store/skill",
+        "agents/copy",
+        "agents/malformed",
         "agents/replaced",
         "retained-original-with-a-longer-name",
     ] {
@@ -1491,29 +1420,13 @@ fn operation_identity_real_fat32_fallback_record() {
         fs::read(root.join("agents/unowned.txt")).unwrap(),
         b"unowned sibling"
     );
-    println!("OPERATION_IDENTITY_REAL_FAT32_RECORD_OK");
+    println!("LEGACY_FAT32_CREATION_AND_REFUSAL_OK");
 }
 
 #[test]
-fn durable_record_link_target_must_point_at_its_store_source() {
-    // A record built from what is on disk cannot claim a link that points outside the stores: the store of the
-    // record's source counts only when the recorded target really points at that source.
+fn legacy_native_records_preserve_absolute_and_relative_links() {
     let stores = Stores::new();
     let source = stores.source();
-    let outside = stores.agents.join("outside");
-    fs::create_dir(&outside).unwrap();
-    let destination = stores.agents.join("user-link");
-    let outcome =
-        create(&stores.request(&destination, TargetStyle::Absolute, false, &outside)).unwrap();
-    let minted = ManagedLink {
-        source: source.clone(),
-        ..outcome.link
-    };
-    let error = remove(&minted, &[&stores.store]).unwrap_err();
-    assert_eq!(error.kind(), FsxErrorKind::NotOwned, "{error}");
-    assert_eq!(fs::canonicalize(&destination).unwrap(), outside);
-
-    // Records OAH made, absolute or relative, point at their source.
     let absolute = stores.agents.join("absolute");
     let relative = stores.agents.join("relative");
     let made = [
@@ -1526,11 +1439,11 @@ fn durable_record_link_target_must_point_at_its_store_source() {
     }
     for outcome in &made {
         assert_eq!(
-            remove(&outcome.link, &[&stores.store]).unwrap(),
-            Removal::Removed
+            remove(&outcome.link, &[&stores.store]).unwrap_err().kind(),
+            FsxErrorKind::NotOwned
         );
     }
-    assert_eq!(names(&stores.agents), ["outside", "user-link"]);
+    assert_eq!(names(&stores.agents), ["absolute", "relative"]);
 }
 
 #[test]
@@ -1588,16 +1501,19 @@ fn durable_record_many_links_and_files_stay_within_256_descriptors() {
         assert!(restored.identity.is_some());
         records.push(restored);
         for record in &records {
-            assert_eq!(remove(record, &[&store]).unwrap(), Removal::Removed);
+            assert_eq!(
+                remove(record, &[&store]).unwrap_err().kind(),
+                FsxErrorKind::NotOwned
+            );
         }
-        assert_eq!(names(&agents), Vec::<String>::new());
+        assert_eq!(names(&agents).len(), LINKS + 1);
         println!("ROLE_OK many links={LINKS} files={FILES}");
         return;
     }
     let stores = Stores::new();
     let root = stores.store.parent().unwrap().to_path_buf();
     rerun(TEST, "many", &root, Some(256));
-    assert_eq!(names(&stores.agents), Vec::<String>::new());
+    assert_eq!(names(&stores.agents).len(), LINKS + 1);
     assert_eq!(
         fs::read_to_string(stores.source().join("SKILL.md")).unwrap(),
         "# Skill A\n"
@@ -1646,17 +1562,7 @@ fn durable_record_descriptor_exhaustion_is_an_io_error_without_residue() {
             "# Skill A\n"
         );
         drop(held);
-        let held = hold_all_but(0);
-        let error = remove(&outcome.link, &[&store]).unwrap_err();
-        assert_eq!(error.kind(), FsxErrorKind::Io, "{error}");
-        assert_eq!(error.io_error().and_then(io::Error::raw_os_error), Some(24));
-        drop(held);
-        assert_eq!(
-            fs::read(destination.join("SKILL.md")).unwrap(),
-            b"# Skill A\n"
-        );
-        assert_eq!(remove(&outcome.link, &[&store]).unwrap(), Removal::Removed);
-        assert_eq!(names(&agents), Vec::<String>::new());
+        assert_eq!(names(&agents), ["skill-a"]);
         println!("ROLE_OK exhaust free=2 copied={}", outcome.link.files.len());
         return;
     }
@@ -1664,7 +1570,7 @@ fn durable_record_descriptor_exhaustion_is_an_io_error_without_residue() {
     let root = stores.store.parent().unwrap().to_path_buf();
     let output = rerun(TEST, "exhaust", &root, Some(256));
     assert!(output.contains("os error 24"), "{output}");
-    assert_eq!(names(&stores.agents), Vec::<String>::new());
+    assert_eq!(names(&stores.agents), ["skill-a"]);
 }
 
 #[test]
@@ -1713,8 +1619,10 @@ fn durable_record_missing_invalid_or_foreign_identity_refuses_without_adoption()
             );
         }
         assert_eq!(
-            remove(&parse_record(&record_text(&outcome.link)), &[&stores.store]).unwrap(),
-            Removal::Removed
+            remove(&parse_record(&record_text(&outcome.link)), &[&stores.store])
+                .unwrap_err()
+                .kind(),
+            FsxErrorKind::NotOwned
         );
     }
 }
