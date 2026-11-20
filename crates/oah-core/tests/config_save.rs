@@ -596,6 +596,39 @@ fn user_settings_are_saved_with_the_same_guarantees() {
     );
 }
 
+#[test]
+fn saving_an_owned_preference_preserves_an_unrelated_key_in_its_table() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("settings.toml");
+    fs::write(&path, "[ui]\ntheme = \"auto\"\naccent = \"blue\" # mine\n").unwrap();
+    let snapshot = UserSettings::read(&path).unwrap();
+
+    save_settings(&snapshot, &[Edit::set(&["ui", "theme"], "dark")], quick()).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[ui]\ntheme = \"dark\"\naccent = \"blue\" # mine\n"
+    );
+}
+
+#[test]
+fn a_settings_batch_with_an_unsupported_preference_leaves_the_file_unchanged() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("settings.toml");
+    let original = "[ui]\ntheme = \"auto\"\naccent = \"blue\" # mine\n";
+    fs::write(&path, original).unwrap();
+    let snapshot = UserSettings::read(&path).unwrap();
+
+    let edits = [
+        Edit::set(&["ui", "theme"], "dark"),
+        Edit::remove(&["ui", "accent"]),
+    ];
+    let error = save_settings(&snapshot, &edits, quick()).unwrap_err();
+
+    assert_eq!(error.code(), codes::KEY_NOT_OWNED);
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+}
+
 /// The saved file must hold no temporary files beside it.
 fn no_temporary_files(folder: &Path) -> bool {
     fs::read_dir(folder).unwrap().all(|entry| {

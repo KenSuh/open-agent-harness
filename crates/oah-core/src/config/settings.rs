@@ -1,5 +1,5 @@
 // 사용자 설정: OAH_HOME/settings.toml 을 같은 파서·병합·형식 보존 저장으로 다루며 비밀·동의·네트워크 값은 두지 않는다.
-use super::error::{ConfigError, Notice};
+use super::error::{ConfigError, Notice, codes};
 use super::file::ConfigFile;
 use super::patch::{self, Op};
 use super::project::merge_top;
@@ -205,6 +205,19 @@ pub fn save_settings(
 ) -> Result<SaveOutcome, ConfigError> {
     let file = snapshot.file();
     check_owned(file, edits, &SETTINGS_TABLES)?;
+    for edit in edits {
+        let (Edit::Set { path, .. } | Edit::Remove { path }) = edit;
+        if !matches!(path.as_slice(), [table, key] if defaults(table).get(key).is_some()) {
+            return Err(ConfigError::new(
+                codes::KEY_NOT_OWNED,
+                format!(
+                    "{}: {} is not a key OAH writes",
+                    file.where_(),
+                    patch::dotted(path)
+                ),
+            ));
+        }
+    }
     let ops: Vec<Op> = edits.iter().map(Edit::op).collect();
     let text = patch::patch(file.text(), file.values(), &ops, file.where_())?;
     if text == file.text() {

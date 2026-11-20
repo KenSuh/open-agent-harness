@@ -16,7 +16,7 @@ pub fn settings_get(ctx: &Ctx<'_>, _req: Empty) -> Result<SettingsDto, Error> {
 }
 
 /// `settings_set`: applies dotted-key edits such as `ui.theme` through `config::save_settings`, records the
-/// write, and returns the settings as saved. A key outside the tables OAH writes, or with an empty segment, is
+/// write, and returns the settings as saved. A key outside the settings OAH owns, or with an empty segment, is
 /// `OAH_CONFIG_KEY_NOT_OWNED`; a value the settings reject is `OAH_CONFIG_INVALID`; nothing is written then.
 pub fn settings_set(ctx: &Ctx<'_>, req: SettingsSetReq) -> Result<SettingsDto, Error> {
     let path = paths::settings_file(ctx.env)?;
