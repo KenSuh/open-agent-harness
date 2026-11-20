@@ -88,6 +88,18 @@ describe("initial load", () => {
     expect(rosterText()).toMatch(/No agent check has run yet\./);
   });
 
+  it("clears the checking status when native completion arrives before the busy response", async () => {
+    const t = createFakeTransport();
+    const start = deferred<string>();
+    t.override.startAgentsProbe = () => start.promise;
+    await mount(<App transport={t} />);
+    t.agents = [codexSignedOut];
+    await emit(() => t.emitAgentsChanged(sampleAgents.changed));
+    await emit(() => start.reject({ code: "OAH_TASK_BUSY", message: "busy", hint: null }));
+    expect(rosterText()).toMatch(/Codex/);
+    expect(rosterText()).not.toMatch(/checking/i);
+  });
+
   it("shows an agents_list error with a working reload", async () => {
     const t = createFakeTransport();
     t.override.agentsList = async () => {

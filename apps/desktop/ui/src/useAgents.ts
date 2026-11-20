@@ -39,6 +39,7 @@ export function useAgents(transport: Transport, notify: Notify) {
   // A probe started elsewhere (the native focus probe) holds the same request; its agents-changed ends the wait.
   const [waiting, setWaiting] = useState(false);
   const readSeq = useRef(0);
+  const agentsChangeSeq = useRef(0);
   const checkRun = useRef(0);
   const checkRunning = useRef(false);
   const hasList = useRef(false);
@@ -65,6 +66,7 @@ export function useAgents(transport: Transport, notify: Notify) {
   const follow = useCallback(
     async (req: AgentsProbeReq, origin: AgentCheck["origin"]) => {
       const run = ++checkRun.current;
+      const changesAtStart = agentsChangeSeq.current;
       const current = () => checkRun.current === run;
       let settled = false;
       checkRunning.current = true;
@@ -108,7 +110,7 @@ export function useAgents(transport: Transport, notify: Notify) {
         if (dto.code !== TASK_BUSY) {
           showError(dto);
         } else if (origin === "initial") {
-          setWaiting(true);
+          setWaiting(agentsChangeSeq.current === changesAtStart);
         } else {
           info("An agent check like this one is already running; the list updates when it ends.");
         }
@@ -128,6 +130,7 @@ export function useAgents(transport: Transport, notify: Notify) {
     transport
       .onAgentsChanged(() => {
         // Invalidation signal only: answer by reading the cache again.
+        ++agentsChangeSeq.current;
         setWaiting(false);
         reload();
       })
