@@ -1,0 +1,28 @@
+{
+  "id": "cursor",
+  "name": "Cursor",
+  "kind": "ide",
+  "installed": false,
+  "status": "missing",
+  "version": null,
+  "source": null,
+  "sign_in": "unknown",
+  "login_hint": {
+    "text": "Cursor Settings → Sign In",
+    "is_command": false
+  },
+  "install_url": "https://cursor.com/download",
+  "can_take_section": false,
+  "capabilities": {
+    "detect": "unknown",
+    "sign_in": "unknown",
+    "skills_link": "unknown",
+    "native_switch": "unknown",
+    "model_write": "unknown",
+    "model_read": "unknown",
+    "hook_prompt": "unknown",
+    "pack_update": "unknown"
+  },
+  "problem": null,
+  "checked_at": "2026-11-18T06:00:00Z"
+}

@@ -6,11 +6,18 @@
 //! [`run_task`] on a blocking thread and returns the task id at once. The session is the only long-lived state;
 //! every durable fact is on disk, so dropping it loses nothing.
 
+mod agents;
 mod cli_copy;
+mod doctor;
 mod refresh;
 mod settings;
 
+pub use agents::{
+    AGENTS_PROBE, SIGN_IN_INTERVAL, agents_list, agents_probe, agents_probe_key, agents_probe_with,
+    sign_in_due,
+};
 pub use cli_copy::{CliCopy, cli_copy};
+pub use doctor::{Doctor, doctor, doctor_exit, doctor_with};
 pub use refresh::{REFRESH, refresh, refresh_key};
 pub use settings::{settings_get, settings_set};
 
@@ -34,6 +41,7 @@ pub struct Session {
     tasks: TaskRegistry,
     self_writes: SelfWrites,
     cli: Mutex<Option<CliCopy>>,
+    agents: Mutex<agents::AgentCache>,
 }
 
 /// What an operation receives: the environment, the session, and the cancellation and progress of the task it
@@ -74,6 +82,7 @@ impl Session {
             tasks: TaskRegistry::new(),
             self_writes: SelfWrites::new(),
             cli: Mutex::new(None),
+            agents: Mutex::default(),
         }
     }
 

@@ -5,6 +5,7 @@
 //! `OAH_*` code through [`Coded`]. [`Error::to_dto`] writes the home folder as `~` in the message, so no full user
 //! path crosses IPC; [`hint_for`] is the one table of hints.
 
+use crate::agents::AgentError;
 use crate::config::ConfigError;
 use crate::fsx::FsxError;
 use crate::paths::{Env, PathsError};
@@ -14,7 +15,7 @@ use crate::tasks::{Cancelled, TaskError};
 use serde::Serialize;
 use std::fmt;
 
-/// The codes M1-S1 adds (CONTRACTS C16).
+/// The codes M1-S1 and M1-S2 add (CONTRACTS C16).
 pub mod codes {
     /// A task of the same kind and subject is already running.
     pub const TASK_BUSY: &str = "OAH_TASK_BUSY";
@@ -26,6 +27,12 @@ pub mod codes {
     pub const CLI_COPY_FAILED: &str = "OAH_CLI_COPY_FAILED";
     /// The chosen path is not a folder.
     pub const PROJECT_NOT_FOLDER: &str = "OAH_PROJECT_NOT_FOLDER";
+    /// An agent's detection or sign-in command could not launch, timed out or exited with an error (M1-S2).
+    pub const AGENT_PROBE_FAILED: &str = "OAH_AGENT_PROBE_FAILED";
+    /// A Windows batch file OAH does not launch: not an npm shim it can map to `node` (v0.4.0 code, M1-S2).
+    pub const UNSUPPORTED_BATCH_SHIM: &str = "OAH_UNSUPPORTED_BATCH_SHIM";
+    /// The program found under an agent's command name does not report itself as that agent (M1-S2).
+    pub const AGENT_UNIDENTIFIED: &str = "OAH_AGENT_UNIDENTIFIED";
 }
 
 /// A failure with a stable code and a message for a person.
@@ -43,6 +50,7 @@ pub enum Error {
     Task(TaskError),
     Plan(PlanError),
     Project(ProjectError),
+    Agents(AgentError),
 }
 
 /// The serialized error: `code` is stable, `message` and `hint` are English text for a person.
@@ -81,6 +89,16 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
             "OAH keeps working. Agent hooks use the previous copy until a later start copies it again."
         }
         codes::PROJECT_NOT_FOLDER => "Choose a folder, not a file.",
+        codes::AGENT_PROBE_FAILED => {
+            "Run the agent's command in a terminal to see what is wrong, then refresh."
+        }
+        codes::UNSUPPORTED_BATCH_SHIM => {
+            "Install the tool's native executable, or configure an explicit command such as \
+             [\"node.exe\", \"<path to the script>\"] in .oah/config.toml."
+        }
+        codes::AGENT_UNIDENTIFIED => {
+            "Another program uses this name. Fix PATH, or set the agent's command in .oah/config.toml."
+        }
         "OAH_PROJECT_MISSING" => "Check that the folder still exists, then open it again.",
         "OAH_HOME_UNAVAILABLE" => "Set OAH_HOME, or make sure the home folder is set.",
         "OAH_GIT_MISSING" => "Install Git or add it to PATH, then open the folder again.",
@@ -105,6 +123,7 @@ impl Coded for Error {
             Error::Task(error) => error.code(),
             Error::Plan(error) => error.code(),
             Error::Project(error) => error.code(),
+            Error::Agents(error) => error.code(),
         }
     }
 
@@ -116,6 +135,7 @@ impl Coded for Error {
             Error::Task(error) => Coded::message(error),
             Error::Plan(error) => Coded::message(error),
             Error::Project(error) => Coded::message(error),
+            Error::Agents(error) => Coded::message(error),
         }
     }
 }
@@ -176,5 +196,11 @@ impl From<PlanError> for Error {
 impl From<ProjectError> for Error {
     fn from(error: ProjectError) -> Self {
         Error::Project(error)
+    }
+}
+
+impl From<AgentError> for Error {
+    fn from(error: AgentError) -> Self {
+        Error::Agents(error)
     }
 }

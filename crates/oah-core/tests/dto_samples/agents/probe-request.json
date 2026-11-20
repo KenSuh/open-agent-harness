@@ -1,0 +1,8 @@
+{
+  "agents": [
+    "claude",
+    "codex"
+  ],
+  "sign_in": true,
+  "focus": false
+}

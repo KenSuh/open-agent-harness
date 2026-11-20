@@ -1,0 +1,28 @@
+{
+  "id": "copilot",
+  "name": "Copilot CLI",
+  "kind": "cli",
+  "installed": true,
+  "status": "sign-in-unknown",
+  "version": "1.0.2",
+  "source": "/bin/copilot",
+  "sign_in": "unknown",
+  "login_hint": {
+    "text": "copilot login",
+    "is_command": true
+  },
+  "install_url": "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
+  "can_take_section": true,
+  "capabilities": {
+    "detect": "verified",
+    "sign_in": "unknown",
+    "skills_link": "unknown",
+    "native_switch": "unknown",
+    "model_write": "unknown",
+    "model_read": "unknown",
+    "hook_prompt": "unknown",
+    "pack_update": "unknown"
+  },
+  "problem": null,
+  "checked_at": "2026-11-18T06:00:00Z"
+}

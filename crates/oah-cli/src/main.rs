@@ -1,13 +1,40 @@
-// oah 명령줄 진입점: 지금은 --version 만 처리한다.
+// oah 명령줄 진입점: clap 으로 인자를 읽어 --version, doctor, 옛 hook 답을 핵심 작업에 넘기고 종료 코드를 정한다.
+mod cmd;
+
+use clap::{Arg, ArgAction, Command};
 use std::process::ExitCode;
 
+/// The command line (CONTRACTS C5): `oah --version`, `oah doctor [--json]` and the hidden legacy `oah hook`.
+fn cli() -> Command {
+    Command::new("oah")
+        .about("Open Agent Harness")
+        .disable_version_flag(true)
+        .arg(
+            Arg::new("version")
+                .long("version")
+                .action(ArgAction::SetTrue)
+                .help("Print the version"),
+        )
+        .args_conflicts_with_subcommands(true)
+        .arg_required_else_help(true)
+        .subcommand(cmd::doctor::command())
+        .subcommand(cmd::hook::command())
+}
+
 fn main() -> ExitCode {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() == 1 && args[0] == "--version" {
-        println!("oah {}", oah_core::VERSION);
-        ExitCode::SUCCESS
-    } else {
-        eprintln!("usage: oah --version");
-        ExitCode::from(2)
+    let matches = match cli().try_get_matches() {
+        Ok(matches) => matches,
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(cmd::USAGE));
+        }
+    };
+    match matches.subcommand() {
+        Some(("doctor", matches)) => cmd::doctor::run(matches),
+        Some(("hook", matches)) => cmd::hook::run(matches),
+        _ => {
+            println!("oah {}", oah_core::VERSION);
+            ExitCode::SUCCESS
+        }
     }
 }

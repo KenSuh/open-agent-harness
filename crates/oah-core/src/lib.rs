@@ -10,7 +10,9 @@
 //! * [`tasks`] runs long operations: ids, states, progress, cooperative cancellation and the registry.
 //! * [`plan`] is the one apply engine for change plans: preflight, then one target at a time.
 //! * [`project`] opens a folder read-only; [`app`] holds the session and the operations the shell calls.
+//! * [`agents`] detects the seven agents and their sign-in through one probe seam, with capability evidence.
 
+pub mod agents;
 pub mod app;
 pub mod config;
 pub mod dto;

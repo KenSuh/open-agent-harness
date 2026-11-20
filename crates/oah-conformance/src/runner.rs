@@ -13,7 +13,7 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 /// The areas this build runs. Every other area is checked for completeness and reported as pending.
-pub const ENABLED: &[&str] = &["config"];
+pub const ENABLED: &[&str] = &["config", "doctor"];
 
 /// The fixture cases whose v0.4.0 result 1.0 deliberately changes, and how this runner adapts each. Design §3.1:
 /// "an unknown key inside a table 1.0 reads is a notice (`OAH_CONFIG_UNKNOWN_KEY`, non-fatal)". The frozen
@@ -182,8 +182,13 @@ pub fn run_area(root: &Path, area: &str) -> AreaReport {
             );
         }
     }
-    if state == AreaState::Enabled && area == "config" {
-        let registered: BTreeSet<&str> = CONFIG_DEVIATIONS.iter().copied().collect();
+    if state == AreaState::Enabled {
+        let adapted: &[&str] = if area == "config" {
+            CONFIG_DEVIATIONS
+        } else {
+            &[]
+        };
+        let registered: BTreeSet<&str> = adapted.iter().copied().collect();
         let declared: BTreeSet<&str> = manifest.deviations.iter().map(String::as_str).collect();
         for case in declared.difference(&registered) {
             fail(
@@ -217,6 +222,7 @@ pub fn run_area(root: &Path, area: &str) -> AreaReport {
         let deviation = manifest.deviations.contains(&case.name);
         let outcome = match area {
             "config" => run_config_case(case, deviation, &input, &expect),
+            "doctor" => crate::doctor::run_case(&case.function, &input, &expect),
             _ => Err(format!(
                 "no operations are registered for the enabled area {area}"
             )),

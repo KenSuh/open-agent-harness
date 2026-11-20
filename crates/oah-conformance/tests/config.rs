@@ -1,5 +1,6 @@
-// conformance/v0.4.0 의 모든 영역을 실행해 config 30개 사례가 실제 oah-core 로 통과하고 나머지 일곱 영역은 pending 으로 남는지 확인한다.
-use oah_conformance::runner::{AreaReport, AreaState, run_all};
+// conformance/v0.4.0 의 모든 영역을 실행해 config 30개 사례가 실제 oah-core 로 통과하고 켜지지 않은 영역은 pending 으로 남는지 확인한다.
+use oah_conformance::REQUIRED_AREAS;
+use oah_conformance::runner::{AreaReport, AreaState, ENABLED, run_all};
 use std::path::{Path, PathBuf};
 
 fn fixture_root() -> PathBuf {
@@ -37,26 +38,21 @@ fn every_config_case_passes_against_the_real_core() {
     assert_eq!(config.deviations, 3);
 }
 
+/// Each enabling slice adds its area to `ENABLED` and its own test file; the pending list follows (D-12).
 #[test]
-fn the_other_seven_areas_stay_pending_and_complete() {
+fn every_area_not_enabled_stays_pending_and_complete() {
     let reports = reports();
     let pending: Vec<&str> = reports
         .iter()
         .filter(|report| report.state == AreaState::Pending)
         .map(|report| report.area.as_str())
         .collect();
-    assert_eq!(
-        pending,
-        [
-            "doctor",
-            "hashes",
-            "license",
-            "models",
-            "review",
-            "rules",
-            "skills-roots"
-        ]
-    );
+    let not_enabled: Vec<&str> = REQUIRED_AREAS
+        .iter()
+        .copied()
+        .filter(|area| !ENABLED.contains(area))
+        .collect();
+    assert_eq!(pending, not_enabled);
     for report in reports
         .iter()
         .filter(|report| report.state == AreaState::Pending)

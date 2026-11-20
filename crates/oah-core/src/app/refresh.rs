@@ -1,5 +1,7 @@
 // 새로고침 작업: 연 프로젝트를 다시 읽어 세션을 갱신하고 실제 개수를 돌려준다(이 조각에서는 아무것도 쓰지 않는다).
 use super::Ctx;
+use super::agents::reprobe_held;
+use crate::agents::SystemProbe;
 use crate::dto::{Empty, RefreshDto};
 use crate::error::Error;
 use crate::project;
@@ -17,8 +19,15 @@ pub fn refresh_key() -> TaskKey {
 
 /// The full refresh: re-reads the open project, if any, and replaces the session's copy unless a project was
 /// opened or read again after this refresh started; the counts are those of the project the session then holds.
-/// It writes nothing in this slice; later slices add steps. Cancellation is checked before each step.
-pub fn refresh(ctx: &Ctx<'_>, _req: Empty) -> Result<RefreshDto, Error> {
+/// Then it re-probes the agents the session holds (M1-S2). It writes nothing in this slice; later slices add
+/// steps. Cancellation is checked before each step.
+pub fn refresh(ctx: &Ctx<'_>, req: Empty) -> Result<RefreshDto, Error> {
+    let counts = read_project(ctx, req)?;
+    reprobe_held(ctx, &SystemProbe::new(ctx.env))?;
+    Ok(counts)
+}
+
+fn read_project(ctx: &Ctx<'_>, _req: Empty) -> Result<RefreshDto, Error> {
     ctx.cancel.check()?;
     let Some((stamp, root)) = ctx.session.stamp_refresh() else {
         ctx.progress.progress(Progress {

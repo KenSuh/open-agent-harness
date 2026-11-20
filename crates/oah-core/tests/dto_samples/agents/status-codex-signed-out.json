@@ -1,0 +1,28 @@
+{
+  "id": "codex",
+  "name": "Codex",
+  "kind": "cli",
+  "installed": true,
+  "status": "not-signed-in",
+  "version": "codex-cli 0.163.0",
+  "source": "/bin/codex",
+  "sign_in": "signed-out",
+  "login_hint": {
+    "text": "codex login",
+    "is_command": true
+  },
+  "install_url": "https://github.com/openai/codex",
+  "can_take_section": true,
+  "capabilities": {
+    "detect": "verified",
+    "sign_in": "verified",
+    "skills_link": "unknown",
+    "native_switch": "unknown",
+    "model_write": "unknown",
+    "model_read": "unknown",
+    "hook_prompt": "unknown",
+    "pack_update": "unknown"
+  },
+  "problem": null,
+  "checked_at": "2026-11-18T06:00:00Z"
+}

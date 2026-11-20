@@ -1,0 +1,479 @@
+# Agent facts (CONTRACTS C8, DECISIONS D-07). The one place a fact about an agent is written.
+#
+# One entry per (agent, capability):
+#   status       verified | unknown | none
+#   basis        carried (pinned by a v0.4.0 fixture) | docs (a cited source) | measured (observed, with version)
+#   source       where the fact comes from; [Sn] are the sources of DESIGN-C2 section 13
+#   os           systems the basis covers; any other system reads as unknown (empty for unknown entries)
+#   verified_on  the agent version a measurement saw; empty for carried and docs
+#   unverified   [open] items that must settle before the entry can be verified
+#
+# A write-bearing capability (skills_link, native_switch, model_write, model_read, hook_prompt, pack_update)
+# with basis docs reads as unknown at run time: docs do not stand in for a measurement. Every Windows fact
+# starts unknown unless a v0.4.0 fixture carries it; the Windows machine is offline. A first measurement of a
+# write-bearing capability comes from an owner-attended evidence session (D-30), never from this slice.
+
+[claude.detect]
+status = "verified"
+basis = "carried"
+source = "v0.4:src/oah/setup/tools.py:141-145; conformance/v0.4.0/doctor/status-table"
+os = ["macos", "windows"]
+verified_on = ""
+unverified = []
+
+[claude.sign_in]
+status = "verified"
+basis = "carried"
+source = "v0.4:src/oah/setup/tools.py:141-145; v0.4:src/oah/setup/guide.py:247-257; conformance/v0.4.0/doctor/signed-in"
+os = ["macos", "windows"]
+verified_on = ""
+unverified = []
+
+[claude.skills_link]
+status = "verified"
+basis = "docs"
+source = "[S4] code.claude.com/docs/en/skills.md: symlinked skill folders"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[claude.native_switch]
+status = "unknown"
+basis = "docs"
+source = "[S4] skillOverrides; user level and plugin skill names are open"
+os = []
+verified_on = ""
+unverified = ["U-11a"]
+
+[claude.model_write]
+status = "verified"
+basis = "docs"
+source = "[S5] code.claude.com/docs/en/model-config.md: model in the user settings file"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[claude.model_read]
+status = "verified"
+basis = "docs"
+source = "[S29] code.claude.com/docs/en/settings.md: model is read once, at session start"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[claude.hook_prompt]
+status = "verified"
+basis = "docs"
+source = "[S5] code.claude.com/docs/en/hooks.md: UserPromptSubmit additionalContext"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[claude.pack_update]
+status = "unknown"
+basis = "docs"
+source = "[S26] plugin updates; holding a pack is open"
+os = []
+verified_on = ""
+unverified = ["U-20"]
+
+[codex.detect]
+status = "verified"
+basis = "carried"
+source = "v0.4:src/oah/setup/tools.py:146-149; conformance/v0.4.0/doctor/status-table"
+os = ["macos", "windows"]
+verified_on = ""
+unverified = []
+
+[codex.sign_in]
+status = "verified"
+basis = "carried"
+source = "v0.4:src/oah/setup/tools.py:146-149; conformance/v0.4.0/doctor/status-table; [S7] codex login status"
+os = ["macos", "windows"]
+verified_on = ""
+unverified = []
+
+[codex.skills_link]
+status = "verified"
+basis = "docs"
+source = "[S6] developers.openai.com/codex/skills.md: symlinked skill folders"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[codex.native_switch]
+status = "verified"
+basis = "docs"
+source = "[S6] [[skills.config]] with enabled = false in ~/.codex/config.toml"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[codex.model_write]
+status = "verified"
+basis = "docs"
+source = "[S7] model and model_reasoning_effort in ~/.codex/config.toml"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[codex.model_read]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-22"
+os = []
+verified_on = ""
+unverified = ["U-22"]
+
+[codex.hook_prompt]
+status = "verified"
+basis = "docs"
+source = "[S7] UserPromptSubmit in ~/.codex/hooks.json; [S25] it runs only after the user trusts it in /hooks"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[codex.pack_update]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-12c: no documented update command"
+os = []
+verified_on = ""
+unverified = ["U-12c", "U-20"]
+
+[gemini.detect]
+status = "unknown"
+basis = "docs"
+source = "DESIGN-C2 section 4.2: gemini on PATH and gemini --version; other install locations are open"
+os = []
+verified_on = ""
+unverified = ["U-1"]
+
+[gemini.sign_in]
+status = "unknown"
+basis = "docs"
+source = "[S9] security.auth.selectedType names a method, not a session"
+os = []
+verified_on = ""
+unverified = ["U-1"]
+
+[gemini.skills_link]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-10"
+os = []
+verified_on = ""
+unverified = ["U-10"]
+
+[gemini.native_switch]
+status = "verified"
+basis = "docs"
+source = "[S9] skills.disabled in the settings file"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[gemini.model_write]
+status = "verified"
+basis = "docs"
+source = "[S9] model.name in ~/.gemini/settings.json"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[gemini.model_read]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-22"
+os = []
+verified_on = ""
+unverified = ["U-22"]
+
+[gemini.hook_prompt]
+status = "verified"
+basis = "docs"
+source = "[S9] BeforeAgent hookSpecificOutput.additionalContext"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[gemini.pack_update]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-20"
+os = []
+verified_on = ""
+unverified = ["U-20"]
+
+[copilot.detect]
+status = "verified"
+basis = "docs"
+source = "[S13] copilot version; [S12] install methods"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[copilot.sign_in]
+status = "unknown"
+basis = "docs"
+source = "[S12] token order: environment, OS keychain, gh; no documented status command"
+os = []
+verified_on = ""
+unverified = ["U-4"]
+
+[copilot.skills_link]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-10"
+os = []
+verified_on = ""
+unverified = ["U-10"]
+
+[copilot.native_switch]
+status = "verified"
+basis = "docs"
+source = "[S13] disabledSkills in settings.json"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[copilot.model_write]
+status = "verified"
+basis = "docs"
+source = "[S13] model in ~/.copilot/settings.json"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[copilot.model_read]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-22"
+os = []
+verified_on = ""
+unverified = ["U-22"]
+
+[copilot.hook_prompt]
+status = "none"
+basis = "docs"
+source = "[S13] hooks reference: output of config-file userPromptSubmitted hooks is dropped; sessionStart only"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[copilot.pack_update]
+status = "unknown"
+basis = "docs"
+source = "[S27] plugin commands; holding a pack is open"
+os = []
+verified_on = ""
+unverified = ["U-20"]
+
+[opencode.detect]
+status = "verified"
+basis = "docs"
+source = "[S15] opencode.ai/docs/cli.md: opencode --version"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[opencode.sign_in]
+status = "unknown"
+basis = "docs"
+source = "[S15] providers are connected with /connect inside the TUI"
+os = []
+verified_on = ""
+unverified = ["U-7a"]
+
+[opencode.skills_link]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-10"
+os = []
+verified_on = ""
+unverified = ["U-10"]
+
+[opencode.native_switch]
+status = "verified"
+basis = "docs"
+source = "[S14] a permissions rule with effect deny"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[opencode.model_write]
+status = "verified"
+basis = "docs"
+source = "[S15] model in opencode.json(c)"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[opencode.model_read]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-22"
+os = []
+verified_on = ""
+unverified = ["U-22"]
+
+[opencode.hook_prompt]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-7c: plugin hook events"
+os = []
+verified_on = ""
+unverified = ["U-7c"]
+
+[opencode.pack_update]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-20"
+os = []
+verified_on = ""
+unverified = ["U-20"]
+
+[antigravity.detect]
+status = "verified"
+basis = "docs"
+source = "[S11] antigravity.google/docs/install.md: agy on PATH or at <home>/.local/bin/agy"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[antigravity.sign_in]
+status = "unknown"
+basis = "docs"
+source = "[S11] credentials are kept in the OS keyring"
+os = []
+verified_on = ""
+unverified = ["U-8a"]
+
+[antigravity.skills_link]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-10"
+os = []
+verified_on = ""
+unverified = ["U-10"]
+
+[antigravity.native_switch]
+status = "unknown"
+basis = "docs"
+source = "DESIGN-C2 section 4.3: none documented"
+os = []
+verified_on = ""
+unverified = []
+
+[antigravity.model_write]
+status = "unknown"
+basis = "docs"
+source = "[S11] the /model choice persists; its settings key is open"
+os = []
+verified_on = ""
+unverified = ["U-8b"]
+
+[antigravity.model_read]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-8b"
+os = []
+verified_on = ""
+unverified = ["U-8b"]
+
+[antigravity.hook_prompt]
+status = "unknown"
+basis = "docs"
+source = "[S11] PreInvocation injectSteps; its payload is open"
+os = []
+verified_on = ""
+unverified = ["U-8c"]
+
+[antigravity.pack_update]
+status = "unknown"
+basis = "docs"
+source = "[S28] plugin commands; holding a pack is open"
+os = []
+verified_on = ""
+unverified = ["U-20"]
+
+[cursor.detect]
+status = "unknown"
+basis = "docs"
+source = "DESIGN-C2 section 4.2: /Applications/Cursor.app; a resolved agent command is not identified"
+os = []
+verified_on = ""
+unverified = ["U-9", "N-7"]
+
+[cursor.sign_in]
+status = "unknown"
+basis = "docs"
+source = "[S18] agent status needs the Cursor CLI"
+os = []
+verified_on = ""
+unverified = ["U-9"]
+
+[cursor.skills_link]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-10"
+os = []
+verified_on = ""
+unverified = ["U-10"]
+
+[cursor.native_switch]
+status = "unknown"
+basis = "docs"
+source = "DESIGN-C2 section 4.3: none documented"
+os = []
+verified_on = ""
+unverified = ["U-9"]
+
+[cursor.model_write]
+status = "unknown"
+basis = "docs"
+source = "DESIGN-C2 section 4.5: Cursor is not a section agent"
+os = []
+verified_on = ""
+unverified = []
+
+[cursor.model_read]
+status = "unknown"
+basis = "docs"
+source = "DESIGN-C2 section 4.5: Cursor is not a section agent"
+os = []
+verified_on = ""
+unverified = []
+
+[cursor.hook_prompt]
+status = "none"
+basis = "docs"
+source = "[S17] beforeSubmitPrompt can only block; sessionStart only"
+os = ["macos"]
+verified_on = ""
+unverified = []
+
+[cursor.pack_update]
+status = "unknown"
+basis = "docs"
+source = "EVIDENCE-MATRIX U-20"
+os = []
+verified_on = ""
+unverified = ["U-20"]
+
+# Items of EVIDENCE-MATRIX.md still open for the entries above, with what settles each.
+[open]
+U-1 = "Gemini CLI install locations beyond PATH and a non-interactive sign-in status: gemini --help, the authentication doc"
+U-4 = "Copilot CLI sign-in status command and exit code: copilot help, run signed in and signed out"
+U-7a = "OpenCode sign-in status command; Windows install, config and skills paths: opencode --help, opencode debug paths"
+U-7c = "OpenCode plugin hook events that add context at prompt time: the plugin API reference"
+U-8a = "Antigravity app bundle paths and sign-in status command: read the bundle id and path, agy --help"
+U-8b = "Antigravity settings key of the default model and thinking level: settings reference, diff after /model"
+U-8c = "Antigravity PreInvocation payload and injectSteps: a test hook in a temporary config folder"
+U-9 = "Cursor bundle and executable paths, IDE sign-in probe, per-skill disable setting: install on both systems"
+U-10 = "Symlinked skill folders outside Claude Code and Codex, and Windows junctions: an evidence session per agent"
+U-11a = "Claude Code skillOverrides at user level and for plugin skill names: an evidence session in a temporary profile"
+U-12c = "Codex plugin update and remove commands: the CLI's help"
+U-20 = "Pack update and hold behaviour per agent: an evidence session with a test pack in a temporary config folder"
+U-22 = "When each agent reads its model setting: the reload check of section 7.5 as an evidence session"
+N-7 = "A command name shared by unrelated tools: confirm the Cursor CLI's identity before recording it"

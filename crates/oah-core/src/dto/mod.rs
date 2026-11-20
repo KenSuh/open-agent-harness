@@ -8,12 +8,17 @@
 //! The samples in `crates/oah-core/tests/dto_samples/<area>/<name>.json` are the contract artefact: a test
 //! serializes fixed values and compares them byte for byte, and the UI tests load the same files.
 
+mod agents;
 mod app;
 mod notice;
 mod plan;
 mod project;
 mod task;
 
+pub use agents::{
+    AgentIdDto, AgentStatusDto, AgentsChangedDto, AgentsProbeReq, CapabilitiesDto, LoginHintDto,
+    SignInDto, rfc3339_utc,
+};
 pub use app::{
     AppInfoDto, CliDto, CliState, RefreshDto, SettingEdit, SettingValue, SettingsDto,
     SettingsSetReq, UiDto,

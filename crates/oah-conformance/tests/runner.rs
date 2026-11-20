@@ -1,5 +1,5 @@
 // 실행기 음성 대조: 고정 트리의 임시 사본을 하나씩 망가뜨려 실행기가 그 영역·사례를 실패로 보고하는지, 원본 conformance/ 는 그대로인지 확인한다.
-use oah_conformance::runner::{AreaReport, AreaState, run_all, run_area};
+use oah_conformance::runner::{AreaReport, AreaState, ENABLED, run_all, run_area};
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -433,7 +433,7 @@ fn required_area_inventory_reports_missing_enabled_and_pending_inputs() {
             let report = reports.iter().find(|report| report.area == *area).unwrap();
             assert_eq!(
                 report.state,
-                if area == "config" {
+                if ENABLED.contains(&area.as_str()) {
                     AreaState::Enabled
                 } else {
                     AreaState::Pending

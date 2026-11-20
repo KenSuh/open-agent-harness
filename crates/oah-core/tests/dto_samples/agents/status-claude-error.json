@@ -1,0 +1,32 @@
+{
+  "id": "claude",
+  "name": "Claude Code",
+  "kind": "cli",
+  "installed": true,
+  "status": "error",
+  "version": "2.1.318 (Claude Code)",
+  "source": "/bin/claude",
+  "sign_in": "unknown",
+  "login_hint": {
+    "text": "claude auth login",
+    "is_command": true
+  },
+  "install_url": "https://code.claude.com/docs/en/setup",
+  "can_take_section": true,
+  "capabilities": {
+    "detect": "verified",
+    "sign_in": "verified",
+    "skills_link": "unknown",
+    "native_switch": "unknown",
+    "model_write": "unknown",
+    "model_read": "unknown",
+    "hook_prompt": "unknown",
+    "pack_update": "unknown"
+  },
+  "problem": {
+    "code": "OAH_AGENT_PROBE_FAILED",
+    "message": "'claude auth status' timed out after 10s",
+    "hint": "Run the agent's command in a terminal to see what is wrong, then refresh."
+  },
+  "checked_at": "2026-11-18T06:00:00Z"
+}

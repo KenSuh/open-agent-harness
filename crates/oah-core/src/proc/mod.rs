@@ -5,6 +5,8 @@
 //! Two short-lived reader threads drain stdout and stderr; the caller waits at most the deadline in total, even
 //! when a grandchild keeps the pipes open, and a child that is still running then is killed.
 
+pub(crate) mod resolve;
+
 use crate::paths::Env;
 use std::fmt;
 use std::io::{self, Read};
@@ -26,13 +28,6 @@ pub(crate) struct Run<'a> {
 pub(crate) struct Output {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
-    #[cfg_attr(
-        not(all(test, unix)),
-        expect(
-            dead_code,
-            reason = "the CLI copy reads stdout only; M1-S2 probes read stderr; only the Unix tests read it here"
-        )
-    )]
     pub stderr: Vec<u8>,
 }
 
@@ -72,12 +67,23 @@ type Drained = (Stream, Result<Vec<u8>, ProcError>);
 
 /// Runs `run.program` with `run.args` and the variables of `env`, and returns its exit status and output.
 pub(crate) fn run(env: &Env, run: &Run<'_>) -> Result<Output, ProcError> {
-    if !run.program.is_absolute() {
+    run_args(env, run.program, run.args, run.deadline, run.limit)
+}
+
+/// [`run`] with arguments that need not be UTF-8: an npm shim's script path, or a configured command's own.
+pub(crate) fn run_args<A: AsRef<std::ffi::OsStr>>(
+    env: &Env,
+    program: &Path,
+    args: &[A],
+    deadline: Duration,
+    limit: usize,
+) -> Result<Output, ProcError> {
+    if !program.is_absolute() {
         return Err(ProcError::NotAbsolute);
     }
-    let deadline = Instant::now() + run.deadline;
-    let mut child = Command::new(run.program)
-        .args(run.args)
+    let deadline = Instant::now() + deadline;
+    let mut child = Command::new(program)
+        .args(args)
         .env_clear()
         .envs(env.vars())
         .stdin(Stdio::null())
@@ -87,8 +93,8 @@ pub(crate) fn run(env: &Env, run: &Run<'_>) -> Result<Output, ProcError> {
         .map_err(ProcError::Spawn)?;
     let (sender, receiver) = mpsc::channel();
     let readers = [
-        drain(child.stdout.take(), Stream::Out, run.limit, sender.clone()),
-        drain(child.stderr.take(), Stream::Err, run.limit, sender),
+        drain(child.stdout.take(), Stream::Out, limit, sender.clone()),
+        drain(child.stderr.take(), Stream::Err, limit, sender),
     ];
     if let Some(error) = readers.into_iter().find_map(Result::err) {
         return Err(stop(&mut child, ProcError::Spawn(error)));
