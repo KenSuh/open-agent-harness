@@ -27,10 +27,10 @@ pub(crate) struct Output {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     #[cfg_attr(
-        not(test),
+        not(all(test, unix)),
         expect(
             dead_code,
-            reason = "the CLI copy reads stdout only; M1-S2 probes read stderr"
+            reason = "the CLI copy reads stdout only; M1-S2 probes read stderr; only the Unix tests read it here"
         )
     )]
     pub stderr: Vec<u8>,

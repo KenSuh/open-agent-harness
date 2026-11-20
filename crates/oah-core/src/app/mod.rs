@@ -215,7 +215,8 @@ mod tests {
     #[test]
     fn an_older_open_that_finishes_last_does_not_replace_the_newer_selection() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // The same platform form the opened project reports: on Windows, a short drive path without `\\?\`.
+        let root = paths::canonical_folder(dir.path()).unwrap();
         let mut env = Env::new(&root).unwrap();
         if let Some(path) = std::env::var_os("PATH") {
             env.set("PATH", path);
