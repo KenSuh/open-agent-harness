@@ -20,6 +20,7 @@ mod ownership;
 mod selfwrite;
 mod staging;
 
+pub(crate) use atomic::read_regular_optional;
 pub use atomic::{
     Fingerprint, WriteReceipt, publish_executable, publish_new, read_optional, write_atomic,
 };

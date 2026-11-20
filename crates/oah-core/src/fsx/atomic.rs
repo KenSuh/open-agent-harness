@@ -3,7 +3,7 @@ use super::error::{FsxError, FsxErrorKind};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -99,11 +99,74 @@ impl WriteReceipt {
 
 /// Reads a whole file; a file that does not exist is `None`. Never creates anything.
 pub fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FsxError> {
-    match retry_sharing(|| fs::read(path)) {
+    optional_read(path, || fs::read(path))
+}
+
+pub(crate) fn read_regular_optional(path: &Path) -> Result<Option<Vec<u8>>, FsxError> {
+    optional_read(path, || read_regular(path))
+}
+
+fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    require_regular(&fs::symlink_metadata(path)?)?;
+    let mut file = open_without_following(path)?;
+    require_regular(&file.metadata()?)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn optional_read(
+    path: &Path,
+    operation: impl FnMut() -> io::Result<Vec<u8>>,
+) -> Result<Option<Vec<u8>>, FsxError> {
+    match retry_sharing(operation) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(FsxError::io(FsxErrorKind::Io, path, "cannot read", error)),
     }
+}
+
+fn require_regular(metadata: &fs::Metadata) -> io::Result<()> {
+    #[cfg(windows)]
+    let is_reparse = {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    };
+    #[cfg(not(windows))]
+    let is_reparse = false;
+
+    if metadata.is_file() && !is_reparse {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "entry is not a regular file",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn open_without_following(path: &Path) -> io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags, open};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = open(path, flags, Mode::empty())?;
+    Ok(fs::File::from(file))
+}
+
+#[cfg(windows)]
+fn open_without_following(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_without_following(_path: &Path) -> io::Result<fs::File> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Replaces `path` with `bytes` atomically and verifies the result.
@@ -135,7 +198,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<WriteReceipt, FsxError>
             error,
         )
     })?;
-    verify(path, bytes)
+    verify(path, bytes, || fs::read(path))
 }
 
 /// Writes a file that must not exist yet, never replacing one that does.
@@ -174,7 +237,7 @@ pub fn publish_new(path: &Path, bytes: &[u8]) -> Result<WriteReceipt, FsxError> 
             error,
         )
     })?;
-    verify(path, bytes)
+    verify(path, bytes, || fs::read(path))
 }
 
 /// Publishes an executable at `path` only after `check` accepted it (CONTRACTS C7).
@@ -212,7 +275,7 @@ pub fn publish_executable<E>(
             error,
         )
     })?;
-    verify(path, bytes).map(Ok)
+    verify(path, bytes, || read_regular(path)).map(Ok)
 }
 
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), FsxError> {
@@ -343,8 +406,12 @@ fn create_temp(
     }
 }
 
-fn verify(path: &Path, expected: &[u8]) -> Result<WriteReceipt, FsxError> {
-    let actual = retry_sharing(|| fs::read(path)).map_err(|error| {
+fn verify(
+    path: &Path,
+    expected: &[u8],
+    read: impl FnMut() -> io::Result<Vec<u8>>,
+) -> Result<WriteReceipt, FsxError> {
+    let actual = retry_sharing(read).map_err(|error| {
         FsxError::io(
             FsxErrorKind::Unverified,
             path,
@@ -403,6 +470,21 @@ fn is_transient_sharing(error: &io::Error) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn opening_without_following_refuses_a_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("data");
+        let link = dir.path().join("alias");
+        fs::write(&target, b"inert data").unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(open_without_following(&target).is_ok());
+        assert!(open_without_following(&link).is_err());
+    }
+
     #[test]
     fn post_publication_readback_failures_issue_no_receipt_or_self_write() {
         use crate::fsx::{SelfWriteMatch, SelfWrites};
@@ -418,7 +500,7 @@ mod tests {
                 Some(bytes) => fs::write(&path, bytes).unwrap(),
             }
             let registry = SelfWrites::new();
-            let result = verify(&path, expected);
+            let result = verify(&path, expected, || fs::read(&path));
             if let Ok(receipt) = &result {
                 registry.record(receipt);
             }

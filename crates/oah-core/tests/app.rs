@@ -441,6 +441,28 @@ mod cli_copy {
     }
 
     #[test]
+    fn cli_copy_preserves_an_existing_link_and_its_data() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let installed = dest(&fixture);
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        let target = fixture.root.join("user-data");
+        fs::write(&target, b"keep").unwrap();
+        symlink(&target, &installed).unwrap();
+        let bundled = fixture.root.join("bundle-cli");
+        fs::write(&bundled, b"inert fixture").unwrap();
+
+        let copy = with_ctx(&fixture, |ctx| app::cli_copy(ctx, &bundled));
+
+        assert_eq!(copy.state, CliState::KeptPrevious);
+        assert_eq!(copy.version, None);
+        assert_eq!(fs::read_link(&installed).unwrap(), target);
+        assert_eq!(fs::read(target).unwrap(), b"keep");
+        assert_eq!(bin_names(&fixture), ["oah"]);
+    }
+
+    #[test]
     fn a_missing_bundled_cli_keeps_what_is_there_and_reports_no_version() {
         let fixture = Fixture::new();
         let before = tree(&fixture.root);
