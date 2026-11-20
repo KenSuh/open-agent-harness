@@ -178,3 +178,81 @@ pub(super) fn windows_drive_root_str(path: &str) -> Option<String> {
     let root = windows_drive_root_units(&units)?;
     String::from_utf16(&root[..3]).ok()
 }
+
+/// Entry kind for an explicit-owner private Windows security descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DescriptorTarget {
+    /// Private folder: explicit user owner and protected inheritable user-only DACL.
+    Directory,
+    /// Private copy: explicit user owner and protected user-only DACL without container inheritance.
+    File,
+}
+
+/// Builds a NUL-terminated UTF-16 SDDL string that sets the entry owner explicitly to `sid_units` and applies a
+/// protected DACL allowing only `sid_units`, eliminating reliance on the ambient Windows token default owner.
+pub(super) fn private_sddl_units(sid_units: &[u16], target: DescriptorTarget) -> Option<Vec<u16>> {
+    if !is_valid_sid_string_units(sid_units) {
+        return None;
+    }
+    let middle = match target {
+        DescriptorTarget::Directory => "D:P(A;OICI;FA;;;",
+        DescriptorTarget::File => "D:P(A;;FA;;;",
+    };
+    let mut out = Vec::with_capacity(2 + sid_units.len() * 2 + middle.len() + 2);
+    out.extend("O:".encode_utf16());
+    out.extend_from_slice(sid_units);
+    out.extend(middle.encode_utf16());
+    out.extend_from_slice(sid_units);
+    out.push(u16::from(b')'));
+    out.push(0);
+    Some(out)
+}
+
+fn is_valid_sid_string_units(units: &[u16]) -> bool {
+    let Some(rest) = units.strip_prefix(&[
+        u16::from(b'S'),
+        u16::from(b'-'),
+        u16::from(b'1'),
+        u16::from(b'-'),
+    ]) else {
+        return false;
+    };
+    let mut parts = rest.split(|&unit| unit == u16::from(b'-'));
+    let Some(auth) = parts.next() else {
+        return false;
+    };
+    let auth_ok = match auth
+        .strip_prefix(&[u16::from(b'0'), u16::from(b'x')])
+        .or_else(|| auth.strip_prefix(&[u16::from(b'0'), u16::from(b'X')]))
+    {
+        Some(hex) => {
+            !hex.is_empty()
+                && hex
+                    .iter()
+                    .all(|&u| u8::try_from(u).is_ok_and(|b| b.is_ascii_hexdigit()))
+        }
+        None => {
+            !auth.is_empty()
+                && auth
+                    .iter()
+                    .all(|&u| u8::try_from(u).is_ok_and(|b| b.is_ascii_digit()))
+        }
+    };
+    auth_ok
+        && parts.all(|sub| {
+            !sub.is_empty()
+                && sub
+                    .iter()
+                    .all(|&u| u8::try_from(u).is_ok_and(|b| b.is_ascii_digit()))
+        })
+}
+
+#[cfg(test)]
+pub(super) fn private_sddl_str(sid: &str, target: DescriptorTarget) -> Option<String> {
+    let units: Vec<u16> = sid.encode_utf16().collect();
+    let sddl = private_sddl_units(&units, target)?;
+    let (&0, body) = sddl.split_last()? else {
+        return None;
+    };
+    String::from_utf16(body).ok()
+}

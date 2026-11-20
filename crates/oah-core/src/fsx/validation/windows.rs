@@ -2,13 +2,15 @@
 //! The Windows side of [`super::validate_private_copy`].
 
 mod acl;
+mod descriptor;
 mod ffi;
 mod handle;
 
 use super::rules::{CleanupCheck, Who, may_cleanup, private_folder_rule, trusted_location_rule};
 use super::{NAME_ATTEMPTS, io_error, refuse, unique_name};
 use crate::fsx::error::FsxError;
-use ffi::{Descriptor, User};
+use descriptor::Descriptor;
+use ffi::User;
 use handle::{
     WinId, final_path_by_handle, is_plain_dir, is_plain_file, mark_delete_on_close, open_folder,
     require_fixed_drive, retry_removal,
@@ -113,7 +115,7 @@ impl Private {
     /// left untouched; an entry whose owner and directory identity are proven but whose ACL policy is insufficient
     /// is deleted through its verified handle.
     pub(super) fn create(base: Location) -> Result<Private, FsxError> {
-        let descriptor = Descriptor::only(&base.user)
+        let descriptor = Descriptor::for_directory(&base.user)
             .map_err(|error| io_error(base.path(), "cannot describe a private folder", error))?;
         for _ in 0..NAME_ATTEMPTS {
             let path = base.path().join(unique_name());
@@ -158,37 +160,56 @@ impl Private {
         ))
     }
 
-    /// Creates the copy exclusively without following reparse points, records its verified identity, writes it and
-    /// closes it before anything runs. It inherits the folder's access.
+    /// Exclusively creates the copy with explicit current-user ownership and open-final-entry semantics, verifies
+    /// its plain-file identity and owner through that same handle before writing, then writes and closes it.
     pub(super) fn write(&mut self, name: &OsStr, bytes: &[u8]) -> Result<PathBuf, FsxError> {
         let path = self.path.join(name);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(&path)
+        let descriptor = Descriptor::for_file(&self.base.user)
+            .map_err(|error| io_error(&path, "cannot describe the private copy", error))?;
+        let mut file = descriptor
+            .create_file(&path)
             .map_err(|error| io_error(&path, "cannot create the private copy", error))?;
         let info = winapi_util::file::information(&file)
             .map_err(|error| io_error(&path, "cannot inspect the private copy", error))?;
-        if !is_plain_file(info.file_attributes())
-            || info.volume_serial_number() != self.dir_id.volume
-        {
+        let id = WinId::of(&info);
+        if !is_plain_file(info.file_attributes()) || id.volume != self.dir_id.volume {
             return Err(refuse(
                 &path,
                 "the new private copy is not a plain file on the verified volume",
             ));
         }
+        if acl::read_owner(&file, &path, &self.base.user)? != Who::User {
+            return Err(refuse(
+                &path,
+                "the new private copy is not owned by this user",
+            ));
+        }
         self.copy = Some(VerifiedCopy {
             path: path.clone(),
-            id: WinId {
-                volume: info.volume_serial_number(),
-                index: info.file_index(),
-            },
+            id,
         });
         file.write_all(bytes)
             .map_err(|error| io_error(&path, "cannot write the private copy", error))?;
         Ok(path)
     }
+}
+
+/// Verifies on Windows that the staged folder and copy are owned by the current user with protected user-only
+/// access, read through opened no-reparse handles.
+#[cfg(test)]
+pub(super) fn assert_private_copy_owner(folder: &Path, copy: &Path) {
+    let user = User::current().unwrap();
+    let (dir, _) = open_folder(folder, READ_CONTROL, FILE_SHARE_DELETE).unwrap();
+    private_folder_rule(&acl::read_security(&dir, folder, &user).unwrap()).unwrap();
+    let file = OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(copy)
+        .unwrap();
+    let info = winapi_util::file::information(&file).unwrap();
+    assert!(is_plain_file(info.file_attributes()));
+    private_folder_rule(&acl::read_security(&file, copy, &user).unwrap()).unwrap();
 }
 
 impl Drop for Private {

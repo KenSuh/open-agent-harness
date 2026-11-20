@@ -26,10 +26,12 @@
 //!   administrators from changing them. That is not inspected.
 //!
 //! The new folder gets an unused name and must then be a real folder owned by this user that nobody else may use:
-//! mode `0700` with no access control list granting more on Unix. On Windows it gets a protected access list that
-//! allows only this user and is kept open without delete sharing during the check. The copy is created exclusively
-//! inside it and closed before the check runs. Cleanup after partial initialization or ordinary drop removes an
-//! entry only after proving its handle, type, owner and intact identity; unverified entries are left untouched.
+//! mode `0700` with no access control list granting more on Unix. On Windows both the private folder and the
+//! exclusive copy are created with explicit current-user ownership and a protected access list allowing only this
+//! user (never relying on the ambient token default owner); the folder is kept open without delete sharing during
+//! the check, and the copy's handle identity and owner are verified before writing and closing it. Cleanup after
+//! partial initialization or ordinary drop removes an entry only after proving its handle, type, owner and intact
+//! identity; unverified entries are left untouched.
 //! A verified removal that still fails after a short retry leaves the entry private to this user. Code running as
 //! the same user, administrators and root are outside the guarantee.
 

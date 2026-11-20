@@ -1,5 +1,5 @@
-// Windows FFI 메모리·문자열·토큰 SID·보안 설명자 경계: 핸들·크기·정렬·유효성을 검증하고 소유 값으로 복사한다.
-//! Checked Windows FFI boundary for Win32 allocations, `FOLDERID_LocalAppData`, process user SID, and descriptors.
+// Windows FFI 메모리·문자열·토큰 SID 경계: 핸들·크기·정렬·유효성을 검증하고 소유 값으로 복사한다.
+//! Checked Windows FFI boundary for Win32 allocations, `FOLDERID_LocalAppData`, and process user SID.
 
 use super::super::io_error;
 use super::super::rules::Who;
@@ -7,7 +7,7 @@ use super::super::windows_rules::{
     MAX_WIDE_UNITS, SID_HEADER_BYTES, validate_sid_layout, validate_token_sid_bounds,
 };
 use crate::fsx::error::FsxError;
-use std::ffi::{OsStr, OsString, c_void};
+use std::ffi::{OsString, c_void};
 use std::io;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -15,15 +15,11 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{NonNull, null_mut};
 use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, LocalFree};
-use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-};
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
-    EqualSid, GetLengthSid, GetTokenInformation, IsValidSid, IsWellKnownSid, PSID,
-    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
-    WinLocalSystemSid,
+    EqualSid, GetLengthSid, GetTokenInformation, IsValidSid, IsWellKnownSid, PSID, TOKEN_QUERY,
+    TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
-use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
@@ -232,74 +228,21 @@ impl User {
             }
         }
     }
-}
 
-/// A security descriptor allocated by Windows and freed on drop.
-pub(super) struct Descriptor(LocalMem);
-
-impl Descriptor {
-    /// Owner `user`, and a protected access list whose one entry allows `user` everything, inherited by files and
-    /// folders created inside.
-    pub(super) fn only(user: &User) -> io::Result<Descriptor> {
+    /// Formats this validated user SID as owned UTF-16 code units (without a trailing NUL).
+    pub(super) fn sid_units(&self) -> io::Result<Vec<u16>> {
         let mut text = null_mut();
-        // SAFETY: `user.sid()` is a validated owned SID; Windows allocates `text`, owned by `_guard`.
-        if unsafe { ConvertSidToStringSidW(user.sid(), &mut text) } == 0 {
+        // SAFETY: `self.sid()` is a validated owned SID; Windows allocates `text`, owned by `_guard`.
+        if unsafe { ConvertSidToStringSidW(self.sid(), &mut text) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        let _text_guard = LocalMem::new(text.cast())
+        let _guard = LocalMem::new(text.cast())
             .ok_or_else(|| invalid_data("ConvertSidToStringSidW returned a null string"))?;
         // SAFETY: successful `ConvertSidToStringSidW` returned a live NUL-terminated UTF-16 string.
         let sid = unsafe { copy_wide_z(text)? };
-        drop(_text_guard);
         if sid.is_empty() {
             return Err(invalid_data("ConvertSidToStringSidW returned an empty SID"));
         }
-        let mut sddl = OsString::from("O:");
-        for part in [
-            sid.as_os_str(),
-            OsStr::new("D:P(A;OICI;FA;;;"),
-            sid.as_os_str(),
-            OsStr::new(")"),
-        ] {
-            sddl.push(part);
-        }
-        let wide: Vec<u16> = sddl.encode_wide().chain(Some(0)).collect();
-        let mut raw = null_mut();
-        // SAFETY: `wide` is NUL-terminated and `raw` is writable; Windows allocates the descriptor.
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide.as_ptr(),
-                SDDL_REVISION_1,
-                &mut raw,
-                null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let mem = LocalMem::new(raw).ok_or_else(|| {
-            invalid_data("ConvertStringSecurityDescriptorToSecurityDescriptorW returned null")
-        })?;
-        Ok(Descriptor(mem))
-    }
-
-    /// Creates the folder `path` with this descriptor; an existing name is `ERROR_ALREADY_EXISTS`.
-    pub(super) fn create_directory(&self, path: &Path) -> io::Result<()> {
-        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if wide.contains(&0) {
-            return Err(invalid_data("directory path contains an embedded NUL"));
-        }
-        wide.push(0);
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
-            lpSecurityDescriptor: self.0.as_ptr(),
-            bInheritHandle: 0,
-        };
-        // SAFETY: `wide` is NUL-terminated, and `attributes` and `self.0` live until the call returns.
-        if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        Ok(sid.encode_wide().collect())
     }
 }

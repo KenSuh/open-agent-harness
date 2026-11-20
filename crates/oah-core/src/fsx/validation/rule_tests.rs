@@ -4,9 +4,10 @@ use super::rules::{
     private_folder_rule, trusted_location_rule,
 };
 use super::windows_rules::{
-    SID_HEADER_BYTES, SID_MAX_SUB_AUTHORITIES, SID_REVISION, validate_ace_extent,
-    validate_ace_header_bounds, validate_acl_size, validate_allow_ace_sid_offset,
-    validate_sid_layout, validate_token_sid_bounds, windows_drive_root_str,
+    DescriptorTarget, SID_HEADER_BYTES, SID_MAX_SUB_AUTHORITIES, SID_REVISION, private_sddl_str,
+    validate_ace_extent, validate_ace_header_bounds, validate_acl_size,
+    validate_allow_ace_sid_offset, validate_sid_layout, validate_token_sid_bounds,
+    windows_drive_root_str,
 };
 
 #[test]
@@ -232,5 +233,32 @@ fn windows_drive_root_normalization_accepts_fixed_disk_forms_and_fails_closed_ot
         "C:\\Temp\0extra",
     ] {
         assert_eq!(windows_drive_root_str(refused), None, "{refused}");
+    }
+}
+
+#[test]
+fn windows_private_sddl_sets_explicit_user_owner_for_directory_and_copy() {
+    let sid = "S-1-5-21-100-200-300-1001";
+    assert_eq!(
+        private_sddl_str(sid, DescriptorTarget::Directory).as_deref(),
+        Some("O:S-1-5-21-100-200-300-1001D:P(A;OICI;FA;;;S-1-5-21-100-200-300-1001)")
+    );
+    assert_eq!(
+        private_sddl_str(sid, DescriptorTarget::File).as_deref(),
+        Some("O:S-1-5-21-100-200-300-1001D:P(A;;FA;;;S-1-5-21-100-200-300-1001)")
+    );
+    assert!(private_sddl_str("S-1-0x123456789abc-1000", DescriptorTarget::File).is_some());
+    for invalid in [
+        "",
+        "S-1-",
+        "S-1-5-",
+        "S-1-5--1",
+        "S-2-5-1",
+        "BA",
+        "S-1-5-21)\0",
+        "S-1-5-21(A;;FA;;;WD)",
+    ] {
+        assert_eq!(private_sddl_str(invalid, DescriptorTarget::Directory), None);
+        assert_eq!(private_sddl_str(invalid, DescriptorTarget::File), None);
     }
 }

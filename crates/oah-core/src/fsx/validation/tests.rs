@@ -39,6 +39,8 @@ fn private_copy_seen(base: &Path, copy: &Path) -> PathBuf {
         let mode = fs::symlink_metadata(copy).unwrap().permissions().mode();
         assert_eq!(mode & 0o7777, 0o700);
     }
+    #[cfg(windows)]
+    platform::assert_private_copy_owner(folder, copy);
     copy.to_path_buf()
 }
 
