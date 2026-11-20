@@ -1,4 +1,4 @@
-// 번들 CLI 경로 해석: 실행 파일 옆의 oah[.exe], 없으면 OAH_DEV_CLI 를 고를 뿐 아무것도 읽거나 쓰지 않는다.
+// 번들 CLI 경로 해석: 실행 파일 옆의 oah[.exe] 를 고르고 개발 빌드에서만 OAH_DEV_CLI 를 허용한다.
 //! Where the bundled `oah` CLI is (CONTRACTS C7). The shell finds the path and passes it to
 //! `oah_core::app::cli_copy`; core decides what to do with it, including when the file is missing. Nothing here
 //! reads, runs or writes the file.
@@ -13,16 +13,22 @@ pub const SIDECAR_NAME: &str = if cfg!(windows) { "oah.exe" } else { "oah" };
 /// The variable `tauri dev` and tests use to name a CLI when none sits beside the executable.
 pub const DEV_CLI_VAR: &str = "OAH_DEV_CLI";
 
-/// The bundled CLI for this process: `<folder of the running executable>/oah[.exe]`, else `OAH_DEV_CLI`.
+/// The bundled CLI beside the executable, with an environment fallback in debug development builds.
 pub fn cli_source(env: &Env) -> PathBuf {
     let beside = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|folder| folder.join(SIDECAR_NAME)));
-    let dev = env
-        .var(DEV_CLI_VAR)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    choose(beside, dev, |path| path.is_file())
+    choose(beside, dev_cli(env), |path| path.is_file())
+}
+
+fn dev_cli(env: &Env) -> Option<PathBuf> {
+    if cfg!(debug_assertions) && tauri::is_dev() {
+        env.var(DEV_CLI_VAR)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    } else {
+        None
+    }
 }
 
 /// The first existing absolute candidate, beside the executable first. When none exists, the path beside the
@@ -77,5 +83,18 @@ mod tests {
     fn relative_candidates_are_never_used() {
         let chosen = choose(None, Some(PathBuf::from("oah")), |_| true);
         assert_eq!(chosen, PathBuf::new());
+    }
+
+    #[test]
+    fn only_a_debug_development_build_reads_the_environment_fallback() {
+        let mut env = Env::new(std::env::temp_dir()).unwrap();
+        let fallback = abs("dev/oah");
+        env.set(DEV_CLI_VAR, &fallback);
+
+        if cfg!(debug_assertions) && tauri::is_dev() {
+            assert_eq!(dev_cli(&env), Some(fallback));
+        } else {
+            assert_eq!(dev_cli(&env), None);
+        }
     }
 }
