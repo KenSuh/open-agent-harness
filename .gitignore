@@ -20,3 +20,7 @@ dist/
 .unlazy-hook-state.json
 .claude/settings.local.json
 /target/
+
+# Desktop app: the staged sidecar CLI and Tauri's generated schemas are build output
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/gen/
