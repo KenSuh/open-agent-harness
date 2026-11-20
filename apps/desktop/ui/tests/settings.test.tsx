@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { button, click, emit, flush, mount, unmount } from "./support/dom";
 import { createFakeTransport, sampleSettings } from "./support/fakeTransport";
-import type { SettingsDto } from "../src/contract";
 
 afterEach(async () => {
   await unmount();
@@ -52,12 +51,11 @@ describe("settings: theme and quick start (persisted only through settings_set)"
     expect(document.querySelector(".quick-start")).toBeNull();
     await unmount();
 
-    const dismissed: SettingsDto = { ...sampleSettings, ui: { theme: "light", quick_start_dismissed: true } };
     const t2 = createFakeTransport();
-    t2.override.settingsGet = async () => dismissed;
+    t2.override.settingsGet = async () => sampleSettings;
     await mount(<App transport={t2} />);
     expect(document.querySelector(".quick-start")).toBeNull();
-    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
   it("shows a settings load error with retry", async () => {

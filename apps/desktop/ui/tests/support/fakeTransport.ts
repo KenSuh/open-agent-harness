@@ -1,4 +1,3 @@
-// 한국어: 테스트 전용 전송 계층 — 운영 코드가 import 하지 않는다. UI 전용 합성 샘플(공유 core DTO 샘플 아님)을 돌려주고 호출을 기록한다.
 import type {
   AppInfoDto,
   NoticeDto,
@@ -10,9 +9,9 @@ import type {
   TaskSnapshotDto,
 } from "../../src/contract";
 import type { ScanChanged, Transport } from "../../src/transport/types";
-import appInfo from "../samples/app_info.json";
-import project from "../samples/project.json";
-import settings from "../samples/settings.json";
+import appInfo from "../../../../../crates/oah-core/tests/dto_samples/app/app_info.json";
+import settings from "../../../../../crates/oah-core/tests/dto_samples/app/settings.json";
+import project from "../../../../../crates/oah-core/tests/dto_samples/project/git_legacy.json";
 
 export const sampleAppInfo = appInfo as AppInfoDto;
 export const sampleProject = project as ProjectDto;
@@ -45,7 +44,10 @@ export interface FakeTransport extends Transport {
 }
 
 export function createFakeTransport(initial: { project?: ProjectDto | null; tasks?: TaskSnapshotDto[] } = {}): FakeTransport {
-  let current: SettingsDto = structuredClone(sampleSettings);
+  let current: SettingsDto = {
+    ...sampleSettings,
+    ui: { theme: "auto", quick_start_dismissed: false },
+  };
   // Like core: start_refresh while a refresh runs joins it and returns the same id.
   let runningRefresh: string | null =
     initial.tasks?.find((task) => task.kind === "refresh" && task.state === "running")?.id ?? null;
