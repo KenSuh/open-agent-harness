@@ -102,25 +102,34 @@ pub fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FsxError> {
     optional_read(path, || fs::read(path))
 }
 
-pub(crate) fn read_regular_optional(path: &Path) -> Result<Option<Vec<u8>>, FsxError> {
-    optional_read(path, || read_regular(path))
+/// Reads a regular file without following its final link, with the metadata of the same opened file; a file that
+/// does not exist is `None`.
+pub(crate) fn read_regular_optional(
+    path: &Path,
+) -> Result<Option<(Vec<u8>, fs::Metadata)>, FsxError> {
+    optional_read(path, || read_regular_with_metadata(path))
 }
 
 fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
-    require_regular(&fs::symlink_metadata(path)?)?;
-    let mut file = open_without_following(path)?;
-    require_regular(&file.metadata()?)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    read_regular_with_metadata(path).map(|(bytes, _)| bytes)
 }
 
-fn optional_read(
+fn read_regular_with_metadata(path: &Path) -> io::Result<(Vec<u8>, fs::Metadata)> {
+    require_regular(&fs::symlink_metadata(path)?)?;
+    let mut file = open_without_following(path)?;
+    let metadata = file.metadata()?;
+    require_regular(&metadata)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, metadata))
+}
+
+fn optional_read<T>(
     path: &Path,
-    operation: impl FnMut() -> io::Result<Vec<u8>>,
-) -> Result<Option<Vec<u8>>, FsxError> {
+    operation: impl FnMut() -> io::Result<T>,
+) -> Result<Option<T>, FsxError> {
     match retry_sharing(operation) {
-        Ok(bytes) => Ok(Some(bytes)),
+        Ok(read) => Ok(Some(read)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(FsxError::io(FsxErrorKind::Io, path, "cannot read", error)),
     }

@@ -11,11 +11,20 @@ sha2 = "0.11.1"
 toml_edit = { version = "=0.22.27", default-features = false, features = ["parse"] }
 
 [target."cfg(unix)".dependencies]
-rustix = { version = "1.1.6", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 
 [target."cfg(windows)".dependencies]
 junction = "2.1.0"
 winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
 
 [dev-dependencies]
 serde_json = "1.0.154"
