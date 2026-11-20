@@ -152,19 +152,30 @@ impl ApplyReport {
 /// A plan failure that is not another module's error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
+    MissingBasis {
+        target: PathBuf,
+    },
     /// A basis target changed after the plan was computed.
-    Stale { target: PathBuf },
+    Stale {
+        target: PathBuf,
+    },
 }
 
 impl Coded for PlanError {
     fn code(&self) -> &'static str {
         match self {
-            PlanError::Stale { .. } => crate::error::codes::PLAN_STALE,
+            PlanError::MissingBasis { .. } | PlanError::Stale { .. } => {
+                crate::error::codes::PLAN_STALE
+            }
         }
     }
 
     fn message(&self) -> String {
         match self {
+            PlanError::MissingBasis { target } => format!(
+                "{} has no recorded basis; make a new plan",
+                target.display()
+            ),
             PlanError::Stale { target } => format!(
                 "{} changed after the plan was made; make a new plan",
                 target.display()

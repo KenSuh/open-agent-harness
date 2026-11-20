@@ -1,5 +1,5 @@
 // 계획 적용 엔진: 잠금 없이 모든 근거를 먼저 확인하고, 대상 하나씩 그 대상의 작성기로 쓰며, 결과를 항목별로 정직하게 남긴다.
-use super::{Basis, ChangePlan, PlanError, PlanItem};
+use super::{Action, Basis, ChangePlan, PlanError, PlanItem};
 use crate::config::{ConfigError, SaveOutcome, codes};
 use crate::error::Error;
 use crate::fsx::{
@@ -118,9 +118,18 @@ where
         }
     }
     cancel.check()?;
+    let targets = group(accepted);
+    for target in &targets {
+        if target.basis.is_none() && target.items.iter().any(|item| item.action != Action::Keep) {
+            return Err(PlanError::MissingBasis {
+                target: target.path.to_path_buf(),
+            }
+            .into());
+        }
+    }
     let mut report = ApplyReport::default();
     let mut statuses: Vec<(&Path, ItemStatus)> = Vec::new();
-    for target in group(accepted) {
+    for target in targets {
         let status = if report.stop.is_some() {
             ItemStatus::NotRun
         } else {
@@ -198,16 +207,25 @@ fn group<'p>(accepted: &Accepted<'p>) -> Vec<Target<'p>> {
 /// Writes `bytes` to one target as a C6 writer: takes the target's lock, re-checks the target's basis under it,
 /// publishes atomically and releases the lock. A lock that stays busy is `failed` (`OAH_FILE_BUSY`).
 pub fn write_target(target: &Target<'_>, bytes: &[u8], lock: LockOptions) -> Outcome {
+    let Some(basis) = target
+        .basis
+        .filter(|basis| basis.target.as_path() == target.path)
+    else {
+        return Outcome::Failed(
+            PlanError::MissingBasis {
+                target: target.path.to_path_buf(),
+            }
+            .into(),
+        );
+    };
     let held = match FileLock::acquire(target.path, lock) {
         Ok(held) => held,
         Err(error) => return Outcome::Failed(error.into()),
     };
-    if let Some(basis) = target.basis {
-        match read_optional(target.path) {
-            Ok(now) if now.as_deref().map(Fingerprint::of) == basis.fingerprint => {}
-            Ok(_) => return Outcome::Stale,
-            Err(error) => return Outcome::Failed(error.into()),
-        }
+    match read_optional(target.path) {
+        Ok(now) if now.as_deref().map(Fingerprint::of) == basis.fingerprint => {}
+        Ok(_) => return Outcome::Stale,
+        Err(error) => return Outcome::Failed(error.into()),
     }
     let outcome = match write_atomic(target.path, bytes) {
         Ok(receipt) => Outcome::Done(vec![receipt]),

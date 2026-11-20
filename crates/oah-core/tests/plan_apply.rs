@@ -72,6 +72,22 @@ fn three_item_plan(files: &Abc) -> ChangePlan {
     )
 }
 
+#[test]
+fn a_missing_basis_prevents_every_accepted_write() {
+    let files = abc();
+    let plan = plan_of(vec![item("a", &files.a), item("b", &files.b)], &[&files.a]);
+    let accepted = plan.accept(&["a", "b"]);
+
+    let error = plan::apply(&accepted, &CancelToken::new(), |_| {
+        panic!("preflight must stop before calling a writer")
+    })
+    .unwrap_err();
+
+    assert_eq!(error.code(), codes::PLAN_STALE);
+    assert!(!lock_file(&files.a).exists());
+    assert!(!lock_file(&files.b).exists());
+}
+
 fn lock_file(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap().to_os_string();
     name.push(".lock");
