@@ -1,5 +1,8 @@
 // 한국어: UI가 의존하는 전송 계층 인터페이스. 운영 구현은 tauri.ts, 테스트 구현은 tests/support 에만 있다.
 import type {
+  AgentStatusDto,
+  AgentsChangedDto,
+  AgentsProbeReq,
   AppInfoDto,
   ErrorDto,
   NoticeDto,
@@ -19,7 +22,7 @@ export interface ScanChanged {
 
 export type Unlisten = () => void;
 
-/** One method per M1-S1 command of CONTRACTS C15, plus the two global events. */
+/** One method per M1-S1 and M1-S2 command of CONTRACTS C15, plus the three global events. */
 export interface Transport {
   appInfo(): Promise<AppInfoDto>;
   projectOpenDialog(): Promise<ProjectDto | null>;
@@ -29,8 +32,11 @@ export interface Transport {
   tasksList(): Promise<TaskSnapshotDto[]>;
   settingsGet(): Promise<SettingsDto>;
   settingsSet(edits: SettingsEdit[]): Promise<SettingsDto>;
+  agentsList(): Promise<AgentStatusDto[]>;
+  startAgentsProbe(req: AgentsProbeReq, onEvent: (event: TaskEvent<AgentStatusDto[]>) => void): Promise<TaskId>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
+  onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;
 }
 
 /** Normalises anything a rejected invoke can carry into an ErrorDto. */

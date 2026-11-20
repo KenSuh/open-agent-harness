@@ -1,5 +1,5 @@
 // 한국어: 화면 상태와 동작(열기·새로고침·취소·설정 저장)을 한 곳에 모은 컨트롤러 훅. 제품 데이터는 전송 계층 응답만 쓴다.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppInfoDto,
   ErrorDto,
@@ -14,6 +14,7 @@ import type {
   Theme,
 } from "./contract";
 import { toErrorDto, type Transport } from "./transport/types";
+import { useAgents } from "./useAgents";
 
 export type Load<T> =
   | { status: "loading" }
@@ -76,6 +77,12 @@ export function useController(transport: Transport) {
     (error: ErrorDto) => pushToast({ level: "error", text: `${error.code}: ${error.message}`, hint: error.hint }),
     [pushToast],
   );
+
+  const agentNotify = useMemo(
+    () => ({ info: (text: string) => pushToast({ level: "info", text }), error: toastError }),
+    [pushToast, toastError],
+  );
+  const agents = useAgents(transport, agentNotify);
 
   const applyProject = useCallback((next: ProjectDto | null) => {
     projectRef.current = next;
@@ -256,6 +263,7 @@ export function useController(transport: Transport) {
     notices,
     refresh,
     toasts,
+    agents,
     reloadInfo: loadInfo,
     reloadSettings: loadSettings,
     openProject,

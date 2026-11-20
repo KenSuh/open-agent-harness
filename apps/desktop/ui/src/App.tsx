@@ -2,9 +2,13 @@
 import { useEffect, useState } from "react";
 import type { ErrorDto, ProjectDto, Theme } from "./contract";
 import type { Transport } from "./transport/types";
+import { AgentRoster, AgentsView } from "./agents";
 import { useController, type Load, type RefreshTask, type Toast } from "./useController";
 
 type Page = "explore" | "installed" | "team-workflow";
+
+/** Where the main area is: one of the section pages, or the Agents view (all agents, or one agent's detail). */
+type View = { page: Page } | { page: "agents"; agent: string | null };
 
 const PAGES: ReadonlyArray<{ id: Page; label: string; title: string; body: string }> = [
   {
@@ -101,7 +105,9 @@ function AppInfoLine({ info, onRetry }: { info: Load<import("./contract").AppInf
 
 export function App({ transport }: { transport: Transport }) {
   const c = useController(transport);
-  const [page, setPage] = useState<Page>("explore");
+  const [view, setView] = useState<View>({ page: "explore" });
+  const page = view.page;
+  const agentsSelected = view.page === "agents" ? view.agent : undefined;
 
   const theme: Theme = c.settings.status === "ready" ? c.settings.value.ui.theme : "auto";
   useEffect(() => {
@@ -121,6 +127,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [startRefresh]);
 
   const current = PAGES.find((item) => item.id === page) ?? PAGES[0]!;
+  const { agents } = c;
   const refreshing = c.refresh?.state === "running";
   const quickStartVisible = c.settings.status === "ready" && !c.settings.value.ui.quick_start_dismissed;
 
@@ -162,19 +169,28 @@ export function App({ transport }: { transport: Transport }) {
       </header>
 
       <div className="body">
-        <nav className="rail" aria-label="Sections">
-          {PAGES.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={item.id === page ? "rail-item active" : "rail-item"}
-              aria-current={item.id === page ? "page" : undefined}
-              onClick={() => setPage(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
+        <div className="rail-column">
+          <nav className="rail" aria-label="Sections">
+            {PAGES.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={item.id === page ? "rail-item active" : "rail-item"}
+                aria-current={item.id === page ? "page" : undefined}
+                onClick={() => setView({ page: item.id })}
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
+          <AgentRoster
+            agents={agents.agents}
+            checking={agents.checking}
+            selected={agentsSelected}
+            onOpen={(agent) => setView({ page: "agents", agent })}
+            onReload={agents.reload}
+          />
+        </div>
 
         <main className="content">
           {c.settings.status === "error" ? <ErrorBox error={c.settings.error} onRetry={c.reloadSettings} /> : null}
@@ -207,10 +223,23 @@ export function App({ transport }: { transport: Transport }) {
               ))}
             </ul>
           ) : null}
-          <section className="page" aria-labelledby="page-title">
-            <h1 id="page-title">{current.title}</h1>
-            <p className="empty">{current.body}</p>
-          </section>
+          {view.page === "agents" ? (
+            <AgentsView
+              agents={agents.agents}
+              check={agents.check}
+              checking={agents.checking}
+              selected={view.agent}
+              onRescan={() => void agents.rescan()}
+              onCancel={(id) => void agents.cancelCheck(id)}
+              onShowAll={() => setView({ page: "agents", agent: null })}
+              onReload={agents.reload}
+            />
+          ) : (
+            <section className="page" aria-labelledby="page-title">
+              <h1 id="page-title">{current.title}</h1>
+              <p className="empty">{current.body}</p>
+            </section>
+          )}
           <AppInfoLine info={c.info} onRetry={c.reloadInfo} />
         </main>
       </div>

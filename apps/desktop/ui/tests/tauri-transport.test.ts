@@ -59,6 +59,32 @@ describe("tauri transport (standalone, mocked @tauri-apps/api)", () => {
     await expect(t.appInfo()).rejects.toMatchObject({ code: "UI_TRANSPORT_ERROR", message: "command not found" });
   });
 
+  it("calls the M1-S2 agents commands with one req argument and a Channel for the probe", async () => {
+    const { default: probeRequest } = await import("../../../../crates/oah-core/tests/dto_samples/agents/probe-request.json");
+    invoke.mockResolvedValueOnce([]).mockResolvedValueOnce("task-7");
+    const t = createTauriTransport();
+    expect(await t.agentsList()).toEqual([]);
+    const received: unknown[] = [];
+    const req = probeRequest as { agents: ["claude", "codex"]; sign_in: boolean; focus: boolean };
+    expect(await t.startAgentsProbe(req, (event) => received.push(event))).toBe("task-7");
+    expect(invoke.mock.calls[0]).toEqual(["agents_list", { req: {} }]);
+    const [command, args] = invoke.mock.calls[1]!;
+    expect(command).toBe("start_agents_probe");
+    expect(args.req).toEqual({ agents: ["claude", "codex"], sign_in: true, focus: false });
+    expect(args.onEvent).toBeInstanceOf(FakeChannel);
+    args.onEvent.onmessage({ event: "done", data: [] });
+    expect(received).toEqual([{ event: "done", data: [] }]);
+  });
+
+  it("subscribes to agents-changed and unwraps its payload", async () => {
+    listen.mockResolvedValue(vi.fn());
+    const changes: unknown[] = [];
+    await createTauriTransport().onAgentsChanged((change) => changes.push(change));
+    expect(listen.mock.calls[0]![0]).toBe("agents-changed");
+    listen.mock.calls[0]![1]({ payload: { agents: ["claude", "codex"] } });
+    expect(changes).toEqual([{ agents: ["claude", "codex"] }]);
+  });
+
   it("subscribes to the notice and scan-changed events and unwraps payloads", async () => {
     const unlisten = vi.fn();
     listen.mockResolvedValue(unlisten);

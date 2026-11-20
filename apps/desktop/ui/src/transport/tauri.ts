@@ -2,6 +2,8 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  AgentStatusDto,
+  AgentsChangedDto,
   AppInfoDto,
   NoticeDto,
   ProjectDto,
@@ -39,8 +41,16 @@ export function createTauriTransport(): Transport {
     tasksList: () => call<TaskSnapshotDto[]>("tasks_list"),
     settingsGet: () => call<SettingsDto>("settings_get"),
     settingsSet: (edits: SettingsEdit[]) => call<SettingsDto>("settings_set", { edits }),
+    agentsList: () => call<AgentStatusDto[]>("agents_list"),
+    startAgentsProbe(req, onEvent) {
+      const channel = new Channel<TaskEvent<AgentStatusDto[]>>();
+      channel.onmessage = onEvent;
+      return call<TaskId>("start_agents_probe", req, { onEvent: channel });
+    },
     onNotice: (handler) => listen<NoticeDto>("notice", (event) => handler(event.payload)),
     onScanChanged: (handler) =>
       listen<ScanChanged>("scan-changed", (event) => handler(event.payload)),
+    onAgentsChanged: (handler) =>
+      listen<AgentsChangedDto>("agents-changed", (event) => handler(event.payload)),
   };
 }

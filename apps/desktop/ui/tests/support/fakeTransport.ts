@@ -1,4 +1,7 @@
 import type {
+  AgentStatusDto,
+  AgentsChangedDto,
+  AgentsProbeReq,
   AppInfoDto,
   NoticeDto,
   ProjectDto,
@@ -12,6 +15,22 @@ import type { ScanChanged, Transport } from "../../src/transport/types";
 import appInfo from "../../../../../crates/oah-core/tests/dto_samples/app/app_info.json";
 import settings from "../../../../../crates/oah-core/tests/dto_samples/app/settings.json";
 import project from "../../../../../crates/oah-core/tests/dto_samples/project/git_legacy.json";
+import claudeError from "../../../../../crates/oah-core/tests/dto_samples/agents/status-claude-error.json";
+import codexSignedOut from "../../../../../crates/oah-core/tests/dto_samples/agents/status-codex-signed-out.json";
+import copilotDocs from "../../../../../crates/oah-core/tests/dto_samples/agents/status-copilot-docs.json";
+import cursorMissing from "../../../../../crates/oah-core/tests/dto_samples/agents/status-cursor-missing.json";
+import agentsChanged from "../../../../../crates/oah-core/tests/dto_samples/agents/agents-changed.json";
+import probeRequest from "../../../../../crates/oah-core/tests/dto_samples/agents/probe-request.json";
+
+/** The shared core samples (crates/oah-core/tests/dto_samples/agents), byte-compared by core's own test. */
+export const sampleAgents = {
+  claudeError: claudeError as AgentStatusDto,
+  codexSignedOut: codexSignedOut as AgentStatusDto,
+  copilotDocs: copilotDocs as AgentStatusDto,
+  cursorMissing: cursorMissing as AgentStatusDto,
+  changed: agentsChanged as AgentsChangedDto,
+  probeRequest: probeRequest as AgentsProbeReq,
+};
 
 export const sampleAppInfo = appInfo as AppInfoDto;
 export const sampleProject = project as ProjectDto;
@@ -41,6 +60,15 @@ export interface FakeTransport extends Transport {
   emitRefresh(event: TaskEvent<RefreshDto>): void;
   emitNotice(notice: NoticeDto): void;
   emitScan(change: ScanChanged): void;
+  /** What the session cache holds; `agents_list` answers with it. */
+  agents: AgentStatusDto[];
+  /** Every `start_agents_probe` request, in order. */
+  probeRequests: AgentsProbeReq[];
+  /** Sends an event to the channel of the newest agents probe start. */
+  emitProbe(event: TaskEvent<AgentStatusDto[]>): void;
+  emitAgentsChanged(change: AgentsChangedDto): void;
+  /** Whether an agents-changed subscription is live. */
+  agentsSubscribed(): boolean;
 }
 
 export function createFakeTransport(initial: { project?: ProjectDto | null; tasks?: TaskSnapshotDto[] } = {}): FakeTransport {
@@ -54,6 +82,9 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
   let refreshSink: ((event: TaskEvent<RefreshDto>) => void) | null = null;
   let noticeSink: ((notice: NoticeDto) => void) | null = null;
   let scanSink: ((change: ScanChanged) => void) | null = null;
+  let probeSink: ((event: TaskEvent<AgentStatusDto[]>) => void) | null = null;
+  let agentsSink: ((change: AgentsChangedDto) => void) | null = null;
+  let probeCount = 0;
   const fake: FakeTransport = {
     calls: [],
     settingsEdits: [],
@@ -109,6 +140,30 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       scanSink = handler;
       return () => undefined;
     },
+    agents: [],
+    probeRequests: [],
+    async agentsList() {
+      fake.calls.push("agents_list");
+      return fake.override.agentsList ? fake.override.agentsList() : [...fake.agents];
+    },
+    async startAgentsProbe(req, onEvent) {
+      fake.calls.push("start_agents_probe");
+      fake.probeRequests.push(req);
+      probeSink = onEvent;
+      if (fake.override.startAgentsProbe) return fake.override.startAgentsProbe(req, onEvent);
+      return `probe-${++probeCount}`;
+    },
+    async onAgentsChanged(handler) {
+      if (fake.override.onAgentsChanged) return fake.override.onAgentsChanged(handler);
+      agentsSink = handler;
+      return () => {
+        fake.calls.push("unlisten:agents-changed");
+        if (agentsSink === handler) agentsSink = null;
+      };
+    },
+    emitProbe: (event) => probeSink?.(event),
+    emitAgentsChanged: (change) => agentsSink?.(change),
+    agentsSubscribed: () => agentsSink !== null,
     emitRefresh: (event) => {
       if (event.event !== "progress") runningRefresh = null;
       refreshSink?.(event);

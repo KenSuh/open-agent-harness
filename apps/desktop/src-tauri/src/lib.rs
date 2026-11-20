@@ -1,7 +1,8 @@
 // 데스크톱 셸: 단일 인스턴스, 네이티브 폴더 선택, 명령 등록만 하고 모든 판단은 oah-core 에 맡긴다.
 //! The OAH desktop shell (CONTRACTS C1, C7). It registers the single-instance plugin first, keeps the dialog
-//! plugin on the Rust side only (the webview has no dialog permission), resolves the bundled CLI path, and
-//! registers exactly the M1-S1 commands of CONTRACTS C15. Every decision lives in `oah-core`.
+//! plugin on the Rust side only (the webview has no dialog permission), resolves the bundled CLI path, registers
+//! exactly the M1-S1 and M1-S2 commands of CONTRACTS C15, and starts the agents focus probe on
+//! `WindowEvent::Focused(true)` of the main window (§2.5 tier 2). Every decision lives in `oah-core`.
 
 mod bundled;
 mod commands;
@@ -24,6 +25,13 @@ pub fn run() {
             app.manage(commands::Shell::start(env, &bundled));
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event
+                && window.label() == MAIN_WINDOW
+            {
+                commands::probe_on_focus(window.app_handle());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::project_open_dialog,
@@ -33,6 +41,8 @@ pub fn run() {
             commands::tasks_list,
             commands::settings_get,
             commands::settings_set,
+            commands::agents_list,
+            commands::start_agents_probe,
         ])
         .run(tauri::generate_context!())
         .expect("the OAH desktop app could not start");
