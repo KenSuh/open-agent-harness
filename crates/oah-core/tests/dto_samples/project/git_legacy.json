@@ -1,0 +1,18 @@
+{
+  "id": "3f1c9a0b7d2e4a55",
+  "root": "~/code/app",
+  "kind": "git",
+  "config": {
+    "state": "legacy"
+  },
+  "notices": [
+    {
+      "id": "OAH_CONFIG_UNKNOWN_KEY:unknown.x",
+      "level": "warning",
+      "code": "OAH_CONFIG_UNKNOWN_KEY",
+      "message": "~/code/app/.oah/config.toml: unknown.x is not a key OAH reads; it is kept as it is",
+      "hint": null,
+      "actions": []
+    }
+  ]
+}

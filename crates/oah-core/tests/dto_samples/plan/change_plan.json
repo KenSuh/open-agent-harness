@@ -1,0 +1,42 @@
+{
+  "id": "plan-1",
+  "items": [
+    {
+      "id": "a",
+      "target": "~/code/app/.oah/config.toml",
+      "owner": "project",
+      "action": "update",
+      "summary": "Set the build section to codex",
+      "detail": "[stages]\nbuild = \"codex\"\n"
+    },
+    {
+      "id": "b",
+      "target": "~/.oah/settings.toml",
+      "owner": "user",
+      "action": "replace-block",
+      "summary": "Remember the dark theme",
+      "detail": null
+    },
+    {
+      "id": "c",
+      "target": "~/.claude/settings.json",
+      "owner": {
+        "agent": "claude"
+      },
+      "action": "keep",
+      "summary": "Leave the agent settings as they are",
+      "detail": null
+    }
+  ],
+  "warnings": [],
+  "basis": [
+    {
+      "target": "~/code/app/.oah/config.toml",
+      "fingerprint": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+    },
+    {
+      "target": "~/.oah/settings.toml",
+      "fingerprint": null
+    }
+  ]
+}

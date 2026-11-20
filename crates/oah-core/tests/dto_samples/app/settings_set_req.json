@@ -1,0 +1,16 @@
+{
+  "edits": [
+    {
+      "key": "ui.theme",
+      "value": "dark"
+    },
+    {
+      "key": "ui.quick_start_dismissed",
+      "value": true
+    },
+    {
+      "key": "history.retention_days",
+      "value": 30
+    }
+  ]
+}

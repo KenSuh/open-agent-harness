@@ -5,10 +5,24 @@
 //! * [`fsx`] holds the file-system primitives every writer shares: atomic writes, short per-file locks, managed
 //!   links and the self-write registry.
 //! * [`config`] reads, interprets and format-preservingly saves `.oah/config.toml` and `OAH_HOME/settings.toml`.
+//! * [`error`] is the one error type operations return and its serialized form; [`dto`] holds the other
+//!   serialized shapes shared by the CLI and the desktop app.
+//! * [`tasks`] runs long operations: ids, states, progress, cooperative cancellation and the registry.
+//! * [`plan`] is the one apply engine for change plans: preflight, then one target at a time.
+//! * [`project`] opens a folder read-only; [`app`] holds the session and the operations the shell calls.
 
+pub mod app;
 pub mod config;
+pub mod dto;
+pub mod error;
 pub mod fsx;
 pub mod paths;
+pub mod plan;
+mod proc;
+pub mod project;
+pub mod tasks;
+
+pub use error::{Coded, Error, ErrorDto, hint_for};
 
 /// The version every OAH program reports, taken from the workspace.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

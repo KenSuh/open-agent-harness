@@ -9,10 +9,20 @@ use crate::fsx::LockOptions;
 use std::path::Path;
 
 /// The top-level tables of `settings.toml` that OAH writes.
-pub const SETTINGS_TABLES: [&str; 3] = ["automation", "autoload", "history"];
+pub const SETTINGS_TABLES: [&str; 4] = ["automation", "autoload", "history", "ui"];
 
 /// The automation levels of `[automation] level`.
 pub const AUTOMATION_LEVELS: [&str; 2] = ["auto-safe", "recommend-only"];
+
+/// The values of `[ui] theme`.
+pub const THEMES: [&str; 3] = ["auto", "light", "dark"];
+
+/// `[ui]`: the app's own preferences that survive a restart (DECISIONS D-19).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiSettings {
+    pub theme: String,
+    pub quick_start_dismissed: bool,
+}
 
 /// `[autoload]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +45,7 @@ pub struct SettingsValues {
     pub automation_level: String,
     pub autoload: AutoloadSettings,
     pub history: HistorySettings,
+    pub ui: UiSettings,
 }
 
 /// `OAH_HOME/settings.toml` as read. Other tables in the file are kept and not read here.
@@ -59,6 +70,10 @@ fn defaults(table: &str) -> Table {
         "history" => {
             out.insert("enabled", Value::from(true));
             out.insert("retention_days", Value::from(90i64));
+        }
+        "ui" => {
+            out.insert("theme", Value::from("auto"));
+            out.insert("quick_start_dismissed", Value::from(false));
         }
         _ => {}
     }
@@ -118,6 +133,19 @@ fn interpret(file: &ConfigFile) -> Result<(SettingsValues, Vec<Notice>), ConfigE
         &defaults("history"),
         &mut notices,
     )?;
+    let ui = merge_top(where_, values, "ui", &defaults("ui"), &mut notices)?;
+    let theme = ui
+        .get("theme")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !THEMES.contains(&theme.as_str()) {
+        return Err(ConfigError::invalid(format!(
+            "{where_}: ui.theme = {}; use one of: {}",
+            Value::from(theme.as_str()),
+            THEMES.join(", ")
+        )));
+    }
     let automation_level = automation
         .get("level")
         .and_then(Value::as_str)
@@ -154,6 +182,13 @@ fn interpret(file: &ConfigFile) -> Result<(SettingsValues, Vec<Notice>), ConfigE
             history: HistorySettings {
                 enabled: flag(&history, "enabled"),
                 retention_days: count(&history, "history", "retention_days")?,
+            },
+            ui: UiSettings {
+                theme,
+                quick_start_dismissed: ui
+                    .get("quick_start_dismissed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             },
         },
         notices,

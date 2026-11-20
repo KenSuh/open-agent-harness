@@ -1,0 +1,7 @@
+{
+  "automation_level": "auto-safe",
+  "ui": {
+    "theme": "dark",
+    "quick_start_dismissed": true
+  }
+}

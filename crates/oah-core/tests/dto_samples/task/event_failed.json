@@ -1,0 +1,8 @@
+{
+  "event": "failed",
+  "data": {
+    "code": "OAH_TASK_BUSY",
+    "message": "a refresh task is already running",
+    "hint": "Wait for the running task to finish, or cancel it, then try again."
+  }
+}

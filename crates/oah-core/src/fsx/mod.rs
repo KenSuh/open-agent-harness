@@ -2,7 +2,8 @@
 //! File-system primitives every OAH writer shares.
 //!
 //! * [`write_atomic`] replaces a file through a temporary sibling, flushes it to disk and reads it back;
-//!   [`publish_new`] does the same for a file that must not exist yet and is never overwritten.
+//!   [`publish_new`] does the same for a file that must not exist yet and is never overwritten;
+//!   [`publish_executable`] runs a caller's check on the temporary executable before it may replace the file.
 //! * [`FileLock`] is the short per-file writer lock on `<file>.lock`. Readers never lock.
 //! * [`links`] creates, inspects and removes managed links: symlinks, Windows directory junctions and the copy
 //!   fallback.
@@ -19,7 +20,9 @@ mod ownership;
 mod selfwrite;
 mod staging;
 
-pub use atomic::{Fingerprint, WriteReceipt, publish_new, read_optional, write_atomic};
+pub use atomic::{
+    Fingerprint, WriteReceipt, publish_executable, publish_new, read_optional, write_atomic,
+};
 pub use error::{FsxError, FsxErrorKind};
 pub use lock::{FileLock, LockOptions};
 pub use selfwrite::{SelfWriteMatch, SelfWrites};

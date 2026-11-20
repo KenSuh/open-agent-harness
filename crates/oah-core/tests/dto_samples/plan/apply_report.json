@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "id": "a",
+      "target": "~/code/app/.oah/config.toml",
+      "status": "done"
+    },
+    {
+      "id": "b",
+      "target": "~/.oah/settings.toml",
+      "status": "stale"
+    },
+    {
+      "id": "c",
+      "target": "~/.claude/settings.json",
+      "status": "not-run"
+    }
+  ],
+  "error": {
+    "code": "OAH_PLAN_STALE",
+    "message": "~/.oah/settings.toml changed after the plan was made; make a new plan",
+    "hint": "Files changed after the plan was made. Review the new plan, then apply it again."
+  }
+}

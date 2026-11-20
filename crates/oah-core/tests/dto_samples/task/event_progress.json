@@ -1,0 +1,8 @@
+{
+  "event": "progress",
+  "data": {
+    "phase": "read-project",
+    "done": 0,
+    "total": 1
+  }
+}

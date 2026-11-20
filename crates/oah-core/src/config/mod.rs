@@ -39,7 +39,7 @@ pub use save::{
     UpgradeWarning, backup_path, plan_project_save, save_project,
 };
 pub use settings::{
-    AUTOMATION_LEVELS, AutoloadSettings, HistorySettings, SETTINGS_TABLES, SettingsValues,
-    UserSettings, save_settings,
+    AUTOMATION_LEVELS, AutoloadSettings, HistorySettings, SETTINGS_TABLES, SettingsValues, THEMES,
+    UiSettings, UserSettings, save_settings,
 };
 pub use value::{Datetime, DatetimeKind, Table, Value};

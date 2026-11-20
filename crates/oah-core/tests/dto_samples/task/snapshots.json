@@ -1,0 +1,12 @@
+[
+  {
+    "id": "task-1",
+    "kind": "refresh",
+    "state": "running",
+    "progress": {
+      "phase": "read-project",
+      "done": 0,
+      "total": 1
+    }
+  }
+]

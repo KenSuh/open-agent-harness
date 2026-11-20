@@ -231,6 +231,13 @@ pub fn settings_file(env: &Env) -> Result<PathBuf, PathsError> {
     Ok(oah_home(env)?.join("settings.toml"))
 }
 
+/// `OAH_HOME/bin/oah` (`oah.exe` on Windows): the stable path of the CLI copy that agent hooks run. Only the
+/// app's CLI copy writes it.
+pub fn cli_bin(env: &Env) -> Result<PathBuf, PathsError> {
+    let name = if cfg!(windows) { "oah.exe" } else { "oah" };
+    Ok(oah_home(env)?.join("bin").join(name))
+}
+
 /// `OAH_HOME/state`, the user-wide state folder.
 pub fn user_state_dir(env: &Env) -> Result<PathBuf, PathsError> {
     Ok(oah_home(env)?.join("state"))
