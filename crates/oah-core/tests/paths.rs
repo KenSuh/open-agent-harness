@@ -61,6 +61,7 @@ impl Sandbox {
     fn git(&self, folder: &Path, args: &[&str]) {
         let env = self.env();
         let output = Command::new("git")
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .arg("-C")
             .arg(folder)
             .args(args)

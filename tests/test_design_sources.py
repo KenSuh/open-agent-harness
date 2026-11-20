@@ -200,23 +200,31 @@ class DeadlineTest(SourceCase):
         original_run = fetch_module.run_command
         original_read = adapters.Tree.read
         timeouts = []
+        blob_read_completed = False
 
-        def run(*args, **kwargs):
+        def record_budget_and_run_fixture(*args, **kwargs):
             timeouts.append(kwargs["timeout"])
+            kwargs["timeout"] = max(30.0, kwargs["timeout"])
             return original_run(*args, **kwargs)
 
         def read(tree, blob):
+            nonlocal blob_read_completed
             data = original_read(tree, blob)
+            blob_read_completed = True
             self.clock.advance(2)
             return data
 
-        with mock.patch.object(fetch_module, "run_command", run), mock.patch.object(adapters.Tree, "read", read):
+        with (
+            mock.patch.object(fetch_module, "run_command", record_budget_and_run_fixture),
+            mock.patch.object(adapters.Tree, "read", read),
+        ):
             result = sources.check_one(spec, deadline=self.clock.monotonic() + 1)
         self.assertEqual("failed", result.result)
         head = sources.head(spec)
         assert head is not None and head.failure is not None
         self.assertEqual("timeout", head.failure.code)
         self.assertIsNone(head.verified)
+        self.assertTrue(blob_read_completed)
         self.assertTrue(timeouts)
         self.assertTrue(all(0 < timeout <= 1 for timeout in timeouts), timeouts)
 
