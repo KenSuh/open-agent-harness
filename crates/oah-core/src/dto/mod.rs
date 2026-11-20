@@ -23,7 +23,7 @@ pub use plan::{ApplyReportDto, BasisDto, ChangePlanDto, ItemResultDto, PlanItemD
 pub use project::{ConfigStateDto, ProjectDto, ProjectKindDto};
 pub use task::{Progress, TaskCancelReq, TaskEvent, TaskId, TaskSnapshotDto, TaskState};
 
-use crate::paths::{Env, user_home};
+use crate::paths::{Env, canonical_folder, user_home};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -39,9 +39,21 @@ pub fn display_path(env: &Env, path: &Path) -> String {
 
 /// `text` with every whole occurrence of the home folder written as `~`.
 pub(crate) fn display_text(env: &Env, text: &str) -> String {
-    match user_home(env) {
-        Ok(home) => replace_home(text, &home.display().to_string()),
-        Err(_) => text.to_string(),
+    let Ok(home) = user_home(env) else {
+        return text.to_string();
+    };
+    let configured = home.to_string_lossy();
+    match canonical_folder(&home) {
+        Ok(resolved) if resolved != home => {
+            let resolved = resolved.to_string_lossy();
+            let (first, second) = if configured.len() > resolved.len() {
+                (configured.as_ref(), resolved.as_ref())
+            } else {
+                (resolved.as_ref(), configured.as_ref())
+            };
+            replace_home(&replace_home(text, first), second)
+        }
+        _ => replace_home(text, &configured),
     }
 }
 
@@ -82,6 +94,49 @@ fn continues_name(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::replace_home;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn configured_and_resolved_home_paths_have_the_same_display() {
+        use super::{Env, canonical_folder, display_path, display_text};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = canonical_folder(temp.path()).unwrap();
+        let home = root.join("home");
+        let alias = root.join("home-alias");
+        std::fs::create_dir(&home).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        #[cfg(windows)]
+        junction::create(&home, &alias).unwrap();
+        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let env = Env::new(&home).unwrap().with(home_var, &alias);
+        let configured_file = alias.join("settings.toml");
+        let resolved_file = home.join("settings.toml");
+        let expected = std::path::Path::new("~").join("settings.toml");
+        let message = format!(
+            "{} and {}",
+            configured_file.display(),
+            resolved_file.display()
+        );
+
+        assert_eq!(
+            display_path(&env, &configured_file),
+            expected.to_string_lossy()
+        );
+        assert_eq!(
+            display_path(&env, &resolved_file),
+            expected.to_string_lossy()
+        );
+        assert_eq!(
+            display_text(&env, &message),
+            format!("{0} and {0}", expected.display())
+        );
+        #[cfg(unix)]
+        std::fs::remove_file(&alias).unwrap();
+        #[cfg(windows)]
+        junction::delete(&alias).unwrap();
+    }
 
     #[test]
     fn only_whole_home_paths_become_a_tilde() {
