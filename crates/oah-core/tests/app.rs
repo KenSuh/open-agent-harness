@@ -409,6 +409,44 @@ fn cli_copy_preserves_a_directory_at_the_install_location() {
     assert_eq!(tree(&fixture.root), before);
 }
 
+#[cfg(any(unix, windows))]
+#[cfg_attr(
+    windows,
+    ignore = "requires permission to create Windows file symlinks"
+)]
+#[test]
+fn cli_copy_preserves_an_existing_link_and_its_data() {
+    use oah_core::dto::CliState;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file as symlink;
+
+    let fixture = Fixture::new();
+    let bin = fixture.oah_home().join("bin");
+    let installed = bin.join(format!("oah{}", std::env::consts::EXE_SUFFIX));
+    fs::create_dir_all(&bin).unwrap();
+    let target = fixture.root.join("user-data");
+    fs::write(&target, b"keep").unwrap();
+    symlink(&target, &installed).unwrap();
+    let bundled = fixture.root.join("bundle-cli");
+    fs::write(&bundled, b"inert fixture").unwrap();
+
+    let copy = with_ctx(&fixture, |ctx| app::cli_copy(ctx, &bundled));
+
+    assert_eq!(copy.state, CliState::KeptPrevious);
+    assert_eq!(copy.version, None);
+    assert!(
+        copy.notice
+            .unwrap()
+            .message
+            .contains("is not a regular file")
+    );
+    assert_eq!(fs::read_link(&installed).unwrap(), target);
+    assert_eq!(fs::read(target).unwrap(), b"keep");
+    assert_eq!(fs::read_dir(&bin).unwrap().count(), 1);
+}
+
 #[cfg(unix)]
 mod cli_copy {
     use super::*;
@@ -438,28 +476,6 @@ mod cli_copy {
             .collect();
         names.sort_unstable();
         names
-    }
-
-    #[test]
-    fn cli_copy_preserves_an_existing_link_and_its_data() {
-        use std::os::unix::fs::symlink;
-
-        let fixture = Fixture::new();
-        let installed = dest(&fixture);
-        fs::create_dir_all(installed.parent().unwrap()).unwrap();
-        let target = fixture.root.join("user-data");
-        fs::write(&target, b"keep").unwrap();
-        symlink(&target, &installed).unwrap();
-        let bundled = fixture.root.join("bundle-cli");
-        fs::write(&bundled, b"inert fixture").unwrap();
-
-        let copy = with_ctx(&fixture, |ctx| app::cli_copy(ctx, &bundled));
-
-        assert_eq!(copy.state, CliState::KeptPrevious);
-        assert_eq!(copy.version, None);
-        assert_eq!(fs::read_link(&installed).unwrap(), target);
-        assert_eq!(fs::read(target).unwrap(), b"keep");
-        assert_eq!(bin_names(&fixture), ["oah"]);
     }
 
     #[test]

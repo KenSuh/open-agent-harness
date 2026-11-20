@@ -470,10 +470,17 @@ fn is_transient_sharing(error: &io::Error) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
+    #[cfg_attr(
+        windows,
+        ignore = "requires permission to create Windows file symlinks"
+    )]
     #[test]
-    fn opening_without_following_refuses_a_link() {
+    fn opening_without_following_never_returns_the_link_target() {
+        #[cfg(unix)]
         use std::os::unix::fs::symlink;
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_file as symlink;
 
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("data");
@@ -481,8 +488,11 @@ mod tests {
         fs::write(&target, b"inert data").unwrap();
         symlink(&target, &link).unwrap();
 
-        assert!(open_without_following(&target).is_ok());
-        assert!(open_without_following(&link).is_err());
+        let handle = open_without_following(&target).unwrap();
+        require_regular(&handle.metadata().unwrap()).unwrap();
+        if let Ok(handle) = open_without_following(&link) {
+            assert!(require_regular(&handle.metadata().unwrap()).is_err());
+        }
     }
 
     #[test]
