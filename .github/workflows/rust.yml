@@ -116,7 +116,7 @@ jobs:
       - name: Stage the bundled CLI
         run: node apps/desktop/scripts/stage-cli.mjs
       - name: Build the desktop app
-        run: cargo build -p oah-desktop --release --locked
+        run: cargo build -p oah-desktop --release --locked --features tauri/custom-protocol
       - name: Start, check the CLI copy, stop, start again
         shell: bash
         run: |
