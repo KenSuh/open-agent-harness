@@ -26,6 +26,8 @@ export const INITIAL_PROBE: AgentsProbeReq = { sign_in: true, focus: true };
 export const RESCAN_PROBE: AgentsProbeReq = { sign_in: true, focus: false };
 
 const TASK_BUSY = "OAH_TASK_BUSY";
+const STARTUP_TASK_POLL_MS = 1_000;
+const STARTUP_TASK_POLL_ERROR_LIMIT = 3;
 
 /** Stable callbacks that show a message; the controller's toasts. */
 interface Notify {
@@ -36,8 +38,7 @@ interface Notify {
 export function useAgents(transport: Transport, notify: Notify) {
   const [agents, setAgents] = useState<AgentsLoad>({ status: "loading" });
   const [check, setCheck] = useState<AgentCheck | null>(null);
-  // A probe started elsewhere (the native focus probe) holds the same request; its agents-changed ends the wait.
-  const [waiting, setWaiting] = useState(false);
+  const [waitingSinceChange, setWaitingSinceChange] = useState<number | null>(null);
   const readSeq = useRef(0);
   const agentsChangeSeq = useRef(0);
   const listening = useRef(false);
@@ -70,6 +71,7 @@ export function useAgents(transport: Transport, notify: Notify) {
       const changesAtStart = agentsChangeSeq.current;
       const current = () => checkRun.current === run;
       let settled = false;
+      if (origin === "initial") setWaitingSinceChange(null);
       checkRunning.current = true;
       setCheck({ id: null, origin, state: "running", progress: null });
       const finish = (state: TaskStateName): boolean => {
@@ -86,7 +88,8 @@ export function useAgents(transport: Transport, notify: Notify) {
             break;
           case "done":
             if (finish("done")) {
-              setWaiting(false);
+              ++agentsChangeSeq.current;
+              setWaitingSinceChange(null);
               reload();
               if (origin === "rescan") info(`Agents checked: ${event.data.length} agent(s).`);
             }
@@ -111,7 +114,9 @@ export function useAgents(transport: Transport, notify: Notify) {
         if (dto.code !== TASK_BUSY) {
           showError(dto);
         } else if (origin === "initial") {
-          setWaiting(listening.current && agentsChangeSeq.current === changesAtStart);
+          if (listening.current && agentsChangeSeq.current === changesAtStart) {
+            setWaitingSinceChange(changesAtStart);
+          }
         } else {
           info("An agent check like this one is already running; the list updates when it ends.");
         }
@@ -129,7 +134,7 @@ export function useAgents(transport: Transport, notify: Notify) {
         if (disposed) return;
         // Invalidation signal only: answer by reading the cache again.
         ++agentsChangeSeq.current;
-        setWaiting(false);
+        setWaitingSinceChange(null);
         reload();
       })
       .then(
@@ -151,9 +156,54 @@ export function useAgents(transport: Transport, notify: Notify) {
     return () => {
       disposed = true;
       listening.current = false;
+      ++readSeq.current;
+      ++checkRun.current;
+      ++agentsChangeSeq.current;
+      checkRunning.current = false;
       unlisten?.();
     };
   }, [transport, reload, follow, showError]);
+
+  useEffect(() => {
+    if (waitingSinceChange === null) return;
+    let disposed = false;
+    let timer: number | undefined;
+    let consecutiveErrors = 0;
+    const current = () => !disposed && agentsChangeSeq.current === waitingSinceChange;
+
+    function scheduleCheck() {
+      timer = window.setTimeout(() => {
+        if (!current()) return;
+        void transport.tasksList().then(
+          (tasks) => {
+            if (!current()) return;
+            consecutiveErrors = 0;
+            if (tasks.some((task) => task.kind === "agents-probe" && task.state === "running")) {
+              scheduleCheck();
+              return;
+            }
+            setWaitingSinceChange(null);
+            reload();
+          },
+          (error) => {
+            if (!current()) return;
+            if (++consecutiveErrors < STARTUP_TASK_POLL_ERROR_LIMIT) {
+              scheduleCheck();
+              return;
+            }
+            setWaitingSinceChange(null);
+            showError(toErrorDto(error));
+          },
+        );
+      }, STARTUP_TASK_POLL_MS);
+    }
+
+    scheduleCheck();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [waitingSinceChange, transport, reload, showError]);
 
   const rescan = useCallback(async () => {
     if (checkRunning.current) return; // one rescan from this window at a time
@@ -171,6 +221,6 @@ export function useAgents(transport: Transport, notify: Notify) {
     [transport, showError],
   );
 
-  const checking = check?.state === "running" || waiting;
+  const checking = check?.state === "running" || waitingSinceChange !== null;
   return { agents, check, checking, reload, rescan, cancelCheck };
 }
