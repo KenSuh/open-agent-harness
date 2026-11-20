@@ -1,7 +1,7 @@
 // 코어 C1 수정 검사: 실제 게시 전 취소는 아무것도 쓰지 않고, 같은 바이트라도 못 쓰는 CLI 는 알리고, 낡은 읽기는 새 선택을 덮지 않는다.
 use oah_core::app::{self, Session};
 use oah_core::config::{Edit, UserSettings, save_settings};
-use oah_core::dto::{CliState, Empty, ProjectDto, RefreshDto};
+use oah_core::dto::{Empty, ProjectDto, RefreshDto};
 use oah_core::fsx::LockOptions;
 use oah_core::paths::{self, Env};
 use oah_core::plan::{self, Action, Basis, ChangePlan, ItemStatus, Outcome, Owner, PlanItem};
@@ -141,6 +141,7 @@ fn a_cancellation_after_a_real_publish_lets_the_apply_finish_as_done() {
 #[cfg(unix)]
 mod cli_copy {
     use super::*;
+    use oah_core::dto::CliState;
     use std::os::unix::fs::PermissionsExt;
 
     /// A session, a bundled CLI printing `printed`, and the same bytes already installed with `mode`.

@@ -2,8 +2,8 @@
 use oah_core::app::{self, Session};
 use oah_core::config::ConfigFile;
 use oah_core::dto::{
-    CliState, ConfigStateDto, Empty, ProjectKindDto, RefreshDto, SettingEdit, SettingValue,
-    SettingsDto, SettingsSetReq, UiDto,
+    ConfigStateDto, Empty, ProjectKindDto, RefreshDto, SettingEdit, SettingValue, SettingsDto,
+    SettingsSetReq, UiDto,
 };
 use oah_core::fsx::SelfWriteMatch;
 use oah_core::paths::{self, Env};
@@ -389,6 +389,7 @@ fn read_commands_change_nothing() {
 #[cfg(unix)]
 mod cli_copy {
     use super::*;
+    use oah_core::dto::CliState;
     use std::os::unix::fs::PermissionsExt;
 
     fn script(fixture: &Fixture, name: &str, printed: &str) -> PathBuf {
