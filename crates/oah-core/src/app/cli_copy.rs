@@ -7,7 +7,7 @@ use crate::paths;
 use crate::proc::{self, Run};
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long a `--version` run may take.
 const VERSION_DEADLINE: Duration = Duration::from_secs(10);
@@ -61,7 +61,7 @@ fn copy(ctx: &Ctx<'_>, bundled: &Path) -> CliCopy {
         && Fingerprint::of(&existing) == Fingerprint::of(&bytes)
     {
         // Equal bytes skip the publish, never the validation: a copy that cannot run is reported, not repaired.
-        return match check(ctx, &dest) {
+        return match check(ctx, &dest, false) {
             Ok(()) => CliCopy {
                 state: CliState::Unchanged,
                 version: Some(crate::VERSION.to_string()),
@@ -76,7 +76,7 @@ fn copy(ctx: &Ctx<'_>, bundled: &Path) -> CliCopy {
         let detail = format!("{}: {error}", folder.display());
         return kept(ctx, "creating the bin folder", &detail);
     }
-    let published = fsx::publish_executable(&dest, &bytes, |candidate| check(ctx, candidate));
+    let published = fsx::publish_executable(&dest, &bytes, |candidate| check(ctx, candidate, true));
     classify(ctx, &dest, published)
 }
 
@@ -104,26 +104,44 @@ fn is_plain_file(metadata: &fs::Metadata) -> bool {
 }
 
 /// Requires `program` (a candidate or the installed copy) to print exactly `oah <app version>` for `--version`.
-fn check(ctx: &Ctx<'_>, program: &Path) -> Result<(), String> {
+fn check(ctx: &Ctx<'_>, program: &Path, freshly_written: bool) -> Result<(), String> {
     let expected = format!("oah {}", crate::VERSION);
-    match version_line(ctx, program) {
+    match version_line(ctx, program, freshly_written) {
         Ok(line) if line == expected => Ok(()),
         Ok(_) => Err(format!("the --version run did not print {expected:?}")),
         Err(reason) => Err(reason),
     }
 }
 
-fn version_line(ctx: &Ctx<'_>, program: &Path) -> Result<String, String> {
-    let output = proc::run(
-        ctx.env,
-        &Run {
-            program,
-            args: &["--version"],
-            deadline: VERSION_DEADLINE,
-            limit: VERSION_OUTPUT_LIMIT,
-        },
-    )
-    .map_err(|error| format!("the --version run failed: {error}"))?;
+fn version_line(ctx: &Ctx<'_>, program: &Path, freshly_written: bool) -> Result<String, String> {
+    let run = |deadline| {
+        proc::run(
+            ctx.env,
+            &Run {
+                program,
+                args: &["--version"],
+                deadline,
+                limit: VERSION_OUTPUT_LIMIT,
+            },
+        )
+    };
+    let start = Instant::now();
+    let result = run(VERSION_DEADLINE);
+    let result = if cfg!(target_os = "linux")
+        && freshly_written
+        && matches!(&result, Err(proc::ProcError::Spawn(error)) if error.kind() == std::io::ErrorKind::ExecutableFileBusy)
+    {
+        std::thread::sleep(Duration::from_millis(10));
+        let remaining = VERSION_DEADLINE.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            result
+        } else {
+            run(remaining)
+        }
+    } else {
+        result
+    };
+    let output = result.map_err(|error| format!("the --version run failed: {error}"))?;
     if !output.status.success() {
         return Err(format!("the --version run exited with {}", output.status));
     }
