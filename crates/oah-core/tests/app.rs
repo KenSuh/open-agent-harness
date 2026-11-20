@@ -386,6 +386,29 @@ fn read_commands_change_nothing() {
     assert_eq!(tree(&fixture.root), before);
 }
 
+#[test]
+fn cli_copy_preserves_a_directory_at_the_install_location() {
+    let fixture = Fixture::new();
+    let dest = fixture
+        .oah_home()
+        .join("bin")
+        .join(format!("oah{}", std::env::consts::EXE_SUFFIX));
+    fs::create_dir_all(&dest).unwrap();
+    fs::write(dest.join("notes.txt"), "keep").unwrap();
+    let bundled = fixture.root.join("bundle-cli");
+    fs::write(&bundled, "fixture bytes").unwrap();
+    let before = tree(&fixture.root);
+
+    let copy = with_ctx(&fixture, |ctx| app::cli_copy(ctx, &bundled));
+
+    assert_eq!(copy.state, oah_core::dto::CliState::KeptPrevious);
+    assert_eq!(copy.version, None);
+    let notice = copy.notice.unwrap();
+    assert_eq!(notice.code, "OAH_CLI_COPY_FAILED");
+    assert!(notice.message.contains("is not a regular file"));
+    assert_eq!(tree(&fixture.root), before);
+}
+
 #[cfg(unix)]
 mod cli_copy {
     use super::*;

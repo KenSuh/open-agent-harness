@@ -53,7 +53,11 @@ fn copy(ctx: &Ctx<'_>, bundled: &Path) -> CliCopy {
         Ok(bytes) => bytes,
         Err(error) => return kept(ctx, "reading the bundled CLI", &error.to_string()),
     };
-    if let Ok(Some(existing)) = fsx::read_optional(&dest)
+    let existing = match read_destination(&dest) {
+        Ok(existing) => existing,
+        Err(error) => return kept(ctx, "inspecting the installed CLI path", &error),
+    };
+    if let Some(existing) = existing
         && Fingerprint::of(&existing) == Fingerprint::of(&bytes)
     {
         // Equal bytes skip the publish, never the validation: a copy that cannot run is reported, not repaired.
@@ -74,6 +78,29 @@ fn copy(ctx: &Ctx<'_>, bundled: &Path) -> CliCopy {
     }
     let published = fsx::publish_executable(&dest, &bytes, |candidate| check(ctx, candidate));
     classify(ctx, &dest, published)
+}
+
+fn read_destination(dest: &Path) -> Result<Option<Vec<u8>>, String> {
+    match fs::symlink_metadata(dest) {
+        Ok(metadata) if is_plain_file(&metadata) => {
+            fsx::read_optional(dest).map_err(|error| Error::from(error).message().to_string())
+        }
+        Ok(_) => Err(format!("{} is not a regular file", dest.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {error}", dest.display())),
+    }
+}
+
+fn is_plain_file(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    metadata.is_file()
 }
 
 /// Requires `program` (a candidate or the installed copy) to print exactly `oah <app version>` for `--version`.
