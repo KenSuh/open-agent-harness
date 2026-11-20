@@ -1,100 +1,122 @@
-// Windows 비공개 확인 폴더: 셸이 정한 로컬 앱 데이터 Temp 를 확인하고, 이 사용자만 허용하는 보호된 접근 목록으로 새 폴더와 사본을 만들고 끝나면 지운다.
+// Windows 비공개 확인 폴더: 셸이 정한 로컬 앱 데이터 Temp 의 핸들에서 최종 경로·고정 볼륨·소유자·접근 목록을 확인해 유지하고, 신원이 확인된 항목만 핸들로 정리한다.
 //! The Windows side of [`super::validate_private_copy`].
 
 mod acl;
+mod ffi;
+mod handle;
 
-use super::rules::{private_folder_rule, trusted_location_rule};
+use super::rules::{CleanupCheck, Who, may_cleanup, private_folder_rule, trusted_location_rule};
 use super::{NAME_ATTEMPTS, io_error, refuse, unique_name};
 use crate::fsx::error::FsxError;
-use acl::{Descriptor, User};
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
+use ffi::{Descriptor, User};
+use handle::{
+    WinId, final_path_by_handle, is_plain_dir, is_plain_file, mark_delete_on_close, open_folder,
+    require_fixed_drive, retry_removal,
+};
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
-use std::path::{Component, Path, PathBuf, Prefix};
-use std::ptr::null_mut;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, GetDriveTypeW, READ_CONTROL, SYNCHRONIZE,
+    DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE,
 };
-use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
-/// How long a removal retries while Windows still reports the copy busy or the folder not yet empty.
-const REMOVE_FOR: Duration = Duration::from_secs(2);
-/// What `GetDriveTypeW` returns for a fixed local drive, as opposed to a removable, network, optical or RAM drive.
-const DRIVE_FIXED: u32 = 3;
-
-/// `Temp` in the user's local application data folder, as the shell's known-folder list names it. Both folders are
-/// checked as named, before anything resolves them: a folder on a fixed local drive, not a reparse point, owned by
-/// this user, SYSTEM or Administrators, and usable by nobody else.
-pub(super) fn location() -> Result<PathBuf, FsxError> {
-    let mut wide = null_mut();
-    // SAFETY: `wide` is writable; the shell allocates the path, which is freed below whatever the result.
-    let status = unsafe {
-        SHGetKnownFolderPath(
-            &FOLDERID_LocalAppData,
-            KF_FLAG_DEFAULT as u32,
-            null_mut(),
-            &mut wide,
-        )
-    };
-    let local = (status >= 0 && !wide.is_null()).then(|| {
-        // SAFETY: a successful call returns a NUL-terminated string.
-        PathBuf::from(OsString::from_wide(unsafe { acl::until_nul(wide) }))
-    });
-    // SAFETY: frees what the shell allocated (null is allowed), exactly once.
-    unsafe { CoTaskMemFree(wide.cast_const().cast()) };
-    let local = local.ok_or_else(|| {
-        let error = io::Error::other(format!("SHGetKnownFolderPath returned 0x{status:08x}"));
-        let known = Path::new("FOLDERID_LocalAppData");
-        io_error(
-            known,
-            "cannot find the local application data folder",
-            error,
-        )
-    })?;
-    let drive_letter = matches!(local.components().next(), Some(Component::Prefix(prefix))
-        if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)));
-    let root: PathBuf = local.components().take(2).collect();
-    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: the root path is NUL-terminated and lives until the call returns.
-    if !drive_letter || unsafe { GetDriveTypeW(wide.as_ptr()) } != DRIVE_FIXED {
-        let why = "the local application data folder is not on a fixed local drive";
-        return Err(refuse(&local, why));
-    }
-    let user = User::current().map_err(|error| io_error(&local, "cannot read this user", error))?;
-    let temp = local.join("Temp");
-    for folder in [&local, &temp] {
-        let held = open_folder(folder, READ_CONTROL, FILE_SHARE_DELETE)?;
-        let security = acl::read_security(&held, folder, &user)?;
-        trusted_location_rule(&security).map_err(|why| refuse(folder, why))?;
-    }
-    Ok(temp)
+/// Verified Windows location: retains the opened `Temp` handle (and `LocalAppData` handle when selected via the
+/// shell), the handle-resolved canonical final path on a fixed local drive, its volume serial, and the current user.
+pub(super) struct Location {
+    path: PathBuf,
+    _handle: File,
+    _parent: Option<File>,
+    volume: u64,
+    user: User,
 }
 
-/// A new private folder this start created, held open without delete sharing, and the copy once written. Dropping
-/// it removes both.
+impl Location {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// `Temp` in the user's local application data folder, as the shell's known-folder list names it. Both folders are
+/// opened as named with `FILE_FLAG_OPEN_REPARSE_POINT`, checked for owner and DACL, resolved via
+/// `GetFinalPathNameByHandleW`, and confirmed to lie on a fixed local drive. The verified handles are kept open.
+pub(super) fn location() -> Result<Location, FsxError> {
+    let local = ffi::local_app_data()?;
+    require_fixed_drive(&local)?;
+    let user = User::current().map_err(|error| io_error(&local, "cannot read this user", error))?;
+    let temp = local.join("Temp");
+    let (local_handle, _) = open_folder(&local, READ_CONTROL, FILE_SHARE_DELETE)?;
+    let local_security = acl::read_security(&local_handle, &local, &user)?;
+    trusted_location_rule(&local_security).map_err(|why| refuse(&local, why))?;
+    let local_final = final_path_by_handle(&local_handle, &local)?;
+    require_fixed_drive(&local_final)?;
+
+    let (temp_handle, temp_id) = open_folder(&temp, READ_CONTROL, FILE_SHARE_DELETE)?;
+    let temp_security = acl::read_security(&temp_handle, &temp, &user)?;
+    trusted_location_rule(&temp_security).map_err(|why| refuse(&temp, why))?;
+    let temp_final = final_path_by_handle(&temp_handle, &temp)?;
+    require_fixed_drive(&temp_final)?;
+    Ok(Location {
+        path: temp_final,
+        _handle: temp_handle,
+        _parent: Some(local_handle),
+        volume: temp_id.volume,
+        user,
+    })
+}
+
+/// Opens an explicit test directory without following reparse points, binds its handle-resolved canonical path,
+/// and checks that the resolved volume is a fixed local drive.
+#[cfg(test)]
+pub(super) fn open_base_for_test(base: &Path) -> Result<Location, FsxError> {
+    if !base.is_absolute() {
+        return Err(refuse(
+            base,
+            "the private check location is not an absolute path",
+        ));
+    }
+    let user = User::current().map_err(|error| io_error(base, "cannot read this user", error))?;
+    let (handle, id) = open_folder(base, READ_CONTROL, FILE_SHARE_DELETE)?;
+    let final_path = final_path_by_handle(&handle, base)?;
+    require_fixed_drive(&final_path)?;
+    Ok(Location {
+        path: final_path,
+        _handle: handle,
+        _parent: None,
+        volume: id.volume,
+        user,
+    })
+}
+
+struct VerifiedCopy {
+    path: PathBuf,
+    id: WinId,
+}
+
+/// A new private folder this start created, held open with `DELETE` and without delete sharing, along with the
+/// anchoring location handle and the copy once written. Dropping it removes only entries whose verified type,
+/// owner and identity remain intact.
 pub(super) struct Private {
     path: PathBuf,
     folder: Option<File>,
-    copy: Option<PathBuf>,
+    base: Location,
+    dir_id: WinId,
+    copy: Option<VerifiedCopy>,
 }
 
 impl Private {
-    /// Creates a new folder in `base` whose owner is this user and whose protected access list allows only this
-    /// user, then reads both back through the handle it keeps.
-    pub(super) fn create(base: &Path) -> Result<Private, FsxError> {
-        let user =
-            User::current().map_err(|error| io_error(base, "cannot read this user", error))?;
-        let descriptor = Descriptor::only(&user)
-            .map_err(|error| io_error(base, "cannot describe a private folder", error))?;
+    /// Creates a new folder inside the verified `base` whose owner is this user and whose protected access list
+    /// allows only this user, then reads both back through the handle it keeps. Unopened or unverified entries are
+    /// left untouched; an entry whose owner and directory identity are proven but whose ACL policy is insufficient
+    /// is deleted through its verified handle.
+    pub(super) fn create(base: Location) -> Result<Private, FsxError> {
+        let descriptor = Descriptor::only(&base.user)
+            .map_err(|error| io_error(base.path(), "cannot describe a private folder", error))?;
         for _ in 0..NAME_ATTEMPTS {
-            let path = base.join(unique_name());
+            let path = base.path().join(unique_name());
             match descriptor.create_directory(&path) {
                 Ok(()) => {}
                 Err(error) if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) => continue,
@@ -102,36 +124,67 @@ impl Private {
                     return Err(io_error(&path, "cannot create the private folder", error));
                 }
             }
-            // Listing access counts as read access for sharing, so the missing delete sharing takes effect: while
-            // the handle is open, nobody can rename or remove the folder.
-            let folder = match open_folder(&path, FILE_LIST_DIRECTORY | READ_CONTROL, 0) {
-                Ok(folder) => folder,
-                Err(error) => {
-                    let _ = fs::remove_dir(&path);
-                    return Err(error);
+            // If the post-create open fails, entry type and owner are unproven: leave untouched.
+            // Listing access counts as read access for sharing, so omitting FILE_SHARE_DELETE prevents others from
+            // renaming or removing the folder while we hold `DELETE` for verified handle-based cleanup.
+            let (folder, dir_id) =
+                open_folder(&path, FILE_LIST_DIRECTORY | READ_CONTROL | DELETE, 0)?;
+            let resolved = final_path_by_handle(&folder, &path)?;
+            require_fixed_drive(&resolved)?;
+            if dir_id.volume != base.volume || resolved.parent() != Some(base.path()) {
+                return Err(refuse(
+                    &path,
+                    "the new private folder resolved outside the verified location",
+                ));
+            }
+            let security = acl::read_security(&folder, &path, &base.user)?;
+            if let Err(why) = private_folder_rule(&security) {
+                if security.owner == Who::User {
+                    cleanup_verified_dir(&folder, &path, dir_id, &base.user);
                 }
-            };
-            // A folder that fails here is not the one this call made, so it is left alone.
-            let security = acl::read_security(&folder, &path, &user)?;
-            private_folder_rule(&security).map_err(|why| refuse(&path, why))?;
+                return Err(refuse(&path, why));
+            }
             return Ok(Private {
                 path,
                 folder: Some(folder),
+                base,
+                dir_id,
                 copy: None,
             });
         }
-        Err(refuse(base, "no unused private folder name was found"))
+        Err(refuse(
+            base.path(),
+            "no unused private folder name was found",
+        ))
     }
 
-    /// Creates the copy exclusively, writes it and closes it before anything runs. It inherits the folder's access.
+    /// Creates the copy exclusively without following reparse points, records its verified identity, writes it and
+    /// closes it before anything runs. It inherits the folder's access.
     pub(super) fn write(&mut self, name: &OsStr, bytes: &[u8]) -> Result<PathBuf, FsxError> {
         let path = self.path.join(name);
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&path)
             .map_err(|error| io_error(&path, "cannot create the private copy", error))?;
-        self.copy = Some(path.clone());
+        let info = winapi_util::file::information(&file)
+            .map_err(|error| io_error(&path, "cannot inspect the private copy", error))?;
+        if !is_plain_file(info.file_attributes())
+            || info.volume_serial_number() != self.dir_id.volume
+        {
+            return Err(refuse(
+                &path,
+                "the new private copy is not a plain file on the verified volume",
+            ));
+        }
+        self.copy = Some(VerifiedCopy {
+            path: path.clone(),
+            id: WinId {
+                volume: info.volume_serial_number(),
+                index: info.file_index(),
+            },
+        });
         file.write_all(bytes)
             .map_err(|error| io_error(&path, "cannot write the private copy", error))?;
         Ok(path)
@@ -141,46 +194,62 @@ impl Private {
 impl Drop for Private {
     fn drop(&mut self) {
         if let Some(copy) = self.copy.take() {
-            // A program that just exited can keep its image mapped for a moment.
-            let _ = retry_removal(|| fs::remove_file(&copy));
+            let _ = retry_removal(|| remove_verified_copy(&copy, &self.base.user));
         }
-        self.folder = None;
-        let _ = retry_removal(|| fs::remove_dir(&self.path));
+        if let Some(folder) = self.folder.take() {
+            cleanup_verified_dir(&folder, &self.path, self.dir_id, &self.base.user);
+        }
     }
 }
 
-/// Opens the folder entry itself, never a reparse point's target, sharing read, write and `share`, and requires a
-/// plain folder.
-fn open_folder(path: &Path, access: u32, share: u32) -> Result<File, FsxError> {
-    let folder = OpenOptions::new()
-        .access_mode(access | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | share)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| io_error(path, "cannot open the folder", error))?;
-    let attributes = winapi_util::file::information(&folder)
-        .map_err(|error| io_error(path, "cannot inspect", error))?
-        .file_attributes();
-    let directory = u64::from(FILE_ATTRIBUTE_DIRECTORY);
-    let reparse = u64::from(FILE_ATTRIBUTE_REPARSE_POINT);
-    if attributes & directory == 0 || attributes & reparse != 0 {
-        return Err(refuse(path, "it is a reparse point or not a folder"));
+/// Opens `copy.path` without following reparse points, verifies it is still the same plain file owned by `user`,
+/// and marks that handle for deletion on close. Unverified entries are left untouched.
+fn remove_verified_copy(copy: &VerifiedCopy, user: &User) -> io::Result<()> {
+    let file = match OpenOptions::new()
+        .access_mode(DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&copy.path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let check = match (
+        winapi_util::file::information(&file),
+        acl::read_owner(&file, &copy.path, user),
+    ) {
+        (Ok(info), Ok(owner)) => CleanupCheck {
+            opened: true,
+            expected_type: is_plain_file(info.file_attributes()),
+            owner_is_user: owner == Who::User,
+            identity_intact: WinId::of(&info) == copy.id,
+        },
+        _ => CleanupCheck::unverified(),
+    };
+    if may_cleanup(check) {
+        mark_delete_on_close(&file)
+    } else {
+        Ok(())
     }
-    Ok(folder)
 }
 
-fn retry_removal(mut remove: impl FnMut() -> io::Result<()>) -> io::Result<()> {
-    let deadline = Instant::now() + REMOVE_FOR;
-    loop {
-        match remove() {
-            // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION and ERROR_DIR_NOT_EMPTY.
-            Err(error)
-                if matches!(error.raw_os_error(), Some(5 | 32 | 33 | 145))
-                    && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            other => return other,
-        }
+/// Re-verifies the already-open directory handle (`plain directory`, `owner == Who::User`, `WinId == expected`)
+/// and marks that exact handle for deletion on close. Unverified handles are left untouched.
+fn cleanup_verified_dir(folder: &File, path: &Path, expected: WinId, user: &User) {
+    let check = match (
+        winapi_util::file::information(folder),
+        acl::read_owner(folder, path, user),
+    ) {
+        (Ok(info), Ok(owner)) => CleanupCheck {
+            opened: true,
+            expected_type: is_plain_dir(info.file_attributes()),
+            owner_is_user: owner == Who::User,
+            identity_intact: WinId::of(&info) == expected,
+        },
+        _ => CleanupCheck::unverified(),
+    };
+    if may_cleanup(check) {
+        let _ = retry_removal(|| mark_delete_on_close(folder));
     }
 }

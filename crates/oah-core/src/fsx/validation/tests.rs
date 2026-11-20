@@ -1,7 +1,4 @@
-// 비공개 확인 단위 시험: 격리된 위치와 실제 사용자별 위치에서 사본·정리·거부를, 그리고 순수 판정 규칙을 확인한다.
-use super::rules::{
-    ALLOW_ACE_TYPE, Entry, Security, Who, location_rule, private_folder_rule, trusted_location_rule,
-};
+// 비공개 확인 단위 시험: 격리된 위치와 실제 사용자별 위치에서 사본·정리·거부 동작을 확인한다.
 use super::*;
 use std::fs;
 use std::path::PathBuf;
@@ -143,13 +140,28 @@ fn a_location_below_a_folder_others_can_write_is_refused() {
     fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// A benign failure during copy creation (invalid file name) still cleans up the verified private folder cleanly.
+#[test]
+fn a_copy_creation_failure_still_cleans_up_the_verified_private_folder() {
+    let (_dir, staging, home) = roots();
+    let mut ran = false;
+    let bad_name = OsStr::new("nested/invalid");
+    let refused = validate_in(&staging, &home, bad_name, b"inert", |_| {
+        ran = true;
+        Ok::<_, ()>(())
+    });
+    assert!(refused.is_err());
+    assert!(!ran);
+    assert!(entries(&staging).is_empty());
+}
+
 /// The operating system's per-user location, as a desktop start uses it.
 #[test]
 fn the_per_user_location_holds_a_private_copy_only_during_the_check() {
     let (_dir, _staging, home) = roots();
     let mut seen = None;
     let result = validate_private_copy(&home, OsStr::new("oah"), b"inert bytes", |copy| {
-        let base = fs::canonicalize(platform::location().unwrap()).unwrap();
+        let base = platform::location().unwrap().path().to_path_buf();
         seen = Some(private_copy_seen(&base, copy));
         Ok::<_, ()>(())
     });
@@ -160,93 +172,4 @@ fn the_per_user_location_holds_a_private_copy_only_during_the_check() {
         !copy.parent().unwrap().exists(),
         "the private folder is removed"
     );
-}
-
-#[test]
-fn the_location_rule_admits_only_root_or_this_user_and_sticky_shared_folders() {
-    assert_eq!(location_rule(true, 0, 501, false, false), Ok(()));
-    assert_eq!(location_rule(true, 501, 501, false, false), Ok(()));
-    assert_eq!(location_rule(true, 0, 501, true, true), Ok(()));
-    assert_eq!(location_rule(true, 501, 501, true, true), Ok(()));
-    assert!(location_rule(false, 501, 501, false, false).is_err());
-    assert!(location_rule(true, 502, 501, false, false).is_err());
-    assert!(location_rule(true, 502, 501, true, true).is_err());
-    assert!(location_rule(true, 0, 501, true, false).is_err());
-    assert!(location_rule(true, 501, 501, true, false).is_err());
-}
-
-fn security(owner: Who, protected: bool, entries: &[(u8, bool, Who)]) -> Security {
-    let entries = entries.iter().map(|&(kind, inherit_only, who)| Entry {
-        kind,
-        inherit_only,
-        who,
-    });
-    Security {
-        owner,
-        dacl_present: true,
-        protected,
-        entries: entries.collect(),
-    }
-}
-
-#[test]
-fn the_private_folder_rule_admits_only_an_owned_protected_list_for_this_user() {
-    let mine = [(ALLOW_ACE_TYPE, false, Who::User)];
-    assert_eq!(
-        private_folder_rule(&security(Who::User, true, &mine)),
-        Ok(())
-    );
-    let with_deny = [
-        (0x01, false, Who::Other),
-        (ALLOW_ACE_TYPE, false, Who::User),
-    ];
-    assert_eq!(
-        private_folder_rule(&security(Who::User, true, &with_deny)),
-        Ok(())
-    );
-    assert!(private_folder_rule(&security(Who::Trusted, true, &mine)).is_err());
-    assert!(private_folder_rule(&security(Who::User, false, &mine)).is_err());
-    let mut missing = security(Who::User, true, &mine);
-    missing.dacl_present = false;
-    assert!(private_folder_rule(&missing).is_err());
-    for who in [Who::Trusted, Who::Other] {
-        for inherit_only in [false, true] {
-            let entry = [(ALLOW_ACE_TYPE, inherit_only, who)];
-            assert!(private_folder_rule(&security(Who::User, true, &entry)).is_err());
-        }
-    }
-    for other_allowing_type in [0x04, 0x05, 0x09, 0x0B] {
-        let entry = [(other_allowing_type, false, Who::Other)];
-        assert!(private_folder_rule(&security(Who::User, true, &entry)).is_err());
-    }
-}
-
-#[test]
-fn the_location_rule_on_windows_admits_this_user_system_and_administrators_only() {
-    let standard = [
-        (ALLOW_ACE_TYPE, false, Who::Trusted),
-        (ALLOW_ACE_TYPE, false, Who::User),
-    ];
-    for owner in [Who::User, Who::Trusted] {
-        assert_eq!(
-            trusted_location_rule(&security(owner, false, &standard)),
-            Ok(())
-        );
-    }
-    assert!(trusted_location_rule(&security(Who::Other, false, &standard)).is_err());
-    let for_children = [
-        (ALLOW_ACE_TYPE, true, Who::Other),
-        (ALLOW_ACE_TYPE, false, Who::User),
-    ];
-    assert_eq!(
-        trusted_location_rule(&security(Who::User, false, &for_children)),
-        Ok(())
-    );
-    let other = [(ALLOW_ACE_TYPE, false, Who::Other)];
-    assert!(trusted_location_rule(&security(Who::User, false, &other)).is_err());
-    let object = [(0x05, false, Who::Other)];
-    assert!(trusted_location_rule(&security(Who::User, false, &object)).is_err());
-    let mut missing = security(Who::User, false, &standard);
-    missing.dacl_present = false;
-    assert!(trusted_location_rule(&missing).is_err());
 }

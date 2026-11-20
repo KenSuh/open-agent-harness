@@ -1,155 +1,67 @@
-// Windows 접근 목록 도우미: 현재 사용자 SID, 이 사용자만 허용하는 보호된 보안 설명자, 핸들로 읽은 소유자·접근 목록을 다룬다.
-//! This user's SID, the owner-only descriptor of a private folder, and a folder's security read through its handle.
+// Windows 핸들 보안 읽기: GetSecurityInfo·GetAclInformation·GetAce 로 소유자와 접근 목록을 경계 검증 후 파싱한다.
+//! Handle-bound Windows owner and DACL reader using checked API-owned ACL metadata.
 
 use super::super::io_error;
 use super::super::rules::{ALLOW_ACE_TYPE, Entry, Security, Who};
+use super::super::windows_rules::{
+    validate_ace_extent, validate_ace_header_bounds, validate_acl_size,
+    validate_allow_ace_sid_offset, validate_sid_layout,
+};
+use super::ffi::{LocalMem, User, invalid_data};
 use crate::fsx::error::FsxError;
-use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::mem::{offset_of, size_of};
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::ptr::null_mut;
-use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-    SDDL_REVISION_1, SE_FILE_OBJECT,
-};
+use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-    GetSecurityDescriptorControl, GetTokenInformation, INHERIT_ONLY_ACE, IsWellKnownSid,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT, SE_DACL_PROTECTED,
-    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
-    WinLocalSystemSid,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+    INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT,
+    SE_DACL_PROTECTED,
 };
-use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-/// This process's user, as the `TOKEN_USER` its token returned; the SID lies inside the buffer.
-pub(super) struct User {
-    buffer: Vec<u64>,
-}
-
-impl User {
-    pub(super) fn current() -> io::Result<User> {
-        let mut raw = null_mut();
-        // SAFETY: GetCurrentProcess returns a pseudo-handle; `raw` is writable.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: the successful call handed over a token handle this code now owns.
-        let token = unsafe { OwnedHandle::from_raw_handle(raw) };
-        let mut buffer = vec![0_u64; 64];
-        let (size, mut returned) = (u32::try_from(buffer.len() * 8).unwrap_or(u32::MAX), 0);
-        // SAFETY: the buffer is writable, 8-byte aligned and `size` bytes long.
-        let read = unsafe {
-            GetTokenInformation(
-                token.as_raw_handle(),
-                TokenUser,
-                buffer.as_mut_ptr().cast(),
-                size,
-                &mut returned,
-            )
-        };
-        if read == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(User { buffer })
+/// The owner of the file or folder open as `handle`, read through that handle.
+pub(super) fn read_owner(handle: &File, path: &Path, user: &User) -> Result<Who, FsxError> {
+    let (mut owner, mut descriptor) = (null_mut(), null_mut());
+    // SAFETY: `handle` is live with `READ_CONTROL`; outputs are writable.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        let error = io::Error::from_raw_os_error(i32::try_from(status).unwrap_or(i32::MAX));
+        return Err(io_error(path, "cannot read the entry's owner", error));
     }
-
-    fn sid(&self) -> PSID {
-        // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of the aligned buffer.
-        unsafe { (*self.buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+    let _guard = LocalMem::new(descriptor).ok_or_else(|| {
+        io_error(
+            path,
+            "cannot read the entry's owner",
+            invalid_data("GetSecurityInfo returned a null security descriptor"),
+        )
+    })?;
+    if owner.is_null() {
+        return Ok(Who::Other);
     }
-
-    fn who(&self, sid: PSID) -> Who {
-        // SAFETY: both SIDs are valid for the duration of the calls.
-        unsafe {
-            if EqualSid(sid, self.sid()) != 0 {
-                Who::User
-            } else if IsWellKnownSid(sid, WinLocalSystemSid) != 0
-                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
-            {
-                Who::Trusted
-            } else {
-                Who::Other
-            }
-        }
-    }
-}
-
-/// A security descriptor allocated by Windows and freed on drop.
-pub(super) struct Descriptor(PSECURITY_DESCRIPTOR);
-
-impl Descriptor {
-    /// Owner `user`, and a protected access list whose one entry allows `user` everything, inherited by files and
-    /// folders created inside.
-    pub(super) fn only(user: &User) -> io::Result<Descriptor> {
-        let mut text = null_mut();
-        // SAFETY: the SID is valid; Windows allocates the string, freed below.
-        if unsafe { ConvertSidToStringSidW(user.sid(), &mut text) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a successful conversion returns a NUL-terminated string.
-        let sid = OsString::from_wide(unsafe { until_nul(text) });
-        // SAFETY: frees the string Windows allocated, exactly once.
-        unsafe { LocalFree(text.cast()) };
-        let mut sddl = OsString::from("O:");
-        for part in [
-            sid.as_os_str(),
-            OsStr::new("D:P(A;OICI;FA;;;"),
-            sid.as_os_str(),
-            OsStr::new(")"),
-        ] {
-            sddl.push(part);
-        }
-        let wide: Vec<u16> = sddl.encode_wide().chain(Some(0)).collect();
-        let mut descriptor = null_mut();
-        // SAFETY: `wide` is NUL-terminated and `descriptor` is writable; Windows allocates the descriptor.
-        let made = unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide.as_ptr(),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                null_mut(),
-            )
-        };
-        if made == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Descriptor(descriptor))
-    }
-
-    /// Creates the folder `path` with this descriptor; an existing name is `ERROR_ALREADY_EXISTS`.
-    pub(super) fn create_directory(&self, path: &Path) -> io::Result<()> {
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
-            lpSecurityDescriptor: self.0,
-            bInheritHandle: 0,
-        };
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        // SAFETY: the path is NUL-terminated, and the attributes and descriptor live until the call returns.
-        if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Drop for Descriptor {
-    fn drop(&mut self) {
-        // SAFETY: frees the descriptor Windows allocated, exactly once.
-        unsafe { LocalFree(self.0) };
-    }
+    // SAFETY: `owner` points into `_guard`, which stays alive until this function returns.
+    unsafe { user.classify_sid(owner, None) }
+        .map_err(|error| io_error(path, "cannot read the entry's owner", error))
 }
 
 /// The owner and access list of the folder open as `folder`, read through that handle.
 pub(super) fn read_security(folder: &File, path: &Path, user: &User) -> Result<Security, FsxError> {
     let (mut owner, mut dacl, mut descriptor) = (null_mut(), null_mut(), null_mut());
-    // SAFETY: the handle is live and has READ_CONTROL; every output is writable. Windows allocates the descriptor,
-    // and `owner` and `dacl` point into it.
+    // SAFETY: `folder` is live with `READ_CONTROL`; outputs are writable. `guard` owns `descriptor`.
     let status = unsafe {
         GetSecurityInfo(
             folder.as_raw_handle(),
@@ -170,48 +82,124 @@ pub(super) fn read_security(folder: &File, path: &Path, user: &User) -> Result<S
             error,
         ));
     }
-    // SAFETY: the pointers come from the successful call above and stay valid until LocalFree.
-    let security = unsafe { describe(owner, dacl, descriptor, user) };
-    // SAFETY: frees the descriptor GetSecurityInfo allocated, exactly once.
-    unsafe { LocalFree(descriptor) };
-    security.ok_or_else(|| {
-        let error = io::Error::last_os_error();
-        io_error(path, "cannot read the folder's access list", error)
-    })
+    let guard = LocalMem::new(descriptor).ok_or_else(|| {
+        io_error(
+            path,
+            "cannot read the folder's owner and access list",
+            invalid_data("GetSecurityInfo returned a null security descriptor"),
+        )
+    })?;
+    // SAFETY: `owner`, `dacl` and `guard` come from one successful `GetSecurityInfo`; `guard` drops only after
+    // `describe` has already captured any `io::Error::last_os_error()`.
+    unsafe { describe(owner, dacl, guard.as_ptr(), user) }
+        .map_err(|error| io_error(path, "cannot read the folder's access list", error))
 }
 
 /// # Safety
-/// `owner`, `dacl` and `descriptor` come from one successful `GetSecurityInfo` call whose descriptor is still
-/// allocated.
+/// `owner`, `dacl` and `descriptor` come from one successful `GetSecurityInfo` call whose descriptor stays live.
 unsafe fn describe(
     owner: PSID,
     dacl: *mut ACL,
     descriptor: PSECURITY_DESCRIPTOR,
     user: &User,
-) -> Option<Security> {
+) -> io::Result<Security> {
     let (mut control, mut revision) = (0_u16, 0_u32);
-    // SAFETY: the descriptor is live; both outputs are writable.
+    // SAFETY: `descriptor` is non-null and live; both outputs are writable.
     if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
-        return None;
+        return Err(io::Error::last_os_error());
     }
-    // SAFETY: a non-null access list is an ACL inside the live descriptor.
-    let count = if dacl.is_null() {
-        0
+    let owner_who = if owner.is_null() {
+        Who::Other
     } else {
-        unsafe { (*dacl).AceCount }
+        // SAFETY: `owner` points into the live descriptor.
+        unsafe { user.classify_sid(owner, None)? }
     };
-    let mut entries = Vec::with_capacity(usize::from(count));
-    for index in 0..u32::from(count) {
+    let protected = control & SE_DACL_PROTECTED != 0;
+    if control & SE_DACL_PRESENT == 0 || dacl.is_null() {
+        return Ok(Security {
+            owner: owner_who,
+            dacl_present: false,
+            protected,
+            entries: Vec::new(),
+        });
+    }
+    if !dacl.cast::<u16>().is_aligned() {
+        return Err(invalid_data("unaligned DACL pointer"));
+    }
+    let mut acl_info = ACL_SIZE_INFORMATION::default();
+    let info_len = u32::try_from(size_of::<ACL_SIZE_INFORMATION>()).unwrap_or(u32::MAX);
+    // SAFETY: `dacl` is a live aligned ACL inside `descriptor` and `acl_info` is writable.
+    if unsafe {
+        GetAclInformation(
+            dacl.cast_const(),
+            (&raw mut acl_info).cast(),
+            info_len,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let acl_bytes = validate_acl_size(
+        acl_info.AceCount,
+        acl_info.AclBytesInUse,
+        size_of::<ACL>(),
+        size_of::<ACE_HEADER>(),
+    )
+    .map_err(invalid_data)?;
+    let acl_start = dacl.addr();
+    let count =
+        usize::try_from(acl_info.AceCount).map_err(|_| invalid_data("ACE count overflow"))?;
+    let mut entries = Vec::with_capacity(count);
+    for index in 0..acl_info.AceCount {
         let mut ace = null_mut();
-        // SAFETY: `index` is below the entry count; `ace` is writable.
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
-            return None;
+        // SAFETY: `index < acl_info.AceCount` on the live ACL; `ace` is writable.
+        if unsafe { GetAce(dacl.cast_const(), index, &mut ace) } == 0 {
+            return Err(io::Error::last_os_error());
         }
-        // SAFETY: every entry GetAce returns starts with an ACE_HEADER.
-        let header = unsafe { *ace.cast::<ACE_HEADER>() };
+        if ace.is_null() {
+            return Err(invalid_data("GetAce returned a null ACE pointer"));
+        }
+        validate_ace_header_bounds(
+            acl_start,
+            acl_bytes,
+            size_of::<ACL>(),
+            size_of::<ACE_HEADER>(),
+            ace.addr(),
+        )
+        .map_err(invalid_data)?;
+        // SAFETY: `ace` is bounded within `[acl_start + size_of::<ACL>(), acl_start + acl_bytes)`.
+        let header = unsafe { ace.cast::<ACE_HEADER>().read_unaligned() };
+        let ace_size = validate_ace_extent(
+            acl_start,
+            acl_bytes,
+            ace.addr(),
+            size_of::<ACE_HEADER>(),
+            header.AceSize,
+        )
+        .map_err(invalid_data)?;
         let who = if header.AceType == ALLOW_ACE_TYPE {
-            // SAFETY: a plain allowing entry is an ACCESS_ALLOWED_ACE whose SID starts at `SidStart`.
-            user.who(unsafe { (&raw mut (*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart).cast() })
+            let sid_offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+            let sid_aligned = ace
+                .cast::<u8>()
+                .wrapping_add(sid_offset)
+                .cast::<u32>()
+                .is_aligned();
+            validate_allow_ace_sid_offset(
+                ace_size,
+                sid_offset,
+                size_of::<ACCESS_ALLOWED_ACE>(),
+                sid_aligned,
+            )
+            .map_err(invalid_data)?;
+            // SAFETY: `validate_allow_ace_sid_offset` proved `sid_offset + SID_HEADER_BYTES <= ace_size`.
+            let sid_ptr = unsafe { ace.cast::<u8>().add(sid_offset) };
+            // SAFETY: `sid_ptr` is within `ace_size` with at least `SID_HEADER_BYTES` readable.
+            let (sid_rev, sub_auth_count) = unsafe { (*sid_ptr, *sid_ptr.add(1)) };
+            let sid_len = validate_sid_layout(sid_offset, ace_size, sid_rev, sub_auth_count)
+                .map_err(invalid_data)?;
+            // SAFETY: `sid_ptr` is aligned and bounded to `sid_len` bytes inside the live ACL.
+            unsafe { user.classify_sid(sid_ptr.cast(), Some(sid_len))? }
         } else {
             Who::Other
         };
@@ -222,28 +210,10 @@ unsafe fn describe(
             who,
         });
     }
-    Some(Security {
-        owner: if owner.is_null() {
-            Who::Other
-        } else {
-            user.who(owner)
-        },
-        dacl_present: !dacl.is_null() && control & SE_DACL_PRESENT != 0,
-        protected: control & SE_DACL_PROTECTED != 0,
+    Ok(Security {
+        owner: owner_who,
+        dacl_present: true,
+        protected,
         entries,
     })
-}
-
-/// The UTF-16 code units before the terminating NUL.
-///
-/// # Safety
-/// `wide` points to a live NUL-terminated UTF-16 string.
-pub(super) unsafe fn until_nul<'a>(wide: *const u16) -> &'a [u16] {
-    let mut len = 0;
-    // SAFETY: the string is NUL-terminated, so every unit up to the terminator is readable.
-    while unsafe { wide.add(len).read() } != 0 {
-        len += 1;
-    }
-    // SAFETY: the `len` units before the terminator are initialized.
-    unsafe { std::slice::from_raw_parts(wide, len) }
 }

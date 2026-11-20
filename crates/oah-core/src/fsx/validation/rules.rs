@@ -1,5 +1,34 @@
-// 비공개 확인의 순수 판정: 운영체제 호출 없이 소유자·권한 비트·접근 목록 항목만으로 위치와 폴더를 판정한다.
+// 비공개 확인의 순수 판정: 운영체제 호출 없이 소유자·권한 비트·접근 목록·정리 조건으로 위치와 폴더를 판정한다.
 //! Pure rules of the private check, kept apart so every platform's tests exercise all of them.
+
+/// Verified facts required before removing a staged private file or folder.
+///
+/// Cleanup requires an opened no-follow handle, the expected plain entry type (never a link or reparse point),
+/// ownership by the current user, and intact identity matching what this call created. If any fact is missing or
+/// unverified, the entry must be left untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CleanupCheck {
+    pub opened: bool,
+    pub expected_type: bool,
+    pub owner_is_user: bool,
+    pub identity_intact: bool,
+}
+
+impl CleanupCheck {
+    pub(super) const fn unverified() -> Self {
+        Self {
+            opened: false,
+            expected_type: false,
+            owner_is_user: false,
+            identity_intact: false,
+        }
+    }
+}
+
+/// Whether cleanup may remove a staged entry. Every fact must be proven; any unverified entry is left untouched.
+pub(super) const fn may_cleanup(check: CleanupCheck) -> bool {
+    check.opened && check.expected_type && check.owner_is_user && check.identity_intact
+}
 
 /// Why a Unix folder on the way to the private copy lets someone other than root or this user change its
 /// entries. It must be a folder that belongs to root or this user, and others may write it only when the sticky
