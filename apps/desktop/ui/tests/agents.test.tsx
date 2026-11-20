@@ -256,6 +256,31 @@ describe("focus probe and rescan overlap", () => {
 });
 
 describe("agents-changed subscription lifetime", () => {
+  it("waits for native completion subscription before starting the initial probe", async () => {
+    const t = createFakeTransport();
+    const subscribed = deferred<() => void>();
+    t.override.onAgentsChanged = () => subscribed.promise;
+    await mount(<App transport={t} />);
+    expect(t.probeRequests).toEqual([]);
+
+    await emit(() => subscribed.resolve(() => undefined));
+    expect(t.probeRequests).toEqual([{ sign_in: true, focus: true }]);
+  });
+
+  it("shows the subscription failure without waiting for an event it cannot receive", async () => {
+    const t = createFakeTransport();
+    t.override.onAgentsChanged = async () => {
+      throw { code: "OAH_FILE_IO", message: "Subscription unavailable.", hint: null };
+    };
+    t.override.startAgentsProbe = async () => {
+      throw { code: "OAH_TASK_BUSY", message: "busy", hint: null };
+    };
+    await mount(<App transport={t} />);
+    expect(t.probeRequests).toEqual([{ sign_in: true, focus: true }]);
+    expect(rosterText()).not.toMatch(/checking/i);
+    expect(toastText()).toMatch(/Subscription unavailable/);
+  });
+
   it("unsubscribes on unmount, so a later event reads nothing", async () => {
     const t = await loaded();
     expect(t.agentsSubscribed()).toBe(true);
@@ -280,6 +305,7 @@ describe("agents-changed subscription lifetime", () => {
     await subscribed.promise;
     await Promise.resolve();
     expect(stopped).toBe(1);
+    expect(t.probeRequests).toEqual([]);
   });
 });
 

@@ -40,6 +40,7 @@ export function useAgents(transport: Transport, notify: Notify) {
   const [waiting, setWaiting] = useState(false);
   const readSeq = useRef(0);
   const agentsChangeSeq = useRef(0);
+  const listening = useRef(false);
   const checkRun = useRef(0);
   const checkRunning = useRef(false);
   const hasList = useRef(false);
@@ -110,7 +111,7 @@ export function useAgents(transport: Transport, notify: Notify) {
         if (dto.code !== TASK_BUSY) {
           showError(dto);
         } else if (origin === "initial") {
-          setWaiting(agentsChangeSeq.current === changesAtStart);
+          setWaiting(listening.current && agentsChangeSeq.current === changesAtStart);
         } else {
           info("An agent check like this one is already running; the list updates when it ends.");
         }
@@ -121,28 +122,38 @@ export function useAgents(transport: Transport, notify: Notify) {
 
   useEffect(() => {
     reload();
-    void follow(INITIAL_PROBE, "initial");
-  }, [reload, follow]);
-
-  useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     transport
       .onAgentsChanged(() => {
+        if (disposed) return;
         // Invalidation signal only: answer by reading the cache again.
         ++agentsChangeSeq.current;
         setWaiting(false);
         reload();
       })
       .then(
-        (stop) => (disposed ? stop() : (unlisten = stop)),
-        (error) => showError(toErrorDto(error)),
+        (stop) => {
+          if (disposed) {
+            stop();
+            return;
+          }
+          unlisten = stop;
+          listening.current = true;
+          void follow(INITIAL_PROBE, "initial");
+        },
+        (error) => {
+          if (disposed) return;
+          showError(toErrorDto(error));
+          void follow(INITIAL_PROBE, "initial");
+        },
       );
     return () => {
       disposed = true;
+      listening.current = false;
       unlisten?.();
     };
-  }, [transport, reload, showError]);
+  }, [transport, reload, follow, showError]);
 
   const rescan = useCallback(async () => {
     if (checkRunning.current) return; // one rescan from this window at a time
