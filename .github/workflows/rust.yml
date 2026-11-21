@@ -11,6 +11,15 @@ on:
       - "apps/**"
       - ".github/workflows/rust.yml"
   workflow_dispatch:
+    inputs:
+      installers:
+        description: "Also build the unsigned installers (one macOS Apple Silicon DMG, one Windows x64 NSIS setup)"
+        type: boolean
+        default: false
+      candidate:
+        description: "With installers: the full commit SHA the chosen branch must be at; any other commit fails the run"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -123,3 +132,222 @@ jobs:
           app="target/release/oah-desktop"
           if [ "$RUNNER_OS" = "Windows" ]; then app="$app.exe"; fi
           node apps/desktop/scripts/smoke-start.mjs --app "$app"
+
+  # Opt-in packaging for a pinned candidate: Run workflow, tick "installers" and give the full commit SHA the chosen
+  # branch is at. Each runner builds only its own native architecture with the locked Tauri CLI, which also stages
+  # the bundled CLI (beforeBuildCommand). No signing credentials are used: the macOS app gets an ad-hoc signature
+  # only (not Developer ID, not notarized) and the Windows setup is not signed. The artifacts are disposable
+  # rehearsal or release-candidate files; publishing a release stays a separate, manual step.
+  installer:
+    name: installer (${{ matrix.platform }}, manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.installers
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos-arm64
+            target: aarch64-apple-darwin
+            runner_arch: ARM64
+            bundle: dmg
+            config: '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+          - os: windows-latest
+            platform: windows-x64
+            target: x86_64-pc-windows-msvc
+            runner_arch: X64
+            bundle: nsis
+            config: ""
+    steps:
+      - name: Check the requested candidate
+        shell: bash
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          if ! printf '%s\n' "$CANDIDATE" | grep -Eqx '[0-9a-f]{40}'; then
+            echo "::error::installers need the candidate input: the full 40-character commit SHA to build"
+            exit 1
+          fi
+          if [ "$CANDIDATE" != "$GITHUB_SHA" ]; then
+            echo "::error::the chosen branch is at $GITHUB_SHA, not the requested candidate $CANDIDATE"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Confirm the checkout
+        shell: bash
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::the checkout is at $(git rev-parse HEAD), not $GITHUB_SHA"
+            exit 1
+          fi
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install the stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Check the runner host
+        shell: bash
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+          EXPECTED_ARCH: ${{ matrix.runner_arch }}
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "runner: $RUNNER_OS $RUNNER_ARCH, rustc host: $host"
+          if [ "$host" != "$EXPECTED_TARGET" ] || [ "$RUNNER_ARCH" != "$EXPECTED_ARCH" ]; then
+            echo "::error::this job builds $EXPECTED_TARGET on an $EXPECTED_ARCH runner, but the runner is $RUNNER_ARCH with host $host"
+            exit 1
+          fi
+      - name: Install the UI dependencies
+        working-directory: apps/desktop/ui
+        run: npm ci
+      - name: Install the locked Tauri CLI
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Build the installer
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLE: ${{ matrix.bundle }}
+          CONFIG: ${{ matrix.config }}
+        run: |
+          set -- build --ci --verbose --bundles "$BUNDLE" --target "$TARGET"
+          if [ -n "$CONFIG" ]; then set -- "$@" --config "$CONFIG"; fi
+          # Everything after the second -- goes to Tauri's cargo runner, so the desktop build uses Cargo.lock as is,
+          # like the sidecar build inside beforeBuildCommand.
+          npm run tauri -- "$@" -- --locked
+      - name: Select and check the installer
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLE: ${{ matrix.bundle }}
+        run: |
+          set -euo pipefail
+          workspace="$(pwd -P)"
+          dir="target/$TARGET/release/bundle/$BUNDLE"
+          case "$BUNDLE" in
+            dmg) suffix=".dmg"; label="_aarch64.dmg" ;;
+            nsis) suffix=".exe"; label="_x64-setup.exe" ;;
+          esac
+          shopt -s nullglob
+          found=("$dir"/*"$suffix")
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one $suffix file in $dir, found ${#found[@]}: ${found[*]:-none}"
+            exit 1
+          fi
+          file="${found[0]}"
+          name="$(basename "$file")"
+          real="$(cd "$(dirname "$file")" && pwd -P)/$name"
+          if [ -L "$file" ] || [ ! -f "$file" ] || [ "${real#"$workspace"/}" = "$real" ]; then
+            echo "::error::$file is not a regular file inside the workspace"
+            exit 1
+          fi
+          case "$name" in
+            *"$label") ;;
+            *) echo "::error::$name does not carry the $label architecture label"; exit 1 ;;
+          esac
+          fail() { echo "::error::$*"; exit 1; }
+          if [ "$BUNDLE" = dmg ]; then
+            info="$(hdiutil imageinfo "$file")" || fail "hdiutil cannot read $name"
+            grep -Eq '^Format: UDZO$' <<<"$info" || fail "$name is not a compressed (UDZO) disk image"
+            hdiutil verify "$file" || fail "$name fails its own checksum"
+            [ "$(tail -c 512 "$file" | head -c 4)" = koly ] || fail "$name has no UDIF trailer"
+          else
+            [ "$(head -c 2 "$file")" = MZ ] || fail "$name is not a Windows executable"
+            grep -aqF NullsoftInst "$file" || fail "$name is not an NSIS installer"
+            # The setup stub's own PE type is NSIS's choice; check the packaged app it was built from instead.
+            exe="target/$TARGET/release/oah-desktop.exe"
+            offset="$(od -An -tu4 -j60 -N4 "$exe" | tr -d ' ')"
+            machine="$(od -An -tx1 -j"$((offset + 4))" -N2 "$exe" | tr -d ' ')"
+            [ "$machine" = 6486 ] || fail "the packaged $exe is not x64 (PE machine bytes $machine)"
+          fi
+          out="$workspace/installer-out"
+          mkdir "$out"
+          cp "$file" "$out/$name"
+          hash="$( (sha256sum "$out/$name" 2>/dev/null || shasum -a 256 "$out/$name") | awk '{print $1}' | tr -d '\\*')"
+          if ! printf '%s\n' "$hash" | grep -Eqx '[0-9a-f]{64}'; then
+            echo "::error::could not hash $name"
+            exit 1
+          fi
+          printf '%s  %s\n' "$hash" "$name" > "$out/$name.sha256"
+          cat "$out/$name.sha256"
+      - name: Start the app inside the DMG, check the CLI copy, stop, start again
+        if: matrix.bundle == 'dmg'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(ls installer-out/*.dmg)"
+          mnt="$RUNNER_TEMP/oah-dmg"
+          mkdir "$mnt"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mnt" "$dmg"
+          trap 'hdiutil detach "$mnt"' EXIT
+          for file in "$mnt"/OAH.app/Contents/MacOS/*; do [ "$(lipo -archs "$file")" = arm64 ]; done
+          codesign --verify --deep --strict --verbose=2 "$mnt/OAH.app"
+          node apps/desktop/scripts/smoke-start.mjs --app "$mnt/OAH.app/Contents/MacOS/oah-desktop"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: oah-installer-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: installer-out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Combines the two installers for one candidate into one artifact: both files, a SHA256SUMS that lists both and
+  # SOURCE.txt with the exact commit. Each per-platform hash is checked against the downloaded bytes first.
+  # Artifact names carry the run attempt and only this attempt's files are downloaded, so one package set always
+  # comes from one attempt: after a failure use "Re-run all jobs"; "Re-run failed jobs" leaves this job without the
+  # installers that passed earlier and it fails instead of mixing attempts.
+  installer-checksums:
+    name: installer checksums (manual)
+    needs: installer
+    if: github.event_name == 'workflow_dispatch' && inputs.installers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: oah-installer-*-${{ github.sha }}-${{ github.run_attempt }}
+          path: parts
+      - name: Check both installers and write SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t dmg < <(find parts -type f -name '*.dmg')
+          mapfile -t exe < <(find parts -type f -name '*.exe')
+          mapfile -t sums < <(find parts -type f -name '*.sha256')
+          if [ "${#dmg[@]}" -ne 1 ] || [ "${#exe[@]}" -ne 1 ] || [ "${#sums[@]}" -ne 2 ]; then
+            echo "::error::expected one .dmg, one .exe and two .sha256 files; found ${#dmg[@]}, ${#exe[@]} and ${#sums[@]}"
+            find parts -type f
+            exit 1
+          fi
+          for installer in "${dmg[0]}" "${exe[0]}"; do
+            (cd "$(dirname "$installer")" && sha256sum --check --strict "$(basename "$installer").sha256")
+          done
+          mkdir release
+          cp "${dmg[0]}" "${exe[0]}" release/
+          cd release
+          sha256sum -- "$(basename "${dmg[0]}")" "$(basename "${exe[0]}")" > SHA256SUMS
+          diff <(cat "${sums[@]/#/../}" | sort) <(sort SHA256SUMS)
+          sha256sum --check --strict SHA256SUMS
+          {
+            echo "repository: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            echo "commit: $GITHUB_SHA"
+            echo "source: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/tree/$GITHUB_SHA"
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
+            echo "signing: macOS ad-hoc only (no Developer ID, not notarized); Windows unsigned"
+          } > SOURCE.txt
+          cat SHA256SUMS SOURCE.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: oah-installers-${{ github.sha }}-${{ github.run_attempt }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
