@@ -18,16 +18,23 @@ pub fn command() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Print the statuses as JSON"),
         )
+        .arg(
+            Arg::new("use-project-commands")
+                .long("use-project-commands")
+                .action(ArgAction::SetTrue)
+                .help("Use [agents.<id>] command overrides from this project's .oah/config.toml instead of installed machine lookups"),
+        )
 }
 
 pub fn run(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
+    let use_project_commands = matches.get_flag("use-project-commands");
     let env = match Env::from_process() {
         Ok(env) => env,
         Err(error) => return refuse(&fallback_env(), &Error::from(error), json),
     };
     let session = Session::new(env);
-    match doctor(&session) {
+    match doctor(&session, use_project_commands) {
         Ok(doctor) => {
             print(&doctor.agents, json);
             ExitCode::from(u8::try_from(doctor.exit).unwrap_or(super::REFUSED))
@@ -36,14 +43,19 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     }
 }
 
-/// The probe of the app, with the project at the invocation folder open when it can be, so its stages and
-/// `[agents.<id>] command` apply; a folder that cannot be opened leaves the built-in defaults.
-fn doctor(session: &Session) -> Result<Doctor, Error> {
+/// The probe of the app, with the project at the invocation folder open when it can be, so its stages
+/// apply; `[agents.<id>] command` overrides apply only when `use_project_commands` is explicitly set.
+/// A folder that cannot be opened leaves the built-in defaults.
+fn doctor(session: &Session, use_project_commands: bool) -> Result<Doctor, Error> {
     let cancel = CancelToken::new();
     let ctx = session.ctx(&cancel, &NoProgress);
     let folder = session.env().cwd().to_path_buf();
     let _ = app::project_open(&ctx, &folder);
-    app::doctor(&ctx)
+    if use_project_commands {
+        app::doctor_project_commands(&ctx)
+    } else {
+        app::doctor(&ctx)
+    }
 }
 
 /// An environment for showing an error when the process's own cannot be read: no home, so paths stay whole.

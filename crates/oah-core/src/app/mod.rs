@@ -17,7 +17,9 @@ pub use agents::{
     sign_in_due,
 };
 pub use cli_copy::{CliCopy, cli_copy};
-pub use doctor::{Doctor, doctor, doctor_exit, doctor_with};
+pub use doctor::{
+    Doctor, doctor, doctor_exit, doctor_project_commands, doctor_project_commands_with, doctor_with,
+};
 pub use refresh::{REFRESH, refresh, refresh_key};
 pub use settings::{settings_get, settings_set};
 

@@ -251,3 +251,118 @@ fn a_legacy_hook_call_exits_zero_with_one_line_and_runs_nothing() {
         "the kind is required"
     );
 }
+
+#[test]
+fn doctor_help_identifies_the_project_commands_source() {
+    let out = Machine::new(0).oah(&["doctor", "--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(help.contains("--use-project-commands"), "{help}");
+    assert!(
+        help.contains(".oah/config.toml") && help.contains("[agents.<id>] command"),
+        "{help}"
+    );
+}
+
+#[test]
+fn doctor_ignores_project_commands_by_default_and_opts_in_with_flag() {
+    let machine = Machine::new(1);
+    machine.script("git", "echo 'fatal: not a git repository' >&2\nexit 128\n");
+    let project_claude = format!(
+        "case \"$1\" in\n--version) echo '2.2.0-project (Claude Code)' ;;\nauth) echo '{{\"loggedIn\": true, \"account\": \"{SENTINEL}\"}}' ;;\nesac\n"
+    );
+    machine.script("claude-project", &project_claude);
+    let config_dir = machine.root.join("work").join(".oah");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[stages]\nplan = \"claude\"\nbuild = \"claude\"\nreview = \"claude\"\nfix = \"claude\"\n\n\
+         [agents.claude]\ncommand = [\"claude-project\"]\n",
+    )
+    .unwrap();
+    let before = tree(&machine.root);
+
+    let default_out = machine.oah(&["doctor", "--json"]);
+    assert_eq!(
+        tree(&machine.root),
+        before,
+        "default doctor creates and changes nothing"
+    );
+    assert_eq!(
+        default_out.status.code(),
+        Some(0),
+        "project [stages] assigns Claude only"
+    );
+    assert!(default_out.stderr.is_empty());
+    let default_stdout = String::from_utf8(default_out.stdout).unwrap();
+    assert!(!default_stdout.contains(SENTINEL), "{default_stdout}");
+    let default_rows: Vec<serde_json::Value> = serde_json::from_str(&default_stdout).unwrap();
+    assert_eq!(default_rows[0]["status"], "ok");
+    assert_eq!(default_rows[0]["version"], "2.1.318 (Claude Code)");
+    assert_eq!(
+        default_rows[0]["source"],
+        machine
+            .root
+            .join("bin")
+            .join("claude")
+            .display()
+            .to_string()
+    );
+    assert_eq!(status_of(&default_rows, "codex"), "not-signed-in");
+
+    let explicit_out = machine.oah(&["doctor", "--use-project-commands", "--json"]);
+    assert_eq!(
+        tree(&machine.root),
+        before,
+        "explicit doctor creates and changes nothing"
+    );
+    assert_eq!(
+        explicit_out.status.code(),
+        Some(0),
+        "project [stages] still governs readiness in explicit mode"
+    );
+    assert!(explicit_out.stderr.is_empty());
+    let explicit_stdout = String::from_utf8(explicit_out.stdout).unwrap();
+    assert!(!explicit_stdout.contains(SENTINEL), "{explicit_stdout}");
+    let explicit_rows: Vec<serde_json::Value> = serde_json::from_str(&explicit_stdout).unwrap();
+    let default_ids: Vec<&str> = default_rows
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    let explicit_ids: Vec<&str> = explicit_rows
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(explicit_ids, default_ids);
+    assert_eq!(explicit_rows[0]["status"], "ok");
+    assert_eq!(explicit_rows[0]["version"], "2.2.0-project (Claude Code)");
+    assert_eq!(
+        explicit_rows[0]["source"],
+        machine
+            .root
+            .join("bin")
+            .join("claude-project")
+            .display()
+            .to_string()
+    );
+    assert_eq!(status_of(&explicit_rows, "codex"), "not-signed-in");
+    assert_eq!(
+        explicit_rows[1]["source"],
+        machine.root.join("bin").join("codex").display().to_string()
+    );
+
+    let text_out = machine.oah(&["doctor", "--use-project-commands"]);
+    assert_eq!(tree(&machine.root), before);
+    assert_eq!(text_out.status.code(), Some(0));
+    assert!(text_out.stderr.is_empty());
+    let text_stdout = String::from_utf8(text_out.stdout).unwrap();
+    let lines: Vec<&str> = text_stdout.lines().collect();
+    assert_eq!(lines.len(), 7, "{text_stdout}");
+    assert!(
+        lines[0].starts_with("Claude Code: ok (2.2.0-project (Claude Code), ")
+            && lines[0].contains("claude-project"),
+        "{text_stdout}"
+    );
+    assert!(!text_stdout.contains(SENTINEL), "{text_stdout}");
+}
