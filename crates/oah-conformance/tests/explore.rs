@@ -2,6 +2,7 @@
 use oah_conformance::runner::{AreaReport, AreaState, ENABLED, run_area};
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 fn fixture_root() -> PathBuf {
@@ -12,22 +13,70 @@ fn fixture_root() -> PathBuf {
         .join("v0.4.0")
 }
 
-/// Every file below `root` with its bytes, keyed by the path relative to `root`.
-fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotEntry {
+    Dir,
+    File(Vec<u8>),
+}
+
+/// Every directory entry and regular file below `root` keyed by its path relative to `root`,
+/// inspected without following links and rejecting unsupported entry types.
+fn snapshot(root: &Path) -> Result<BTreeMap<PathBuf, SnapshotEntry>, String> {
+    let root_meta = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("cannot inspect fixture tree: {error}"))?;
+    let root_kind = root_meta.file_type();
+    if root_kind.is_symlink() || !root_kind.is_dir() {
+        return Err("fixture tree root is not a direct non-symlink directory".into());
+    }
     let mut out = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(folder) = pending.pop() {
-        for entry in std::fs::read_dir(&folder).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
+        let entries = std::fs::read_dir(&folder)
+            .map_err(|error| format!("cannot list fixture tree: {error}"))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("cannot list fixture tree: {error}"))?
+                .path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| format!("cannot relativize fixture tree path: {error}"))?
+                .to_path_buf();
+            let meta = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect fixture tree entry: {error}"))?;
+            let kind = meta.file_type();
+            if kind.is_symlink() {
+                return Err(format!(
+                    "unsupported symlink entry in fixture tree: {}",
+                    relative.display()
+                ));
+            } else if kind.is_dir() {
+                out.insert(relative, SnapshotEntry::Dir);
                 pending.push(path);
+            } else if kind.is_file() {
+                let mut file = std::fs::File::open(&path)
+                    .map_err(|error| format!("cannot read fixture tree file: {error}"))?;
+                let opened = file
+                    .metadata()
+                    .map_err(|error| format!("cannot inspect opened fixture file: {error}"))?;
+                if !opened.file_type().is_file() {
+                    return Err(format!(
+                        "unsupported entry type in fixture tree: {}",
+                        relative.display()
+                    ));
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|error| format!("cannot read fixture tree file: {error}"))?;
+                out.insert(relative, SnapshotEntry::File(bytes));
             } else {
-                let bytes = std::fs::read(&path).unwrap();
-                out.insert(path.strip_prefix(root).unwrap().to_path_buf(), bytes);
+                return Err(format!(
+                    "unsupported entry type in fixture tree: {}",
+                    relative.display()
+                ));
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// A scratch copy of the fixture tree; the original is never touched.
@@ -40,10 +89,16 @@ impl Scratch {
     fn new() -> Scratch {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("v0.4.0");
-        for (relative, bytes) in snapshot(&fixture_root()) {
+        std::fs::create_dir_all(&root).unwrap();
+        for (relative, entry) in snapshot(&fixture_root()).unwrap() {
             let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, bytes).unwrap();
+            match entry {
+                SnapshotEntry::Dir => std::fs::create_dir_all(&path).unwrap(),
+                SnapshotEntry::File(bytes) => {
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, bytes).unwrap();
+                }
+            }
         }
         Scratch { _dir: dir, root }
     }
@@ -201,9 +256,37 @@ fn an_unknown_operation_or_input_key_in_an_explore_area_fails() {
 
 #[test]
 fn running_the_explore_areas_never_writes_under_the_fixture_tree() {
-    let before = snapshot(&fixture_root());
+    let before = snapshot(&fixture_root()).unwrap();
     for (area, _, _) in AREAS {
         assert!(run_area(&fixture_root(), area).is_ok(), "{area}");
     }
-    assert_eq!(snapshot(&fixture_root()), before);
+    assert_eq!(snapshot(&fixture_root()).unwrap(), before);
+}
+
+#[test]
+fn fixture_tree_snapshot_observes_empty_directories_and_refuses_links() {
+    let scratch = tempfile::tempdir().unwrap();
+    let tree = scratch.path().join("tree");
+    std::fs::create_dir(&tree).unwrap();
+    std::fs::write(tree.join("ordinary.txt"), "data\n").unwrap();
+
+    let before = snapshot(&tree).unwrap();
+    let empty = tree.join("empty-dir");
+    std::fs::create_dir(&empty).unwrap();
+    let after = snapshot(&tree).unwrap();
+    assert_ne!(
+        after, before,
+        "snapshot must distinguish an empty directory change"
+    );
+    assert_eq!(after.get(Path::new("empty-dir")), Some(&SnapshotEntry::Dir));
+    std::fs::remove_dir(&empty).unwrap();
+    assert_eq!(snapshot(&tree).unwrap(), before);
+
+    #[cfg(unix)]
+    {
+        let link = tree.join("local-link");
+        std::os::unix::fs::symlink(tree.join("ordinary.txt"), &link).unwrap();
+        let err = snapshot(&tree).expect_err("snapshot must reject symlinks");
+        assert!(err.contains("symlink"), "unexpected error: {err:?}");
+    }
 }
