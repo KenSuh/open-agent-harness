@@ -375,6 +375,15 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    // Windows unit test binaries do not embed `tauri_build`'s application manifest, yet linking
+    // `tauri`/`wry` pulls in `comctl32.dll!TaskDialogIndirect`, which requires Common Controls v6.
+    // Emit the MSVC linker `.drectve` `/MANIFESTDEPENDENCY` only for Windows MSVC test builds.
+    #[cfg(all(test, windows, target_env = "msvc"))]
+    #[used]
+    #[unsafe(link_section = ".drectve")]
+    static WINDOWS_TEST_COMMON_CONTROLS_MANIFEST_DIRECTIVE: [u8; 168] =
+        *b" /MANIFESTDEPENDENCY:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\" ";
+
     fn parse(raw: &str) -> Url {
         Url::parse(raw).expect("valid test URL")
     }
