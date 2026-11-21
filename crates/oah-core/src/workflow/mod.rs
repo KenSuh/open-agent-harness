@@ -1,11 +1,13 @@
 // 팀 작업 흐름: 섹션 배정을 설정에 저장한 뒤 규칙 블록을 다시 맞추고, 단일 배너·프리셋·규칙 점검을 앱과 CLI 에 준다.
 //! Team Workflow (design §6.1-§6.3, CONTRACTS C12, M2-S1).
 //!
-//! * [`set_stages`] is the one assignment operation: it checks `.oah` and the project-local config mutation paths
-//!   without following links or reparse points before calling `config::save_project` with `Edit::stage` (a v0.4.0
-//!   file needs the approval of its exact bytes, and its backup is kept), then runs the rules plan and the rules
-//!   write (`rules::sync`). A rules refusal after a saved config leaves the config written and returns
-//!   `synced: false` with the reason and the *Sync now* action.
+//! * [`set_stages`] is the one assignment operation: it checks `.oah` and `.oah/config.toml` without following
+//!   links or reparse points for reads, plans the save via `config::plan_project_save`, and before a real
+//!   publication rechecks only the project-local paths that publication uses (`.oah`, `.oah/config.toml`,
+//!   `.oah/config.toml.lock`, and `.oah/config.toml.v0.4.bak` only on an approved v0.4.0 upgrade) before calling
+//!   `config::save_project` with `Edit::stage`. A v0.4.0 file needs the approval of its exact bytes, and its
+//!   backup is kept; then the rules plan and the rules write (`rules::sync`) run. A rules refusal after a saved
+//!   config leaves the config written and returns `synced: false` with the reason and the *Sync now* action.
 //! * [`status`] is the single banner, first match wins: an assigned agent not installed, not signed in, sign-in
 //!   unknown, an `independent_of` rule broken, ready.
 //! * [`presets`] set several sections at once; a preset naming an agent that is not installed is disabled.
@@ -30,7 +32,7 @@ pub use status::{independence_breaks, status};
 use crate::error::{Coded, codes};
 use crate::fsx::FsxErrorKind;
 
-/// Why a project-local configuration mutation path was refused before saving.
+/// Why a project-local configuration path was refused during Team Workflow configuration handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigPathRefusal {
     /// The path is a symbolic link, Windows directory junction, or other Windows reparse entry.
@@ -56,8 +58,15 @@ pub enum WorkflowError {
         preset: String,
         reason: String,
     },
-    /// `.oah` or a project-local config mutation path under it has unsupported metadata; no stored path is exposed.
+    /// `.oah` or a relevant project-local config path under it has unsupported metadata before any write; no stored
+    /// target path is exposed.
     UnsafeConfigPath {
+        entry: &'static str,
+        reason: ConfigPathRefusal,
+    },
+    /// `.oah` or `.oah/config.toml` had unsupported metadata when re-reading after a completed save; no stored
+    /// target path is exposed.
+    UnsafeConfigPathAfterSave {
         entry: &'static str,
         reason: ConfigPathRefusal,
     },
@@ -70,7 +79,8 @@ impl Coded for WorkflowError {
             WorkflowError::ProjectChanged => codes::PROJECT_CHANGED,
             WorkflowError::UnknownSection { .. } => codes::SECTION_UNKNOWN,
             WorkflowError::PresetUnavailable { .. } => codes::PRESET_UNAVAILABLE,
-            WorkflowError::UnsafeConfigPath { .. } => FsxErrorKind::Io.code(),
+            WorkflowError::UnsafeConfigPath { .. }
+            | WorkflowError::UnsafeConfigPathAfterSave { .. } => FsxErrorKind::Io.code(),
         }
     }
 
@@ -96,6 +106,20 @@ impl Coded for WorkflowError {
                 ConfigPathRefusal::NotRegularFile => format!(
                     "{entry} is not a regular file; OAH only writes regular project configuration files; \
                      nothing was written"
+                ),
+            },
+            WorkflowError::UnsafeConfigPathAfterSave { entry, reason } => match reason {
+                ConfigPathRefusal::LinkOrReparse => format!(
+                    "{entry} is a link or reparse entry; the assignment was saved, but OAH could not \
+                     re-read regular project configuration inside the selected project"
+                ),
+                ConfigPathRefusal::NotDirectory => format!(
+                    "{entry} is not a regular folder; the assignment was saved, but OAH could not \
+                     re-read project configuration inside a regular .oah folder"
+                ),
+                ConfigPathRefusal::NotRegularFile => format!(
+                    "{entry} is not a regular file; the assignment was saved, but OAH could not \
+                     re-read regular project configuration"
                 ),
             },
         }

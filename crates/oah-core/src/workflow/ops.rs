@@ -10,7 +10,7 @@ use super::{ConfigPathRefusal, WorkflowError};
 use crate::app::{Ctx, agents_list};
 use crate::config::{
     AgentId, AssignmentSource, ConfigFile, Edit, Effective, Format, ProjectConfig, Table,
-    UPGRADE_WARNING, Value, backup_path, save_project,
+    UPGRADE_WARNING, Value, backup_path, plan_project_save, save_project,
 };
 use crate::dto::{
     AdvancedDto, AgentIdDto, AgentOptionDto, AgentStatusDto, BannerDto, ConfigFormatDto, DriftDto,
@@ -40,78 +40,115 @@ fn config_path(root: &Path) -> PathBuf {
     root.join(".oah").join("config.toml")
 }
 
-fn refuse_config_path(entry: &'static str, reason: ConfigPathRefusal) -> Error {
-    WorkflowError::UnsafeConfigPath { entry, reason }.into()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigPathPhase {
+    BeforeWrite,
+    AfterWrite,
 }
 
-/// Checks `.oah` and every project-local path `config::save_project` reads, locks, backs up, or replaces,
-/// without following links or Windows reparse points. Returns `Ok(true)` when `.oah` exists as a regular
-/// folder and `Ok(false)` when `.oah` is absent.
+fn refuse_config_path(
+    entry: &'static str,
+    reason: ConfigPathRefusal,
+    phase: ConfigPathPhase,
+) -> Error {
+    match phase {
+        ConfigPathPhase::BeforeWrite => WorkflowError::UnsafeConfigPath { entry, reason }.into(),
+        ConfigPathPhase::AfterWrite => {
+            WorkflowError::UnsafeConfigPathAfterSave { entry, reason }.into()
+        }
+    }
+}
+
+/// Checks `.oah` without following links or Windows reparse points. Returns `Ok(true)` when `.oah` exists as a
+/// regular folder and `Ok(false)` when `.oah` is absent.
+fn check_config_dir(root: &Path, phase: ConfigPathPhase) -> Result<bool, Error> {
+    let dir = root.join(".oah");
+    match inspect_project_entry(&dir, ExpectedEntry::Directory)? {
+        InspectedEntry::Missing => Ok(false),
+        InspectedEntry::Allowed => Ok(true),
+        InspectedEntry::LinkOrReparse => Err(refuse_config_path(
+            CONFIG_DIR_LABEL,
+            ConfigPathRefusal::LinkOrReparse,
+            phase,
+        )),
+        InspectedEntry::Unsupported => Err(refuse_config_path(
+            CONFIG_DIR_LABEL,
+            ConfigPathRefusal::NotDirectory,
+            phase,
+        )),
+    }
+}
+
+/// Checks one project-local file entry under `.oah` without following links or Windows reparse points.
+fn check_regular_config_entry(
+    path: &Path,
+    entry: &'static str,
+    phase: ConfigPathPhase,
+) -> Result<(), Error> {
+    match inspect_project_entry(path, ExpectedEntry::RegularFile)? {
+        InspectedEntry::Missing | InspectedEntry::Allowed => Ok(()),
+        InspectedEntry::LinkOrReparse => Err(refuse_config_path(
+            entry,
+            ConfigPathRefusal::LinkOrReparse,
+            phase,
+        )),
+        InspectedEntry::Unsupported => Err(refuse_config_path(
+            entry,
+            ConfigPathRefusal::NotRegularFile,
+            phase,
+        )),
+    }
+}
+
+/// Checks `.oah` and only the project-local paths that a real `config::save_project` publication touches, without
+/// following links or Windows reparse points.
+///
+/// Always checks `.oah`, `.oah/config.toml`, and `.oah/config.toml.lock` when `.oah` exists; checks
+/// `.oah/config.toml.v0.4.bak` only when `check_backup` is true (an approved v0.4.0 upgrade).
 ///
 /// Residual limit: this is a name-based metadata check before calling `config::save_project`; it refuses
 /// pre-existing links, reparse entries, and unsupported file types, but cannot by itself prevent a
 /// concurrent local writer from replacing `.oah` between inspection and `save_project`'s filesystem calls.
-fn check_config_mutation_paths(root: &Path) -> Result<bool, Error> {
-    let dir = root.join(".oah");
-    match inspect_project_entry(&dir, ExpectedEntry::Directory)? {
-        InspectedEntry::Missing => return Ok(false),
-        InspectedEntry::Allowed => {}
-        InspectedEntry::LinkOrReparse => {
-            return Err(refuse_config_path(
-                CONFIG_DIR_LABEL,
-                ConfigPathRefusal::LinkOrReparse,
-            ));
-        }
-        InspectedEntry::Unsupported => {
-            return Err(refuse_config_path(
-                CONFIG_DIR_LABEL,
-                ConfigPathRefusal::NotDirectory,
-            ));
-        }
+fn check_config_publication_paths(root: &Path, check_backup: bool) -> Result<(), Error> {
+    if !check_config_dir(root, ConfigPathPhase::BeforeWrite)? {
+        return Ok(());
     }
+    let dir = root.join(".oah");
     let config = config_path(root);
     let lock = dir.join("config.toml.lock");
-    let backup = backup_path(&config);
-    for (entry, path) in [
-        (CONFIG_FILE_LABEL, config),
-        (CONFIG_LOCK_LABEL, lock),
-        (CONFIG_BACKUP_LABEL, backup),
-    ] {
-        match inspect_project_entry(&path, ExpectedEntry::RegularFile)? {
-            InspectedEntry::Missing | InspectedEntry::Allowed => {}
-            InspectedEntry::LinkOrReparse => {
-                return Err(refuse_config_path(entry, ConfigPathRefusal::LinkOrReparse));
-            }
-            InspectedEntry::Unsupported => {
-                return Err(refuse_config_path(entry, ConfigPathRefusal::NotRegularFile));
-            }
-        }
+    check_regular_config_entry(&config, CONFIG_FILE_LABEL, ConfigPathPhase::BeforeWrite)?;
+    check_regular_config_entry(&lock, CONFIG_LOCK_LABEL, ConfigPathPhase::BeforeWrite)?;
+    if check_backup {
+        let backup = backup_path(&config);
+        check_regular_config_entry(&backup, CONFIG_BACKUP_LABEL, ConfigPathPhase::BeforeWrite)?;
     }
-    Ok(true)
+    Ok(())
 }
 
-fn map_config_read_error(error: FsxError) -> Error {
+fn map_config_read_error(error: FsxError, phase: ConfigPathPhase) -> Error {
     if let Some(io) = error.io_error() {
         #[cfg(unix)]
         if rustix::io::Errno::from_io_error(io) == Some(rustix::io::Errno::LOOP) {
-            return refuse_config_path(CONFIG_FILE_LABEL, ConfigPathRefusal::LinkOrReparse);
+            return refuse_config_path(CONFIG_FILE_LABEL, ConfigPathRefusal::LinkOrReparse, phase);
         }
         if io.kind() == ErrorKind::InvalidData {
-            return refuse_config_path(CONFIG_FILE_LABEL, ConfigPathRefusal::NotRegularFile);
+            return refuse_config_path(CONFIG_FILE_LABEL, ConfigPathRefusal::NotRegularFile, phase);
         }
     }
     error.into()
 }
 
-/// Validates the `.oah` mutation boundary and reads `.oah/config.toml` without following leaf links.
-fn read_config_for_mutation(root: &Path) -> Result<ProjectConfig, Error> {
+/// Validates `.oah` and `.oah/config.toml` only (leaving unused lock/backup sidecars untouched) and reads
+/// `.oah/config.toml` without following leaf links.
+fn read_config_source(root: &Path, phase: ConfigPathPhase) -> Result<ProjectConfig, Error> {
     let path = config_path(root);
-    let dir_exists = check_config_mutation_paths(root)?;
+    let dir_exists = check_config_dir(root, phase)?;
     let bytes = if dir_exists {
+        check_regular_config_entry(&path, CONFIG_FILE_LABEL, phase)?;
         match fsx::read_regular_optional(&path) {
             Ok(Some((bytes, _))) => Some(bytes),
             Ok(None) => None,
-            Err(error) => return Err(map_config_read_error(error)),
+            Err(error) => return Err(map_config_read_error(error, phase)),
         }
     } else {
         None
@@ -297,6 +334,15 @@ fn independence_notices(effective: &Effective) -> Vec<NoticeDto> {
 /// What the Team Workflow page and `oah sections show` show for the project at `root`; reads only.
 pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<WorkflowDto, Error> {
     let config = ProjectConfig::read(&config_path(root))?;
+    Ok(view_from_config(env, root, &config, agents))
+}
+
+fn view_from_config(
+    env: &Env,
+    root: &Path,
+    config: &ProjectConfig,
+    agents: &[AgentStatusDto],
+) -> WorkflowDto {
     let effective = config.effective();
     let sections = effective
         .sections
@@ -327,7 +373,7 @@ pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<Workflo
         .map(|notice| NoticeDto::from_config(env, notice))
         .collect();
     notices.extend(independence_notices(effective));
-    Ok(WorkflowDto {
+    WorkflowDto {
         sections,
         agents: agent_options(agents),
         banner: status(effective, agents),
@@ -335,7 +381,7 @@ pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<Workflo
             .iter()
             .map(|preset| preset.to_dto(effective, agents))
             .collect(),
-        rules: rules_state(env, root, &config, agents),
+        rules: rules_state(env, root, config, agents),
         config_format: match config.format() {
             Format::Missing => ConfigFormatDto::Missing,
             Format::Legacy => ConfigFormatDto::Legacy,
@@ -352,7 +398,7 @@ pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<Workflo
         },
         notes,
         notices,
-    })
+    }
 }
 
 /// Plans the rules from `effective` and writes them; records every verified write in the session.
@@ -414,7 +460,7 @@ pub fn set_stages(
     req: StagesSetReq,
 ) -> Result<StagesSetDto, Error> {
     let path = config_path(root);
-    let snapshot = read_config_for_mutation(root)?;
+    let snapshot = read_config_source(root, ConfigPathPhase::BeforeWrite)?;
     let effective = snapshot.effective();
     let known = |id: &str| effective.sections.iter().any(|section| section.id == id);
     let unknown = |id: &str| -> Error {
@@ -443,6 +489,7 @@ pub fn set_stages(
             Value::Array(list),
         ));
     }
+    let plan = plan_project_save(&snapshot, &edits)?;
     let approval = match (
         req.approve_upgrade.as_deref(),
         snapshot.file().source_bytes(),
@@ -455,7 +502,9 @@ pub fn set_stages(
         }
         _ => None,
     };
-    check_config_mutation_paths(root)?;
+    if plan.bytes.is_some() && (!plan.upgrade || approval.is_some()) {
+        check_config_publication_paths(root, plan.upgrade)?;
+    }
     let saved = save_project(&snapshot, &edits, approval.as_ref(), LockOptions::default())?;
     if let Some(crate::config::Backup::Written(receipt)) = &saved.backup {
         ctx.session.self_writes().record(receipt);
@@ -473,9 +522,14 @@ pub fn set_stages(
                 .unwrap_or_default()
         )
     });
-    let after = read_config_for_mutation(root)?;
+    let post_save_phase = if saved.written.is_some() {
+        ConfigPathPhase::AfterWrite
+    } else {
+        ConfigPathPhase::BeforeWrite
+    };
+    let after = read_config_source(root, post_save_phase)?;
     let result = sync_rules(ctx, root, &after, agents);
-    let mut workflow = view(ctx.env, root, agents)?;
+    let mut workflow = view_from_config(ctx.env, root, &after, agents);
     let sync_error = result.error.as_ref().map(|error| error.to_dto(ctx.env));
     if let Some(error) = &sync_error {
         workflow.notices.push(NoticeDto {
@@ -594,7 +648,7 @@ pub fn preset_apply(
     let root = open_root(ctx, Some(&req.project_id))?;
     let req = req.input;
     let agents = agents_list(ctx, Empty {})?;
-    let config = read_config_for_mutation(&root)?;
+    let config = read_config_source(&root, ConfigPathPhase::BeforeWrite)?;
     let effective = config.effective();
     let unavailable = |reason: String| -> Error {
         WorkflowError::PresetUnavailable {
@@ -653,4 +707,111 @@ fn sync_open_project(ctx: &Ctx<'_>, project_id: Option<&str>) -> Result<RulesSyn
     let root = open_root(ctx, project_id)?;
     let agents = agents_list(ctx, Empty {})?;
     rules_sync_at(ctx, &root, &agents)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Coded;
+    use std::fs;
+
+    #[test]
+    fn read_config_source_ignores_auxiliary_sidecars_and_distinguishes_post_save_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".oah")).unwrap();
+        fs::write(
+            root.join(".oah/config.toml"),
+            b"[stages]\nplan = \"claude\"\n",
+        )
+        .unwrap();
+        // Unused lock and backup sidecars are directories; source reads must ignore both.
+        fs::create_dir_all(root.join(".oah/config.toml.lock")).unwrap();
+        fs::create_dir_all(root.join(".oah/config.toml.v0.4.bak")).unwrap();
+
+        let before = read_config_source(root, ConfigPathPhase::BeforeWrite).unwrap();
+        let after = read_config_source(root, ConfigPathPhase::AfterWrite).unwrap();
+        assert_eq!(before.format(), Format::Current);
+        assert_eq!(after.format(), Format::Current);
+
+        // Publication check without backup checks `.oah/config.toml.lock` and ignores `.v0.4.bak`.
+        let lock_err = check_config_publication_paths(root, false).unwrap_err();
+        assert!(matches!(
+            lock_err,
+            Error::Workflow(WorkflowError::UnsafeConfigPath {
+                entry: ".oah/config.toml.lock",
+                reason: ConfigPathRefusal::NotRegularFile,
+            })
+        ));
+        fs::remove_dir(root.join(".oah/config.toml.lock")).unwrap();
+        check_config_publication_paths(root, false).unwrap();
+
+        // Publication check with backup checks `.oah/config.toml.v0.4.bak`.
+        let backup_err = check_config_publication_paths(root, true).unwrap_err();
+        assert!(matches!(
+            backup_err,
+            Error::Workflow(WorkflowError::UnsafeConfigPath {
+                entry: ".oah/config.toml.v0.4.bak",
+                reason: ConfigPathRefusal::NotRegularFile,
+            })
+        ));
+
+        // Post-save reread on an unsafe `.oah/config.toml` reports committed state without claiming nothing was written.
+        fs::remove_file(root.join(".oah/config.toml")).unwrap();
+        fs::create_dir_all(root.join(".oah/config.toml")).unwrap();
+        let post_err = read_config_source(root, ConfigPathPhase::AfterWrite).unwrap_err();
+        assert_eq!(post_err.code(), "OAH_FILE_IO");
+        assert!(matches!(
+            post_err,
+            Error::Workflow(WorkflowError::UnsafeConfigPathAfterSave {
+                entry: ".oah/config.toml",
+                reason: ConfigPathRefusal::NotRegularFile,
+            })
+        ));
+        assert!(post_err.message().contains("the assignment was saved"));
+        assert!(!post_err.message().contains("nothing was written"));
+        assert!(!post_err.message().contains(&root.display().to_string()));
+
+        // Post-save reread on an unsafe `.oah` directory likewise reports committed state.
+        let file_oah = tempfile::tempdir().unwrap();
+        fs::write(file_oah.path().join(".oah"), b"not a dir\n").unwrap();
+        let dir_err = read_config_source(file_oah.path(), ConfigPathPhase::AfterWrite).unwrap_err();
+        assert_eq!(dir_err.code(), "OAH_FILE_IO");
+        assert!(matches!(
+            dir_err,
+            Error::Workflow(WorkflowError::UnsafeConfigPathAfterSave {
+                entry: ".oah",
+                reason: ConfigPathRefusal::NotDirectory,
+            })
+        ));
+        assert!(dir_err.message().contains("the assignment was saved"));
+        assert!(!dir_err.message().contains("nothing was written"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_save_reread_on_linked_source_omits_stored_target_and_does_not_claim_unwritten() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".oah")).unwrap();
+        let inert = root.join("inert-config-target.toml");
+        fs::write(&inert, b"[stages]\nplan = \"claude\"\n").unwrap();
+        symlink(&inert, root.join(".oah/config.toml")).unwrap();
+
+        let err = read_config_source(root, ConfigPathPhase::AfterWrite).unwrap_err();
+        assert_eq!(err.code(), "OAH_FILE_IO");
+        assert!(matches!(
+            err,
+            Error::Workflow(WorkflowError::UnsafeConfigPathAfterSave {
+                entry: ".oah/config.toml",
+                reason: ConfigPathRefusal::LinkOrReparse,
+            })
+        ));
+        assert!(err.message().contains("the assignment was saved"));
+        assert!(!err.message().contains("nothing was written"));
+        assert!(!err.message().contains("inert-config-target.toml"));
+        assert!(!err.message().contains(&root.display().to_string()));
+    }
 }

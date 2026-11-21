@@ -1250,7 +1250,7 @@ fn workflow_config_mutations_refuse_linked_config_paths_without_writing_or_expos
             target_name: "inert-missing.bak",
             create_target: false,
             target_bytes: b"",
-            legacy_config: false,
+            legacy_config: true,
         },
     ];
 
@@ -1394,35 +1394,43 @@ fn workflow_config_mutations_refuse_unsupported_non_link_metadata_without_writin
     }
     assert_eq!(oah_file.read(".oah").unwrap(), b"not a directory\n");
 
-    // 2. Directories where regular config, lock, or backup files belong.
-    for entry in [
-        ".oah/config.toml",
-        ".oah/config.toml.lock",
-        ".oah/config.toml.v0.4.bak",
+    // 2. Directories where regular config, lock, or relevant legacy backup files belong.
+    for (entry, legacy_config) in [
+        (".oah/config.toml", false),
+        (".oah/config.toml.lock", false),
+        (".oah/config.toml.v0.4.bak", true),
     ] {
+        let initial_config: &[u8] = if legacy_config {
+            LEGACY.as_bytes()
+        } else {
+            b"[stages]\nplan = \"claude\"\n"
+        };
         let files: Vec<(&str, &[u8])> = if entry == ".oah/config.toml" {
             Vec::new()
         } else {
-            vec![(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]
+            vec![(".oah/config.toml", initial_config)]
         };
         let project = Project::new(&files);
         fs::create_dir_all(project.root.join(entry)).unwrap();
         let ctx = project.session.ctx(&cancel, &NoProgress);
         probe_ready_session(&ctx);
         let opened = app::project_open(&ctx, &project.root).unwrap();
+        let approval = if legacy_config {
+            project.view(&agents).config_sha256
+        } else {
+            None
+        };
+        let stage_req = StagesSetReq {
+            approve_upgrade: approval.clone(),
+            ..change("review", AgentId::Claude)
+        };
         for error in [
-            workflow::set_stages(
-                &ctx,
-                &project.root,
-                &agents,
-                change("review", AgentId::Claude),
-            )
-            .unwrap_err(),
+            workflow::set_stages(&ctx, &project.root, &agents, stage_req.clone()).unwrap_err(),
             app::stages_set(
                 &ctx,
                 WorkflowProjectReq {
                     project_id: opened.id.clone(),
-                    input: change("review", AgentId::Claude),
+                    input: stage_req,
                 },
             )
             .unwrap_err(),
@@ -1432,7 +1440,7 @@ fn workflow_config_mutations_refuse_unsupported_non_link_metadata_without_writin
                     project_id: opened.id,
                     input: PresetApplyReq {
                         preset: String::from("balanced"),
-                        approve_upgrade: None,
+                        approve_upgrade: approval,
                     },
                 },
             )
@@ -1448,25 +1456,38 @@ fn workflow_config_mutations_refuse_unsupported_non_link_metadata_without_writin
             );
         }
         assert!(project.root.join(entry).is_dir());
+        if entry != ".oah/config.toml" {
+            assert_eq!(project.read(".oah/config.toml").unwrap(), initial_config);
+        }
         assert!(!project.root.join("AGENTS.md").exists());
     }
 
-    // 3. Unix FIFOs at config, lock, or backup paths are refused immediately without blocking.
+    // 3. Unix FIFOs at config, lock, or relevant legacy backup paths are refused immediately without blocking.
     #[cfg(unix)]
-    for entry in [
-        ".oah/config.toml",
-        ".oah/config.toml.lock",
-        ".oah/config.toml.v0.4.bak",
+    for (entry, legacy_config) in [
+        (".oah/config.toml", false),
+        (".oah/config.toml.lock", false),
+        (".oah/config.toml.v0.4.bak", true),
     ] {
+        let initial_config: &[u8] = if legacy_config {
+            LEGACY.as_bytes()
+        } else {
+            b"[stages]\nplan = \"claude\"\n"
+        };
         let files: Vec<(&str, &[u8])> = if entry == ".oah/config.toml" {
             Vec::new()
         } else {
-            vec![(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]
+            vec![(".oah/config.toml", initial_config)]
         };
         let project = Project::new(&files);
         let ctx = project.session.ctx(&cancel, &NoProgress);
         probe_ready_session(&ctx);
         let opened = app::project_open(&ctx, &project.root).unwrap();
+        let approval = if legacy_config {
+            project.view(&agents).config_sha256
+        } else {
+            None
+        };
         fs::create_dir_all(project.root.join(".oah")).unwrap();
         let fifo = project.root.join(entry);
         let status = std::process::Command::new("mkfifo")
@@ -1474,19 +1495,17 @@ fn workflow_config_mutations_refuse_unsupported_non_link_metadata_without_writin
             .status()
             .expect("run mkfifo");
         assert!(status.success(), "mkfifo failed: {status}");
+        let stage_req = StagesSetReq {
+            approve_upgrade: approval.clone(),
+            ..change("review", AgentId::Claude)
+        };
         for error in [
-            workflow::set_stages(
-                &ctx,
-                &project.root,
-                &agents,
-                change("review", AgentId::Claude),
-            )
-            .unwrap_err(),
+            workflow::set_stages(&ctx, &project.root, &agents, stage_req.clone()).unwrap_err(),
             app::stages_set(
                 &ctx,
                 WorkflowProjectReq {
                     project_id: opened.id.clone(),
-                    input: change("review", AgentId::Claude),
+                    input: stage_req,
                 },
             )
             .unwrap_err(),
@@ -1496,7 +1515,7 @@ fn workflow_config_mutations_refuse_unsupported_non_link_metadata_without_writin
                     project_id: opened.id,
                     input: PresetApplyReq {
                         preset: String::from("balanced"),
-                        approve_upgrade: None,
+                        approve_upgrade: approval,
                     },
                 },
             )
@@ -1511,6 +1530,328 @@ fn workflow_config_mutations_refuse_unsupported_non_link_metadata_without_writin
                 &[],
             );
         }
+        if entry != ".oah/config.toml" {
+            assert_eq!(project.read(".oah/config.toml").unwrap(), initial_config);
+        }
         assert!(!project.root.join("AGENTS.md").exists());
+    }
+}
+
+#[test]
+fn workflow_current_format_save_ignores_unused_legacy_backup_and_preserves_rules_refusal() {
+    let agents = ready_agents();
+    let cancel = CancelToken::new();
+
+    // 1. Cross-platform: an unused directory at `.oah/config.toml.v0.4.bak` does not block current-format saves
+    //    via `set_stages`, `stages_set`, or `preset_apply`, nor does it trigger a post-save reread failure.
+    let dir_bak = Project::new(&[(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]);
+    fs::create_dir_all(dir_bak.root.join(".oah/config.toml.v0.4.bak")).unwrap();
+    let ctx = dir_bak.session.ctx(&cancel, &NoProgress);
+    probe_ready_session(&ctx);
+    let opened = app::project_open(&ctx, &dir_bak.root).unwrap();
+
+    let direct = workflow::set_stages(
+        &ctx,
+        &dir_bak.root,
+        &agents,
+        change("review", AgentId::Claude),
+    )
+    .unwrap();
+    assert!(direct.saved && !direct.upgraded && direct.backup.is_none() && direct.synced);
+    assert!(
+        dir_bak
+            .text(".oah/config.toml")
+            .contains("review = \"claude\"")
+    );
+    assert!(dir_bak.root.join(".oah/config.toml.v0.4.bak").is_dir());
+
+    let via_stages = app::stages_set(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened.id.clone(),
+            input: change("fix", AgentId::Claude),
+        },
+    )
+    .unwrap();
+    assert!(
+        via_stages.saved
+            && !via_stages.upgraded
+            && via_stages.backup.is_none()
+            && via_stages.synced
+    );
+    assert!(
+        dir_bak
+            .text(".oah/config.toml")
+            .contains("fix = \"claude\"")
+    );
+
+    let via_preset = app::preset_apply(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened.id,
+            input: PresetApplyReq {
+                preset: String::from("balanced"),
+                approve_upgrade: None,
+            },
+        },
+    )
+    .unwrap();
+    assert!(
+        via_preset.saved
+            && !via_preset.upgraded
+            && via_preset.backup.is_none()
+            && via_preset.synced
+    );
+    assert!(
+        dir_bak
+            .text(".oah/config.toml")
+            .contains("review = \"codex\"")
+    );
+    assert!(dir_bak.root.join(".oah/config.toml.v0.4.bak").is_dir());
+
+    // 2. Unix: an unused live symlink, dangling symlink, or FIFO at `.oah/config.toml.v0.4.bak` does not block
+    //    current-format saves and its in-project target stays untouched.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        for (target_name, create_target) in [("inert-bak.txt", true), ("inert-missing.bak", false)]
+        {
+            let project = Project::new(&[(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]);
+            let target = project.root.join(target_name);
+            if create_target {
+                fs::write(&target, b"unused backup target\n").unwrap();
+            }
+            symlink(&target, project.root.join(".oah/config.toml.v0.4.bak")).unwrap();
+            let outcome = project
+                .set(&agents, change("review", AgentId::Claude))
+                .unwrap();
+            assert!(
+                outcome.saved && !outcome.upgraded && outcome.backup.is_none() && outcome.synced
+            );
+            assert!(
+                project
+                    .text(".oah/config.toml")
+                    .contains("review = \"claude\"")
+            );
+            if create_target {
+                assert_eq!(fs::read(&target).unwrap(), b"unused backup target\n");
+            } else {
+                assert!(!target.exists());
+            }
+        }
+
+        let fifo_project = Project::new(&[(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]);
+        let fifo = fifo_project.root.join(".oah/config.toml.v0.4.bak");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed: {status}");
+        let outcome = fifo_project
+            .set(&agents, change("review", AgentId::Claude))
+            .unwrap();
+        assert!(outcome.saved && !outcome.upgraded && outcome.backup.is_none() && outcome.synced);
+        assert!(
+            fifo_project
+                .text(".oah/config.toml")
+                .contains("review = \"claude\"")
+        );
+    }
+
+    // 3. Valid current-format save with an unused legacy backup still stays saved if Rules refuses to sync (AC6).
+    let big = format!("# Notes\n{}\n", "x".repeat(40 * 1024));
+    let rules_refused = Project::new(&[
+        (".oah/config.toml", b"[stages]\nplan = \"claude\"\n"),
+        ("AGENTS.md", big.as_bytes()),
+    ]);
+    fs::create_dir_all(rules_refused.root.join(".oah/config.toml.v0.4.bak")).unwrap();
+    let outcome = rules_refused
+        .set(&agents, change("fix", AgentId::Claude))
+        .unwrap();
+    assert!(outcome.saved && !outcome.upgraded && outcome.backup.is_none() && !outcome.synced);
+    assert_eq!(
+        outcome.sync_error.as_ref().map(|e| e.code.as_str()),
+        Some("OAH_RULES_BUDGET")
+    );
+    assert_eq!(outcome.actions, ["rules_sync"]);
+    assert!(
+        rules_refused
+            .text(".oah/config.toml")
+            .contains("fix = \"claude\"")
+    );
+    assert_eq!(rules_refused.read("AGENTS.md").unwrap(), big.as_bytes());
+    assert!(
+        rules_refused
+            .root
+            .join(".oah/config.toml.v0.4.bak")
+            .is_dir()
+    );
+}
+
+#[test]
+fn workflow_noop_and_unapproved_legacy_save_do_not_require_unused_lock_or_backup() {
+    let agents = ready_agents();
+    let cancel = CancelToken::new();
+
+    // 1. Current-format no-op (both `stages_set` and `preset_apply`) succeeds even when unused lock and backup
+    //    sidecars are non-regular entries (directories, and on Unix symlinks).
+    let balanced_toml =
+        b"[stages]\nplan = \"claude\"\nbuild = \"claude\"\nreview = \"codex\"\nfix = \"codex\"\n";
+    let noop = Project::new(&[(".oah/config.toml", balanced_toml)]);
+    fs::create_dir_all(noop.root.join(".oah/config.toml.lock")).unwrap();
+    fs::create_dir_all(noop.root.join(".oah/config.toml.v0.4.bak")).unwrap();
+    let ctx = noop.session.ctx(&cancel, &NoProgress);
+    probe_ready_session(&ctx);
+    let opened = app::project_open(&ctx, &noop.root).unwrap();
+
+    let stage_noop = app::stages_set(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened.id.clone(),
+            input: change("plan", AgentId::Claude),
+        },
+    )
+    .unwrap();
+    assert!(
+        !stage_noop.saved
+            && !stage_noop.upgraded
+            && stage_noop.backup.is_none()
+            && stage_noop.synced
+    );
+    assert_eq!(noop.read(".oah/config.toml").unwrap(), balanced_toml);
+
+    let preset_noop = app::preset_apply(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened.id,
+            input: PresetApplyReq {
+                preset: String::from("balanced"),
+                approve_upgrade: None,
+            },
+        },
+    )
+    .unwrap();
+    assert!(
+        !preset_noop.saved
+            && !preset_noop.upgraded
+            && preset_noop.backup.is_none()
+            && preset_noop.synced
+    );
+    assert_eq!(noop.read(".oah/config.toml").unwrap(), balanced_toml);
+    assert!(noop.root.join(".oah/config.toml.lock").is_dir());
+    assert!(noop.root.join(".oah/config.toml.v0.4.bak").is_dir());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let link_noop = Project::new(&[(".oah/config.toml", balanced_toml)]);
+        let lock_target = link_noop.root.join("inert-noop-lock.txt");
+        let bak_target = link_noop.root.join("inert-noop-bak.txt");
+        fs::write(&lock_target, b"lock target\n").unwrap();
+        fs::write(&bak_target, b"bak target\n").unwrap();
+        symlink(&lock_target, link_noop.root.join(".oah/config.toml.lock")).unwrap();
+        symlink(
+            &bak_target,
+            link_noop.root.join(".oah/config.toml.v0.4.bak"),
+        )
+        .unwrap();
+        let outcome = link_noop
+            .set(&agents, change("plan", AgentId::Claude))
+            .unwrap();
+        assert!(!outcome.saved && !outcome.upgraded && outcome.backup.is_none() && outcome.synced);
+        assert_eq!(fs::read(&lock_target).unwrap(), b"lock target\n");
+        assert_eq!(fs::read(&bak_target).unwrap(), b"bak target\n");
+    }
+
+    // 2. Legacy-format no-op (`review = "codex"` already matches) does not require approval, lock, or backup.
+    let legacy_noop = Project::new(&[(".oah/config.toml", LEGACY.as_bytes())]);
+    fs::create_dir_all(legacy_noop.root.join(".oah/config.toml.lock")).unwrap();
+    fs::create_dir_all(legacy_noop.root.join(".oah/config.toml.v0.4.bak")).unwrap();
+    let outcome = legacy_noop
+        .set(&agents, change("review", AgentId::Codex))
+        .unwrap();
+    assert!(!outcome.saved && !outcome.upgraded && outcome.backup.is_none() && outcome.synced);
+    assert_eq!(
+        legacy_noop.read(".oah/config.toml").unwrap(),
+        LEGACY.as_bytes()
+    );
+
+    // 3. Legacy-format real change WITHOUT matching approval returns OAH_CONFIG_UPGRADE_REQUIRED first (matching
+    //    `config::save_project`), even if unused lock/backup sidecars are non-regular entries. Once exact approval
+    //    is provided, the relevant backup path is refused before writing.
+    let legacy_unapproved = Project::new(&[(".oah/config.toml", LEGACY.as_bytes())]);
+    fs::create_dir_all(legacy_unapproved.root.join(".oah/config.toml.v0.4.bak")).unwrap();
+    let sha = legacy_unapproved.view(&agents).config_sha256;
+    for bad_approval in [None, Some(String::from("0").repeat(64))] {
+        let err = legacy_unapproved
+            .set(
+                &agents,
+                StagesSetReq {
+                    approve_upgrade: bad_approval,
+                    ..change("review", AgentId::Claude)
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "OAH_CONFIG_UPGRADE_REQUIRED");
+        assert_eq!(
+            legacy_unapproved.read(".oah/config.toml").unwrap(),
+            LEGACY.as_bytes()
+        );
+    }
+    let approved_err = legacy_unapproved
+        .set(
+            &agents,
+            StagesSetReq {
+                approve_upgrade: sha,
+                ..change("review", AgentId::Claude)
+            },
+        )
+        .unwrap_err();
+    assert_unsafe_config_refusal(
+        legacy_unapproved.session.env(),
+        &legacy_unapproved.root,
+        approved_err,
+        ".oah/config.toml.v0.4.bak",
+        ConfigPathRefusal::NotRegularFile,
+        &[],
+    );
+    assert_eq!(
+        legacy_unapproved.read(".oah/config.toml").unwrap(),
+        LEGACY.as_bytes()
+    );
+    assert!(!legacy_unapproved.root.join("AGENTS.md").exists());
+}
+
+#[test]
+fn workflow_post_save_diagnostics_report_committed_state_without_exposing_targets() {
+    let project = Project::new(&[]);
+    for (entry, reason) in [
+        (".oah", ConfigPathRefusal::LinkOrReparse),
+        (".oah", ConfigPathRefusal::NotDirectory),
+        (".oah/config.toml", ConfigPathRefusal::LinkOrReparse),
+        (".oah/config.toml", ConfigPathRefusal::NotRegularFile),
+    ] {
+        let error: Error = WorkflowError::UnsafeConfigPathAfterSave { entry, reason }.into();
+        assert_eq!(error.code(), "OAH_FILE_IO");
+        let dto = error.to_dto(project.session.env());
+        assert_eq!(dto.code, "OAH_FILE_IO");
+        assert!(dto.message.contains(entry), "{}", dto.message);
+        assert!(
+            dto.message.contains("the assignment was saved"),
+            "post-save diagnostic must report committed write: {}",
+            dto.message
+        );
+        assert!(
+            !dto.message.contains("nothing was written"),
+            "post-save diagnostic must not claim nothing was written: {}",
+            dto.message
+        );
+        assert!(
+            !dto.message.contains(&project.root.display().to_string()),
+            "must not expose absolute project root: {}",
+            dto.message
+        );
     }
 }
