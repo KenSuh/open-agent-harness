@@ -9,7 +9,7 @@ use crate::agents::{
     AgentError, Check, Detection, Failure, Os, Probe, SignInCheck, Status, SystemProbe,
     check_sign_in, detect,
 };
-use crate::config::{AgentId, ProjectConfig};
+use crate::config::AgentId;
 use crate::dto::{AgentIdDto, AgentStatusDto, AgentsProbeReq, Empty};
 use crate::error::Error;
 use crate::tasks::{Progress, TaskKey};
@@ -161,17 +161,30 @@ pub fn agents_probe(ctx: &Ctx<'_>, req: AgentsProbeReq) -> Result<Vec<AgentStatu
     agents_probe_with(ctx, req, &SystemProbe::new(ctx.env))
 }
 
-/// Probes the requested agents through `probe` and returns what the session then holds for them. The session
-/// keeps the newest detection and newest compatible sign-in result independently. A cancelled probe publishes
-/// nothing.
+/// Probes the requested agents through `probe` using installed machine lookups only (ignoring any open project's
+/// `[agents.<id>] command`) and returns what the session then holds for them. The session keeps the newest
+/// detection and newest compatible sign-in result independently. A cancelled probe publishes nothing.
 pub fn agents_probe_with(
     ctx: &Ctx<'_>,
     req: AgentsProbeReq,
     probe: &dyn Probe,
 ) -> Result<Vec<AgentStatusDto>, Error> {
+    let no_commands = BTreeMap::new();
+    probe_with_commands(ctx, req, probe, &no_commands)
+}
+
+/// Probes the requested agents through `probe` with explicit caller-supplied command overrides.
+///
+/// Kept `pub(super)` so only the explicit terminal `doctor` entry can supply project-configured commands;
+/// automatic app, focus and refresh probes enter through [`agents_probe_with`] with an empty override map.
+pub(super) fn probe_with_commands(
+    ctx: &Ctx<'_>,
+    req: AgentsProbeReq,
+    probe: &dyn Probe,
+    commands: &BTreeMap<AgentId, Vec<String>>,
+) -> Result<Vec<AgentStatusDto>, Error> {
     ctx.cancel.check()?;
     let ids = requested(&req);
-    let commands = configured_commands(ctx);
     let stamp = {
         let mut cache = lock(&ctx.session.agents);
         cache.issued += 1;
@@ -252,21 +265,6 @@ fn requested(req: &AgentsProbeReq) -> Vec<AgentId> {
         .collect()
 }
 
-/// The `[agents.<id>] command` lists the open project's config gives; none without a project or a readable file.
-fn configured_commands(ctx: &Ctx<'_>) -> BTreeMap<AgentId, Vec<String>> {
-    let Some(open) = ctx.session.project() else {
-        return BTreeMap::new();
-    };
-    let Ok(config) = ProjectConfig::read(&open.project.config_file()) else {
-        return BTreeMap::new();
-    };
-    let agents = config.effective().agents.iter();
-    agents
-        .filter(|agent| agent.given.contains_key("command"))
-        .map(|agent| (agent.id, agent.command.clone()))
-        .collect()
-}
-
 fn probe_one(
     id: AgentId,
     probe: &dyn Probe,
@@ -302,5 +300,185 @@ fn stopped(id: AgentId) -> Check {
     Check {
         detection: Detection::failed(id, None, None, problem),
         sign_in: SignInCheck::NotChecked,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::{Resolution, Resolved, RunError, RunOutput};
+    use crate::app::{Session, project_open};
+    use crate::paths::{self, Env};
+    use crate::tasks::{CancelToken, NoProgress};
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+
+    struct RecordingProbe {
+        env: Env,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl RecordingProbe {
+        fn new(env: Env) -> RecordingProbe {
+            RecordingProbe {
+                env,
+                asked: Mutex::default(),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            lock(&self.asked).clone()
+        }
+
+        fn note(&self, entry: String) {
+            lock(&self.asked).push(entry);
+        }
+    }
+
+    impl Probe for RecordingProbe {
+        fn env(&self) -> &Env {
+            &self.env
+        }
+
+        fn os(&self) -> Os {
+            Os::Macos
+        }
+
+        fn resolve(&self, command: &str) -> Resolution {
+            self.note(format!("resolve {command}"));
+            match command {
+                "claude" => Resolution::Found(Resolved {
+                    argv: vec![OsString::from("/bin/claude")],
+                    source: PathBuf::from("/bin/claude"),
+                }),
+                "node" => Resolution::Found(Resolved {
+                    argv: vec![OsString::from("/bin/node")],
+                    source: PathBuf::from("/bin/node"),
+                }),
+                _ => Resolution::Missing,
+            }
+        }
+
+        fn resolve_in(&self, command: &str, folder: &Path) -> Resolution {
+            self.note(format!("resolve {command} in {}", folder.display()));
+            Resolution::Missing
+        }
+
+        fn run(
+            &self,
+            program: &Resolved,
+            args: &[&str],
+            _deadline: Duration,
+        ) -> Result<RunOutput, RunError> {
+            let mut parts: Vec<String> = program
+                .argv
+                .iter()
+                .map(|part| part.to_string_lossy().into_owned())
+                .collect();
+            parts.extend(args.iter().map(|arg| (*arg).to_string()));
+            let line = parts.join(" ");
+            self.note(format!("run {line}"));
+            match line.as_str() {
+                "/bin/claude --version" => Ok(RunOutput {
+                    exit: Some(0),
+                    stdout: String::from("2.1.318 (Claude Code)\n"),
+                    stderr: String::new(),
+                }),
+                "/bin/claude auth status" => Ok(RunOutput {
+                    exit: Some(0),
+                    stdout: String::from("{\"loggedIn\": true}"),
+                    stderr: String::new(),
+                }),
+                _ => Err(RunError::Launch(String::from("unexpected command"))),
+            }
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.note(format!("exists {}", path.display()));
+            false
+        }
+    }
+
+    fn opened(config: &str) -> (tempfile::TempDir, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = paths::canonical_folder(&fs::canonicalize(dir.path()).unwrap()).unwrap();
+        let (home, project) = (root.join("home"), root.join("project"));
+        fs::create_dir_all(project.join(".oah")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(project.join(".oah").join("config.toml"), config).unwrap();
+        let mut env = Env::new(&root).unwrap();
+        for name in [
+            "PATH",
+            "SystemRoot",
+            "windir",
+            "ComSpec",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                env.set(name, value);
+            }
+        }
+        env.set(HOME_VAR, &home);
+        env.set("GIT_CONFIG_NOSYSTEM", "1");
+        env.set("GIT_CEILING_DIRECTORIES", &root);
+        let session = Session::new(env);
+        let cancel = CancelToken::new();
+        project_open(&session.ctx(&cancel, &NoProgress), &project).unwrap();
+        (dir, session)
+    }
+
+    #[test]
+    fn reprobe_held_ignores_the_open_projects_configured_commands() {
+        let (_dir, session) = opened(
+            "[agents.claude]\ncommand = [\"node\", \"/opt/claude/cli.js\"]\n\
+             [agents.codex]\ncommand = [\"./bin/synthetic-codex\"]\n",
+        );
+        let cancel = CancelToken::new();
+        let ctx = session.ctx(&cancel, &NoProgress);
+
+        let initial = RecordingProbe::new(session.env().clone());
+        let seed = AgentsProbeReq {
+            agents: Some(vec![
+                AgentIdDto(AgentId::Claude),
+                AgentIdDto(AgentId::Codex),
+            ]),
+            sign_in: false,
+            focus: false,
+        };
+        agents_probe_with(&ctx, seed, &initial).unwrap();
+
+        let refresh = RecordingProbe::new(session.env().clone());
+        reprobe_held(&ctx, &refresh).unwrap();
+
+        let asked = refresh.asked();
+        assert!(asked.contains(&String::from("resolve claude")), "{asked:?}");
+        assert!(asked.contains(&String::from("resolve codex")), "{asked:?}");
+        assert!(
+            asked.contains(&String::from("run /bin/claude --version")),
+            "{asked:?}"
+        );
+        assert!(
+            asked.contains(&String::from("run /bin/claude auth status")),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().all(|entry| !entry.contains("node")
+                && !entry.contains("/opt/claude/cli.js")
+                && !entry.contains("synthetic-codex")),
+            "held-agent refresh must never ask for configured project commands: {asked:?}"
+        );
+
+        let listed = agents_list(&ctx, Empty {}).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id.0, AgentId::Claude);
+        assert_eq!(listed[0].status, Status::Ok);
+        assert_eq!(listed[0].source.as_deref(), Some("/bin/claude"));
+        assert_eq!(listed[1].id.0, AgentId::Codex);
+        assert_eq!(listed[1].status, Status::Missing);
     }
 }

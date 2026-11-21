@@ -1,4 +1,4 @@
-// 프로젝트 설정·진단 시험: 연 프로젝트의 [agents.<id>] command 와 [stages], 기본 단계가 확인 명령과 진단 종료 코드를 정하는지 가짜 확인 통로로 본다.
+// 프로젝트 설정·진단 시험: 기본 앱 확인은 연 프로젝트의 [agents.<id>] command 를 쓰지 않고, 명시적 doctor 진입점만 설정한 명령과 [stages] 를 적용하는지 가짜 확인 통로로 본다.
 use crate::fake_agents::FakeProbe;
 use crate::session::{CLAUDE_VERSION, claude, probe, req, session};
 use oah_core::agents::{Os, Status};
@@ -60,21 +60,105 @@ fn claude_through_node() -> FakeProbe {
 }
 
 #[test]
-fn the_open_projects_command_replaces_the_lookup_of_that_agent_only() {
-    let (_dir, session) = opened("[agents.claude]\ncommand = [\"node\", \"/opt/claude/cli.js\"]\n");
+fn app_probing_ignores_the_open_projects_configured_commands() {
+    let (_dir, session) = opened(
+        "[agents.claude]\ncommand = [\"node\", \"/opt/claude/cli.js\"]\n\
+         [agents.codex]\ncommand = [\"./bin/synthetic-codex\"]\n",
+    );
     let cancel = CancelToken::new();
-    let probe = claude_through_node();
+    let machine_and_node = claude(CLAUDE_VERSION, true)
+        .program("node", "/bin/node")
+        .run(
+            "/bin/node /opt/claude/cli.js --version",
+            Some(0),
+            "2.1.318 (Claude Code)\n",
+            "",
+        )
+        .run(
+            "/bin/node /opt/claude/cli.js auth status",
+            Some(0),
+            "{}",
+            "",
+        );
     let all = oah_core::dto::AgentsProbeReq {
         agents: None,
         sign_in: true,
         focus: false,
     };
-    let rows = app::agents_probe_with(&session.ctx(&cancel, &NoProgress), all, &probe).unwrap();
+    let rows =
+        app::agents_probe_with(&session.ctx(&cancel, &NoProgress), all, &machine_and_node).unwrap();
     assert_eq!(rows[0].status, Status::Ok);
+    assert_eq!(rows[0].source.as_deref(), Some("/bin/claude"));
+    let codex = rows.iter().find(|row| row.id.0 == AgentId::Codex).unwrap();
+    assert_eq!(codex.status, Status::Missing);
+    let asked = machine_and_node.asked();
+    assert!(
+        asked.contains(&String::from("resolve claude")),
+        "default app probe uses machine provider lookup: {asked:?}"
+    );
+    assert!(
+        asked.contains(&String::from("resolve codex")),
+        "path-shaped project command is ignored: {asked:?}"
+    );
+    assert!(
+        asked.contains(&String::from("resolve agy")),
+        "built-in provider names stay unchanged: {asked:?}"
+    );
+    assert!(
+        !asked.contains(&String::from("resolve node")),
+        "app probe must never resolve a project-configured command: {asked:?}"
+    );
+    assert!(
+        !asked.contains(&String::from("resolve antigravity")),
+        "a default command is not a configured one: {asked:?}"
+    );
+    assert!(
+        asked.iter().all(
+            |entry| !entry.contains("/opt/claude/cli.js") && !entry.contains("synthetic-codex")
+        ),
+        "project commands must never be asked or run: {asked:?}"
+    );
+
+    let focus = oah_core::dto::AgentsProbeReq {
+        agents: None,
+        sign_in: true,
+        focus: true,
+    };
+    let node_only = claude_through_node();
+    let focus_rows =
+        app::agents_probe_with(&session.ctx(&cancel, &NoProgress), focus, &node_only).unwrap();
+    assert_eq!(focus_rows[0].status, Status::Missing);
+    let focus_asked = node_only.asked();
+    assert!(
+        focus_asked.contains(&String::from("resolve claude")),
+        "{focus_asked:?}"
+    );
+    assert!(
+        !focus_asked.contains(&String::from("resolve node")),
+        "focus probe must never resolve a project-configured command: {focus_asked:?}"
+    );
+    assert!(
+        node_only.ran().is_empty(),
+        "focus probe must never execute a project-configured command: {:?}",
+        node_only.ran()
+    );
+}
+
+#[test]
+fn doctor_applies_the_open_projects_command_for_that_agent_only() {
+    let (_dir, session) = opened("[agents.claude]\ncommand = [\"node\", \"/opt/claude/cli.js\"]\n");
+    let cancel = CancelToken::new();
+    let probe = claude_through_node();
+    let doctor = app::doctor_with(&session.ctx(&cancel, &NoProgress), &probe).unwrap();
+    assert_eq!(doctor.agents[0].status, Status::Ok);
     let asked = probe.asked();
     assert!(
         !asked.contains(&String::from("resolve claude")),
         "{asked:?}"
+    );
+    assert!(
+        asked.contains(&String::from("resolve node")),
+        "explicit doctor entry applies the configured command: {asked:?}"
     );
     assert!(
         asked.contains(&String::from("resolve agy")),
