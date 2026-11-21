@@ -6,18 +6,20 @@
 //! path crosses IPC; [`hint_for`] is the one table of hints.
 
 use crate::agents::AgentError;
+use crate::app::ReviewFailed;
 use crate::config::ConfigError;
 use crate::fsx::FsxError;
 use crate::paths::{Env, PathsError};
 use crate::plan::PlanError;
 use crate::project::ProjectError;
+use crate::review::StoreError;
 use crate::rules::RulesError;
 use crate::tasks::{Cancelled, TaskError};
 use crate::workflow::WorkflowError;
 use serde::Serialize;
 use std::fmt;
 
-/// The codes M1-S1, M1-S2 and M2-S1 add (CONTRACTS C16).
+/// The codes M1-S1, M1-S2, M1-S3 and M2-S1 add (CONTRACTS C16).
 pub mod codes {
     /// A task of the same kind and subject is already running.
     pub const TASK_BUSY: &str = "OAH_TASK_BUSY";
@@ -47,6 +49,14 @@ pub mod codes {
     pub const SECTION_UNKNOWN: &str = "OAH_SECTION_UNKNOWN";
     /// A preset that does not exist or names an agent that is not installed here (M2-S1).
     pub const PRESET_UNAVAILABLE: &str = "OAH_PRESET_UNAVAILABLE";
+    /// No answer from a host of the network table: no connection, an unresolved name or a missed deadline (M1-S3).
+    pub const NET_OFFLINE: &str = "OAH_NET_OFFLINE";
+    /// A host of the network table refused more requests for now; the message names the retry time (M1-S3).
+    pub const NET_RATE_LIMITED: &str = "OAH_NET_RATE_LIMITED";
+    /// An answer was larger than the call's byte limit (M1-S3).
+    pub const NET_TOO_LARGE: &str = "OAH_NET_TOO_LARGE";
+    /// A stored review or snapshot file OAH cannot use; it is never repaired or reset (v0.4.0 code, M1-S3).
+    pub const SKILL_STATE_CORRUPT: &str = "OAH_SKILL_STATE_CORRUPT";
 }
 
 /// A failure with a stable code and a message for a person.
@@ -67,6 +77,10 @@ pub enum Error {
     Agents(AgentError),
     Rules(RulesError),
     Workflow(WorkflowError),
+    /// A skill review that ended without an outcome, with the upstream cause behind it (M1-S3).
+    Review(ReviewFailed),
+    /// The review store under `OAH_HOME/state` could not be read or written (M1-S3).
+    ReviewStore(StoreError),
 }
 
 /// The serialized error: `code` is stable, `message` and `hint` are English text for a person.
@@ -155,6 +169,21 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         }
         "OAH_FILE_IO" => "Check that the folder exists and can be written.",
         "OAH_FILE_UNVERIFIED" => "Refresh to read the file again.",
+        codes::NET_OFFLINE => "Check the internet connection, then try again.",
+        codes::NET_RATE_LIMITED => {
+            "Wait until the time in the message, or set GITHUB_TOKEN or GH_TOKEN in the environment OAH starts \
+             from, then try again."
+        }
+        codes::NET_TOO_LARGE => "The repository or one of its files is larger than OAH reviews.",
+        codes::SKILL_STATE_CORRUPT => {
+            "Move the named file aside; OAH never repairs it, and the next review starts that record again."
+        }
+        "OAH_SKILL_SOURCE_UNSUPPORTED" => {
+            "Give a public GitHub repository as OWNER/REPO and the skill folder inside it."
+        }
+        "OAH_SKILL_REVIEW_FAILED" => {
+            "Check that the repository is public and the folder holds a SKILL.md, then review again."
+        }
         _ => return None,
     })
 }
@@ -171,6 +200,8 @@ impl Coded for Error {
             Error::Agents(error) => error.code(),
             Error::Rules(error) => Coded::code(error),
             Error::Workflow(error) => error.code(),
+            Error::Review(error) => error.code(),
+            Error::ReviewStore(error) => error.code(),
         }
     }
 
@@ -185,6 +216,8 @@ impl Coded for Error {
             Error::Agents(error) => Coded::message(error),
             Error::Rules(error) => Coded::message(error),
             Error::Workflow(error) => Coded::message(error),
+            Error::Review(error) => error.message(),
+            Error::ReviewStore(error) => error.message(),
         }
     }
 }
@@ -204,7 +237,19 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    /// The upstream cause of a failed review, or the store failure; no source for the other variants.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Review(error) => error
+                .cause
+                .as_ref()
+                .map(|cause| cause as &(dyn std::error::Error + 'static)),
+            Error::ReviewStore(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<PathsError> for Error {
     fn from(error: PathsError) -> Self {
@@ -263,5 +308,17 @@ impl From<RulesError> for Error {
 impl From<WorkflowError> for Error {
     fn from(error: WorkflowError) -> Self {
         Error::Workflow(error)
+    }
+}
+
+impl From<ReviewFailed> for Error {
+    fn from(error: ReviewFailed) -> Self {
+        Error::Review(error)
+    }
+}
+
+impl From<StoreError> for Error {
+    fn from(error: StoreError) -> Self {
+        Error::ReviewStore(error)
     }
 }

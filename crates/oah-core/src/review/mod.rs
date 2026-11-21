@@ -7,8 +7,11 @@
 //! * [`license`]: strict text classification, expressions, declared manifests, discovery, verdict and eligibility.
 //! * [`snapshot`]: the collector seam ([`snapshot::Collector`], [`snapshot::Tree`]) and the v0.4.0 snapshot manifest.
 //! * [`record`]: `ReviewedSkillV1` and [`record::review`]; [`gate`]: the pure install gate.
+//! * [`store`]: the reviews and snapshots under `OAH_HOME/state` (CONTRACTS C9) and [`store::review_and_store`],
+//!   the review operation over a collector: identity check, record, `unchanged`, writes, gate.
 //!
-//! Skill text and metadata are only ever data here: nothing is fetched, installed, executed or delivered. The
+//! Skill text and metadata are only ever data here: nothing is installed, executed or delivered, and nothing is
+//! fetched except through the collector a caller passes in. The
 //! v0.4.0 regular expressions are kept as written and read by a private matcher with Python's rules; the limits of
 //! the Unicode tables behind it are listed in its helper module.
 //!
@@ -27,10 +30,14 @@ pub mod license;
 pub mod record;
 pub mod screening;
 pub mod snapshot;
+pub mod store;
 
 pub use gate::{GATE, GateDecision, GatePolicy, GateReason, GateResult, ReasonKind, gate, refusal};
 pub use identity::{Identity, POLICY_VERSION, SourceSpec, hit_paths, identity};
 pub use record::{ReviewRequest, ReviewedSkillV1, review};
+pub use store::{
+    Failure, Prepared, ReviewOutcome, Store, StoreError, commit, prepare, review_and_store,
+};
 
 use crate::error::Coded;
 use std::fmt;

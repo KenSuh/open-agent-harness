@@ -10,6 +10,7 @@ mod agents;
 mod cli_copy;
 mod doctor;
 mod refresh;
+mod review;
 mod settings;
 pub mod sync;
 
@@ -26,6 +27,7 @@ pub use doctor::{
     Doctor, doctor, doctor_exit, doctor_project_commands, doctor_project_commands_with, doctor_with,
 };
 pub use refresh::{REFRESH, refresh, refresh_key};
+pub use review::{REVIEW, ReviewFailed, review, review_key};
 pub use settings::{settings_get, settings_set};
 
 use crate::dto::{
@@ -33,11 +35,13 @@ use crate::dto::{
 };
 use crate::error::Error;
 use crate::fsx::SelfWrites;
+use crate::net::{HttpsTransport, Transport};
 use crate::paths::{self, Env};
 use crate::project::{self, OpenProject};
 use crate::tasks::{CancelToken, ProgressSink, TaskHandle, TaskRegistry, TaskState};
+use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 /// The state of one process: its environment, the open project, the running tasks, OAH's own verified writes and
 /// the result of this start's CLI copy. The CLI builds one per command; the app keeps one for its lifetime.
@@ -49,6 +53,23 @@ pub struct Session {
     self_writes: SelfWrites,
     cli: Mutex<Option<CliCopy>>,
     agents: Mutex<agents::AgentCache>,
+    transport: TransportSlot,
+}
+
+/// The transport the session's network operations send through: the one [`Session::with_transport`] gave, else the
+/// real HTTPS transport, made on first use.
+#[derive(Default)]
+struct TransportSlot(OnceLock<Arc<dyn Transport>>);
+
+impl fmt::Debug for TransportSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = if self.0.get().is_some() {
+            "ready"
+        } else {
+            "unused"
+        };
+        write!(f, "TransportSlot({state})")
+    }
 }
 
 /// What an operation receives: the environment, the session, and the cancellation and progress of the task it
@@ -90,7 +111,24 @@ impl Session {
             self_writes: SelfWrites::new(),
             cli: Mutex::new(None),
             agents: Mutex::default(),
+            transport: TransportSlot::default(),
         }
+    }
+
+    /// A session whose network operations send through `transport` instead of the real HTTPS transport (tests and
+    /// recorded fixtures).
+    pub fn with_transport(env: Env, transport: Arc<dyn Transport>) -> Session {
+        let session = Session::new(env);
+        let _ = session.transport.0.set(transport);
+        session
+    }
+
+    /// The transport of the session's network operations.
+    pub fn transport(&self) -> Arc<dyn Transport> {
+        self.transport
+            .0
+            .get_or_init(|| Arc::new(HttpsTransport::new()))
+            .clone()
     }
 
     pub fn env(&self) -> &Env {
