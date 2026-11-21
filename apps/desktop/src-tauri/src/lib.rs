@@ -2,7 +2,7 @@
 //! The OAH desktop shell (CONTRACTS C1, C7). It registers the single-instance plugin first, keeps the dialog
 //! plugin on the Rust side only (the webview has no dialog permission), enforces the native navigation policy for
 //! the seven canonical agent install links without adding IPC or capabilities, resolves the bundled CLI path,
-//! registers exactly the M1-S1 and M1-S2 commands of CONTRACTS C15, and starts the agents focus probe on
+//! registers exactly the M1-S1, M1-S2 and M2-S1 commands of CONTRACTS C15, and starts the agents focus probe on
 //! `WindowEvent::Focused(true)` of the main window (§2.5 tier 2). Every decision lives in `oah-core`.
 
 mod bundled;
@@ -46,6 +46,12 @@ pub fn run() {
             commands::settings_set,
             commands::agents_list,
             commands::start_agents_probe,
+            commands::sections_show,
+            commands::stages_set,
+            commands::preset_apply,
+            commands::workflow_status,
+            commands::rules_check,
+            commands::rules_sync,
         ])
         .run(tauri::generate_context!())
         .expect("the OAH desktop app could not start");

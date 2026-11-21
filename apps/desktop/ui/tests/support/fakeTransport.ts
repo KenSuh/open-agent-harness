@@ -8,8 +8,13 @@ import type {
   RefreshDto,
   SettingsDto,
   SettingsEdit,
+  StagesSetDto,
+  StagesSetReq,
+  PresetApplyReq,
   TaskEvent,
   TaskSnapshotDto,
+  WorkflowDto,
+  WorkflowProjectReq,
 } from "../../src/contract";
 import type { ScanChanged, Transport } from "../../src/transport/types";
 import appInfo from "../../../../../crates/oah-core/tests/dto_samples/app/app_info.json";
@@ -21,6 +26,14 @@ import copilotDocs from "../../../../../crates/oah-core/tests/dto_samples/agents
 import cursorMissing from "../../../../../crates/oah-core/tests/dto_samples/agents/status-cursor-missing.json";
 import agentsChanged from "../../../../../crates/oah-core/tests/dto_samples/agents/agents-changed.json";
 import probeRequest from "../../../../../crates/oah-core/tests/dto_samples/agents/probe-request.json";
+import workflowLegacy from "../../../../../crates/oah-core/tests/dto_samples/workflow/sections_show_legacy.json";
+import stagesUpgraded from "../../../../../crates/oah-core/tests/dto_samples/workflow/stages_set_upgraded.json";
+
+/** The shared Team Workflow samples (crates/oah-core/tests/dto_samples/workflow), byte-compared by core's own test. */
+export const sampleWorkflow = {
+  legacy: workflowLegacy as WorkflowDto,
+  upgraded: stagesUpgraded as StagesSetDto,
+};
 
 /** The shared core samples (crates/oah-core/tests/dto_samples/agents), byte-compared by core's own test. */
 export const sampleAgents = {
@@ -69,6 +82,7 @@ export interface FakeTransport extends Transport {
   emitAgentsChanged(change: AgentsChangedDto): void;
   /** Whether an agents-changed subscription is live. */
   agentsSubscribed(): boolean;
+  workflowRequests: WorkflowProjectReq<StagesSetReq | PresetApplyReq | Record<string, never>>[];
 }
 
 export function createFakeTransport(initial: { project?: ProjectDto | null; tasks?: TaskSnapshotDto[] } = {}): FakeTransport {
@@ -160,6 +174,34 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
         fake.calls.push("unlisten:agents-changed");
         if (agentsSink === handler) agentsSink = null;
       };
+    },
+    workflowRequests: [],
+    async sectionsShow(req) {
+      fake.calls.push("sections_show");
+      return fake.override.sectionsShow ? fake.override.sectionsShow(req) : sampleWorkflow.legacy;
+    },
+    async stagesSet(req) {
+      fake.calls.push("stages_set");
+      fake.workflowRequests.push(req);
+      return fake.override.stagesSet ? fake.override.stagesSet(req) : sampleWorkflow.upgraded;
+    },
+    async presetApply(req) {
+      fake.calls.push("preset_apply");
+      fake.workflowRequests.push(req);
+      return fake.override.presetApply ? fake.override.presetApply(req) : sampleWorkflow.upgraded;
+    },
+    async workflowStatus() {
+      fake.calls.push("workflow_status");
+      return fake.override.workflowStatus ? fake.override.workflowStatus() : sampleWorkflow.legacy.banner;
+    },
+    async rulesCheck() {
+      fake.calls.push("rules_check");
+      return fake.override.rulesCheck ? fake.override.rulesCheck() : sampleWorkflow.legacy.rules;
+    },
+    async rulesSync(req) {
+      fake.calls.push("rules_sync");
+      fake.workflowRequests.push(req);
+      return fake.override.rulesSync ? fake.override.rulesSync(req) : { synced: true, written: [], error: null };
     },
     emitProbe: (event) => probeSink?.(event),
     emitAgentsChanged: (change) => agentsSink?.(change),

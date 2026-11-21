@@ -5,14 +5,19 @@ import type {
   AgentStatusDto,
   AgentsChangedDto,
   AppInfoDto,
+  BannerDto,
   NoticeDto,
   ProjectDto,
   RefreshDto,
+  RulesStateDto,
+  RulesSyncDto,
   SettingsDto,
   SettingsEdit,
+  StagesSetDto,
   TaskEvent,
   TaskId,
   TaskSnapshotDto,
+  WorkflowDto,
 } from "../contract";
 import { toErrorDto, type ScanChanged, type Transport } from "./types";
 
@@ -47,6 +52,12 @@ export function createTauriTransport(): Transport {
       channel.onmessage = onEvent;
       return call<TaskId>("start_agents_probe", req, { onEvent: channel });
     },
+    sectionsShow: (req) => call<WorkflowDto>("sections_show", req),
+    stagesSet: (req) => call<StagesSetDto>("stages_set", req),
+    presetApply: (req) => call<StagesSetDto>("preset_apply", req),
+    workflowStatus: () => call<BannerDto>("workflow_status"),
+    rulesCheck: () => call<RulesStateDto>("rules_check"),
+    rulesSync: (req) => call<RulesSyncDto>("rules_sync", req),
     onNotice: (handler) => listen<NoticeDto>("notice", (event) => handler(event.payload)),
     onScanChanged: (handler) =>
       listen<ScanChanged>("scan-changed", (event) => handler(event.payload)),

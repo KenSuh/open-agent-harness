@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { ErrorDto, ProjectDto, Theme } from "./contract";
 import type { Transport } from "./transport/types";
 import { AgentRoster, AgentsView } from "./agents";
+import { TeamWorkflow } from "./workflow";
 import { useController, type Load, type RefreshTask, type Toast } from "./useController";
 
 type Page = "explore" | "installed" | "team-workflow";
@@ -27,7 +28,7 @@ const PAGES: ReadonlyArray<{ id: Page; label: string; title: string; body: strin
     id: "team-workflow",
     label: "Team Workflow",
     title: "Team Workflow",
-    body: "Team workflow settings are not available yet. Nothing to show.",
+    body: "Open a project to choose which agent does each section. Nothing to show.",
   },
 ];
 
@@ -129,6 +130,8 @@ export function App({ transport }: { transport: Transport }) {
   const current = PAGES.find((item) => item.id === page) ?? PAGES[0]!;
   const { agents } = c;
   const refreshing = c.refresh?.state === "running";
+  const agentRows = agents.agents.status === "ready" ? agents.agents.value : [];
+  const agentStatusKey = agentRows.map((a) => `${a.id}:${a.installed}:${a.sign_in}`).join(",");
   const quickStartVisible = c.settings.status === "ready" && !c.settings.value.ui.quick_start_dismissed;
 
   return (
@@ -237,7 +240,11 @@ export function App({ transport }: { transport: Transport }) {
           ) : (
             <section className="page" aria-labelledby="page-title">
               <h1 id="page-title">{current.title}</h1>
-              <p className="empty">{current.body}</p>
+              {page === "team-workflow" && c.project ? (
+                <TeamWorkflow key={`${c.project.id}:${c.projectRevision}:${agentStatusKey}`} transport={transport} projectId={c.project.id} />
+              ) : (
+                <p className="empty">{current.body}</p>
+              )}
             </section>
           )}
           <AppInfoLine info={c.info} onRetry={c.reloadInfo} />

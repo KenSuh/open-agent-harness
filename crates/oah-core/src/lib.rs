@@ -11,6 +11,8 @@
 //! * [`plan`] is the one apply engine for change plans: preflight, then one target at a time.
 //! * [`project`] opens a folder read-only; [`app`] holds the session and the operations the shell calls.
 //! * [`agents`] detects the seven agents and their sign-in through one probe seam, with capability evidence.
+//! * [`rules`] plans and writes the managed block of `AGENTS.md` and the thin files; [`workflow`] is the Team
+//!   Workflow: one assignment operation (config, then rules), the single banner, presets and the rules check.
 
 pub mod agents;
 pub mod app;
@@ -22,7 +24,9 @@ pub mod paths;
 pub mod plan;
 mod proc;
 pub mod project;
+pub mod rules;
 pub mod tasks;
+pub mod workflow;
 
 pub use error::{Coded, Error, ErrorDto, hint_for};
 

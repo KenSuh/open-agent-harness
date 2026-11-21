@@ -14,6 +14,7 @@ mod notice;
 mod plan;
 mod project;
 mod task;
+mod workflow;
 
 pub use agents::{
     AgentIdDto, AgentStatusDto, AgentsChangedDto, AgentsProbeReq, CapabilitiesDto, LoginHintDto,
@@ -27,6 +28,12 @@ pub use notice::{NoticeDto, NoticeLevel};
 pub use plan::{ApplyReportDto, BasisDto, ChangePlanDto, ItemResultDto, PlanItemDto};
 pub use project::{ConfigStateDto, ProjectDto, ProjectKindDto};
 pub use task::{Progress, TaskCancelReq, TaskEvent, TaskId, TaskSnapshotDto, TaskState};
+pub use workflow::{
+    AdvancedDto, AgentOptionDto, BannerAgentDto, BannerDto, BannerPairDto, BannerSectionDto,
+    ConfigFormatDto, DriftDto, IndependenceReq, PlannedWriteDto, PresetApplyReq, PresetDto,
+    PresetStageDto, RulesStateDto, RulesSyncDto, RulesWriteDto, SectionDto, StageChangeReq,
+    StagesSetDto, StagesSetReq, WorkflowDto, WorkflowProjectReq,
+};
 
 use crate::paths::{Env, canonical_folder, user_home};
 use serde::{Deserialize, Serialize};

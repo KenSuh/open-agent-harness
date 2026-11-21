@@ -46,7 +46,10 @@ function mergeNotices(...lists: ReadonlyArray<readonly NoticeDto[]>): NoticeDto[
 export function useController(transport: Transport) {
   const [info, setInfo] = useState<Load<AppInfoDto>>({ status: "loading" });
   const [settings, setSettings] = useState<Load<SettingsDto>>({ status: "loading" });
-  const [project, setProject] = useState<ProjectDto | null>(null);
+  const [{ project, projectRevision }, setProjectRead] = useState<{ project: ProjectDto | null; projectRevision: number }>({
+    project: null,
+    projectRevision: 0,
+  });
   const [projectBusy, setProjectBusy] = useState(false);
   const [eventNotices, setEventNotices] = useState<NoticeDto[]>([]);
   const [refresh, setRefresh] = useState<RefreshTask | null>(null);
@@ -55,6 +58,7 @@ export function useController(transport: Transport) {
   const refreshRunning = useRef(false);
   const refreshRun = useRef(0);
   const projectRef = useRef<ProjectDto | null>(null);
+  const projectReads = useRef(0);
 
   const pushToast = useCallback((toast: Omit<Toast, "key">) => {
     const key = ++toastKey.current;
@@ -84,10 +88,22 @@ export function useController(transport: Transport) {
   );
   const agents = useAgents(transport, agentNotify);
 
-  const applyProject = useCallback((next: ProjectDto | null) => {
-    projectRef.current = next;
-    setProject(next);
+  const applyProject = useCallback((project: ProjectDto | null, projectRevision: number) => {
+    projectRef.current = project;
+    setProjectRead({ project, projectRevision });
   }, []);
+
+  const readProject = useCallback(() => {
+    const revision = ++projectReads.current;
+    transport.projectCurrent().then(
+      (next) => {
+        if (revision === projectReads.current) applyProject(next, revision);
+      },
+      (error) => {
+        if (revision === projectReads.current) toastError(toErrorDto(error));
+      },
+    );
+  }, [transport, applyProject, toastError]);
 
   /**
    * Follows one refresh task through a channel until its terminal event. A new start and a
@@ -162,7 +178,7 @@ export function useController(transport: Transport) {
   useEffect(() => {
     loadInfo();
     loadSettings();
-    transport.projectCurrent().then(applyProject, (error) => toastError(toErrorDto(error)));
+    readProject();
     // A reloaded webview shows tasks that are still running (C4 tasks_list) and joins the
     // running refresh so this webview receives its remaining events, including the terminal one.
     transport.tasksList().then(
@@ -174,7 +190,7 @@ export function useController(transport: Transport) {
       },
       (error) => toastError(toErrorDto(error)),
     );
-  }, [transport, loadInfo, loadSettings, applyProject, toastError, followRefresh]);
+  }, [transport, loadInfo, loadSettings, readProject, toastError, followRefresh]);
 
   useEffect(() => {
     let disposed = false;
@@ -193,20 +209,20 @@ export function useController(transport: Transport) {
     keep(
       transport.onScanChanged(() => {
         // Invalidation signal only: answer by calling a read command.
-        transport.projectCurrent().then(applyProject, (error) => toastError(toErrorDto(error)));
+        readProject();
       }),
     );
     return () => {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [transport, applyProject, pushToast, toastError]);
+  }, [transport, readProject, pushToast, toastError]);
 
   const openProject = useCallback(async () => {
     setProjectBusy(true);
     try {
       const opened = await transport.projectOpenDialog();
-      if (opened) applyProject(opened); // null = picker cancelled: nothing changes.
+      if (opened) applyProject(opened, ++projectReads.current);
     } catch (error) {
       toastError(toErrorDto(error));
     } finally {
@@ -259,6 +275,7 @@ export function useController(transport: Transport) {
     info,
     settings,
     project,
+    projectRevision,
     projectBusy,
     notices,
     refresh,
