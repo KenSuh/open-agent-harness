@@ -268,7 +268,10 @@ function Get-Release {
     Say "  SHA-256 verified: $actual"
     $unpacked = Join-Path $script:OahWork 'release'
     try {
-        Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
+        if (-not ('System.IO.Compression.ZipFile' -as [type])) {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        }
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $unpacked)
     } catch {
         Fail 'The release archive could not be unpacked. Clone the repository instead.'
     }
@@ -318,7 +321,7 @@ function New-InstallPlan {
                 'would create a temporary folder for the release.'
                 "would download: $url (HTTPS only, including redirects)"
                 "would verify SHA-256: $digest (.NET SHA-256 on the downloaded file; refuse a mismatch before extraction)"
-                'would extract: Expand-Archive -LiteralPath <temporary-folder>\release.zip -DestinationPath <release-folder>'
+                'would extract: [System.IO.Compression.ZipFile]::ExtractToDirectory(<temporary-folder>\release.zip, <release-folder>)'
                 'would remove the temporary folder when finished, including on failure.'
             )
         }
