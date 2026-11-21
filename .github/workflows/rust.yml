@@ -165,12 +165,12 @@ jobs:
         env:
           CANDIDATE: ${{ inputs.candidate }}
         run: |
-          if ! printf '%s\n' "$CANDIDATE" | grep -Eqx '[0-9a-f]{40}'; then
-            echo "::error::installers need the candidate input: the full 40-character commit SHA to build"
+          if [ "${#CANDIDATE}" -ne 40 ] || [[ "$CANDIDATE" == *[!0123456789abcdef]* ]]; then
+            echo "::error::installers need the candidate input: one full 40-character lowercase hex commit SHA"
             exit 1
           fi
           if [ "$CANDIDATE" != "$GITHUB_SHA" ]; then
-            echo "::error::the chosen branch is at $GITHUB_SHA, not the requested candidate $CANDIDATE"
+            echo "::error::the chosen branch is at $GITHUB_SHA, which does not match the requested candidate"
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -264,11 +264,29 @@ jobs:
           else
             [ "$(head -c 2 "$file")" = MZ ] || fail "$name is not a Windows executable"
             grep -aqF NullsoftInst "$file" || fail "$name is not an NSIS installer"
-            # The setup stub's own PE type is NSIS's choice; check the packaged app it was built from instead.
-            exe="target/$TARGET/release/oah-desktop.exe"
-            offset="$(od -An -tu4 -j60 -N4 "$exe" | tr -d ' ')"
-            machine="$(od -An -tx1 -j"$((offset + 4))" -N2 "$exe" | tr -d ' ')"
-            [ "$machine" = 6486 ] || fail "the packaged $exe is not x64 (PE machine bytes $machine)"
+            # The setup stub's own PE architecture is NSIS's choice; verify both packaged x64 binaries instead.
+            check_pe_x64() {
+              local bin="$1" real_bin size dos e_lfanew b0 b1 b2 b3 offset pe_hdr
+              [ ! -L "$bin" ] && [ -f "$bin" ] || fail "$bin is missing or not a regular file"
+              real_bin="$(cd "$(dirname "$bin")" && pwd -P)/$(basename "$bin")"
+              [ "${real_bin#"$workspace"/}" != "$real_bin" ] || fail "$bin resolves outside the workspace"
+              size="$(wc -c < "$bin" | tr -d ' \t\r\n')"
+              [ "$size" -ge 64 ] || fail "$bin is too small to contain a DOS/PE header ($size bytes)"
+              dos="$(od -An -tx1 -j0 -N2 "$bin" | tr -d ' \t\r\n')"
+              [ "$dos" = 4d5a ] || fail "$bin does not start with a DOS MZ signature"
+              e_lfanew="$(od -An -tx1 -j60 -N4 "$bin" | tr -d '\r\n')"
+              read -r b0 b1 b2 b3 <<< "$e_lfanew"
+              [ -n "${b3:-}" ] || fail "$bin has an unreadable PE header offset"
+              offset=$(( 16#$b0 + (16#$b1 << 8) + (16#$b2 << 16) + (16#$b3 << 24) ))
+              if [ "$offset" -lt 64 ] || [ "$((offset + 6))" -gt "$size" ]; then
+                fail "$bin has an out-of-bounds PE header offset ($offset)"
+              fi
+              pe_hdr="$(od -An -tx1 -j"$offset" -N6 "$bin" | tr -d ' \t\r\n')"
+              [ "${pe_hdr:0:8}" = 50450000 ] || fail "$bin does not have a valid PE signature"
+              [ "${pe_hdr:8:4}" = 6486 ] || fail "$bin is not an x64 PE executable (PE machine bytes ${pe_hdr:8:4})"
+            }
+            check_pe_x64 "target/$TARGET/release/oah-desktop.exe"
+            check_pe_x64 "apps/desktop/src-tauri/binaries/oah-$TARGET.exe"
           fi
           out="$workspace/installer-out"
           mkdir "$out"
@@ -307,7 +325,7 @@ jobs:
   # installers that passed earlier and it fails instead of mixing attempts.
   installer-checksums:
     name: installer checksums (manual)
-    needs: installer
+    needs: [rust, ui, desktop, installer]
     if: github.event_name == 'workflow_dispatch' && inputs.installers
     runs-on: ubuntu-latest
     timeout-minutes: 10
