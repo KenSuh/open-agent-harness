@@ -199,7 +199,11 @@ fn linked_local_rules_leaf_and_ancestor_are_refused_before_plan_and_apply() {
     )
     .unwrap_err();
     assert_eq!(error.code(), "OAH_RULES_LINK");
-    assert_eq!(RulesFiles::read(root).unwrap_err().code(), "OAH_FILE_IO");
+    assert!(error.message.contains(".oah/rules.local.md"));
+    assert!(!error.message.contains("inert.md"));
+    let io_error = RulesFiles::read(root).unwrap_err();
+    assert_eq!(io_error.code(), "OAH_FILE_IO");
+    assert!(!io_error.to_string().contains("inert.md"));
     assert!(!root.join("AGENTS.md").exists());
     assert!(!root.join("CLAUDE.md").exists());
 
@@ -217,7 +221,11 @@ fn linked_local_rules_leaf_and_ancestor_are_refused_before_plan_and_apply() {
     )
     .unwrap_err();
     assert_eq!(error.code(), "OAH_RULES_LINK");
-    assert_eq!(RulesFiles::read(root).unwrap_err().code(), "OAH_FILE_IO");
+    assert!(error.message.contains(".oah"));
+    assert!(!error.message.contains("inert-dir"));
+    let io_error = RulesFiles::read(root).unwrap_err();
+    assert_eq!(io_error.code(), "OAH_FILE_IO");
+    assert!(!io_error.to_string().contains("inert-dir"));
     assert!(!root.join("AGENTS.md").exists());
 
     // 3. Leaf replaced with an in-project symlink (even matching bytes) between plan and apply.
@@ -236,7 +244,9 @@ fn linked_local_rules_leaf_and_ancestor_are_refused_before_plan_and_apply() {
     fs::remove_file(root.join(".oah/rules.local.md")).unwrap();
     symlink(&inert, root.join(".oah/rules.local.md")).unwrap();
     let result = apply_sync(&plan, &CancelToken::new(), LockOptions::default());
-    assert_eq!(result.error.unwrap().code(), "OAH_RULES_LINK");
+    let err = result.error.unwrap();
+    assert_eq!(err.code(), "OAH_RULES_LINK");
+    assert!(!err.message().contains("inert.md"));
     assert!(!root.join("AGENTS.md").exists());
     assert!(!root.join("CLAUDE.md").exists());
 
@@ -253,7 +263,9 @@ fn linked_local_rules_leaf_and_ancestor_are_refused_before_plan_and_apply() {
     .unwrap();
     symlink(&inert_dir, root.join(".oah")).unwrap();
     let result = apply_sync(&plan, &CancelToken::new(), LockOptions::default());
-    assert_eq!(result.error.unwrap().code(), "OAH_RULES_LINK");
+    let err = result.error.unwrap();
+    assert_eq!(err.code(), "OAH_RULES_LINK");
+    assert!(!err.message().contains("inert-dir"));
     assert!(!root.join("AGENTS.md").exists());
 }
 

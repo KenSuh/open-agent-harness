@@ -16,10 +16,7 @@ use crate::dto::{Empty, NoticeDto};
 use crate::error::Error;
 use crate::fsx::LockOptions;
 use crate::plan::{self, ApplyReport, Basis, ChangePlan, ItemResult, Outcome, PlanItem, Target};
-use crate::rules::{
-    LOCAL_RULES, RulesSnapshot, SyncInput, plan_sync, sync::recheck_local_rules, target_path,
-    write_file,
-};
+use crate::rules::{RulesSnapshot, SyncInput, plan_sync, sync::LocalRulesBasis, write_file};
 use std::path::{Path, PathBuf};
 
 /// The five sync steps, in their one order (C11).
@@ -110,6 +107,8 @@ pub struct StepPlan {
     pub items: Vec<SyncItem>,
     pub notices: Vec<NoticeDto>,
     pub source_basis: Vec<Basis>,
+    /// Planned `.oah/rules.local.md` source state, revalidated outside `plan::Basis::holds`.
+    pub(crate) local_rules_source: Option<LocalRulesBasis>,
 }
 
 /// A step's pure planner over a snapshot.
@@ -138,6 +137,8 @@ pub struct SyncPlan {
     pub plan: ChangePlan,
     pub items: Vec<SyncItem>,
     pub steps: Vec<StepId>,
+    /// Planned `.oah/rules.local.md` source states, anchored to each step's planned project root.
+    pub(crate) local_rules_sources: Vec<LocalRulesBasis>,
 }
 
 /// One step's share of an apply.
@@ -164,9 +165,15 @@ pub fn sync_plan(
     let mut warnings: Vec<NoticeDto> = Vec::new();
     let mut steps = Vec::new();
     let mut basis: Vec<Basis> = Vec::new();
+    let mut local_rules_sources: Vec<LocalRulesBasis> = Vec::new();
     for row in registry {
         ctx.cancel.check()?;
         let planned = (row.plan)(ctx, project)?;
+        if let Some(local_source) = planned.local_rules_source
+            && !local_rules_sources.contains(&local_source)
+        {
+            local_rules_sources.push(local_source);
+        }
         for snapshot in planned
             .source_basis
             .into_iter()
@@ -189,6 +196,7 @@ pub fn sync_plan(
         },
         items,
         steps,
+        local_rules_sources,
     })
 }
 
@@ -201,23 +209,10 @@ pub fn sync_apply<S: AsRef<str>>(
     accepted: &[S],
     registry: &[StepRow],
 ) -> Result<SyncReport, Error> {
-    let local_rules = target_path(&project.root, LOCAL_RULES);
-    let mut filtered;
-    let change_plan = if plan.steps.contains(&StepId::Rules)
-        && let Some(local_basis) = plan
-            .plan
-            .basis
-            .iter()
-            .find(|basis| basis.target == local_rules)
-    {
-        recheck_local_rules(&project.root, local_basis)?;
-        filtered = plan.plan.clone();
-        filtered.basis.retain(|basis| basis.target != local_rules);
-        &filtered
-    } else {
-        &plan.plan
-    };
-    let chosen = change_plan.accept(accepted);
+    for local_source in &plan.local_rules_sources {
+        local_source.recheck()?;
+    }
+    let chosen = plan.plan.accept(accepted);
     let apply = plan::apply(&chosen, ctx.cancel, |target| {
         let items: Vec<&SyncItem> = plan
             .items
@@ -306,7 +301,8 @@ fn rules_plan(ctx: &Ctx<'_>, project: &SyncProject) -> Result<StepPlan, Error> {
     Ok(StepPlan {
         items,
         notices: Vec::new(),
-        source_basis: Vec::from(planned.sources),
+        source_basis: vec![planned.config_source],
+        local_rules_source: Some(planned.local_rules_source),
     })
 }
 

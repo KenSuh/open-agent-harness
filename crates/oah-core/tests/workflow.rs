@@ -350,6 +350,15 @@ fn a_linked_local_rules_input_is_refused_consistently_across_read_check_save_and
         shown.rules.error.as_ref().map(|e| e.code.as_str()),
         Some("OAH_RULES_LINK")
     );
+    assert!(
+        !shown
+            .rules
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("inert.md")
+    );
     let checked = app::rules_check(&ctx, Empty {}).unwrap();
     assert_eq!(checked, shown.rules);
     assert!(!project.root.join("AGENTS.md").exists());
@@ -357,6 +366,7 @@ fn a_linked_local_rules_input_is_refused_consistently_across_read_check_save_and
 
     let sync_err = app::rules_sync(&ctx, Empty {}).unwrap_err();
     assert_eq!(sync_err.code(), "OAH_RULES_LINK");
+    assert!(!sync_err.message().contains("inert.md"));
     assert!(!project.root.join("AGENTS.md").exists());
     assert!(!project.root.join("CLAUDE.md").exists());
 
@@ -410,10 +420,20 @@ fn a_linked_local_rules_input_is_refused_consistently_across_read_check_save_and
         shown.rules.error.as_ref().map(|e| e.code.as_str()),
         Some("OAH_RULES_LINK")
     );
+    assert!(
+        !shown
+            .rules
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("inert-dir")
+    );
     let checked = app::rules_check(&ctx, Empty {}).unwrap();
     assert_eq!(checked, shown.rules);
     let sync_err = app::rules_sync(&ctx, Empty {}).unwrap_err();
     assert_eq!(sync_err.code(), "OAH_RULES_LINK");
+    assert!(!sync_err.message().contains("inert-dir"));
     assert!(!ancestor_project.root.join("AGENTS.md").exists());
     assert!(!ancestor_project.root.join("CLAUDE.md").exists());
 }

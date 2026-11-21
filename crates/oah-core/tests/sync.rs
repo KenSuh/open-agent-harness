@@ -298,6 +298,7 @@ fn linked_local_rules_is_refused_at_sync_plan_and_sync_apply() {
     assert!(planned.items.is_empty());
     assert_eq!(planned.plan.warnings.len(), 1);
     assert_eq!(planned.plan.warnings[0].code, "OAH_RULES_LINK");
+    assert!(!planned.plan.warnings[0].message.contains("inert.md"));
     assert!(!root.join("AGENTS.md").exists());
 
     // 2. Traversed `.oah` ancestor symlink at sync_plan time becomes an ordinary Rules refusal warning.
@@ -311,15 +312,20 @@ fn linked_local_rules_is_refused_at_sync_plan_and_sync_apply() {
     assert!(planned.items.is_empty());
     assert_eq!(planned.plan.warnings.len(), 1);
     assert_eq!(planned.plan.warnings[0].code, "OAH_RULES_LINK");
+    assert!(!planned.plan.warnings[0].message.contains("inert-dir"));
     assert!(!root.join("AGENTS.md").exists());
 
-    // 3. Regular local rules replaced by an in-project symlink (even with identical bytes) before sync_apply.
+    // 3. Regular local rules replaced by an in-project symlink (even with identical bytes) before sync_apply,
+    // both with the planned project and when a different project root is supplied to sync_apply.
     let (_dir, root, session) = project();
     let same_bytes = b"Original local guidance.\n";
     let inert = root.join("inert.md");
     fs::write(&inert, same_bytes).unwrap();
     fs::create_dir(root.join(".oah")).unwrap();
     fs::write(root.join(".oah/rules.local.md"), same_bytes).unwrap();
+    let other_root = root.with_file_name("other-project");
+    fs::create_dir(&other_root).unwrap();
+    let other_project = SyncProject::read(&other_root).unwrap();
     let cancel = CancelToken::new();
     let ctx = session.ctx(&cancel, &NoProgress);
     let sync_project = SyncProject::read(&root).unwrap();
@@ -328,8 +334,12 @@ fn linked_local_rules_is_refused_at_sync_plan_and_sync_apply() {
     assert!(!ids.is_empty());
     fs::remove_file(root.join(".oah/rules.local.md")).unwrap();
     symlink(&inert, root.join(".oah/rules.local.md")).unwrap();
-    let error = sync_apply(&ctx, &sync_project, &planned, &ids, REGISTRY).unwrap_err();
-    assert_eq!(error.code(), "OAH_RULES_LINK");
+    for supplied in [&sync_project, &other_project] {
+        let error = sync_apply(&ctx, supplied, &planned, &ids, REGISTRY).unwrap_err();
+        assert_eq!(error.code(), "OAH_RULES_LINK");
+        assert!(!error.message().contains("inert.md"));
+    }
     assert!(!root.join("AGENTS.md").exists());
     assert!(!root.join("CLAUDE.md").exists());
+    assert!(!other_root.join("AGENTS.md").exists());
 }

@@ -1,6 +1,6 @@
-// 규칙 입력: 프로젝트 파일을 링크나 재파스 지점을 따라가지 않고 읽어, 순수 계획 함수가 받을 바이트·없음·링크 상태로 만든다.
+// 규칙 입력: 프로젝트 파일을 링크를 따라가지 않고 읽어, 순수 계획 함수가 받을 바이트·없음·링크 상태로 만든다.
 //! What the pure planners read. [`ProjectFile::read`] inspects every component of a project-relative path
-//! without following it, so a linked or reparse file or folder on the way is reported as a link and never read
+//! without following it, so a linked file or a linked folder on the way is reported as a link and never read
 //! through (v0.4:src/oah/rules.py:105-109 refuses to write through links). Reading writes nothing.
 
 use crate::fsx::{self, FsxError, FsxErrorKind, links::Entry};
@@ -17,41 +17,37 @@ pub const LOCAL_RULES: &str = ".oah/rules.local.md";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectFile {
     Missing,
-    /// The file, or a folder on its path, is a symbolic link, junction or reparse entry. `target` is that link's
-    /// stored target, or the reparse entry's path when no link target is exposed.
+    /// The file, or a folder on its path, is a symbolic link or junction. `target` is that link's stored target.
     Link {
         target: PathBuf,
     },
     Regular(Vec<u8>),
 }
 
-/// What one inspected component of a project-relative path permits next.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ComponentStep {
-    Continue,
-    ReadRegular,
-    Stop(ProjectFile),
-}
-
 impl ProjectFile {
-    /// Reads `relative` (with `/`) under `root` without following any link or reparse entry below `root`.
+    /// Reads `relative` (with `/`) under `root` without following any link below `root`.
     pub fn read(root: &Path, relative: &str) -> Result<ProjectFile, FsxError> {
         let mut path = root.to_path_buf();
         let mut parts = relative.split('/').peekable();
         while let Some(part) = parts.next() {
-            if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
-                return Err(refuse_unsupported(&path));
-            }
             path.push(part);
             let last = parts.peek().is_none();
-            match inspect_component(&path, last)? {
-                ComponentStep::Continue => {}
-                ComponentStep::ReadRegular => break,
-                ComponentStep::Stop(file) => return Ok(file),
+            match fsx::links::inspect(&path)? {
+                Entry::Missing => return Ok(ProjectFile::Missing),
+                Entry::Symlink { target } | Entry::Junction { target } => {
+                    return Ok(ProjectFile::Link { target });
+                }
+                // A folder on the way is walked on; a regular file there fails the next inspect or read at once.
+                Entry::Directory if !last => {}
+                Entry::File if last => {}
+                // The final entry is neither a file nor a folder to walk through: a pipe or socket would block
+                // a read until a writer shows up, so it is refused before any read.
+                _ if last => return Err(refuse_unsupported(&path)),
+                _ => {}
             }
         }
-        Ok(match fsx::read_regular_optional(&path)? {
-            Some((bytes, _)) => ProjectFile::Regular(bytes),
+        Ok(match fsx::read_optional(&path)? {
+            Some(bytes) => ProjectFile::Regular(bytes),
             None => ProjectFile::Missing,
         })
     }
@@ -69,40 +65,73 @@ impl ProjectFile {
     }
 }
 
-/// Classifies one inspected project-relative component without following links or reparse entries.
-pub(crate) fn classify_component(
+/// The file layer's own refusal for an entry that is not a regular file (a pipe, a socket, a device, a folder
+/// where a file is needed). It is built from the path alone: nothing is opened or read, so it cannot block.
+fn refuse_unsupported(path: &Path) -> FsxError {
+    FsxError::new(
+        FsxErrorKind::Io,
+        path,
+        "not a regular file; only regular files are read",
+    )
+}
+
+/// What `.oah/rules.local.md` holds when inspected without following links or reparse entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocalRulesRead {
+    Missing,
+    Regular(Vec<u8>),
+    /// The traversed ancestor (`.oah`) or leaf (`.oah/rules.local.md`) is a link or reparse entry.
+    RefusedLink {
+        entry: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalStep {
+    Continue,
+    ReadRegular,
+    Stop(LocalRulesRead),
+}
+
+/// Classifies one inspected component of `.oah/rules.local.md` without exposing stored link targets.
+fn classify_local_component(
     entry: Entry,
     is_reparse: bool,
     last: bool,
     path: &Path,
-) -> Result<ComponentStep, FsxError> {
+    label: &'static str,
+) -> Result<LocalStep, FsxError> {
     match entry {
-        Entry::Missing => Ok(ComponentStep::Stop(ProjectFile::Missing)),
-        Entry::Symlink { target } | Entry::Junction { target } => {
-            Ok(ComponentStep::Stop(ProjectFile::Link { target }))
+        Entry::Missing => Ok(LocalStep::Stop(LocalRulesRead::Missing)),
+        Entry::Symlink { .. } | Entry::Junction { .. } => {
+            Ok(LocalStep::Stop(LocalRulesRead::RefusedLink {
+                entry: label,
+            }))
         }
-        _ if is_reparse => Ok(ComponentStep::Stop(ProjectFile::Link {
-            target: path.to_path_buf(),
+        _ if is_reparse => Ok(LocalStep::Stop(LocalRulesRead::RefusedLink {
+            entry: label,
         })),
-        Entry::Directory if !last => Ok(ComponentStep::Continue),
-        Entry::File if last => Ok(ComponentStep::ReadRegular),
-        // Any other entry at the leaf (a pipe, socket, device or folder) or a non-folder ancestor is refused
-        // before opening or descending into it.
+        Entry::Directory if !last => Ok(LocalStep::Continue),
+        Entry::File if last => Ok(LocalStep::ReadRegular),
         _ => Err(refuse_unsupported(path)),
     }
 }
 
-fn inspect_component(path: &Path, last: bool) -> Result<ComponentStep, FsxError> {
+fn inspect_local_component(
+    path: &Path,
+    last: bool,
+    label: &'static str,
+) -> Result<LocalStep, FsxError> {
     let entry = fsx::links::inspect(path)?;
     let is_reparse = match entry {
         Entry::Missing | Entry::Symlink { .. } | Entry::Junction { .. } => false,
         _ => is_reparse_point(path)?,
     };
-    classify_component(entry, is_reparse, last, path)
+    classify_local_component(entry, is_reparse, last, path, label)
 }
 
 #[cfg(windows)]
-pub(crate) fn is_reparse_point(path: &Path) -> Result<bool, FsxError> {
+fn is_reparse_point(path: &Path) -> Result<bool, FsxError> {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     match std::fs::symlink_metadata(path) {
@@ -118,35 +147,39 @@ pub(crate) fn is_reparse_point(path: &Path) -> Result<bool, FsxError> {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn is_reparse_point(_path: &Path) -> Result<bool, FsxError> {
+fn is_reparse_point(_path: &Path) -> Result<bool, FsxError> {
     Ok(false)
 }
 
-/// The file layer's own refusal for an entry that is not a regular file (a pipe, a socket, a device, a folder
-/// where a file is needed). It is built from the path alone: nothing is opened or read, so it cannot block.
-fn refuse_unsupported(path: &Path) -> FsxError {
+/// Reads `.oah/rules.local.md` under `root` only when absent or a regular in-project file.
+///
+/// Inspects `.oah` and `.oah/rules.local.md` without following links or reparse entries, then opens the leaf
+/// through `fsx::read_regular_optional`.
+pub(crate) fn read_local_rules_checked(root: &Path) -> Result<LocalRulesRead, FsxError> {
+    let dir_path = root.join(".oah");
+    match inspect_local_component(&dir_path, false, ".oah")? {
+        LocalStep::Continue => {}
+        LocalStep::Stop(result) => return Ok(result),
+        LocalStep::ReadRegular => unreachable!("non-final component cannot read a file"),
+    }
+    let file_path = dir_path.join("rules.local.md");
+    match inspect_local_component(&file_path, true, LOCAL_RULES)? {
+        LocalStep::ReadRegular => {}
+        LocalStep::Stop(result) => return Ok(result),
+        LocalStep::Continue => unreachable!("final component cannot continue"),
+    }
+    Ok(match fsx::read_regular_optional(&file_path)? {
+        Some((bytes, _)) => LocalRulesRead::Regular(bytes),
+        None => LocalRulesRead::Missing,
+    })
+}
+
+fn refuse_link_io(path: &Path, entry: &'static str) -> FsxError {
     FsxError::new(
         FsxErrorKind::Io,
         path,
-        "not a regular file; only regular files are read",
+        format!("{entry} is a link or reparse entry; only regular project files are read"),
     )
-}
-
-fn refuse_link_io(path: &Path, target: &Path) -> FsxError {
-    FsxError::new(
-        FsxErrorKind::Io,
-        path,
-        format!(
-            "is a link or reparse entry ({}); only regular project files are read",
-            target.display()
-        ),
-    )
-}
-
-fn join_relative(root: &Path, relative: &str) -> PathBuf {
-    relative
-        .split('/')
-        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 /// The three files the block plan reads.
@@ -162,11 +195,14 @@ impl RulesFiles {
     pub fn read(root: &Path) -> Result<RulesFiles, FsxError> {
         let agents = ProjectFile::read(root, AGENTS_MD)?;
         let claude = ProjectFile::read(root, CLAUDE_MD)?;
-        let local_rules = match ProjectFile::read(root, LOCAL_RULES)? {
-            ProjectFile::Missing => None,
-            ProjectFile::Regular(bytes) => Some(bytes),
-            ProjectFile::Link { target } => {
-                return Err(refuse_link_io(&join_relative(root, LOCAL_RULES), &target));
+        let local_rules = match read_local_rules_checked(root)? {
+            LocalRulesRead::Missing => None,
+            LocalRulesRead::Regular(bytes) => Some(bytes),
+            LocalRulesRead::RefusedLink { entry } => {
+                return Err(refuse_link_io(
+                    &root.join(".oah").join("rules.local.md"),
+                    entry,
+                ));
             }
         };
         Ok(RulesFiles {
@@ -187,65 +223,62 @@ mod tests {
         let ancestor = Path::new("/project/.oah");
         let link_target = PathBuf::from("inert.md");
 
-        for (target_path, last) in [(ancestor, false), (path, true)] {
+        for (target_path, last, label) in [(ancestor, false, ".oah"), (path, true, LOCAL_RULES)] {
             assert_eq!(
-                classify_component(Entry::Missing, false, last, target_path).unwrap(),
-                ComponentStep::Stop(ProjectFile::Missing)
+                classify_local_component(Entry::Missing, false, last, target_path, label).unwrap(),
+                LocalStep::Stop(LocalRulesRead::Missing)
             );
             assert_eq!(
-                classify_component(
+                classify_local_component(
                     Entry::Symlink {
                         target: link_target.clone()
                     },
                     false,
                     last,
-                    target_path
+                    target_path,
+                    label
                 )
                 .unwrap(),
-                ComponentStep::Stop(ProjectFile::Link {
-                    target: link_target.clone()
-                })
+                LocalStep::Stop(LocalRulesRead::RefusedLink { entry: label })
             );
             assert_eq!(
-                classify_component(
+                classify_local_component(
                     Entry::Junction {
                         target: link_target.clone()
                     },
                     true,
                     last,
-                    target_path
+                    target_path,
+                    label
                 )
                 .unwrap(),
-                ComponentStep::Stop(ProjectFile::Link {
-                    target: link_target.clone()
-                })
+                LocalStep::Stop(LocalRulesRead::RefusedLink { entry: label })
             );
             for reparse_entry in [Entry::Directory, Entry::File, Entry::Other] {
                 assert_eq!(
-                    classify_component(reparse_entry, true, last, target_path).unwrap(),
-                    ComponentStep::Stop(ProjectFile::Link {
-                        target: target_path.to_path_buf()
-                    })
+                    classify_local_component(reparse_entry, true, last, target_path, label)
+                        .unwrap(),
+                    LocalStep::Stop(LocalRulesRead::RefusedLink { entry: label })
                 );
             }
         }
 
         assert_eq!(
-            classify_component(Entry::Directory, false, false, ancestor).unwrap(),
-            ComponentStep::Continue
+            classify_local_component(Entry::Directory, false, false, ancestor, ".oah").unwrap(),
+            LocalStep::Continue
         );
         assert_eq!(
-            classify_component(Entry::File, false, true, path).unwrap(),
-            ComponentStep::ReadRegular
+            classify_local_component(Entry::File, false, true, path, LOCAL_RULES).unwrap(),
+            LocalStep::ReadRegular
         );
 
-        for (entry, last, p) in [
-            (Entry::Directory, true, path),
-            (Entry::File, false, ancestor),
-            (Entry::Other, false, ancestor),
-            (Entry::Other, true, path),
+        for (entry, last, p, label) in [
+            (Entry::Directory, true, path, LOCAL_RULES),
+            (Entry::File, false, ancestor, ".oah"),
+            (Entry::Other, false, ancestor, ".oah"),
+            (Entry::Other, true, path, LOCAL_RULES),
         ] {
-            let err = classify_component(entry, false, last, p).unwrap_err();
+            let err = classify_local_component(entry, false, last, p, label).unwrap_err();
             assert_eq!(err.kind(), FsxErrorKind::Io);
             assert_eq!(err.path(), p);
             assert!(err.io_error().is_none());
