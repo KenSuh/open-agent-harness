@@ -7,5 +7,5 @@ mod link_plan;
 
 pub use hash::computed_hash;
 pub use link_plan::{
-    AgentView, LinkAction, LinkPlanRequest, Scope, SkillDirs, SwitchOp, link_plan,
+    AgentView, LinkAction, LinkPlanRequest, PlannedLink, Scope, SkillDirs, SwitchOp, link_plan,
 };
