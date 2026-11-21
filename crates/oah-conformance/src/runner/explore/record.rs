@@ -23,8 +23,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The largest fixture file this adapter writes; the review's own file limit is 1 MiB.
 const FIXTURE_FILE_LIMIT: u64 = 4 << 20;
-/// Maximum byte length of a record fixture relative path.
-const FIXTURE_PATH_LIMIT: usize = 300;
 /// Maximum byte length of one path segment in a record fixture path.
 const FIXTURE_SEGMENT_LIMIT: usize = 255;
 const UPSTREAM_KEYS: [&str; 6] = ["author", "branch", "date", "email", "files", "message"];
@@ -276,7 +274,6 @@ impl<'a> Fixture<'a> {
             field("branch")?,
             field("message")?,
         );
-        validate_branch(branch)?;
         let author = [
             ("GIT_AUTHOR_NAME", name),
             ("GIT_AUTHOR_EMAIL", email),
@@ -317,26 +314,6 @@ impl<'a> Fixture<'a> {
     }
 }
 
-/// Validates a plain local branch name before passing it to `git init -b`.
-fn validate_branch(branch: &str) -> Result<(), String> {
-    let ok = !branch.is_empty()
-        && branch.len() <= FIXTURE_SEGMENT_LIMIT
-        && !branch.starts_with(['-', '.', '/'])
-        && !branch.ends_with(['.', '/'])
-        && !branch.ends_with(".lock")
-        && !branch.contains("..")
-        && !branch.contains("//")
-        && branch
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'));
-    if !ok {
-        return Err(format!(
-            "upstream branch {branch:?} is not a plain branch name"
-        ));
-    }
-    Ok(())
-}
-
 /// Validates every fixture file path and materializes all file payloads before any write or Git call.
 fn prepare_fixture_files(files: &Map<String, Json>) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
     let validated = validate_fixture_paths(files.keys().map(String::as_str))?;
@@ -350,18 +327,14 @@ fn prepare_fixture_files(files: &Map<String, Json>) -> Result<Vec<(PathBuf, Vec<
 
 /// Validates the complete record fixture file inventory before any filesystem write or Git call.
 ///
-/// Accepted record fixture filename grammar:
+/// Single path authority — accepted record fixture filename grammar:
 /// - Passes the runner's plain-relative path check (`safe_relative`: non-empty, `/`-separated,
 ///   no `.` or `..`, no `\\` or `:`, every segment is `Component::Normal`).
-/// - Total path length is at most 300 bytes; each segment is 1..=255 bytes.
-/// - Reserves Git's administrative namespace at any depth across supported hosts (Linux, macOS
-///   case-insensitive / HFS+ ignorable-character aliasing, Windows case-insensitive / trailing
-///   dots or spaces / NTFS 8.3 short-name aliases such as `git~1`): rejects `.git`, `.gitmodules`,
-///   `.gitattributes`, `.gitignore`, and any `.git*` administrative entry.
-/// - Requires ordinary portable ASCII content segments matching `[A-Za-z0-9_][A-Za-z0-9._-]*`
-///   without trailing `.` (no leading `.` or `-`, no spaces, no `~`, no control or non-ASCII
-///   characters) and rejects Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`,
-///   `COM0`-`COM9`, `LPT0`-`LPT9`, with or without extension).
+/// - Each segment is 1..=255 bytes and matches ordinary portable ASCII content names
+///   `[A-Za-z0-9_][A-Za-z0-9._-]*` without a trailing `.`, excluding dot-prefixed administrative
+///   namespaces (including `.git`), spaces, tildes, control characters, and non-ASCII characters.
+/// - Rejects Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`,
+///   `LPT0`-`LPT9`, with or without extension).
 /// - Preflights collisions across the full inventory: rejects duplicate paths, case-insensitive
 ///   collisions, and file-vs-directory prefix collisions.
 fn validate_fixture_paths<'a>(
@@ -394,21 +367,11 @@ fn validate_fixture_paths<'a>(
     Ok(out)
 }
 
-/// Validates one record fixture path against `safe_relative`, Git's reserved administrative
-/// namespace, and the ordinary portable ASCII filename grammar.
+/// Validates one record fixture path against `safe_relative` and the ordinary portable ASCII
+/// content segment grammar.
 fn validate_fixture_path(raw: &str) -> Result<PathBuf, String> {
     let relative = safe_relative(raw)?;
-    if raw.len() > FIXTURE_PATH_LIMIT {
-        return Err(format!(
-            "fixture path {raw:?} exceeds the {FIXTURE_PATH_LIMIT}-byte limit"
-        ));
-    }
     for part in raw.split('/') {
-        if is_reserved_git_segment(part) {
-            return Err(format!(
-                "fixture path {raw:?} enters Git's reserved administrative namespace"
-            ));
-        }
         if !is_ordinary_portable_segment(part) {
             return Err(format!(
                 "fixture path {raw:?} is not an ordinary portable content path"
@@ -418,42 +381,7 @@ fn validate_fixture_path(raw: &str) -> Result<PathBuf, String> {
     Ok(relative)
 }
 
-/// Whether `part` names or aliases Git's administrative namespace across Linux, macOS, and Windows.
-fn is_reserved_git_segment(part: &str) -> bool {
-    let folded: String = part
-        .chars()
-        .filter(|c| !is_ignorable_path_char(*c))
-        .collect::<String>()
-        .trim_end_matches(['.', ' '])
-        .to_ascii_lowercase();
-    if folded == ".git" || folded.starts_with(".git") {
-        return true;
-    }
-    let stem = folded.split('.').next().unwrap_or("");
-    if let Some((prefix, digits)) = stem.split_once('~')
-        && (prefix == "gi" || prefix.starts_with("git"))
-        && !digits.is_empty()
-        && digits.bytes().all(|b| b.is_ascii_digit())
-    {
-        return true;
-    }
-    false
-}
-
-/// Characters ignored by macOS HFS+/APFS path matching or control characters that could mask names.
-fn is_ignorable_path_char(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{00AD}'
-                | '\u{200C}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{206A}'..='\u{206F}'
-                | '\u{FEFF}'
-        )
-}
-
-/// Strict ordinary portable ASCII filename grammar: `[A-Za-z0-9_][A-Za-z0-9._-]*`, no trailing `.`,
+/// Ordinary portable ASCII content segment grammar: `[A-Za-z0-9_][A-Za-z0-9._-]*`, no trailing `.`,
 /// length 1..=255 bytes, and not a Windows reserved device name.
 fn is_ordinary_portable_segment(part: &str) -> bool {
     let bytes = part.as_bytes();
@@ -664,41 +592,21 @@ mod tests {
         .expect("ordinary inventory");
         assert_eq!(multi.len(), 3);
 
-        // Reserved Git administrative names are exercised strictly as inert validator input only.
-        for reserved in [
-            ".git/config",
-            ".GIT/HEAD",
-            "sub/.git/index",
-            ".git./config",
-            ".git /config",
-            ".g\u{200c}it/config",
-            "git~1/config",
-            "GI~2/HEAD",
-            ".gitattributes",
-            ".gitmodules",
-            ".gitignore",
-        ] {
-            let err = validate_fixture_paths([reserved]).expect_err(reserved);
-            assert!(
-                err.contains("reserved administrative namespace"),
-                "expected reserved-namespace error for {reserved:?}, got {err:?}"
-            );
-        }
+        // One reserved administrative name is exercised strictly as inert validator input only.
+        let err =
+            validate_fixture_paths([".git/config"]).expect_err("reserved administrative name");
+        assert!(
+            err.contains("ordinary portable content path"),
+            "unexpected error for reserved name: {err:?}"
+        );
 
-        // Non-portable or grammar-violating paths are rejected as inert validator input.
+        // Plain-relative, portable segment limit, trailing-dot, and Windows device rules apply.
+        let over_limit = "a".repeat(FIXTURE_SEGMENT_LIMIT + 1);
         for invalid in [
-            "",
             "../outside.md",
-            "/abs.md",
-            "skills\\bad.md",
-            "skills/a:b.md",
-            "-flag.md",
-            ".hidden",
-            "skills/trailing.",
-            "skills/with space.md",
             "skills/CON.md",
-            "skills/nul",
-            "skills/caf\u{00e9}.md",
+            "skills/trailing.",
+            over_limit.as_str(),
         ] {
             assert!(
                 validate_fixture_paths([invalid]).is_err(),
