@@ -1,5 +1,5 @@
 // 사실 파일 시험: 들어 있는 facts.toml 이 모든 (에이전트, 능력)을 적고 열린 항목을 맞게 가리키는지, 그리고 D-07 판정을 본다.
-use super::{FACTS_TOML, Facts};
+use super::{FACTS_TOML, Facts, facts};
 use crate::agents::capability::{Basis, Capability, CapabilityName, CapabilityState, Evidence, Os};
 use crate::config::AgentId;
 
@@ -52,37 +52,38 @@ fn the_shipped_file_has_one_entry_per_agent_and_capability() {
 }
 
 #[test]
-fn only_detection_and_sign_in_of_claude_code_and_codex_are_carried() {
-    let facts = Facts::parse(FACTS_TOML).unwrap();
+fn only_claude_and_codex_detection_and_sign_in_are_measured_on_macos_and_windows() {
+    let facts = facts();
     for agent in AgentId::ALL {
         for name in CapabilityName::ALL {
             let fact = facts.get(agent, name).unwrap();
-            let pinned = matches!(agent, AgentId::Claude | AgentId::Codex)
-                && matches!(name, CapabilityName::Detect | CapabilityName::SignIn);
-            assert_eq!(
-                fact.basis == Basis::Carried,
-                pinned,
-                "{agent}.{}",
-                name.as_str()
-            );
-            assert_ne!(
-                fact.basis,
-                Basis::Measured,
-                "nothing is measured yet: {agent}.{}",
-                name.as_str()
-            );
-        }
-    }
-}
-
-#[test]
-fn every_windows_fact_starts_carried() {
-    let facts = Facts::parse(FACTS_TOML).unwrap();
-    for agent in AgentId::ALL {
-        for name in CapabilityName::ALL {
-            let fact = facts.get(agent, name).unwrap();
-            if fact.os.contains(&Os::Windows) {
-                assert_eq!(fact.basis, Basis::Carried, "{agent}.{}", name.as_str());
+            let version = match (agent, name) {
+                (AgentId::Claude, CapabilityName::Detect | CapabilityName::SignIn) => {
+                    Some("2.1.329")
+                }
+                (AgentId::Codex, CapabilityName::Detect | CapabilityName::SignIn) => {
+                    Some("0.170.0")
+                }
+                _ => None,
+            };
+            let capability = name.as_str();
+            assert_eq!(fact.verified_on.as_deref(), version, "{agent}.{capability}");
+            if let Some(version) = version {
+                assert_eq!(fact.basis, Basis::Measured, "{agent}.{capability}");
+                assert_eq!(fact.os.len(), 2, "{agent}.{capability}");
+                for os in [Os::Macos, Os::Windows] {
+                    let state = facts.evaluate(agent, name, os, Some(version)).state();
+                    assert_eq!(
+                        state,
+                        CapabilityState::Verified,
+                        "{agent}.{capability} {os:?}"
+                    );
+                }
+            } else {
+                assert_eq!(fact.basis, Basis::Docs, "{agent}.{capability}");
+                assert!(!fact.os.contains(&Os::Windows), "{agent}.{capability}");
+                let state = facts.evaluate(agent, name, Os::Windows, None).state();
+                assert_eq!(state, CapabilityState::Unknown, "{agent}.{capability}");
             }
         }
     }
@@ -101,10 +102,6 @@ fn on_macos_no_write_bearing_capability_is_usable_yet() {
         }
     }
     let read = |agent, name| facts.evaluate(agent, name, Os::Macos, None).state();
-    assert_eq!(
-        read(AgentId::Claude, CapabilityName::SignIn),
-        CapabilityState::Verified
-    );
     assert_eq!(
         read(AgentId::Copilot, CapabilityName::Detect),
         CapabilityState::Verified
