@@ -42,6 +42,7 @@ pub mod codes {
     pub const RULES_NOT_SYNCED: &str = "OAH_RULES_NOT_SYNCED";
     /// A Team Workflow or rules operation needs an open project (M2-S1).
     pub const PROJECT_NOT_OPEN: &str = "OAH_PROJECT_NOT_OPEN";
+    pub const PROJECT_CHANGED: &str = "OAH_PROJECT_CHANGED";
     /// An assignment names a section that is not in `sections.order` (M2-S1).
     pub const SECTION_UNKNOWN: &str = "OAH_SECTION_UNKNOWN";
     /// A preset that does not exist or names an agent that is not installed here (M2-S1).
@@ -121,6 +122,7 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
             "The assignment is saved. Fix the reason shown, then use Sync now or run `oah rules sync`."
         }
         codes::PROJECT_NOT_OPEN => "Open a project folder first.",
+        codes::PROJECT_CHANGED => "Open the intended project and repeat the action.",
         codes::SECTION_UNKNOWN => "Add the section id to sections.order in .oah/config.toml first.",
         codes::PRESET_UNAVAILABLE => {
             "Install the agents the preset names, or assign each section by hand."

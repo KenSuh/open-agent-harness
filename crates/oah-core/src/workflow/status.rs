@@ -13,19 +13,22 @@ use crate::rules::body::agent_name;
 /// Every broken `independent_of` rule as (section, other section, shared agent), in section order. An id that is
 /// not a section, or that names the section itself, is skipped.
 pub fn independence_breaks(effective: &Effective) -> Vec<(String, String, AgentId)> {
-    let mut breaks = Vec::new();
-    for section in &effective.sections {
-        let Some(agent) = effective.agent_for(&section.id) else {
-            continue;
-        };
-        for other in &section.independent_of {
-            let listed = effective.sections.iter().any(|s| &s.id == other);
-            if *other != section.id && listed && effective.agent_for(other) == Some(agent) {
-                breaks.push((section.id.clone(), other.clone(), agent));
-            }
-        }
-    }
-    breaks
+    independence_pairs(effective)
+        .filter_map(|(section, other)| {
+            let agent = effective.agent_for(section)?;
+            (effective.agent_for(other) == Some(agent))
+                .then(|| (section.to_string(), other.to_string(), agent))
+        })
+        .collect()
+}
+
+fn independence_pairs(effective: &Effective) -> impl Iterator<Item = (&str, &str)> {
+    effective.sections.iter().flat_map(move |section| {
+        section.independent_of.iter().filter_map(move |other| {
+            (*other != section.id && effective.sections.iter().any(|s| &s.id == other))
+                .then_some((section.id.as_str(), other.as_str()))
+        })
+    })
 }
 
 fn find(agents: &[AgentStatusDto], id: AgentId) -> Option<&AgentStatusDto> {
@@ -68,17 +71,15 @@ fn banner_agent(agents: &[AgentStatusDto], id: AgentId) -> BannerAgentDto {
     }
 }
 
-/// Whether `candidate` keeps every `independent_of` rule `section` takes part in.
-fn keeps_rules(effective: &Effective, section: &str, candidate: AgentId) -> bool {
-    effective.sections.iter().all(|other| {
-        let linked = (other.id != section)
-            && (other.independent_of.iter().any(|id| id == section)
-                || effective
-                    .sections
-                    .iter()
-                    .find(|s| s.id == section)
-                    .is_some_and(|s| s.independent_of.contains(&other.id)));
-        !linked || effective.agent_for(&other.id) != Some(candidate)
+fn keeps_rules(effective: &Effective, missing: &[BannerSectionDto], candidate: AgentId) -> bool {
+    let replaced = |id: &str| missing.iter().any(|section| section.id == id);
+    independence_pairs(effective).all(|(section, other)| {
+        match (replaced(section), replaced(other)) {
+            (true, true) => false,
+            (true, false) => effective.agent_for(other) != Some(candidate),
+            (false, true) => effective.agent_for(section) != Some(candidate),
+            (false, false) => true,
+        }
     })
 }
 
@@ -103,9 +104,7 @@ pub fn status(effective: &Effective, agents: &[AgentStatusDto]) -> BannerDto {
             candidate.can_own_section()
                 && find(agents, *candidate)
                     .is_some_and(|status| status.installed && status.sign_in == SignInDto::SignedIn)
-                && missing
-                    .iter()
-                    .all(|section| keeps_rules(effective, &section.id, *candidate))
+                && keeps_rules(effective, &missing, *candidate)
         });
         let named: Vec<String> = missing
             .iter()

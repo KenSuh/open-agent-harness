@@ -1,9 +1,9 @@
 // 규칙 쓰기: 블록·CLAUDE.md·얇은 파일 계획을 프로젝트 안 고정 경로에만 계획 엔진으로 원자적으로 쓰고 다시 읽어 확인한다.
-//! The rules writer (design §3.4 "When files are written", CONTRACTS C12). [`RulesSnapshot::read`] reads the five
-//! project files without following links; [`plan_sync`] renders the 1.0 body from the effective config and plans
+//! The rules writer (design §3.4 "When files are written", CONTRACTS C12). [`RulesSnapshot::read`] reads the
+//! eligible files; [`plan_sync`] renders the 1.0 body from the config snapshot and plans
 //! the block, `CLAUDE.md` and the thin files (pure, nothing written); [`check_sync`] turns a plan into drift lines
-//! without writing; [`apply_sync`] writes every planned file through the one apply engine (C4): a basis per file,
-//! the initial preflight, one target at a time under its own lock, each write atomic and then read back. A file
+//! without writing; [`apply_sync`] uses C4 to check the source and target bases first and then writes one target
+//! at a time under its own lock, each write atomic and then read back. A file
 //! that does not read back as planned is `OAH_RULES_VERIFY`.
 //!
 //! Every target is a fixed project-relative path under the project root: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` and
@@ -13,58 +13,65 @@
 use super::body::{AlwaysSkill, SkillsForBlock, render_bodies};
 use super::check::{Drift, drift};
 use super::error::{RulesError, RulesErrorKind as Kind, codes};
-use super::input::{AGENTS_MD, CLAUDE_MD, ProjectFile, RulesFiles};
+use super::input::{AGENTS_MD, CLAUDE_MD, LOCAL_RULES, ProjectFile, RulesFiles};
 use super::markers::find_block;
 use super::plan::{RulesInput, RulesPlan, decode, plan};
 use super::text::split_lines;
-use super::thin::{CURSOR_MDC, GEMINI_MD, IMPORT, ThinFilePlan, ThinInput, plan_thin};
-use crate::config::{AgentId, Effective};
+use super::thin::{
+    CURSOR_MDC, GEMINI_MD, IMPORT, ThinFilePlan, ThinInput, cursor_trigger, plan_thin,
+};
+use crate::config::{AgentId, ProjectConfig};
 use crate::error::Error;
 use crate::fsx::{self, FsxError, FsxErrorKind, LockOptions, WriteReceipt, links::Entry};
 use crate::plan::{
-    Action, Basis, ChangePlan, ItemResult, Outcome, Owner, PlanItem, Target, write_target,
+    Action, Basis, ChangePlan, ItemResult, Outcome, Owner, PlanError, PlanItem, Target,
+    write_target,
 };
 use crate::tasks::CancelToken;
 use std::path::{Path, PathBuf};
 
 /// The project files a rules sync reads, as read once from one root.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RulesSnapshot {
-    pub root: PathBuf,
-    pub files: RulesFiles,
-    pub gemini_md: ProjectFile,
-    pub cursor_mdc: ProjectFile,
+pub struct RulesSnapshot<'a> {
+    root: PathBuf,
+    files: RulesFiles,
+    gemini_md: ProjectFile,
+    cursor_mdc: ProjectFile,
+    detected: &'a [AgentId],
 }
 
-impl RulesSnapshot {
-    /// Reads `AGENTS.md`, `CLAUDE.md`, `.oah/rules.local.md`, `GEMINI.md` and `.cursor/rules/oah.mdc` under
-    /// `root`. Reading writes nothing.
-    pub fn read(root: &Path) -> Result<RulesSnapshot, FsxError> {
+impl<'a> RulesSnapshot<'a> {
+    /// Reads the block inputs and Gemini's possible existing file. Cursor's file is read only when detected.
+    pub fn read(root: &Path, detected: &'a [AgentId]) -> Result<Self, FsxError> {
         Ok(RulesSnapshot {
             root: root.to_path_buf(),
             files: RulesFiles::read(root)?,
             gemini_md: ProjectFile::read(root, GEMINI_MD)?,
-            cursor_mdc: ProjectFile::read(root, CURSOR_MDC)?,
+            cursor_mdc: if cursor_trigger(detected).is_some() {
+                ProjectFile::read(root, CURSOR_MDC)?
+            } else {
+                ProjectFile::Missing
+            },
+            detected,
         })
-    }
-
-    /// The managed block of `AGENTS.md` as it is on disk, markers included; `None` when there is none.
-    pub fn block_text(&self) -> Option<String> {
-        let text = std::str::from_utf8(self.files.agents.bytes()?).ok()?;
-        let lines = split_lines(text);
-        let (begin, end) = find_block(&lines).ok()??;
-        Some(lines[begin..=end].concat())
     }
 }
 
-/// What the writer plans from: the effective config, the always-on skills (empty until `skills::lock` exists,
-/// D-14), the agents the caller detected as installed (a read, no `InstalledAgent` witness, D-33) and the
-/// `--lang` value (`None`: detect from the block, else `en`).
+/// The managed block of `AGENTS.md` as it is on disk, markers included.
+pub(crate) fn read_block(root: &Path) -> Option<String> {
+    let file = ProjectFile::read(root, AGENTS_MD).ok()?;
+    let text = std::str::from_utf8(file.bytes()?).ok()?;
+    let lines = split_lines(text);
+    let (begin, end) = find_block(&lines).ok()??;
+    Some(lines[begin..=end].concat())
+}
+
+/// The config snapshot, the always-on skills (empty until `skills::lock` exists, D-14) and the `--lang` value
+/// (`None`: detect from the block, else `en`).
 #[derive(Debug, Clone, Copy)]
 pub struct SyncInput<'a> {
-    pub effective: &'a Effective,
+    pub config: &'a ProjectConfig,
     pub always: &'a [AlwaysSkill],
-    pub detected: &'a [AgentId],
     pub lang: Option<&'a str>,
 }
 
@@ -81,12 +88,49 @@ impl FileWrite {
     pub fn needs_write(&self) -> bool {
         self.before.as_deref() != Some(self.after.as_slice())
     }
+
+    pub(crate) fn plan_item(&self, root: &Path) -> PlanItem {
+        let target = target_path(root, self.path);
+        PlanItem {
+            id: format!(
+                "rules:{}:{}",
+                crate::paths::folder_id(&target),
+                action_id(self.action)
+            ),
+            target,
+            owner: Owner::Project,
+            action: self.action,
+            summary: summary(self),
+            detail: None,
+        }
+    }
+
+    pub(crate) fn basis(&self, root: &Path) -> Basis {
+        basis(target_path(root, self.path), self.before.as_deref())
+    }
+}
+
+fn action_id(action: Action) -> &'static str {
+    match action {
+        Action::Create => "create",
+        Action::Update => "update",
+        Action::Append => "append",
+        Action::ReplaceBlock => "replace-block",
+        Action::Link => "link",
+        Action::Unlink => "unlink",
+        Action::Switch => "switch",
+        Action::Move => "move",
+        Action::Remove => "remove",
+        Action::Keep => "keep",
+    }
 }
 
 /// A computed sync: the block plan, the thin-file plans, and every planned file in write order (`AGENTS.md`,
 /// `CLAUDE.md`, then the thin files), including the ones that already match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncPlan {
+    root: PathBuf,
+    pub(crate) sources: [Basis; 2],
     pub rules: RulesPlan,
     pub thin: Vec<ThinFilePlan>,
     pub files: Vec<FileWrite>,
@@ -135,37 +179,30 @@ impl SyncPlan {
         lines
     }
 
-    /// The plan as one C4 change plan over the files that need a write, each with its basis.
-    pub fn to_change_plan(&self, root: &Path) -> ChangePlan {
-        let mut items = Vec::new();
-        let mut basis = Vec::new();
-        for file in self.writes() {
-            let target = target_path(root, file.path);
-            items.push(PlanItem {
-                id: item_id(file.path),
-                target: target.clone(),
-                owner: Owner::Project,
-                action: file.action,
-                summary: summary(file),
-                detail: None,
-            });
-            basis.push(Basis {
-                target,
-                fingerprint: file.before.as_deref().map(fsx::Fingerprint::of),
-            });
-        }
+    /// The C4 plan includes the files to write and the sources that determined their contents.
+    pub fn to_change_plan(&self) -> ChangePlan {
         ChangePlan {
             id: String::from("rules-sync"),
-            items,
+            items: self
+                .writes()
+                .map(|file| file.plan_item(&self.root))
+                .collect(),
             warnings: Vec::new(),
-            basis,
+            basis: self
+                .sources
+                .iter()
+                .cloned()
+                .chain(self.writes().map(|file| file.basis(&self.root)))
+                .collect(),
         }
     }
 }
 
-/// The stable id of the item that writes `path` (the same work has the same id in a plan and in its apply).
-pub fn item_id(path: &str) -> String {
-    format!("rules:{path}")
+fn basis(target: PathBuf, bytes: Option<&[u8]>) -> Basis {
+    Basis {
+        target,
+        fingerprint: bytes.map(fsx::Fingerprint::of),
+    }
 }
 
 /// The absolute target of a fixed project-relative path.
@@ -186,16 +223,20 @@ fn summary(file: &FileWrite) -> String {
 }
 
 /// Renders the 1.0 body from `input` and plans every file; writes nothing. A refusal plans nothing.
-pub fn plan_sync(snapshot: &RulesSnapshot, input: &SyncInput<'_>) -> Result<SyncPlan, RulesError> {
-    let skills = SkillsForBlock::from_config(input.effective, input.always.to_vec());
-    let bodies = render_bodies(input.effective, &skills);
+pub fn plan_sync(
+    snapshot: &RulesSnapshot<'_>,
+    input: &SyncInput<'_>,
+) -> Result<SyncPlan, RulesError> {
+    let effective = input.config.effective();
+    let skills = SkillsForBlock::from_config(effective, input.always.to_vec());
+    let bodies = render_bodies(effective, &skills);
     let rules = plan(&RulesInput {
         files: &snapshot.files,
         lang: input.lang,
         bodies: &bodies,
     })?;
     let thin = plan_thin(&ThinInput {
-        detected: input.detected,
+        detected: snapshot.detected,
         gemini_md: &snapshot.gemini_md,
         cursor_mdc: &snapshot.cursor_mdc,
     })?;
@@ -237,12 +278,25 @@ pub fn plan_sync(snapshot: &RulesSnapshot, input: &SyncInput<'_>) -> Result<Sync
             after: thin.after.clone(),
         });
     }
-    Ok(SyncPlan { rules, thin, files })
+    let config = input.config.file();
+    Ok(SyncPlan {
+        root: snapshot.root.clone(),
+        sources: [
+            basis(config.path().to_path_buf(), config.source_bytes()),
+            basis(
+                target_path(&snapshot.root, LOCAL_RULES),
+                snapshot.files.local_rules.as_deref(),
+            ),
+        ],
+        rules,
+        thin,
+        files,
+    })
 }
 
 /// Plans and reports drift; writes nothing. A refusal is returned as the error a sync would hit.
 pub fn check_sync(
-    snapshot: &RulesSnapshot,
+    snapshot: &RulesSnapshot<'_>,
     input: &SyncInput<'_>,
 ) -> Result<(SyncPlan, Vec<DriftLine>), RulesError> {
     let plan = plan_sync(snapshot, input)?;
@@ -267,38 +321,24 @@ impl SyncResult {
 
 /// Writes every file of `plan` that needs a write, with the production writer: the missing folders on the way
 /// (after a link check), then the C6 writer of [`write_target`] (lock, basis re-check, atomic write).
-pub fn apply_sync(
-    root: &Path,
-    plan: &SyncPlan,
-    cancel: &CancelToken,
-    lock: LockOptions,
-) -> SyncResult {
-    apply_sync_with(root, plan, cancel, |target, bytes| {
-        let relative = plan
-            .files
-            .iter()
-            .find(|file| target_path(root, file.path) == target.path)
-            .map_or("", |file| file.path);
-        if let Err(error) = make_parents(root, relative) {
-            return Outcome::Failed(error);
+pub fn apply_sync(plan: &SyncPlan, cancel: &CancelToken, lock: LockOptions) -> SyncResult {
+    apply_sync_with(plan, cancel, |target, bytes| {
+        let root = &plan.root;
+        match prepare_target(root, target.path) {
+            Ok(_) => write_target(target, bytes, lock),
+            Err(error) => Outcome::Failed(error),
         }
-        write_target(target, bytes, lock)
     })
 }
 
-/// Writes one planned rules file as a C6 writer and reads it back: the missing folders of `relative` (after a link
+/// Writes one planned rules file as a C6 writer and reads it back: the missing folders of the target (after a link
 /// check), then [`write_target`] (lock, basis re-check, atomic write), then a read-back that must equal `bytes`
 /// (`OAH_RULES_VERIFY` otherwise). This is the executor of sync step 3 (`app::sync`).
-pub fn write_file(
-    root: &Path,
-    relative: &str,
-    target: &Target<'_>,
-    bytes: &[u8],
-    lock: LockOptions,
-) -> Outcome {
-    if let Err(error) = make_parents(root, relative) {
-        return Outcome::Failed(error);
-    }
+pub fn write_file(root: &Path, target: &Target<'_>, bytes: &[u8], lock: LockOptions) -> Outcome {
+    let relative = match prepare_target(root, target.path) {
+        Ok(relative) => relative,
+        Err(error) => return Outcome::Failed(error),
+    };
     match write_target(target, bytes, lock) {
         Outcome::Done(receipts) => match read_back(root, relative, bytes) {
             Ok(()) => Outcome::Done(receipts),
@@ -308,19 +348,26 @@ pub fn write_file(
     }
 }
 
+fn prepare_target(root: &Path, target: &Path) -> Result<&'static str, Error> {
+    let relative = [AGENTS_MD, CLAUDE_MD, GEMINI_MD, CURSOR_MDC]
+        .into_iter()
+        .find(|relative| target_path(root, relative) == target)
+        .ok_or_else(|| PlanError::MissingBasis {
+            target: target.to_path_buf(),
+        })?;
+    make_parents(root, relative)?;
+    Ok(relative)
+}
+
 /// [`apply_sync`] with the writer as a parameter, so a test can supply one; every write it reports `done` is
 /// read back without following links and compared with the planned bytes. A difference is `unknown` with
 /// `OAH_RULES_VERIFY`, and the apply stops there.
-pub fn apply_sync_with<W>(
-    root: &Path,
-    plan: &SyncPlan,
-    cancel: &CancelToken,
-    mut write: W,
-) -> SyncResult
+pub fn apply_sync_with<W>(plan: &SyncPlan, cancel: &CancelToken, mut write: W) -> SyncResult
 where
     W: FnMut(&Target<'_>, &[u8]) -> Outcome,
 {
-    let change = plan.to_change_plan(root);
+    let root = &plan.root;
+    let change = plan.to_change_plan();
     let ids: Vec<&str> = change.items.iter().map(|item| item.id.as_str()).collect();
     let accepted = change.accept(&ids);
     let applied = crate::plan::apply(&accepted, cancel, |target| {

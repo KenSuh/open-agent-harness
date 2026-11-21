@@ -259,6 +259,11 @@ export interface PresetApplyReq {
   approve_upgrade?: string;
 }
 
+export interface WorkflowProjectReq<T = Record<string, never>> {
+  readonly project_id: string;
+  readonly input: T;
+}
+
 export interface StagesSetDto {
   saved: boolean;
   upgraded: boolean;

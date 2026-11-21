@@ -20,6 +20,7 @@ import type {
   TaskId,
   TaskSnapshotDto,
   WorkflowDto,
+  WorkflowProjectReq,
 } from "../contract";
 
 export interface ScanChanged {
@@ -41,12 +42,12 @@ export interface Transport {
   settingsSet(edits: SettingsEdit[]): Promise<SettingsDto>;
   agentsList(): Promise<AgentStatusDto[]>;
   startAgentsProbe(req: AgentsProbeReq, onEvent: (event: TaskEvent<AgentStatusDto[]>) => void): Promise<TaskId>;
-  sectionsShow(): Promise<WorkflowDto>;
-  stagesSet(req: StagesSetReq): Promise<StagesSetDto>;
-  presetApply(req: PresetApplyReq): Promise<StagesSetDto>;
+  sectionsShow(req: WorkflowProjectReq): Promise<WorkflowDto>;
+  stagesSet(req: WorkflowProjectReq<StagesSetReq>): Promise<StagesSetDto>;
+  presetApply(req: WorkflowProjectReq<PresetApplyReq>): Promise<StagesSetDto>;
   workflowStatus(): Promise<BannerDto>;
   rulesCheck(): Promise<RulesStateDto>;
-  rulesSync(): Promise<RulesSyncDto>;
+  rulesSync(req: WorkflowProjectReq): Promise<RulesSyncDto>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
   onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;

@@ -20,8 +20,8 @@ pub mod presets;
 pub mod status;
 
 pub use ops::{
-    preset_apply, rules_check, rules_check_at, rules_sync, rules_sync_at, sections_show,
-    set_stages, stages_set, view, workflow_status,
+    preset_apply, rules_check, rules_check_at, rules_sync, rules_sync_at, rules_sync_for_project,
+    sections_show, sections_show_for_project, set_stages, stages_set, view, workflow_status,
 };
 pub use presets::{PRESETS, Preset};
 pub use status::{independence_breaks, status};
@@ -33,16 +33,23 @@ use crate::error::{Coded, codes};
 pub enum WorkflowError {
     /// No project is open in the session.
     NoProject,
+    ProjectChanged,
     /// The section is not in `sections.order`.
-    UnknownSection { section: String },
+    UnknownSection {
+        section: String,
+    },
     /// The preset does not exist, or names an agent that is not installed here.
-    PresetUnavailable { preset: String, reason: String },
+    PresetUnavailable {
+        preset: String,
+        reason: String,
+    },
 }
 
 impl Coded for WorkflowError {
     fn code(&self) -> &'static str {
         match self {
             WorkflowError::NoProject => codes::PROJECT_NOT_OPEN,
+            WorkflowError::ProjectChanged => codes::PROJECT_CHANGED,
             WorkflowError::UnknownSection { .. } => codes::SECTION_UNKNOWN,
             WorkflowError::PresetUnavailable { .. } => codes::PRESET_UNAVAILABLE,
         }
@@ -51,6 +58,7 @@ impl Coded for WorkflowError {
     fn message(&self) -> String {
         match self {
             WorkflowError::NoProject => String::from("no project is open"),
+            WorkflowError::ProjectChanged => String::from("the open project changed"),
             WorkflowError::UnknownSection { section } => {
                 format!("{section:?} is not a section in sections.order; nothing was written")
             }

@@ -14,6 +14,7 @@ import type {
   TaskEvent,
   TaskSnapshotDto,
   WorkflowDto,
+  WorkflowProjectReq,
 } from "../../src/contract";
 import type { ScanChanged, Transport } from "../../src/transport/types";
 import appInfo from "../../../../../crates/oah-core/tests/dto_samples/app/app_info.json";
@@ -81,8 +82,7 @@ export interface FakeTransport extends Transport {
   emitAgentsChanged(change: AgentsChangedDto): void;
   /** Whether an agents-changed subscription is live. */
   agentsSubscribed(): boolean;
-  /** Every `stages_set` and `preset_apply` request, in order. */
-  workflowRequests: (StagesSetReq | PresetApplyReq)[];
+  workflowRequests: WorkflowProjectReq<StagesSetReq | PresetApplyReq | Record<string, never>>[];
 }
 
 export function createFakeTransport(initial: { project?: ProjectDto | null; tasks?: TaskSnapshotDto[] } = {}): FakeTransport {
@@ -176,9 +176,9 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       };
     },
     workflowRequests: [],
-    async sectionsShow() {
+    async sectionsShow(req) {
       fake.calls.push("sections_show");
-      return fake.override.sectionsShow ? fake.override.sectionsShow() : sampleWorkflow.legacy;
+      return fake.override.sectionsShow ? fake.override.sectionsShow(req) : sampleWorkflow.legacy;
     },
     async stagesSet(req) {
       fake.calls.push("stages_set");
@@ -198,9 +198,10 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       fake.calls.push("rules_check");
       return fake.override.rulesCheck ? fake.override.rulesCheck() : sampleWorkflow.legacy.rules;
     },
-    async rulesSync() {
+    async rulesSync(req) {
       fake.calls.push("rules_sync");
-      return fake.override.rulesSync ? fake.override.rulesSync() : { synced: true, written: [], error: null };
+      fake.workflowRequests.push(req);
+      return fake.override.rulesSync ? fake.override.rulesSync(req) : { synced: true, written: [], error: null };
     },
     emitProbe: (event) => probeSink?.(event),
     emitAgentsChanged: (change) => agentsSink?.(change),

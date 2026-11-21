@@ -32,7 +32,7 @@ pub use workflow::{
     AdvancedDto, AgentOptionDto, BannerAgentDto, BannerDto, BannerPairDto, BannerSectionDto,
     ConfigFormatDto, DriftDto, IndependenceReq, PlannedWriteDto, PresetApplyReq, PresetDto,
     PresetStageDto, RulesStateDto, RulesSyncDto, RulesWriteDto, SectionDto, StageChangeReq,
-    StagesSetDto, StagesSetReq, WorkflowDto,
+    StagesSetDto, StagesSetReq, WorkflowDto, WorkflowProjectReq,
 };
 
 use crate::paths::{Env, canonical_folder, user_home};

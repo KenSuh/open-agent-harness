@@ -1,10 +1,15 @@
 // 팀 작업 흐름 시험: 배정 저장 뒤 블록만 바뀌고, 옛 설정은 승인·백업 뒤에만 올라가며, 규칙 거절은 저장된 배정을 남기고, 배너는 정해진 순서다.
-use oah_core::agents::{CapabilityState, Kind, Status};
+#[path = "support/fake_agents.rs"]
+mod fake_agents;
+
+use fake_agents::FakeProbe;
+use oah_core::agents::{CapabilityState, Kind, Os, Status};
 use oah_core::app::{self, Session};
 use oah_core::config::{AgentId, UPGRADE_WARNING};
 use oah_core::dto::{
-    AgentIdDto, AgentStatusDto, BannerDto, CapabilitiesDto, ConfigFormatDto, Empty,
-    IndependenceReq, LoginHintDto, SignInDto, StageChangeReq, StagesSetReq,
+    AgentIdDto, AgentStatusDto, AgentsProbeReq, BannerDto, CapabilitiesDto, ConfigFormatDto, Empty,
+    IndependenceReq, LoginHintDto, PresetApplyReq, SignInDto, StageChangeReq, StagesSetReq,
+    WorkflowProjectReq,
 };
 use oah_core::paths::{self, Env};
 use oah_core::tasks::{CancelToken, NoProgress};
@@ -425,6 +430,36 @@ fn thin_files_follow_detection_and_keep_user_content_inside_the_project() {
 }
 
 #[test]
+fn an_ineligible_cursor_path_leaves_workflow_and_immediate_rules_available() {
+    let project = Project::new(&[("GEMINI.md", b"user text\n")]);
+    let cursor = project.root.join(".cursor/rules/oah.mdc");
+    fs::create_dir_all(&cursor).unwrap();
+    let cancel = CancelToken::new();
+    let ctx = project.session.ctx(&cancel, &NoProgress);
+    app::project_open(&ctx, &project.root).unwrap();
+    let page = app::sections_show(&ctx, Empty {}).unwrap();
+    assert!(page.rules.error.is_none());
+    let check = app::rules_check(&ctx, Empty {}).unwrap();
+    assert_eq!(check, page.rules);
+    assert_eq!(
+        check
+            .writes
+            .iter()
+            .map(|write| write.path.as_str())
+            .collect::<Vec<_>>(),
+        ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+    );
+    assert!(!project.root.join("AGENTS.md").exists());
+    let sync = app::rules_sync(&ctx, Empty {}).unwrap();
+    assert!(sync.synced);
+    assert_eq!(
+        project.read("GEMINI.md").unwrap(),
+        b"user text\n@AGENTS.md\n"
+    );
+    assert!(cursor.is_dir());
+}
+
+#[test]
 fn the_banner_takes_the_first_match_of_the_fixed_order() {
     let project = Project::new(&[(
         ".oah/config.toml",
@@ -526,6 +561,36 @@ fn the_banner_takes_the_first_match_of_the_fixed_order() {
 }
 
 #[test]
+fn a_common_replacement_must_keep_independence_between_two_missing_sections() {
+    let project = Project::new(&[(
+        ".oah/config.toml",
+        b"[stages]\nbuild = \"gemini\"\nreview = \"codex\"\nfix = \"claude\"\n",
+    )]);
+    let agents = [
+        agent(AgentId::Claude, true, SignInDto::SignedIn),
+        agent(AgentId::Codex, false, SignInDto::Unknown),
+        agent(AgentId::Gemini, false, SignInDto::Unknown),
+    ];
+    let banner = project.view(&agents).banner;
+    let BannerDto::NotInstalled {
+        sections,
+        suggestion,
+        ..
+    } = banner
+    else {
+        panic!("expected the missing-agent banner, got {banner:?}");
+    };
+    assert_eq!(
+        sections
+            .iter()
+            .map(|section| section.id.as_str())
+            .collect::<Vec<_>>(),
+        ["build", "review"]
+    );
+    assert_eq!(suggestion, None);
+}
+
+#[test]
 fn a_signed_out_agent_can_be_assigned_and_the_independence_switch_writes_the_list() {
     let project = Project::new(&[(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]);
     let mut agents = ready_agents();
@@ -603,7 +668,7 @@ fn the_session_commands_share_the_core_and_rules_check_writes_nothing() {
         app::sections_show(&ctx, Empty {}).unwrap_err().code(),
         "OAH_PROJECT_NOT_OPEN"
     );
-    app::project_open(&ctx, &project.root).unwrap();
+    let opened = app::project_open(&ctx, &project.root).unwrap();
     let before = project.tree();
     let check = app::rules_check(&ctx, Empty {}).unwrap();
     assert!(!check.synced);
@@ -616,9 +681,12 @@ fn the_session_commands_share_the_core_and_rules_check_writes_nothing() {
         ["AGENTS.md", "CLAUDE.md"]
     );
     assert_eq!(project.tree(), before, "rules_check wrote nothing");
-    let preset = oah_core::dto::PresetApplyReq {
-        preset: String::from("research-build"),
-        approve_upgrade: None,
+    let preset = WorkflowProjectReq {
+        project_id: opened.id.clone(),
+        input: PresetApplyReq {
+            preset: String::from("research-build"),
+            approve_upgrade: None,
+        },
     };
     assert_eq!(
         app::preset_apply(&ctx, preset).unwrap_err().code(),
@@ -635,12 +703,127 @@ fn the_session_commands_share_the_core_and_rules_check_writes_nothing() {
         app::workflow_status(&ctx, Empty {}).unwrap(),
         BannerDto::SignInUnknown { .. }
     ));
-    let saved = app::stages_set(&ctx, change("build", AgentId::Codex)).unwrap();
+    let saved = app::stages_set(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened.id,
+            input: change("build", AgentId::Codex),
+        },
+    )
+    .unwrap();
     assert!(saved.saved && saved.synced);
     assert_eq!(
         app::sections_show(&ctx, Empty {}).unwrap().config_format,
         ConfigFormatDto::Current
     );
+}
+
+#[test]
+fn a_project_switch_refuses_late_workflow_requests_even_for_identical_legacy_bytes() {
+    let a = Project::new(&[(".oah/config.toml", LEGACY.as_bytes())]);
+    let b = Project::new(&[(".oah/config.toml", LEGACY.as_bytes())]);
+    let cancel = CancelToken::new();
+    let ctx = a.session.ctx(&cancel, &NoProgress);
+    let probe = FakeProbe::new(Os::Macos)
+        .program("claude", "/bin/claude")
+        .run(
+            "/bin/claude --version",
+            Some(0),
+            "2.1.144 (Claude Code)\n",
+            "",
+        )
+        .program("codex", "/bin/codex")
+        .run("/bin/codex --version", Some(0), "codex-cli 0.163.0\n", "");
+    app::agents_probe_with(
+        &ctx,
+        AgentsProbeReq {
+            agents: Some(vec![
+                AgentIdDto(AgentId::Claude),
+                AgentIdDto(AgentId::Codex),
+            ]),
+            sign_in: false,
+            focus: false,
+        },
+        &probe,
+    )
+    .unwrap();
+    let opened_a = app::project_open(&ctx, &a.root).unwrap();
+    let req_a = WorkflowProjectReq {
+        project_id: opened_a.id,
+        input: Empty {},
+    };
+    let view_a = app::sections_show_for_project(&ctx, req_a.clone()).unwrap();
+    let opened_b = app::project_open(&ctx, &b.root).unwrap();
+    let req_b = WorkflowProjectReq {
+        project_id: opened_b.id.clone(),
+        input: Empty {},
+    };
+    let view_b = app::sections_show_for_project(&ctx, req_b.clone()).unwrap();
+    assert_eq!(view_a.config_sha256, view_b.config_sha256);
+    let edit = StagesSetReq {
+        approve_upgrade: view_a.config_sha256.clone(),
+        ..change("build", AgentId::Codex)
+    };
+    let preset = PresetApplyReq {
+        preset: String::from("balanced"),
+        approve_upgrade: view_a.config_sha256,
+    };
+    let before_a = a.tree();
+    let before_b = b.tree();
+    let errors = [
+        app::sections_show_for_project(&ctx, req_a.clone()).unwrap_err(),
+        app::stages_set(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: req_a.project_id.clone(),
+                input: edit.clone(),
+            },
+        )
+        .unwrap_err(),
+        app::preset_apply(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: req_a.project_id.clone(),
+                input: preset.clone(),
+            },
+        )
+        .unwrap_err(),
+        app::rules_sync_for_project(&ctx, req_a).unwrap_err(),
+    ];
+    assert!(
+        errors
+            .iter()
+            .all(|error| error.code() == "OAH_PROJECT_CHANGED")
+    );
+    assert_eq!(a.tree(), before_a);
+    assert_eq!(b.tree(), before_b);
+
+    assert!(app::rules_sync_for_project(&ctx, req_b).unwrap().synced);
+    assert!(b.root.join("AGENTS.md").is_file());
+    let saved = app::stages_set(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened_b.id.clone(),
+            input: edit,
+        },
+    )
+    .unwrap();
+    assert!(saved.upgraded && saved.synced);
+    assert_eq!(
+        b.read(".oah/config.toml.v0.4.bak").unwrap(),
+        LEGACY.as_bytes()
+    );
+    let preset = app::preset_apply(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened_b.id,
+            input: preset,
+        },
+    )
+    .unwrap();
+    assert!(preset.saved && preset.synced);
+    assert!(b.text(".oah/config.toml").contains("build = \"claude\""));
+    assert_eq!(a.tree(), before_a);
 }
 
 fn sample(name: &str) -> PathBuf {

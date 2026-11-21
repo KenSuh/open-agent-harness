@@ -30,7 +30,7 @@ pub use plan::{
 };
 pub use sync::{
     DriftLine, FileWrite, RulesSnapshot, SyncInput, SyncPlan, SyncResult, apply_sync,
-    apply_sync_with, check_sync, item_id, plan_sync, target_path, write_file,
+    apply_sync_with, check_sync, plan_sync, target_path, write_file,
 };
 pub use text::{Eol, split_lines};
 pub use thin::{ThinFilePlan, ThinFileTrigger, ThinInput, plan_thin};

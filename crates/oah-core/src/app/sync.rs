@@ -106,6 +106,7 @@ pub struct SyncItem {
 pub struct StepPlan {
     pub items: Vec<SyncItem>,
     pub notices: Vec<NoticeDto>,
+    pub source_basis: Vec<Basis>,
 }
 
 /// A step's pure planner over a snapshot.
@@ -159,18 +160,22 @@ pub fn sync_plan(
     let mut items: Vec<SyncItem> = Vec::new();
     let mut warnings: Vec<NoticeDto> = Vec::new();
     let mut steps = Vec::new();
+    let mut basis: Vec<Basis> = Vec::new();
     for row in registry {
         ctx.cancel.check()?;
         let planned = (row.plan)(ctx, project)?;
+        for snapshot in planned
+            .source_basis
+            .into_iter()
+            .chain(planned.items.iter().map(|item| item.basis.clone()))
+        {
+            if !basis.contains(&snapshot) {
+                basis.push(snapshot);
+            }
+        }
         items.extend(planned.items);
         warnings.extend(planned.notices);
         steps.push(row.step);
-    }
-    let mut basis: Vec<Basis> = Vec::new();
-    for item in &items {
-        if !basis.iter().any(|known| known.target == item.basis.target) {
-            basis.push(item.basis.clone());
-        }
     }
     Ok(SyncPlan {
         plan: ChangePlan {
@@ -236,8 +241,6 @@ pub fn sync_apply<S: AsRef<str>>(
     Ok(SyncReport { steps, apply })
 }
 
-const RULES_PREFIX: &str = "rules:";
-
 /// Step 3's planner: the rules writer's plan from the project config and the session's agent detection; a refusal
 /// plans nothing and becomes a warning with its reason.
 fn rules_plan(ctx: &Ctx<'_>, project: &SyncProject) -> Result<StepPlan, Error> {
@@ -247,11 +250,10 @@ fn rules_plan(ctx: &Ctx<'_>, project: &SyncProject) -> Result<StepPlan, Error> {
         .filter(|agent| agent.installed)
         .map(|agent| agent.id.0)
         .collect();
-    let snapshot = RulesSnapshot::read(&project.root)?;
+    let snapshot = RulesSnapshot::read(&project.root, &detected)?;
     let input = SyncInput {
-        effective: project.config.effective(),
+        config: &project.config,
         always: &[],
-        detected: &detected,
         lang: None,
     };
     let planned = match plan_sync(&snapshot, &input) {
@@ -259,41 +261,33 @@ fn rules_plan(ctx: &Ctx<'_>, project: &SyncProject) -> Result<StepPlan, Error> {
         Err(refusal) => {
             let message = refusal.message.clone();
             return Ok(StepPlan {
-                items: Vec::new(),
                 notices: vec![NoticeDto::warning(
                     refusal.code(),
                     StepId::Rules.as_str(),
                     message,
                 )],
+                ..StepPlan::default()
             });
         }
     };
-    let change = planned.to_change_plan(&project.root);
-    let items = change
-        .items
-        .iter()
-        .zip(change.basis.iter())
-        .map(|(item, basis)| {
-            let relative = item.id.strip_prefix(RULES_PREFIX).unwrap_or_default();
-            let content = planned
-                .files
-                .iter()
-                .find(|file| file.path == relative)
-                .map(|file| file.after.clone())
-                .unwrap_or_default();
+    let items = planned
+        .writes()
+        .map(|file| {
+            let item = file.plan_item(&project.root);
             SyncItem {
                 id: item.id.clone(),
                 step: StepId::Rules,
-                item: item.clone(),
-                basis: basis.clone(),
+                item,
+                basis: file.basis(&project.root),
                 row: Row::Always,
-                content,
+                content: file.after.clone(),
             }
         })
         .collect();
     Ok(StepPlan {
         items,
         notices: Vec::new(),
+        source_basis: Vec::from(planned.sources),
     })
 }
 
@@ -308,12 +302,5 @@ fn rules_execute(
     let Some(item) = items.last() else {
         return Outcome::Done(Vec::new());
     };
-    let relative = item.id.strip_prefix(RULES_PREFIX).unwrap_or_default();
-    write_file(
-        &project.root,
-        relative,
-        target,
-        &item.content,
-        LockOptions::default(),
-    )
+    write_file(&project.root, target, &item.content, LockOptions::default())
 }

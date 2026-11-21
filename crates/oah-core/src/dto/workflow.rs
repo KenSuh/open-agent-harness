@@ -4,10 +4,17 @@
 //! returning [`StagesSetDto`]; `rules_check` returns [`RulesStateDto`] and `rules_sync` [`RulesSyncDto`]. Paths
 //! here are fixed project-relative names such as `AGENTS.md`, never full paths.
 
-use super::{AgentIdDto, LoginHintDto, NoticeDto, SignInDto};
+use super::{AgentIdDto, Empty, LoginHintDto, NoticeDto, SignInDto};
 use crate::error::ErrorDto;
 use crate::plan::{Action, ItemStatus};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowProjectReq<T = Empty> {
+    pub project_id: String,
+    pub input: T,
+}
 
 /// The Team Workflow page: one card per entry of `sections.order`, the agents a section may take, the one banner,
 /// the presets, the rules state and what the Advanced disclosure shows.

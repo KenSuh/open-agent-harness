@@ -4,7 +4,7 @@ use crate::fsx::LockOptions;
 use crate::rules::{RulesSnapshot, SyncInput, apply_sync, apply_sync_with, check_sync, plan_sync};
 use crate::support::write_files;
 use oah_core::Coded;
-use oah_core::plan::{ItemStatus, Outcome};
+use oah_core::plan::{ItemStatus, Outcome, write_target};
 use oah_core::tasks::CancelToken;
 use std::fs;
 use std::path::Path;
@@ -26,17 +26,16 @@ fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
     out
 }
 
-fn input_for<'a>(config: &'a ProjectConfig, detected: &'a [AgentId]) -> SyncInput<'a> {
+fn input_for(config: &ProjectConfig) -> SyncInput<'_> {
     SyncInput {
-        effective: config.effective(),
+        config,
         always: &[],
-        detected,
         lang: None,
     }
 }
 
-fn defaults() -> ProjectConfig {
-    ProjectConfig::read(Path::new("/nonexistent-oah-config/config.toml")).unwrap()
+fn config_at(root: &Path) -> ProjectConfig {
+    ProjectConfig::read(&root.join(".oah/config.toml")).unwrap()
 }
 
 #[test]
@@ -44,10 +43,10 @@ fn a_sync_writes_every_planned_file_reads_it_back_and_is_then_a_fixed_point() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write_files(root, &[("GEMINI.md", b"# Gemini\n")]);
-    let config = defaults();
+    let config = config_at(root);
     let detected = [AgentId::Cursor];
-    let snapshot = RulesSnapshot::read(root).unwrap();
-    let plan = plan_sync(&snapshot, &input_for(&config, &detected)).unwrap();
+    let snapshot = RulesSnapshot::read(root, &detected).unwrap();
+    let plan = plan_sync(&snapshot, &input_for(&config)).unwrap();
     let paths: Vec<&str> = plan.writes().map(|file| file.path).collect();
     assert_eq!(
         paths,
@@ -58,7 +57,7 @@ fn a_sync_writes_every_planned_file_reads_it_back_and_is_then_a_fixed_point() {
             ".cursor/rules/oah.mdc"
         ]
     );
-    let result = apply_sync(root, &plan, &CancelToken::new(), LockOptions::default());
+    let result = apply_sync(&plan, &CancelToken::new(), LockOptions::default());
     assert!(result.synced(), "{:?}", result.error);
     assert_eq!(result.receipts.len(), 4);
     assert!(
@@ -72,8 +71,8 @@ fn a_sync_writes_every_planned_file_reads_it_back_and_is_then_a_fixed_point() {
         b"# Gemini\n@AGENTS.md\n"
     );
     let (again, drift) = check_sync(
-        &RulesSnapshot::read(root).unwrap(),
-        &input_for(&config, &detected),
+        &RulesSnapshot::read(root, &detected).unwrap(),
+        &input_for(&config),
     )
     .unwrap();
     assert!(drift.is_empty(), "{drift:?}");
@@ -84,13 +83,13 @@ fn a_sync_writes_every_planned_file_reads_it_back_and_is_then_a_fixed_point() {
 fn a_write_that_does_not_read_back_is_rules_verify_and_stops_the_sync() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let config = defaults();
+    let config = config_at(root);
     let plan = plan_sync(
-        &RulesSnapshot::read(root).unwrap(),
-        &input_for(&config, &[]),
+        &RulesSnapshot::read(root, &[]).unwrap(),
+        &input_for(&config),
     )
     .unwrap();
-    let result = apply_sync_with(root, &plan, &CancelToken::new(), |target, _bytes| {
+    let result = apply_sync_with(&plan, &CancelToken::new(), |target, _bytes| {
         fs::write(target.path, b"something else\n").unwrap();
         Outcome::Done(Vec::new())
     });
@@ -113,30 +112,118 @@ fn a_file_changed_after_planning_is_stale_and_nothing_is_written() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write_files(root, &[("CLAUDE.md", b"one\n")]);
-    let config = defaults();
+    let config = config_at(root);
     let plan = plan_sync(
-        &RulesSnapshot::read(root).unwrap(),
-        &input_for(&config, &[]),
+        &RulesSnapshot::read(root, &[]).unwrap(),
+        &input_for(&config),
     )
     .unwrap();
     fs::write(root.join("CLAUDE.md"), b"two\n").unwrap();
-    let result = apply_sync(root, &plan, &CancelToken::new(), LockOptions::default());
+    let result = apply_sync(&plan, &CancelToken::new(), LockOptions::default());
     assert_eq!(result.error.unwrap().code(), "OAH_PLAN_STALE");
     assert!(!root.join("AGENTS.md").exists());
     assert_eq!(fs::read(root.join("CLAUDE.md")).unwrap(), b"two\n");
 }
 
 #[test]
+fn an_immediate_rules_apply_checks_the_source_bytes_it_rendered() {
+    for relative in [".oah/config.toml", ".oah/rules.local.md"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".oah")).unwrap();
+        let config = config_at(root);
+        let plan = plan_sync(
+            &RulesSnapshot::read(root, &[]).unwrap(),
+            &input_for(&config),
+        )
+        .unwrap();
+        fs::write(root.join(relative), b"# added after the read\n").unwrap();
+        let before = tree(root);
+        let result = apply_sync(&plan, &CancelToken::new(), LockOptions::default());
+        assert_eq!(result.error.unwrap().code(), "OAH_PLAN_STALE", "{relative}");
+        assert_eq!(tree(root), before, "{relative}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn local_rules_are_read_through_links_and_the_target_bytes_are_rechecked() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let guidance = root.join("guidance.md");
+    write_files(root, &[("guidance.md", b"Follow local guidance.\n")]);
+    fs::create_dir(root.join(".oah")).unwrap();
+    let local_rules = root.join(".oah/rules.local.md");
+    std::os::unix::fs::symlink(&guidance, &local_rules).unwrap();
+    let config = config_at(root);
+    let read_plan = || {
+        plan_sync(
+            &RulesSnapshot::read(root, &[]).unwrap(),
+            &input_for(&config),
+        )
+        .unwrap()
+    };
+    let plan = read_plan();
+    let cancel = CancelToken::new();
+    let lock = LockOptions::default();
+    fs::write(&guidance, b"Use the new guidance.\n").unwrap();
+    assert_eq!(
+        apply_sync(&plan, &cancel, lock).error.unwrap().code(),
+        "OAH_PLAN_STALE"
+    );
+    assert!(!root.join("AGENTS.md").exists());
+    assert!(apply_sync(&read_plan(), &cancel, lock).synced());
+    assert!(
+        fs::read_to_string(root.join("AGENTS.md"))
+            .unwrap()
+            .contains("Use the new guidance.")
+    );
+    assert_eq!(fs::read_link(local_rules).unwrap(), guidance);
+}
+
+#[test]
+fn a_target_changed_during_apply_keeps_completed_writes_and_stops_at_that_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = config_at(root);
+    let plan = plan_sync(
+        &RulesSnapshot::read(root, &[AgentId::Gemini]).unwrap(),
+        &input_for(&config),
+    )
+    .unwrap();
+    let result = apply_sync_with(&plan, &CancelToken::new(), |target, bytes| {
+        let outcome = write_target(target, bytes, LockOptions::default());
+        if target.path == root.join("AGENTS.md") {
+            fs::write(root.join("CLAUDE.md"), b"user edit\n").unwrap();
+        }
+        outcome
+    });
+    assert_eq!(result.error.unwrap().code(), "OAH_PLAN_STALE");
+    assert_eq!(result.receipts.len(), 1);
+    let statuses: Vec<_> = result
+        .items
+        .iter()
+        .map(|(_, _, item)| item.status)
+        .collect();
+    assert_eq!(
+        statuses,
+        [ItemStatus::Done, ItemStatus::Stale, ItemStatus::NotRun]
+    );
+    assert_eq!(fs::read(root.join("CLAUDE.md")).unwrap(), b"user edit\n");
+    assert!(!root.join("GEMINI.md").exists());
+}
+
+#[test]
 fn a_drift_check_reports_hand_edits_and_thin_files_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let config = defaults();
+    let config = config_at(root);
     let plan = plan_sync(
-        &RulesSnapshot::read(root).unwrap(),
-        &input_for(&config, &[]),
+        &RulesSnapshot::read(root, &[]).unwrap(),
+        &input_for(&config),
     )
     .unwrap();
-    assert!(apply_sync(root, &plan, &CancelToken::new(), LockOptions::default()).synced());
+    assert!(apply_sync(&plan, &CancelToken::new(), LockOptions::default()).synced());
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
     fs::write(
         root.join("AGENTS.md"),
@@ -145,8 +232,8 @@ fn a_drift_check_reports_hand_edits_and_thin_files_and_writes_nothing() {
     .unwrap();
     let before = tree(root);
     let (_, drift) = check_sync(
-        &RulesSnapshot::read(root).unwrap(),
-        &input_for(&config, &[AgentId::Gemini]),
+        &RulesSnapshot::read(root, &[AgentId::Gemini]).unwrap(),
+        &input_for(&config),
     )
     .unwrap();
     let lines: Vec<(&str, &str)> = drift.iter().map(|line| (line.path, line.code)).collect();
@@ -167,10 +254,10 @@ fn a_linked_folder_on_the_way_to_a_thin_file_is_refused_before_any_write() {
     let outside = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::os::unix::fs::symlink(outside.path(), root.join(".cursor")).unwrap();
-    let config = defaults();
+    let config = config_at(root);
     let error = plan_sync(
-        &RulesSnapshot::read(root).unwrap(),
-        &input_for(&config, &[AgentId::Cursor]),
+        &RulesSnapshot::read(root, &[AgentId::Cursor]).unwrap(),
+        &input_for(&config),
     )
     .unwrap_err();
     assert_eq!(error.code(), "OAH_RULES_LINK");

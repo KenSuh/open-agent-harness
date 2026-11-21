@@ -131,7 +131,7 @@ export function App({ transport }: { transport: Transport }) {
   const { agents } = c;
   const refreshing = c.refresh?.state === "running";
   const agentRows = agents.agents.status === "ready" ? agents.agents.value : [];
-  const workflowKey = `${c.project?.id ?? ""}|${agentRows.map((a) => `${a.id}:${a.installed}:${a.sign_in}`).join(",")}`;
+  const agentStatusKey = agentRows.map((a) => `${a.id}:${a.installed}:${a.sign_in}`).join(",");
   const quickStartVisible = c.settings.status === "ready" && !c.settings.value.ui.quick_start_dismissed;
 
   return (
@@ -241,7 +241,7 @@ export function App({ transport }: { transport: Transport }) {
             <section className="page" aria-labelledby="page-title">
               <h1 id="page-title">{current.title}</h1>
               {page === "team-workflow" && c.project ? (
-                <TeamWorkflow transport={transport} reloadKey={workflowKey} />
+                <TeamWorkflow key={`${c.project.id}:${c.projectRevision}:${agentStatusKey}`} transport={transport} projectId={c.project.id} />
               ) : (
                 <p className="empty">{current.body}</p>
               )}

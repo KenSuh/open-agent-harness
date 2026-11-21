@@ -16,12 +16,14 @@ use crate::dto::{
     AdvancedDto, AgentIdDto, AgentOptionDto, AgentStatusDto, BannerDto, ConfigFormatDto, DriftDto,
     Empty, NoticeDto, NoticeLevel, PlannedWriteDto, PresetApplyReq, RulesStateDto, RulesSyncDto,
     RulesWriteDto, SectionDto, SignInDto, StageChangeReq, StagesSetDto, StagesSetReq, WorkflowDto,
+    WorkflowProjectReq,
 };
 use crate::error::{Error, codes, hint_for};
 use crate::fsx::{Fingerprint, LockOptions};
 use crate::paths::Env;
 use crate::plan::ItemStatus;
 use crate::rules::body::{AlwaysSkill, agent_name};
+use crate::rules::sync::read_block;
 use crate::rules::{RulesSnapshot, SyncInput, SyncResult, apply_sync, plan_sync};
 use std::path::{Path, PathBuf};
 
@@ -32,11 +34,12 @@ fn config_path(root: &Path) -> PathBuf {
     root.join(".oah").join("config.toml")
 }
 
-fn open_root(ctx: &Ctx<'_>) -> Result<PathBuf, Error> {
-    ctx.session
-        .project()
-        .map(|open| open.project.root)
-        .ok_or_else(|| WorkflowError::NoProject.into())
+fn open_root(ctx: &Ctx<'_>, project_id: Option<&str>) -> Result<PathBuf, Error> {
+    let open = ctx.session.project().ok_or(WorkflowError::NoProject)?;
+    if project_id.is_some_and(|id| id != open.id) {
+        return Err(WorkflowError::ProjectChanged.into());
+    }
+    Ok(open.project.root)
 }
 
 /// The agents the caller detected as installed (a read; thin files take no `InstalledAgent`, D-33).
@@ -54,15 +57,10 @@ fn always_skills() -> Vec<AlwaysSkill> {
     Vec::new()
 }
 
-fn sync_input<'a>(
-    effective: &'a Effective,
-    always: &'a [AlwaysSkill],
-    detected: &'a [AgentId],
-) -> SyncInput<'a> {
+fn sync_input<'a>(config: &'a ProjectConfig, always: &'a [AlwaysSkill]) -> SyncInput<'a> {
     SyncInput {
-        effective,
+        config,
         always,
-        detected,
         lang: None,
     }
 }
@@ -70,7 +68,7 @@ fn sync_input<'a>(
 fn rules_state(
     env: &Env,
     root: &Path,
-    effective: &Effective,
+    config: &ProjectConfig,
     agents: &[AgentStatusDto],
 ) -> RulesStateDto {
     let refused = |error: Error| RulesStateDto {
@@ -79,12 +77,12 @@ fn rules_state(
         writes: Vec::new(),
         error: Some(error.to_dto(env)),
     };
-    let snapshot = match RulesSnapshot::read(root) {
+    let (always, detected) = (always_skills(), installed(agents));
+    let snapshot = match RulesSnapshot::read(root, &detected) {
         Ok(snapshot) => snapshot,
         Err(error) => return refused(error.into()),
     };
-    let (always, detected) = (always_skills(), installed(agents));
-    match plan_sync(&snapshot, &sync_input(effective, &always, &detected)) {
+    match plan_sync(&snapshot, &sync_input(config, &always)) {
         Ok(plan) => {
             let drift: Vec<DriftDto> = plan
                 .drift()
@@ -226,9 +224,7 @@ pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<Workflo
             skills: section.skills.clone(),
         })
         .collect();
-    let block = RulesSnapshot::read(root)
-        .ok()
-        .and_then(|snapshot| snapshot.block_text());
+    let block = read_block(root);
     let mut notes = Vec::new();
     if effective
         .stages
@@ -253,7 +249,7 @@ pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<Workflo
             .iter()
             .map(|preset| preset.to_dto(effective, agents))
             .collect(),
-        rules: rules_state(env, root, effective, agents),
+        rules: rules_state(env, root, &config, agents),
         config_format: match config.format() {
             Format::Missing => ConfigFormatDto::Missing,
             Format::Legacy => ConfigFormatDto::Legacy,
@@ -277,10 +273,11 @@ pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<Workflo
 fn sync_rules(
     ctx: &Ctx<'_>,
     root: &Path,
-    effective: &Effective,
+    config: &ProjectConfig,
     agents: &[AgentStatusDto],
 ) -> SyncResult {
-    let snapshot = match RulesSnapshot::read(root) {
+    let (always, detected) = (always_skills(), installed(agents));
+    let snapshot = match RulesSnapshot::read(root, &detected) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return SyncResult {
@@ -289,8 +286,7 @@ fn sync_rules(
             };
         }
     };
-    let (always, detected) = (always_skills(), installed(agents));
-    let plan = match plan_sync(&snapshot, &sync_input(effective, &always, &detected)) {
+    let plan = match plan_sync(&snapshot, &sync_input(config, &always)) {
         Ok(plan) => plan,
         Err(error) => {
             return SyncResult {
@@ -299,7 +295,7 @@ fn sync_rules(
             };
         }
     };
-    let result = apply_sync(root, &plan, ctx.cancel, LockOptions::default());
+    let result = apply_sync(&plan, ctx.cancel, LockOptions::default());
     for receipt in &result.receipts {
         ctx.session.self_writes().record(receipt);
     }
@@ -391,7 +387,7 @@ pub fn set_stages(
         )
     });
     let after = ProjectConfig::read(&path)?;
-    let result = sync_rules(ctx, root, after.effective(), agents);
+    let result = sync_rules(ctx, root, &after, agents);
     let mut workflow = view(ctx.env, root, agents)?;
     let sync_error = result.error.as_ref().map(|error| error.to_dto(ctx.env));
     if let Some(error) = &sync_error {
@@ -430,7 +426,7 @@ pub fn rules_check_at(
     agents: &[AgentStatusDto],
 ) -> Result<RulesStateDto, Error> {
     let config = ProjectConfig::read(&config_path(root))?;
-    Ok(rules_state(env, root, config.effective(), agents))
+    Ok(rules_state(env, root, &config, agents))
 }
 
 /// `rules_sync` for the project at `root`. A refusal before anything was written is the error; a stop after a
@@ -441,7 +437,7 @@ pub fn rules_sync_at(
     agents: &[AgentStatusDto],
 ) -> Result<RulesSyncDto, Error> {
     let config = ProjectConfig::read(&config_path(root))?;
-    let result = sync_rules(ctx, root, config.effective(), agents);
+    let result = sync_rules(ctx, root, &config, agents);
     let wrote = result
         .items
         .iter()
@@ -468,30 +464,48 @@ pub fn rules_sync_at(
 
 /// `sections_show`: the page of the open project with the session's agent statuses.
 pub fn sections_show(ctx: &Ctx<'_>, _req: Empty) -> Result<WorkflowDto, Error> {
-    let root = open_root(ctx)?;
+    show(ctx, None)
+}
+
+pub fn sections_show_for_project(
+    ctx: &Ctx<'_>,
+    req: WorkflowProjectReq,
+) -> Result<WorkflowDto, Error> {
+    show(ctx, Some(&req.project_id))
+}
+
+fn show(ctx: &Ctx<'_>, project_id: Option<&str>) -> Result<WorkflowDto, Error> {
+    let root = open_root(ctx, project_id)?;
     let agents = agents_list(ctx, Empty {})?;
     view(ctx.env, &root, &agents)
 }
 
 /// `workflow_status`: the one banner of the open project.
 pub fn workflow_status(ctx: &Ctx<'_>, _req: Empty) -> Result<BannerDto, Error> {
-    let root = open_root(ctx)?;
+    let root = open_root(ctx, None)?;
     let agents = agents_list(ctx, Empty {})?;
     let config = ProjectConfig::read(&config_path(&root))?;
     Ok(status(config.effective(), &agents))
 }
 
 /// `stages_set` on the open project.
-pub fn stages_set(ctx: &Ctx<'_>, req: StagesSetReq) -> Result<StagesSetDto, Error> {
-    let root = open_root(ctx)?;
+pub fn stages_set(
+    ctx: &Ctx<'_>,
+    req: WorkflowProjectReq<StagesSetReq>,
+) -> Result<StagesSetDto, Error> {
+    let root = open_root(ctx, Some(&req.project_id))?;
     let agents = agents_list(ctx, Empty {})?;
-    set_stages(ctx, &root, &agents, req)
+    set_stages(ctx, &root, &agents, req.input)
 }
 
 /// `preset_apply`: the preset's assignments for the sections that exist, as one `stages_set`. A preset that does
 /// not exist, or names an agent not installed here, is `OAH_PRESET_UNAVAILABLE` and writes nothing.
-pub fn preset_apply(ctx: &Ctx<'_>, req: PresetApplyReq) -> Result<StagesSetDto, Error> {
-    let root = open_root(ctx)?;
+pub fn preset_apply(
+    ctx: &Ctx<'_>,
+    req: WorkflowProjectReq<PresetApplyReq>,
+) -> Result<StagesSetDto, Error> {
+    let root = open_root(ctx, Some(&req.project_id))?;
+    let req = req.input;
     let agents = agents_list(ctx, Empty {})?;
     let config = ProjectConfig::read(&config_path(&root))?;
     let effective = config.effective();
@@ -531,14 +545,25 @@ pub fn preset_apply(ctx: &Ctx<'_>, req: PresetApplyReq) -> Result<StagesSetDto, 
 
 /// `rules_check` on the open project.
 pub fn rules_check(ctx: &Ctx<'_>, _req: Empty) -> Result<RulesStateDto, Error> {
-    let root = open_root(ctx)?;
+    let root = open_root(ctx, None)?;
     let agents = agents_list(ctx, Empty {})?;
     rules_check_at(ctx.env, &root, &agents)
 }
 
 /// `rules_sync` on the open project.
 pub fn rules_sync(ctx: &Ctx<'_>, _req: Empty) -> Result<RulesSyncDto, Error> {
-    let root = open_root(ctx)?;
+    sync_open_project(ctx, None)
+}
+
+pub fn rules_sync_for_project(
+    ctx: &Ctx<'_>,
+    req: WorkflowProjectReq,
+) -> Result<RulesSyncDto, Error> {
+    sync_open_project(ctx, Some(&req.project_id))
+}
+
+fn sync_open_project(ctx: &Ctx<'_>, project_id: Option<&str>) -> Result<RulesSyncDto, Error> {
+    let root = open_root(ctx, project_id)?;
     let agents = agents_list(ctx, Empty {})?;
     rules_sync_at(ctx, &root, &agents)
 }

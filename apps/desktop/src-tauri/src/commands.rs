@@ -15,7 +15,7 @@ use oah_core::app::{self, Ctx, Session};
 use oah_core::dto::{
     AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, BannerDto, Empty, PresetApplyReq,
     ProjectDto, RefreshDto, RulesStateDto, RulesSyncDto, SettingsDto, SettingsSetReq, StagesSetDto,
-    StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto,
+    StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto, WorkflowProjectReq,
 };
 use oah_core::error::codes;
 use oah_core::paths::Env;
@@ -307,20 +307,26 @@ pub fn start_agents_probe(
 
 /// The Team Workflow page of the open project (M2-S1, read).
 #[tauri::command]
-pub fn sections_show(req: Empty, shell: State<'_, Shell>) -> Result<WorkflowDto, ErrorDto> {
-    shell.call(|ctx| app::sections_show(ctx, req))
+pub fn sections_show(
+    req: WorkflowProjectReq,
+    shell: State<'_, Shell>,
+) -> Result<WorkflowDto, ErrorDto> {
+    shell.call(|ctx| app::sections_show_for_project(ctx, req))
 }
 
 /// One assignment: config save, then the rules re-sync (M2-S1, write-own).
 #[tauri::command]
-pub fn stages_set(req: StagesSetReq, shell: State<'_, Shell>) -> Result<StagesSetDto, ErrorDto> {
+pub fn stages_set(
+    req: WorkflowProjectReq<StagesSetReq>,
+    shell: State<'_, Shell>,
+) -> Result<StagesSetDto, ErrorDto> {
     shell.call(|ctx| app::stages_set(ctx, req))
 }
 
 /// A preset's assignments as one `stages_set` (M2-S1, write-own).
 #[tauri::command]
 pub fn preset_apply(
-    req: PresetApplyReq,
+    req: WorkflowProjectReq<PresetApplyReq>,
     shell: State<'_, Shell>,
 ) -> Result<StagesSetDto, ErrorDto> {
     shell.call(|ctx| app::preset_apply(ctx, req))
@@ -340,8 +346,11 @@ pub fn rules_check(req: Empty, shell: State<'_, Shell>) -> Result<RulesStateDto,
 
 /// *Sync now*: the rules block and thin files written from the config (M2-S1, write-own).
 #[tauri::command]
-pub fn rules_sync(req: Empty, shell: State<'_, Shell>) -> Result<RulesSyncDto, ErrorDto> {
-    shell.call(|ctx| app::rules_sync(ctx, req))
+pub fn rules_sync(
+    req: WorkflowProjectReq,
+    shell: State<'_, Shell>,
+) -> Result<RulesSyncDto, ErrorDto> {
+    shell.call(|ctx| app::rules_sync_for_project(ctx, req))
 }
 
 #[cfg(test)]

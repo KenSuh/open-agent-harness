@@ -1,5 +1,5 @@
 // 한국어: 팀 작업 흐름 화면 — 섹션 카드·에이전트 선택·단일 배너·프리셋·업그레이드 확인·규칙 동기 상태·고급 보기. 판단은 모두 core 응답을 그대로 쓴다.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentId,
   AgentOptionDto,
@@ -169,28 +169,30 @@ function UpgradePrompt({ text, onAccept, onCancel }: { text: string; onAccept: (
   );
 }
 
-/**
- * The Team Workflow page. It reloads `sections_show` when the project or the agent statuses change (`reloadKey`).
- * Every assignment is one `stages_set`; a refused upgrade shows the warning once and retries with its approval.
- */
-export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; reloadKey: string }) {
+export function TeamWorkflow({ transport, projectId }: { transport: Transport; projectId: string }) {
   const [page, setPage] = useState<PageLoad>({ status: "loading" });
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
   const [status, setStatus] = useState<Status>(null);
+  const reads = useRef(0);
 
   const load = useCallback(async () => {
+    const read = ++reads.current;
+    setPage({ status: "loading" });
     try {
-      const value = await transport.sectionsShow();
+      const value = await transport.sectionsShow({ project_id: projectId, input: {} });
+      if (read !== reads.current) return null;
       setPage({ status: "ready", value });
+      return value;
     } catch (error) {
-      setPage({ status: "error", error: toErrorDto(error) });
+      if (read === reads.current) setPage({ status: "error", error: toErrorDto(error) });
+      return null;
     }
-  }, [transport]);
+  }, [transport, projectId]);
 
   useEffect(() => {
     void load();
-  }, [load, reloadKey]);
+  }, [load]);
 
   const settle = useCallback((result: StagesSetDto) => {
     setPage({ status: "ready", value: result.workflow });
@@ -207,17 +209,35 @@ export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; r
   }, []);
 
   const run = useCallback(
-    async (next: Pending) => {
+    async (next: Pending, approveUpgrade?: string) => {
       setBusy(true);
       setStatus(null);
       try {
-        settle(next.kind === "stages" ? await transport.stagesSet(next.req) : await transport.presetApply(next.req));
+        switch (next.kind) {
+          case "stages":
+            settle(await transport.stagesSet({
+              project_id: projectId,
+              input: { ...next.req, approve_upgrade: approveUpgrade },
+            }));
+            break;
+          case "preset":
+            settle(await transport.presetApply({
+              project_id: projectId,
+              input: { ...next.req, approve_upgrade: approveUpgrade },
+            }));
+            break;
+        }
       } catch (raw) {
         const error = toErrorDto(raw);
         if (error.code === "OAH_CONFIG_UPGRADE_REQUIRED") {
-          setPending(next);
+          const current = await load();
+          if (current?.upgrade_warning && current.config_sha256) {
+            setPending(next);
+          } else if (current) {
+            setStatus({ level: "error", text: "The settings changed on disk. Repeat the change." });
+          }
         } else if (error.code === "OAH_CONFIG_CHANGED") {
-          setStatus({ level: "error", text: "The file changed on disk. It was read again; repeat the change.", hint: null });
+          setStatus({ level: "error", text: "The settings changed on disk. Repeat the change." });
           await load();
         } else {
           setStatus({ level: "error", text: `${error.code}: ${error.message}`, hint: error.hint });
@@ -226,13 +246,13 @@ export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; r
         setBusy(false);
       }
     },
-    [transport, settle, load],
+    [transport, projectId, settle, load],
   );
 
   const syncNow = useCallback(async () => {
     setBusy(true);
     try {
-      const result = await transport.rulesSync();
+      const result = await transport.rulesSync({ project_id: projectId, input: {} });
       setStatus(
         result.synced
           ? { level: "info", text: "Rules synced." }
@@ -242,10 +262,10 @@ export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; r
       const error = toErrorDto(raw);
       setStatus({ level: "error", text: `${error.code}: ${error.message}`, hint: error.hint });
     } finally {
-      setBusy(false);
       await load();
+      setBusy(false);
     }
-  }, [transport, load]);
+  }, [transport, projectId, load]);
 
   if (page.status === "loading") return <p className="muted">Loading the team workflow…</p>;
   if (page.status === "error") {
@@ -261,8 +281,7 @@ export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; r
     );
   }
   const view = page.value;
-  const approve = (next: Pending): Pending =>
-    view.config_sha256 === null ? next : { ...next, req: { ...next.req, approve_upgrade: view.config_sha256 } } as Pending;
+  const controlsDisabled = busy || pending !== null;
 
   return (
     <div className="team-workflow">
@@ -273,18 +292,17 @@ export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; r
           {status.hint ? <span className="muted"> {status.hint}</span> : null}
         </p>
       ) : null}
-      {pending && view.upgrade_warning ? (
+      {pending && view.upgrade_warning && view.config_sha256 ? (
         <UpgradePrompt
           text={view.upgrade_warning}
           onAccept={() => {
-            const next = approve(pending);
             setPending(null);
-            void run(next);
+            void run(pending, view.config_sha256 ?? undefined);
           }}
           onCancel={() => setPending(null)}
         />
       ) : null}
-      <RulesTile rules={view.rules} onSync={() => void syncNow()} busy={busy} />
+      <RulesTile rules={view.rules} onSync={() => void syncNow()} busy={controlsDisabled} />
       {view.notices.length > 0 ? (
         <ul className="notices" aria-label="Workflow notices">
           {view.notices.map((notice) => (
@@ -307,7 +325,7 @@ export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; r
           <button
             key={preset.id}
             type="button"
-            disabled={busy || preset.disabled_reason !== null}
+            disabled={controlsDisabled || preset.disabled_reason !== null}
             title={preset.disabled_reason ?? undefined}
             onClick={() => void run({ kind: "preset", req: { preset: preset.id } })}
           >
@@ -323,7 +341,7 @@ export function TeamWorkflow({ transport, reloadKey }: { transport: Transport; r
             section={section}
             sections={view.sections}
             agents={view.agents}
-            busy={busy}
+            busy={controlsDisabled}
             onAssign={(id, agent) => void run({ kind: "stages", req: { stages: [{ section: id, agent }] } })}
             onIndependence={(id, of) => void run({ kind: "stages", req: { independent_of: [{ section: id, of }] } })}
           />
