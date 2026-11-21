@@ -1,7 +1,8 @@
 // IPC 명령: 각 명령은 인자 변환, oah-core 호출 하나, 결과 변환만 하고 아무것도 판단하지 않는다.
-//! The M1-S1 and M1-S2 commands of CONTRACTS C15, exactly: `app_info`, `project_open_dialog`, `project_current`,
-//! `start_refresh`, `task_cancel`, `tasks_list`, `settings_get`, `settings_set`, `agents_list` and
-//! `start_agents_probe`. Each takes one argument named `req`; the `start_*` commands also take the task channel
+//! The M1-S1, M1-S2 and M2-S1 commands of CONTRACTS C15, exactly: `app_info`, `project_open_dialog`,
+//! `project_current`, `start_refresh`, `task_cancel`, `tasks_list`, `settings_get`, `settings_set`, `agents_list`,
+//! `start_agents_probe`, `sections_show`, `stages_set`, `preset_apply`, `workflow_status`, `rules_check` and
+//! `rules_sync`. Each takes one argument named `req`; the `start_*` commands also take the task channel
 //! `on_event` (JS key `onEvent`, CONTRACTS C4). A command body converts arguments, makes one `oah-core` call and
 //! converts the result. The shell's own part is transport only: the native folder picker, the task channel, the
 //! blocking thread a task runs on, the `scan-changed` and `agents-changed` events, and starting the agents probe
@@ -12,8 +13,9 @@ use std::sync::Arc;
 
 use oah_core::app::{self, Ctx, Session};
 use oah_core::dto::{
-    AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, Empty, ProjectDto, RefreshDto,
-    SettingsDto, SettingsSetReq, TaskCancelReq, TaskSnapshotDto,
+    AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, BannerDto, Empty, PresetApplyReq,
+    ProjectDto, RefreshDto, RulesStateDto, RulesSyncDto, SettingsDto, SettingsSetReq, StagesSetDto,
+    StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto,
 };
 use oah_core::error::codes;
 use oah_core::paths::Env;
@@ -301,6 +303,45 @@ pub fn start_agents_probe(
         let _ = on_event.send(event.clone());
     });
     shell.spawn_agents_probe(req, listener, app)
+}
+
+/// The Team Workflow page of the open project (M2-S1, read).
+#[tauri::command]
+pub fn sections_show(req: Empty, shell: State<'_, Shell>) -> Result<WorkflowDto, ErrorDto> {
+    shell.call(|ctx| app::sections_show(ctx, req))
+}
+
+/// One assignment: config save, then the rules re-sync (M2-S1, write-own).
+#[tauri::command]
+pub fn stages_set(req: StagesSetReq, shell: State<'_, Shell>) -> Result<StagesSetDto, ErrorDto> {
+    shell.call(|ctx| app::stages_set(ctx, req))
+}
+
+/// A preset's assignments as one `stages_set` (M2-S1, write-own).
+#[tauri::command]
+pub fn preset_apply(
+    req: PresetApplyReq,
+    shell: State<'_, Shell>,
+) -> Result<StagesSetDto, ErrorDto> {
+    shell.call(|ctx| app::preset_apply(ctx, req))
+}
+
+/// The one banner of the open project (M2-S1, read).
+#[tauri::command]
+pub fn workflow_status(req: Empty, shell: State<'_, Shell>) -> Result<BannerDto, ErrorDto> {
+    shell.call(|ctx| app::workflow_status(ctx, req))
+}
+
+/// Rules drift without writing (M2-S1, read).
+#[tauri::command]
+pub fn rules_check(req: Empty, shell: State<'_, Shell>) -> Result<RulesStateDto, ErrorDto> {
+    shell.call(|ctx| app::rules_check(ctx, req))
+}
+
+/// *Sync now*: the rules block and thin files written from the config (M2-S1, write-own).
+#[tauri::command]
+pub fn rules_sync(req: Empty, shell: State<'_, Shell>) -> Result<RulesSyncDto, ErrorDto> {
+    shell.call(|ctx| app::rules_sync(ctx, req))
 }
 
 #[cfg(test)]

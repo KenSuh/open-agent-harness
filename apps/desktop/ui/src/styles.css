@@ -449,3 +449,61 @@ select:disabled {
 .capability-none {
   color: var(--muted);
 }
+
+/* Team Workflow (M2-S1) */
+.team-workflow {
+  display: grid;
+  gap: 12px;
+}
+
+.workflow-banner,
+.rules-tile,
+.upgrade-prompt {
+  border: 1px solid var(--border, #8884);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.banner-ready {
+  border-color: #2e7d3266;
+}
+
+.banner-not-installed,
+.banner-not-signed-in,
+.banner-not-independent,
+.rules-not-synced {
+  border-color: #c6282866;
+}
+
+.section-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.section-card {
+  border: 1px solid var(--border, #8884);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.section-card label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.advanced pre {
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.status-error {
+  color: #c62828;
+}

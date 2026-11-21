@@ -103,6 +103,17 @@ fn one_wrong_ok_expectation_fails_that_case_only() {
 }
 
 #[test]
+fn a_wrong_rules_expectation_fails_that_case_only() {
+    let scratch = Scratch::new();
+    scratch.edit_json("rules/no-files/expect.json", |json| {
+        json["ok"]["block_bytes"] = Json::from(0);
+    });
+    let report = run_area(&scratch.root, "rules");
+    assert_eq!(failed_cases(&report), ["no-files"]);
+    assert_eq!(report.passed, 42);
+}
+
+#[test]
 fn a_wrong_error_message_or_code_fails() {
     let scratch = Scratch::new();
     scratch.edit_json("config/type-section-not-table/expect.json", |json| {

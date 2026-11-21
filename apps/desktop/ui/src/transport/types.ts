@@ -5,14 +5,21 @@ import type {
   AgentsProbeReq,
   AppInfoDto,
   ErrorDto,
+  BannerDto,
   NoticeDto,
+  PresetApplyReq,
   ProjectDto,
   RefreshDto,
+  RulesStateDto,
+  RulesSyncDto,
   SettingsDto,
   SettingsEdit,
+  StagesSetDto,
+  StagesSetReq,
   TaskEvent,
   TaskId,
   TaskSnapshotDto,
+  WorkflowDto,
 } from "../contract";
 
 export interface ScanChanged {
@@ -22,7 +29,7 @@ export interface ScanChanged {
 
 export type Unlisten = () => void;
 
-/** One method per M1-S1 and M1-S2 command of CONTRACTS C15, plus the three global events. */
+/** One method per M1-S1, M1-S2 and M2-S1 command of CONTRACTS C15, plus the three global events. */
 export interface Transport {
   appInfo(): Promise<AppInfoDto>;
   projectOpenDialog(): Promise<ProjectDto | null>;
@@ -34,6 +41,12 @@ export interface Transport {
   settingsSet(edits: SettingsEdit[]): Promise<SettingsDto>;
   agentsList(): Promise<AgentStatusDto[]>;
   startAgentsProbe(req: AgentsProbeReq, onEvent: (event: TaskEvent<AgentStatusDto[]>) => void): Promise<TaskId>;
+  sectionsShow(): Promise<WorkflowDto>;
+  stagesSet(req: StagesSetReq): Promise<StagesSetDto>;
+  presetApply(req: PresetApplyReq): Promise<StagesSetDto>;
+  workflowStatus(): Promise<BannerDto>;
+  rulesCheck(): Promise<RulesStateDto>;
+  rulesSync(): Promise<RulesSyncDto>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
   onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;

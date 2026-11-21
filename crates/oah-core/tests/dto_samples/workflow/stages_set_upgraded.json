@@ -1,0 +1,176 @@
+{
+  "saved": true,
+  "upgraded": true,
+  "backup": ".oah/config.toml.v0.4.bak",
+  "synced": true,
+  "sync_error": null,
+  "actions": [],
+  "workflow": {
+    "sections": [
+      {
+        "id": "plan",
+        "label": "Plan & Clarify",
+        "agent": "claude",
+        "source": "file",
+        "independent_of": [],
+        "skills": []
+      },
+      {
+        "id": "build",
+        "label": "Write Code",
+        "agent": "claude",
+        "source": "file",
+        "independent_of": [],
+        "skills": []
+      },
+      {
+        "id": "review",
+        "label": "Code Review",
+        "agent": "claude",
+        "source": "file",
+        "independent_of": [
+          "build"
+        ],
+        "skills": []
+      },
+      {
+        "id": "fix",
+        "label": "Fix Issues",
+        "agent": "codex",
+        "source": "file",
+        "independent_of": [],
+        "skills": []
+      }
+    ],
+    "agents": [
+      {
+        "id": "claude",
+        "name": "Claude Code",
+        "installed": true,
+        "sign_in": "signed-in",
+        "disabled_reason": null
+      },
+      {
+        "id": "codex",
+        "name": "Codex",
+        "installed": true,
+        "sign_in": "signed-out",
+        "disabled_reason": null
+      },
+      {
+        "id": "gemini",
+        "name": "Gemini CLI",
+        "installed": false,
+        "sign_in": "unknown",
+        "disabled_reason": "Not installed on this machine"
+      },
+      {
+        "id": "copilot",
+        "name": "Copilot CLI",
+        "installed": false,
+        "sign_in": "unknown",
+        "disabled_reason": "Not installed on this machine"
+      },
+      {
+        "id": "opencode",
+        "name": "OpenCode",
+        "installed": false,
+        "sign_in": "unknown",
+        "disabled_reason": "Not installed on this machine"
+      },
+      {
+        "id": "antigravity",
+        "name": "Antigravity",
+        "installed": false,
+        "sign_in": "unknown",
+        "disabled_reason": "Not installed on this machine"
+      }
+    ],
+    "banner": {
+      "kind": "not-signed-in",
+      "message": "Not signed in: Codex (codex login).",
+      "agents": [
+        {
+          "id": "codex",
+          "name": "Codex",
+          "login_hint": {
+            "text": "codex login",
+            "is_command": true
+          }
+        }
+      ]
+    },
+    "presets": [
+      {
+        "id": "balanced",
+        "label": "Balanced",
+        "stages": [
+          {
+            "section": "plan",
+            "agent": "claude"
+          },
+          {
+            "section": "build",
+            "agent": "claude"
+          },
+          {
+            "section": "review",
+            "agent": "codex"
+          },
+          {
+            "section": "fix",
+            "agent": "codex"
+          }
+        ],
+        "disabled_reason": null
+      },
+      {
+        "id": "research-build",
+        "label": "Research and build",
+        "stages": [
+          {
+            "section": "plan",
+            "agent": "gemini"
+          },
+          {
+            "section": "build",
+            "agent": "claude"
+          },
+          {
+            "section": "review",
+            "agent": "codex"
+          },
+          {
+            "section": "fix",
+            "agent": "codex"
+          }
+        ],
+        "disabled_reason": "Gemini CLI is not installed"
+      }
+    ],
+    "rules": {
+      "synced": true,
+      "drift": [],
+      "writes": [],
+      "error": null
+    },
+    "config_format": "current",
+    "config_sha256": "730ff766892083ca47b18cd9bf1dbbffc5afa93d68aebb39111bb61e0697cb44",
+    "upgrade_warning": null,
+    "advanced": {
+      "config_tables": "[stages]\nplan = \"claude\"\nbuild = \"claude\"\nreview = \"claude\"\nfix = \"codex\"\n",
+      "block": "<!-- OAH:RULES:BEGIN v1 -->\n<!-- oah rules lang=en; managed by `oah rules sync`. Put project rules in .oah/rules.local.md, not here. -->\n## Team workflow (managed by OAH)\n\n| Section | Agent |\n|---|---|\n| Plan & Clarify | Claude Code |\n| Write Code | Claude Code |\n| Code Review | Claude Code |\n| Fix Issues | Codex |\n\n- Do the section your agent is listed for. If asked to do another section, say which agent is listed for it.\n- Code Review is done by a different agent than Write Code.\n<!-- OAH:RULES:END -->\n"
+    },
+    "notes": [],
+    "notices": [
+      {
+        "id": "OAH_REVIEW_NOT_INDEPENDENT:review:build",
+        "level": "warning",
+        "code": "OAH_REVIEW_NOT_INDEPENDENT",
+        "message": "Code Review is done by the same agent as Write Code (Claude Code).",
+        "hint": "Assign a different agent to one of the two sections, or switch the rule off. This only warns.",
+        "actions": []
+      }
+    ]
+  }
+}

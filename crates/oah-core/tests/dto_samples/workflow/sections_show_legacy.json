@@ -1,0 +1,179 @@
+{
+  "sections": [
+    {
+      "id": "plan",
+      "label": "Plan & Clarify",
+      "agent": "claude",
+      "source": "legacy:initial",
+      "independent_of": [],
+      "skills": []
+    },
+    {
+      "id": "build",
+      "label": "Write Code",
+      "agent": "claude",
+      "source": "legacy:initial",
+      "independent_of": [],
+      "skills": []
+    },
+    {
+      "id": "review",
+      "label": "Code Review",
+      "agent": "codex",
+      "source": "file",
+      "independent_of": [
+        "build"
+      ],
+      "skills": []
+    },
+    {
+      "id": "fix",
+      "label": "Fix Issues",
+      "agent": "codex",
+      "source": "legacy:correction",
+      "independent_of": [],
+      "skills": []
+    }
+  ],
+  "agents": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "installed": true,
+      "sign_in": "signed-in",
+      "disabled_reason": null
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "installed": true,
+      "sign_in": "signed-out",
+      "disabled_reason": null
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "installed": false,
+      "sign_in": "unknown",
+      "disabled_reason": "Not installed on this machine"
+    },
+    {
+      "id": "copilot",
+      "name": "Copilot CLI",
+      "installed": false,
+      "sign_in": "unknown",
+      "disabled_reason": "Not installed on this machine"
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "installed": false,
+      "sign_in": "unknown",
+      "disabled_reason": "Not installed on this machine"
+    },
+    {
+      "id": "antigravity",
+      "name": "Antigravity",
+      "installed": false,
+      "sign_in": "unknown",
+      "disabled_reason": "Not installed on this machine"
+    }
+  ],
+  "banner": {
+    "kind": "not-signed-in",
+    "message": "Not signed in: Codex (codex login).",
+    "agents": [
+      {
+        "id": "codex",
+        "name": "Codex",
+        "login_hint": {
+          "text": "codex login",
+          "is_command": true
+        }
+      }
+    ]
+  },
+  "presets": [
+    {
+      "id": "balanced",
+      "label": "Balanced",
+      "stages": [
+        {
+          "section": "plan",
+          "agent": "claude"
+        },
+        {
+          "section": "build",
+          "agent": "claude"
+        },
+        {
+          "section": "review",
+          "agent": "codex"
+        },
+        {
+          "section": "fix",
+          "agent": "codex"
+        }
+      ],
+      "disabled_reason": null
+    },
+    {
+      "id": "research-build",
+      "label": "Research and build",
+      "stages": [
+        {
+          "section": "plan",
+          "agent": "gemini"
+        },
+        {
+          "section": "build",
+          "agent": "claude"
+        },
+        {
+          "section": "review",
+          "agent": "codex"
+        },
+        {
+          "section": "fix",
+          "agent": "codex"
+        }
+      ],
+      "disabled_reason": "Gemini CLI is not installed"
+    }
+  ],
+  "rules": {
+    "synced": false,
+    "drift": [
+      {
+        "code": "OAH_RULES_DRIFT",
+        "path": "AGENTS.md",
+        "message": "AGENTS.md is missing"
+      },
+      {
+        "code": "OAH_RULES_DRIFT",
+        "path": "CLAUDE.md",
+        "message": "CLAUDE.md is missing"
+      }
+    ],
+    "writes": [
+      {
+        "path": "AGENTS.md",
+        "action": "create"
+      },
+      {
+        "path": "CLAUDE.md",
+        "action": "create"
+      }
+    ],
+    "error": null
+  },
+  "config_format": "legacy",
+  "config_sha256": "a9497057d25ff09aa26999ece82a80fba185d8839a24e934520cdb87269e307f",
+  "upgrade_warning": "Saving converts .oah/config.toml to the OAH 1.0 format, and oah 0.4 commands will stop reading this project's settings. A later `oah rules sync` or `oah init` from the 0.4 CLI replaces the 1.0 workflow block in AGENTS.md with the 0.4 rules text, because both use the block marker v1; OAH 1.0 reports that drift and restores the block at its next sync. The original file is kept as .oah/config.toml.v0.4.bak.",
+  "advanced": {
+    "config_tables": "[stages]\ninitial = \"claude\"\nreview = \"codex\"\ncorrection = \"codex\"\n",
+    "block": null
+  },
+  "notes": [],
+  "notices": []
+}

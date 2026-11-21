@@ -1,0 +1,544 @@
+// 팀 작업 흐름 작업: 연 프로젝트의 설정·규칙 파일을 읽어 화면 모양을 만들고, 배정을 저장한 뒤 규칙을 다시 맞춘다.
+//! The M2-S1 operations of CONTRACTS C15: `sections_show` (read), `workflow_status` (read), `stages_set` and
+//! `preset_apply` (write-own), `rules_check` (read) and `rules_sync` (write-own). Each `*_at` / [`view`] /
+//! [`set_stages`] form takes the project root and the agent statuses explicitly; the session forms take the open
+//! project and the session's agent cache (`app::agents_list`), so the app and the CLI share one implementation.
+
+use super::WorkflowError;
+use super::presets::PRESETS;
+use super::status::{independence_breaks, status};
+use crate::app::{Ctx, agents_list};
+use crate::config::{
+    AgentId, AssignmentSource, Edit, Effective, Format, ProjectConfig, Table, UPGRADE_WARNING,
+    Value, backup_path, save_project,
+};
+use crate::dto::{
+    AdvancedDto, AgentIdDto, AgentOptionDto, AgentStatusDto, BannerDto, ConfigFormatDto, DriftDto,
+    Empty, NoticeDto, NoticeLevel, PlannedWriteDto, PresetApplyReq, RulesStateDto, RulesSyncDto,
+    RulesWriteDto, SectionDto, SignInDto, StageChangeReq, StagesSetDto, StagesSetReq, WorkflowDto,
+};
+use crate::error::{Error, codes, hint_for};
+use crate::fsx::{Fingerprint, LockOptions};
+use crate::paths::Env;
+use crate::plan::ItemStatus;
+use crate::rules::body::{AlwaysSkill, agent_name};
+use crate::rules::{RulesSnapshot, SyncInput, SyncResult, apply_sync, plan_sync};
+use std::path::{Path, PathBuf};
+
+/// The action id of *Sync now*: the `rules_sync` command.
+const SYNC_NOW: &str = "rules_sync";
+
+fn config_path(root: &Path) -> PathBuf {
+    root.join(".oah").join("config.toml")
+}
+
+fn open_root(ctx: &Ctx<'_>) -> Result<PathBuf, Error> {
+    ctx.session
+        .project()
+        .map(|open| open.project.root)
+        .ok_or_else(|| WorkflowError::NoProject.into())
+}
+
+/// The agents the caller detected as installed (a read; thin files take no `InstalledAgent`, D-33).
+fn installed(agents: &[AgentStatusDto]) -> Vec<AgentId> {
+    agents
+        .iter()
+        .filter(|agent| agent.installed)
+        .map(|agent| agent.id.0)
+        .collect()
+}
+
+/// The always-on project skills the block lists. `skills::lock` does not exist at this base, so the list is
+/// empty; the slice that lands the lock wires it here (D-14, CONTRACTS C18).
+fn always_skills() -> Vec<AlwaysSkill> {
+    Vec::new()
+}
+
+fn sync_input<'a>(
+    effective: &'a Effective,
+    always: &'a [AlwaysSkill],
+    detected: &'a [AgentId],
+) -> SyncInput<'a> {
+    SyncInput {
+        effective,
+        always,
+        detected,
+        lang: None,
+    }
+}
+
+fn rules_state(
+    env: &Env,
+    root: &Path,
+    effective: &Effective,
+    agents: &[AgentStatusDto],
+) -> RulesStateDto {
+    let refused = |error: Error| RulesStateDto {
+        synced: false,
+        drift: Vec::new(),
+        writes: Vec::new(),
+        error: Some(error.to_dto(env)),
+    };
+    let snapshot = match RulesSnapshot::read(root) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return refused(error.into()),
+    };
+    let (always, detected) = (always_skills(), installed(agents));
+    match plan_sync(&snapshot, &sync_input(effective, &always, &detected)) {
+        Ok(plan) => {
+            let drift: Vec<DriftDto> = plan
+                .drift()
+                .into_iter()
+                .map(|line| DriftDto {
+                    code: line.code.to_string(),
+                    path: line.path.to_string(),
+                    message: line.message,
+                })
+                .collect();
+            RulesStateDto {
+                synced: drift.is_empty(),
+                drift,
+                writes: plan
+                    .writes()
+                    .map(|file| PlannedWriteDto {
+                        path: file.path.to_string(),
+                        action: file.action,
+                    })
+                    .collect(),
+                error: None,
+            }
+        }
+        Err(error) => refused(error.into()),
+    }
+}
+
+fn source(effective: &Effective, section: &str) -> String {
+    match effective
+        .stages
+        .iter()
+        .find(|assignment| assignment.section == section)
+        .map(|assignment| assignment.source)
+    {
+        Some(AssignmentSource::File) => String::from("file"),
+        Some(AssignmentSource::Legacy(key)) => format!("legacy:{key}"),
+        Some(AssignmentSource::Default) => String::from("default"),
+        None => String::from("unassigned"),
+    }
+}
+
+fn agent_options(agents: &[AgentStatusDto]) -> Vec<AgentOptionDto> {
+    let mut options: Vec<AgentOptionDto> = AgentId::ALL
+        .into_iter()
+        .filter(|id| id.can_own_section())
+        .map(|id| {
+            let found = agents.iter().find(|agent| agent.id == AgentIdDto(id));
+            AgentOptionDto {
+                id: AgentIdDto(id),
+                name: agent_name(id).to_string(),
+                installed: found.map(|agent| agent.installed),
+                sign_in: found.map_or(SignInDto::Unknown, |agent| agent.sign_in),
+                disabled_reason: found
+                    .filter(|agent| !agent.installed)
+                    .map(|_| String::from("Not installed on this machine")),
+            }
+        })
+        .collect();
+    options.sort_by_key(|option| option.installed != Some(true));
+    options
+}
+
+fn bare_key(key: &str) -> String {
+    if !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        key.to_string()
+    } else {
+        format!("{key:?}")
+    }
+}
+
+fn render_table(out: &mut String, name: &str, table: &Table) {
+    out.push_str(&format!("[{name}]\n"));
+    for (key, value) in table.iter().filter(|(_, value)| value.as_table().is_none()) {
+        out.push_str(&format!("{} = {}\n", bare_key(key), value.to_toml()));
+    }
+    for (key, value) in table.iter() {
+        if let Some(inner) = value.as_table() {
+            render_table(out, &format!("{name}.{}", bare_key(key)), inner);
+        }
+    }
+}
+
+/// The `[sections]` and `[stages]` tables as the file holds them.
+fn config_tables(values: &Table) -> String {
+    let mut out = String::new();
+    for name in ["sections", "stages"] {
+        if let Some(table) = values.get(name).and_then(Value::as_table) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            render_table(&mut out, name, table);
+        }
+    }
+    out
+}
+
+fn independence_notices(effective: &Effective) -> Vec<NoticeDto> {
+    let label = |id: &str| {
+        effective
+            .sections
+            .iter()
+            .find(|section| section.id == id)
+            .map_or_else(|| id.to_string(), |section| section.label.clone())
+    };
+    independence_breaks(effective)
+        .into_iter()
+        .map(|(section, other, agent)| {
+            NoticeDto::warning(
+                codes::REVIEW_NOT_INDEPENDENT,
+                &format!("{section}:{other}"),
+                format!(
+                    "{} is done by the same agent as {} ({}).",
+                    label(&section),
+                    label(&other),
+                    agent_name(agent)
+                ),
+            )
+        })
+        .collect()
+}
+
+/// What the Team Workflow page and `oah sections show` show for the project at `root`; reads only.
+pub fn view(env: &Env, root: &Path, agents: &[AgentStatusDto]) -> Result<WorkflowDto, Error> {
+    let config = ProjectConfig::read(&config_path(root))?;
+    let effective = config.effective();
+    let sections = effective
+        .sections
+        .iter()
+        .map(|section| SectionDto {
+            id: section.id.clone(),
+            label: section.label.clone(),
+            agent: effective.agent_for(&section.id).map(AgentIdDto),
+            source: source(effective, &section.id),
+            independent_of: section.independent_of.clone(),
+            skills: section.skills.clone(),
+        })
+        .collect();
+    let block = RulesSnapshot::read(root)
+        .ok()
+        .and_then(|snapshot| snapshot.block_text());
+    let mut notes = Vec::new();
+    if effective
+        .stages
+        .iter()
+        .any(|assignment| assignment.agent == AgentId::Copilot)
+    {
+        notes.push(String::from(
+            "Copilot CLI may not read AGENTS.md (not verified yet), so this assignment may not reach it.",
+        ));
+    }
+    let mut notices: Vec<NoticeDto> = config
+        .notices()
+        .iter()
+        .map(|notice| NoticeDto::from_config(env, notice))
+        .collect();
+    notices.extend(independence_notices(effective));
+    Ok(WorkflowDto {
+        sections,
+        agents: agent_options(agents),
+        banner: status(effective, agents),
+        presets: PRESETS
+            .iter()
+            .map(|preset| preset.to_dto(effective, agents))
+            .collect(),
+        rules: rules_state(env, root, effective, agents),
+        config_format: match config.format() {
+            Format::Missing => ConfigFormatDto::Missing,
+            Format::Legacy => ConfigFormatDto::Legacy,
+            Format::Current => ConfigFormatDto::Current,
+        },
+        config_sha256: config
+            .file()
+            .source_bytes()
+            .map(|bytes| Fingerprint::of(bytes).to_hex()),
+        upgrade_warning: (config.format() == Format::Legacy).then(|| UPGRADE_WARNING.to_string()),
+        advanced: AdvancedDto {
+            config_tables: config_tables(config.file().values()),
+            block,
+        },
+        notes,
+        notices,
+    })
+}
+
+/// Plans the rules from `effective` and writes them; records every verified write in the session.
+fn sync_rules(
+    ctx: &Ctx<'_>,
+    root: &Path,
+    effective: &Effective,
+    agents: &[AgentStatusDto],
+) -> SyncResult {
+    let snapshot = match RulesSnapshot::read(root) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return SyncResult {
+                error: Some(error.into()),
+                ..SyncResult::default()
+            };
+        }
+    };
+    let (always, detected) = (always_skills(), installed(agents));
+    let plan = match plan_sync(&snapshot, &sync_input(effective, &always, &detected)) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return SyncResult {
+                error: Some(error.into()),
+                ..SyncResult::default()
+            };
+        }
+    };
+    let result = apply_sync(root, &plan, ctx.cancel, LockOptions::default());
+    for receipt in &result.receipts {
+        ctx.session.self_writes().record(receipt);
+    }
+    result
+}
+
+/// Re-reads the session's project when it is the one at `root`, so its config state follows a save.
+fn refresh_session(ctx: &Ctx<'_>, root: &Path) {
+    if let Some((stamp, held)) = ctx.session.stamp_refresh()
+        && held == root
+        && let Ok(read) = crate::project::open(ctx.env, root)
+    {
+        ctx.session.publish_project(stamp, read);
+    }
+}
+
+/// The one assignment operation (CONTRACTS C12) for the project at `root`.
+///
+/// 1. Every named section must be in `sections.order` (`OAH_SECTION_UNKNOWN`, nothing written).
+/// 2. `config::save_project` writes the `[stages]` keys and `independent_of` lists in one save. A v0.4.0 file
+///    needs `approve_upgrade` to be the SHA-256 of exactly the bytes the warning was shown for; otherwise the save
+///    is `OAH_CONFIG_UPGRADE_REQUIRED` and nothing is written. The upgrade keeps `.oah/config.toml.v0.4.bak`.
+///    `cursor` is refused by `config` (`OAH_AGENT_DEPLOY_ONLY`). A refused save is returned as the error.
+/// 3. The rules are planned from the saved config and written. A refusal leaves the saved config in place and
+///    returns `synced: false`, the reason, and the *Sync now* action.
+pub fn set_stages(
+    ctx: &Ctx<'_>,
+    root: &Path,
+    agents: &[AgentStatusDto],
+    req: StagesSetReq,
+) -> Result<StagesSetDto, Error> {
+    let path = config_path(root);
+    let snapshot = ProjectConfig::read(&path)?;
+    let effective = snapshot.effective();
+    let known = |id: &str| effective.sections.iter().any(|section| section.id == id);
+    let unknown = |id: &str| -> Error {
+        WorkflowError::UnknownSection {
+            section: id.to_string(),
+        }
+        .into()
+    };
+    let mut edits = Vec::new();
+    for change in &req.stages {
+        if !known(&change.section) {
+            return Err(unknown(&change.section));
+        }
+        edits.push(Edit::stage(&change.section, change.agent.0));
+    }
+    for rule in &req.independent_of {
+        if !known(&rule.section) {
+            return Err(unknown(&rule.section));
+        }
+        if let Some(bad) = rule.of.iter().find(|id| !known(id) || **id == rule.section) {
+            return Err(unknown(bad));
+        }
+        let list = rule.of.iter().map(|id| Value::from(id.as_str())).collect();
+        edits.push(Edit::set(
+            &["sections", rule.section.as_str(), "independent_of"],
+            Value::Array(list),
+        ));
+    }
+    let approval = match (
+        req.approve_upgrade.as_deref(),
+        snapshot.file().source_bytes(),
+        snapshot.upgrade_warning(),
+    ) {
+        (Some(approved), Some(bytes), Some(warning))
+            if Fingerprint::of(bytes).to_hex() == approved =>
+        {
+            Some(warning.approve())
+        }
+        _ => None,
+    };
+    let saved = save_project(&snapshot, &edits, approval.as_ref(), LockOptions::default())?;
+    if let Some(crate::config::Backup::Written(receipt)) = &saved.backup {
+        ctx.session.self_writes().record(receipt);
+    }
+    if let Some(receipt) = &saved.written {
+        ctx.session.self_writes().record(receipt);
+    }
+    refresh_session(ctx, root);
+    let backup = saved.backup.as_ref().map(|_| {
+        let name = backup_path(&path);
+        format!(
+            ".oah/{}",
+            name.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        )
+    });
+    let after = ProjectConfig::read(&path)?;
+    let result = sync_rules(ctx, root, after.effective(), agents);
+    let mut workflow = view(ctx.env, root, agents)?;
+    let sync_error = result.error.as_ref().map(|error| error.to_dto(ctx.env));
+    if let Some(error) = &sync_error {
+        workflow.notices.push(NoticeDto {
+            id: codes::RULES_NOT_SYNCED.to_string(),
+            level: NoticeLevel::Warning,
+            code: codes::RULES_NOT_SYNCED.to_string(),
+            message: format!(
+                "The assignment is saved, but AGENTS.md is not synced: {}: {}",
+                error.code, error.message
+            ),
+            hint: hint_for(codes::RULES_NOT_SYNCED).map(str::to_string),
+            actions: vec![SYNC_NOW.to_string()],
+        });
+    }
+    Ok(StagesSetDto {
+        saved: saved.written.is_some(),
+        upgraded: saved.upgraded,
+        backup,
+        synced: result.synced(),
+        actions: if result.synced() {
+            Vec::new()
+        } else {
+            vec![SYNC_NOW.to_string()]
+        },
+        sync_error,
+        workflow,
+    })
+}
+
+/// `rules_check` for the project at `root`: drift and planned writes, or the refusal a sync would hit. Writes
+/// nothing.
+pub fn rules_check_at(
+    env: &Env,
+    root: &Path,
+    agents: &[AgentStatusDto],
+) -> Result<RulesStateDto, Error> {
+    let config = ProjectConfig::read(&config_path(root))?;
+    Ok(rules_state(env, root, config.effective(), agents))
+}
+
+/// `rules_sync` for the project at `root`. A refusal before anything was written is the error; a stop after a
+/// write is reported in the result with `synced: false`.
+pub fn rules_sync_at(
+    ctx: &Ctx<'_>,
+    root: &Path,
+    agents: &[AgentStatusDto],
+) -> Result<RulesSyncDto, Error> {
+    let config = ProjectConfig::read(&config_path(root))?;
+    let result = sync_rules(ctx, root, config.effective(), agents);
+    let wrote = result
+        .items
+        .iter()
+        .any(|(_, _, item)| item.status != ItemStatus::NotRun && item.status != ItemStatus::Stale);
+    let mut result = result;
+    if !wrote && let Some(error) = result.error.take() {
+        return Err(error);
+    }
+    let synced = result.error.is_none();
+    Ok(RulesSyncDto {
+        synced,
+        written: result
+            .items
+            .iter()
+            .map(|(path, action, item)| RulesWriteDto {
+                path: path.to_string(),
+                action: *action,
+                status: item.status,
+            })
+            .collect(),
+        error: result.error.as_ref().map(|error| error.to_dto(ctx.env)),
+    })
+}
+
+/// `sections_show`: the page of the open project with the session's agent statuses.
+pub fn sections_show(ctx: &Ctx<'_>, _req: Empty) -> Result<WorkflowDto, Error> {
+    let root = open_root(ctx)?;
+    let agents = agents_list(ctx, Empty {})?;
+    view(ctx.env, &root, &agents)
+}
+
+/// `workflow_status`: the one banner of the open project.
+pub fn workflow_status(ctx: &Ctx<'_>, _req: Empty) -> Result<BannerDto, Error> {
+    let root = open_root(ctx)?;
+    let agents = agents_list(ctx, Empty {})?;
+    let config = ProjectConfig::read(&config_path(&root))?;
+    Ok(status(config.effective(), &agents))
+}
+
+/// `stages_set` on the open project.
+pub fn stages_set(ctx: &Ctx<'_>, req: StagesSetReq) -> Result<StagesSetDto, Error> {
+    let root = open_root(ctx)?;
+    let agents = agents_list(ctx, Empty {})?;
+    set_stages(ctx, &root, &agents, req)
+}
+
+/// `preset_apply`: the preset's assignments for the sections that exist, as one `stages_set`. A preset that does
+/// not exist, or names an agent not installed here, is `OAH_PRESET_UNAVAILABLE` and writes nothing.
+pub fn preset_apply(ctx: &Ctx<'_>, req: PresetApplyReq) -> Result<StagesSetDto, Error> {
+    let root = open_root(ctx)?;
+    let agents = agents_list(ctx, Empty {})?;
+    let config = ProjectConfig::read(&config_path(&root))?;
+    let effective = config.effective();
+    let unavailable = |reason: String| -> Error {
+        WorkflowError::PresetUnavailable {
+            preset: req.preset.clone(),
+            reason,
+        }
+        .into()
+    };
+    let preset = PRESETS
+        .iter()
+        .find(|preset| preset.id == req.preset)
+        .ok_or_else(|| unavailable(String::from("there is no such preset")))?;
+    if let Some(reason) = preset.disabled_reason(effective, &agents) {
+        return Err(unavailable(reason));
+    }
+    let stages = preset
+        .stages_for(effective)
+        .into_iter()
+        .map(|(section, agent)| StageChangeReq {
+            section,
+            agent: AgentIdDto(agent),
+        })
+        .collect();
+    set_stages(
+        ctx,
+        &root,
+        &agents,
+        StagesSetReq {
+            stages,
+            independent_of: Vec::new(),
+            approve_upgrade: req.approve_upgrade,
+        },
+    )
+}
+
+/// `rules_check` on the open project.
+pub fn rules_check(ctx: &Ctx<'_>, _req: Empty) -> Result<RulesStateDto, Error> {
+    let root = open_root(ctx)?;
+    let agents = agents_list(ctx, Empty {})?;
+    rules_check_at(ctx.env, &root, &agents)
+}
+
+/// `rules_sync` on the open project.
+pub fn rules_sync(ctx: &Ctx<'_>, _req: Empty) -> Result<RulesSyncDto, Error> {
+    let root = open_root(ctx)?;
+    let agents = agents_list(ctx, Empty {})?;
+    rules_sync_at(ctx, &root, &agents)
+}

@@ -1,4 +1,4 @@
-// 적합성 실행기: 모든 영역의 매니페스트와 사례를 검사하고, 켜진 영역(config)만 실제 oah-core 로 실행해 기대값과 비교한다.
+// 적합성 실행기: 모든 영역의 매니페스트와 사례를 검사하고, 켜진 영역을 실제 oah-core 로 실행해 기대값과 비교한다.
 //! Runs the golden fixtures against the real `oah-core`.
 //!
 //! Every area's manifest and case folders are checked for completeness. Which areas run is decided here, in
@@ -12,8 +12,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+mod rules;
+
 /// The areas this build runs. Every other area is checked for completeness and reported as pending.
-pub const ENABLED: &[&str] = &["config", "doctor"];
+pub const ENABLED: &[&str] = &["config", "doctor", "rules"];
 
 /// The fixture cases whose v0.4.0 result 1.0 deliberately changes, and how this runner adapts each. Design §3.1:
 /// "an unknown key inside a table 1.0 reads is a notice (`OAH_CONFIG_UNKNOWN_KEY`, non-fatal)". The frozen
@@ -223,6 +225,7 @@ pub fn run_area(root: &Path, area: &str) -> AreaReport {
         let outcome = match area {
             "config" => run_config_case(case, deviation, &input, &expect),
             "doctor" => crate::doctor::run_case(&case.function, &input, &expect),
+            "rules" => rules::run_case(case, deviation, &input, &expect),
             _ => Err(format!(
                 "no operations are registered for the enabled area {area}"
             )),

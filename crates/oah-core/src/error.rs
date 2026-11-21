@@ -11,11 +11,13 @@ use crate::fsx::FsxError;
 use crate::paths::{Env, PathsError};
 use crate::plan::PlanError;
 use crate::project::ProjectError;
+use crate::rules::RulesError;
 use crate::tasks::{Cancelled, TaskError};
+use crate::workflow::WorkflowError;
 use serde::Serialize;
 use std::fmt;
 
-/// The codes M1-S1 and M1-S2 add (CONTRACTS C16).
+/// The codes M1-S1, M1-S2 and M2-S1 add (CONTRACTS C16).
 pub mod codes {
     /// A task of the same kind and subject is already running.
     pub const TASK_BUSY: &str = "OAH_TASK_BUSY";
@@ -33,6 +35,17 @@ pub mod codes {
     pub const UNSUPPORTED_BATCH_SHIM: &str = "OAH_UNSUPPORTED_BATCH_SHIM";
     /// The program found under an agent's command name does not report itself as that agent (M1-S2).
     pub const AGENT_UNIDENTIFIED: &str = "OAH_AGENT_UNIDENTIFIED";
+    /// Warning: a section and a section it lists in `independent_of` are done by the same agent (M2-S1, v0.4.0's
+    /// code). It never blocks.
+    pub const REVIEW_NOT_INDEPENDENT: &str = "OAH_REVIEW_NOT_INDEPENDENT";
+    /// The config was saved and the rules re-sync was refused; the reason follows and *Sync now* is offered (M2-S1).
+    pub const RULES_NOT_SYNCED: &str = "OAH_RULES_NOT_SYNCED";
+    /// A Team Workflow or rules operation needs an open project (M2-S1).
+    pub const PROJECT_NOT_OPEN: &str = "OAH_PROJECT_NOT_OPEN";
+    /// An assignment names a section that is not in `sections.order` (M2-S1).
+    pub const SECTION_UNKNOWN: &str = "OAH_SECTION_UNKNOWN";
+    /// A preset that does not exist or names an agent that is not installed here (M2-S1).
+    pub const PRESET_UNAVAILABLE: &str = "OAH_PRESET_UNAVAILABLE";
 }
 
 /// A failure with a stable code and a message for a person.
@@ -51,6 +64,8 @@ pub enum Error {
     Plan(PlanError),
     Project(ProjectError),
     Agents(AgentError),
+    Rules(RulesError),
+    Workflow(WorkflowError),
 }
 
 /// The serialized error: `code` is stable, `message` and `hint` are English text for a person.
@@ -99,6 +114,34 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         codes::AGENT_UNIDENTIFIED => {
             "Another program uses this name. Fix PATH, or set the agent's command in .oah/config.toml."
         }
+        codes::REVIEW_NOT_INDEPENDENT => {
+            "Assign a different agent to one of the two sections, or switch the rule off. This only warns."
+        }
+        codes::RULES_NOT_SYNCED => {
+            "The assignment is saved. Fix the reason shown, then use Sync now or run `oah rules sync`."
+        }
+        codes::PROJECT_NOT_OPEN => "Open a project folder first.",
+        codes::SECTION_UNKNOWN => "Add the section id to sections.order in .oah/config.toml first.",
+        codes::PRESET_UNAVAILABLE => {
+            "Install the agents the preset names, or assign each section by hand."
+        }
+        "OAH_CONFIG_UPGRADE_REQUIRED" => {
+            "Read the upgrade warning, then save again with its approval. Nothing was written."
+        }
+        "OAH_AGENT_DEPLOY_ONLY" => {
+            "Cursor receives the rules but cannot take a section; choose another agent."
+        }
+        "OAH_RULES_BLOCK_TOO_LARGE" | "OAH_RULES_BUDGET" => {
+            "Shorten the text named in the message, then sync again. AGENTS.md was not changed."
+        }
+        "OAH_RULES_LINK" => "Replace the link with a regular file, then sync again.",
+        "OAH_RULES_MARKER_BROKEN" | "OAH_RULES_MARKER_DUPLICATE" => {
+            "Fix the marker lines by hand, then sync again. Nothing was written."
+        }
+        "OAH_RULES_NEWER" => "Upgrade OAH; this block was written by a newer version.",
+        "OAH_RULES_ENCODING" => "Save the file as UTF-8, then sync again.",
+        "OAH_RULES_VERIFY" => "Refresh to read the files again, then sync again.",
+        "OAH_RULES_DRIFT" => "Run Sync now or `oah rules sync` to restore the managed text.",
         "OAH_PROJECT_MISSING" => "Check that the folder still exists, then open it again.",
         "OAH_HOME_UNAVAILABLE" => "Set OAH_HOME, or make sure the home folder is set.",
         "OAH_GIT_MISSING" => "Install Git or add it to PATH, then open the folder again.",
@@ -124,6 +167,8 @@ impl Coded for Error {
             Error::Plan(error) => error.code(),
             Error::Project(error) => error.code(),
             Error::Agents(error) => error.code(),
+            Error::Rules(error) => Coded::code(error),
+            Error::Workflow(error) => error.code(),
         }
     }
 
@@ -136,6 +181,8 @@ impl Coded for Error {
             Error::Plan(error) => Coded::message(error),
             Error::Project(error) => Coded::message(error),
             Error::Agents(error) => Coded::message(error),
+            Error::Rules(error) => Coded::message(error),
+            Error::Workflow(error) => Coded::message(error),
         }
     }
 }
@@ -202,5 +249,17 @@ impl From<ProjectError> for Error {
 impl From<AgentError> for Error {
     fn from(error: AgentError) -> Self {
         Error::Agents(error)
+    }
+}
+
+impl From<RulesError> for Error {
+    fn from(error: RulesError) -> Self {
+        Error::Rules(error)
+    }
+}
+
+impl From<WorkflowError> for Error {
+    fn from(error: WorkflowError) -> Self {
+        Error::Workflow(error)
     }
 }

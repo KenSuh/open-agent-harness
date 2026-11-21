@@ -1,6 +1,8 @@
-// 하위 명령 모음: doctor 와 옛 hook 답을 두고, 핵심 오류를 C5 모양(--json 이면 표준 출력의 JSON, 아니면 한 줄)으로 알린다.
+// 하위 명령 모음: doctor·sections·rules 와 옛 hook 답을 두고, 핵심 오류를 C5 모양(--json 이면 표준 출력의 JSON, 아니면 한 줄)으로 알린다.
 pub mod doctor;
 pub mod hook;
+pub mod rules;
+pub mod sections;
 
 use oah_core::paths::Env;
 use oah_core::{Coded, Error, ErrorDto};
@@ -30,4 +32,9 @@ pub fn refuse(env: &Env, error: &Error, json: bool) -> ExitCode {
         eprintln!("{}: {}", dto.code, dto.message.replace('\n', " "));
     }
     ExitCode::from(REFUSED)
+}
+
+/// An environment for showing an error when the process's own cannot be read: no home, so paths stay whole.
+pub fn fallback_env() -> Env {
+    Env::new(std::env::temp_dir()).expect("the temporary folder is absolute")
 }
