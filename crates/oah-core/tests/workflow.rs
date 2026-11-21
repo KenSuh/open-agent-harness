@@ -13,7 +13,7 @@ use oah_core::dto::{
 };
 use oah_core::paths::{self, Env};
 use oah_core::tasks::{CancelToken, NoProgress};
-use oah_core::workflow::{self, status};
+use oah_core::workflow::{self, ConfigPathRefusal, WorkflowError, status};
 use oah_core::{Coded, Error};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -968,5 +968,549 @@ fn the_workflow_page_matches_the_shared_samples() {
             fs::write(sample(name), text).unwrap();
         }
         assert_eq!(&fs::read_to_string(sample(name)).unwrap(), text, "{name}");
+    }
+}
+
+fn probe_ready_session(ctx: &app::Ctx<'_>) {
+    let probe = FakeProbe::new(Os::Macos)
+        .program("claude", "/bin/claude")
+        .run(
+            "/bin/claude --version",
+            Some(0),
+            "2.1.144 (Claude Code)\n",
+            "",
+        )
+        .program("codex", "/bin/codex")
+        .run("/bin/codex --version", Some(0), "codex-cli 0.163.0\n", "");
+    app::agents_probe_with(
+        ctx,
+        AgentsProbeReq {
+            agents: Some(vec![
+                AgentIdDto(AgentId::Claude),
+                AgentIdDto(AgentId::Codex),
+            ]),
+            sign_in: false,
+            focus: false,
+        },
+        &probe,
+    )
+    .unwrap();
+}
+
+fn assert_unsafe_config_refusal(
+    env: &Env,
+    root: &Path,
+    error: Error,
+    expected_entry: &'static str,
+    expected_reason: ConfigPathRefusal,
+    hidden_tokens: &[&str],
+) {
+    assert_eq!(error.code(), "OAH_FILE_IO", "{error}");
+    let dto = error.to_dto(env);
+    assert_eq!(dto.code, "OAH_FILE_IO");
+    assert!(dto.message.contains(expected_entry), "{}", dto.message);
+    assert!(
+        !dto.message.contains(&root.display().to_string()),
+        "must not expose absolute project root: {}",
+        dto.message
+    );
+    for token in hidden_tokens {
+        assert!(
+            !error.message().contains(token) && !dto.message.contains(token),
+            "must not expose stored target {token:?}: {}",
+            dto.message
+        );
+    }
+    assert!(
+        matches!(
+            error,
+            Error::Workflow(WorkflowError::UnsafeConfigPath { entry, reason })
+                if entry == expected_entry && reason == expected_reason
+        ),
+        "expected UnsafeConfigPath({expected_entry:?}, {expected_reason:?}), got {error:?}"
+    );
+}
+
+#[test]
+fn workflow_config_saves_allow_absent_regular_and_legacy_backup_paths_and_preserve_error_semantics()
+{
+    let agents = ready_agents();
+
+    // 1. Absent `.oah` directory works through `preset_apply` as well as `stages_set`.
+    let absent = Project::new(&[]);
+    let cancel = CancelToken::new();
+    let ctx = absent.session.ctx(&cancel, &NoProgress);
+    probe_ready_session(&ctx);
+    let opened = app::project_open(&ctx, &absent.root).unwrap();
+    let applied = app::preset_apply(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened.id,
+            input: PresetApplyReq {
+                preset: String::from("balanced"),
+                approve_upgrade: None,
+            },
+        },
+    )
+    .unwrap();
+    assert!(applied.saved && applied.synced);
+    assert!(
+        absent
+            .text(".oah/config.toml")
+            .contains("plan = \"claude\"")
+    );
+
+    // 2. Regular `.oah/config.toml` with a leftover regular `.oah/config.toml.lock` saves cleanly.
+    let with_lock = Project::new(&[
+        (".oah/config.toml", b"[stages]\nplan = \"claude\"\n"),
+        (".oah/config.toml.lock", b""),
+    ]);
+    let saved = with_lock
+        .set(&agents, change("review", AgentId::Claude))
+        .unwrap();
+    assert!(saved.saved && saved.synced);
+    assert!(
+        with_lock
+            .text(".oah/config.toml")
+            .contains("review = \"claude\"")
+    );
+
+    // 3. Regular identical `.oah/config.toml.v0.4.bak` is reused on approved legacy upgrade.
+    let reused = Project::new(&[
+        (".oah/config.toml", LEGACY.as_bytes()),
+        (".oah/config.toml.v0.4.bak", LEGACY.as_bytes()),
+    ]);
+    let sha = reused.view(&agents).config_sha256;
+    let outcome = reused
+        .set(
+            &agents,
+            StagesSetReq {
+                approve_upgrade: sha,
+                ..change("review", AgentId::Claude)
+            },
+        )
+        .unwrap();
+    assert!(outcome.saved && outcome.upgraded && outcome.synced);
+    assert_eq!(outcome.backup.as_deref(), Some(".oah/config.toml.v0.4.bak"));
+    assert_eq!(
+        reused.read(".oah/config.toml.v0.4.bak").unwrap(),
+        LEGACY.as_bytes()
+    );
+
+    // 4. Regular conflicting `.oah/config.toml.v0.4.bak` preserves OAH_CONFIG_BACKUP_CONFLICT without overwriting.
+    let conflict = Project::new(&[
+        (".oah/config.toml", LEGACY.as_bytes()),
+        (".oah/config.toml.v0.4.bak", b"other backup\n"),
+    ]);
+    let sha = conflict.view(&agents).config_sha256;
+    let err = conflict
+        .set(
+            &agents,
+            StagesSetReq {
+                approve_upgrade: sha,
+                ..change("review", AgentId::Claude)
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "OAH_CONFIG_BACKUP_CONFLICT");
+    assert_eq!(
+        conflict.read(".oah/config.toml").unwrap(),
+        LEGACY.as_bytes()
+    );
+    assert_eq!(
+        conflict.read(".oah/config.toml.v0.4.bak").unwrap(),
+        b"other backup\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn workflow_config_mutations_refuse_linked_config_paths_without_writing_or_exposing_targets() {
+    use std::os::unix::fs::symlink;
+
+    let agents = ready_agents();
+    let cancel = CancelToken::new();
+
+    // 1. `.oah` symlink (live in-project directory and dangling in-project target).
+    for (label, create_target) in [("inert-dir", true), ("inert-missing-dir", false)] {
+        let project = Project::new(&[]);
+        let target = project.root.join(label);
+        if create_target {
+            fs::create_dir(&target).unwrap();
+        }
+        symlink(&target, project.root.join(".oah")).unwrap();
+        let ctx = project.session.ctx(&cancel, &NoProgress);
+        probe_ready_session(&ctx);
+        let opened = app::project_open(&ctx, &project.root).unwrap();
+
+        let direct =
+            workflow::set_stages(&ctx, &project.root, &agents, change("plan", AgentId::Codex))
+                .unwrap_err();
+        assert_unsafe_config_refusal(
+            project.session.env(),
+            &project.root,
+            direct,
+            ".oah",
+            ConfigPathRefusal::LinkOrReparse,
+            &[label],
+        );
+
+        let via_stages = app::stages_set(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: opened.id.clone(),
+                input: change("plan", AgentId::Codex),
+            },
+        )
+        .unwrap_err();
+        assert_unsafe_config_refusal(
+            project.session.env(),
+            &project.root,
+            via_stages,
+            ".oah",
+            ConfigPathRefusal::LinkOrReparse,
+            &[label],
+        );
+
+        let via_preset = app::preset_apply(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: opened.id,
+                input: PresetApplyReq {
+                    preset: String::from("balanced"),
+                    approve_upgrade: None,
+                },
+            },
+        )
+        .unwrap_err();
+        assert_unsafe_config_refusal(
+            project.session.env(),
+            &project.root,
+            via_preset,
+            ".oah",
+            ConfigPathRefusal::LinkOrReparse,
+            &[label],
+        );
+
+        if create_target {
+            assert!(fs::read_dir(&target).unwrap().next().is_none());
+        } else {
+            assert!(!target.exists());
+        }
+        assert!(!project.root.join("AGENTS.md").exists());
+    }
+
+    // 2. Leaf symlinks inside a real `.oah` folder: config.toml, config.toml.lock, and config.toml.v0.4.bak
+    //    (both live in-project targets and dangling in-project targets, including legacy upgrade with approval).
+    struct LeafCase {
+        entry: &'static str,
+        target_name: &'static str,
+        create_target: bool,
+        target_bytes: &'static [u8],
+        legacy_config: bool,
+    }
+    let cases = [
+        LeafCase {
+            entry: ".oah/config.toml",
+            target_name: "inert-config.toml",
+            create_target: true,
+            target_bytes: b"[stages]\nplan = \"claude\"\n",
+            legacy_config: false,
+        },
+        LeafCase {
+            entry: ".oah/config.toml",
+            target_name: "inert-missing-config.toml",
+            create_target: false,
+            target_bytes: b"",
+            legacy_config: false,
+        },
+        LeafCase {
+            entry: ".oah/config.toml.lock",
+            target_name: "inert-lock.txt",
+            create_target: true,
+            target_bytes: b"inert lock target\n",
+            legacy_config: false,
+        },
+        LeafCase {
+            entry: ".oah/config.toml.lock",
+            target_name: "inert-missing.lock",
+            create_target: false,
+            target_bytes: b"",
+            legacy_config: false,
+        },
+        LeafCase {
+            entry: ".oah/config.toml.v0.4.bak",
+            target_name: "inert-backup.txt",
+            create_target: true,
+            target_bytes: LEGACY.as_bytes(),
+            legacy_config: true,
+        },
+        LeafCase {
+            entry: ".oah/config.toml.v0.4.bak",
+            target_name: "inert-missing.bak",
+            create_target: false,
+            target_bytes: b"",
+            legacy_config: false,
+        },
+    ];
+
+    for case in cases {
+        let initial_config: &[u8] = if case.legacy_config {
+            LEGACY.as_bytes()
+        } else {
+            b"[stages]\nplan = \"claude\"\n"
+        };
+        let files: Vec<(&str, &[u8])> = if case.entry == ".oah/config.toml" {
+            Vec::new()
+        } else {
+            vec![(".oah/config.toml", initial_config)]
+        };
+        let project = Project::new(&files);
+        fs::create_dir_all(project.root.join(".oah")).unwrap();
+        let target = project.root.join(case.target_name);
+        if case.create_target {
+            fs::write(&target, case.target_bytes).unwrap();
+        }
+        symlink(&target, project.root.join(case.entry)).unwrap();
+        let ctx = project.session.ctx(&cancel, &NoProgress);
+        probe_ready_session(&ctx);
+        let opened = app::project_open(&ctx, &project.root).unwrap();
+        let approval = if case.legacy_config {
+            project.view(&agents).config_sha256
+        } else {
+            None
+        };
+
+        let stage_req = StagesSetReq {
+            approve_upgrade: approval.clone(),
+            ..change("review", AgentId::Claude)
+        };
+        let direct =
+            workflow::set_stages(&ctx, &project.root, &agents, stage_req.clone()).unwrap_err();
+        assert_unsafe_config_refusal(
+            project.session.env(),
+            &project.root,
+            direct,
+            case.entry,
+            ConfigPathRefusal::LinkOrReparse,
+            &[case.target_name],
+        );
+
+        let via_stages = app::stages_set(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: opened.id.clone(),
+                input: stage_req,
+            },
+        )
+        .unwrap_err();
+        assert_unsafe_config_refusal(
+            project.session.env(),
+            &project.root,
+            via_stages,
+            case.entry,
+            ConfigPathRefusal::LinkOrReparse,
+            &[case.target_name],
+        );
+
+        let via_preset = app::preset_apply(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: opened.id,
+                input: PresetApplyReq {
+                    preset: String::from("balanced"),
+                    approve_upgrade: approval,
+                },
+            },
+        )
+        .unwrap_err();
+        assert_unsafe_config_refusal(
+            project.session.env(),
+            &project.root,
+            via_preset,
+            case.entry,
+            ConfigPathRefusal::LinkOrReparse,
+            &[case.target_name],
+        );
+
+        if case.create_target {
+            assert_eq!(fs::read(&target).unwrap(), case.target_bytes);
+        } else {
+            assert!(!target.exists());
+        }
+        if case.entry != ".oah/config.toml" {
+            assert_eq!(project.read(".oah/config.toml").unwrap(), initial_config);
+        }
+        assert!(!project.root.join("AGENTS.md").exists());
+    }
+}
+
+#[test]
+fn workflow_config_mutations_refuse_unsupported_non_link_metadata_without_writing() {
+    let agents = ready_agents();
+    let cancel = CancelToken::new();
+
+    // 1. `.oah` is a regular file instead of a directory.
+    let oah_file = Project::new(&[(".oah", b"not a directory\n")]);
+    let ctx = oah_file.session.ctx(&cancel, &NoProgress);
+    probe_ready_session(&ctx);
+    let opened = app::project_open(&ctx, &oah_file.root).unwrap();
+    for error in [
+        workflow::set_stages(
+            &ctx,
+            &oah_file.root,
+            &agents,
+            change("plan", AgentId::Codex),
+        )
+        .unwrap_err(),
+        app::stages_set(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: opened.id.clone(),
+                input: change("plan", AgentId::Codex),
+            },
+        )
+        .unwrap_err(),
+        app::preset_apply(
+            &ctx,
+            WorkflowProjectReq {
+                project_id: opened.id,
+                input: PresetApplyReq {
+                    preset: String::from("balanced"),
+                    approve_upgrade: None,
+                },
+            },
+        )
+        .unwrap_err(),
+    ] {
+        assert_unsafe_config_refusal(
+            oah_file.session.env(),
+            &oah_file.root,
+            error,
+            ".oah",
+            ConfigPathRefusal::NotDirectory,
+            &[],
+        );
+    }
+    assert_eq!(oah_file.read(".oah").unwrap(), b"not a directory\n");
+
+    // 2. Directories where regular config, lock, or backup files belong.
+    for entry in [
+        ".oah/config.toml",
+        ".oah/config.toml.lock",
+        ".oah/config.toml.v0.4.bak",
+    ] {
+        let files: Vec<(&str, &[u8])> = if entry == ".oah/config.toml" {
+            Vec::new()
+        } else {
+            vec![(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]
+        };
+        let project = Project::new(&files);
+        fs::create_dir_all(project.root.join(entry)).unwrap();
+        let ctx = project.session.ctx(&cancel, &NoProgress);
+        probe_ready_session(&ctx);
+        let opened = app::project_open(&ctx, &project.root).unwrap();
+        for error in [
+            workflow::set_stages(
+                &ctx,
+                &project.root,
+                &agents,
+                change("review", AgentId::Claude),
+            )
+            .unwrap_err(),
+            app::stages_set(
+                &ctx,
+                WorkflowProjectReq {
+                    project_id: opened.id.clone(),
+                    input: change("review", AgentId::Claude),
+                },
+            )
+            .unwrap_err(),
+            app::preset_apply(
+                &ctx,
+                WorkflowProjectReq {
+                    project_id: opened.id,
+                    input: PresetApplyReq {
+                        preset: String::from("balanced"),
+                        approve_upgrade: None,
+                    },
+                },
+            )
+            .unwrap_err(),
+        ] {
+            assert_unsafe_config_refusal(
+                project.session.env(),
+                &project.root,
+                error,
+                entry,
+                ConfigPathRefusal::NotRegularFile,
+                &[],
+            );
+        }
+        assert!(project.root.join(entry).is_dir());
+        assert!(!project.root.join("AGENTS.md").exists());
+    }
+
+    // 3. Unix FIFOs at config, lock, or backup paths are refused immediately without blocking.
+    #[cfg(unix)]
+    for entry in [
+        ".oah/config.toml",
+        ".oah/config.toml.lock",
+        ".oah/config.toml.v0.4.bak",
+    ] {
+        let files: Vec<(&str, &[u8])> = if entry == ".oah/config.toml" {
+            Vec::new()
+        } else {
+            vec![(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]
+        };
+        let project = Project::new(&files);
+        let ctx = project.session.ctx(&cancel, &NoProgress);
+        probe_ready_session(&ctx);
+        let opened = app::project_open(&ctx, &project.root).unwrap();
+        fs::create_dir_all(project.root.join(".oah")).unwrap();
+        let fifo = project.root.join(entry);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed: {status}");
+        for error in [
+            workflow::set_stages(
+                &ctx,
+                &project.root,
+                &agents,
+                change("review", AgentId::Claude),
+            )
+            .unwrap_err(),
+            app::stages_set(
+                &ctx,
+                WorkflowProjectReq {
+                    project_id: opened.id.clone(),
+                    input: change("review", AgentId::Claude),
+                },
+            )
+            .unwrap_err(),
+            app::preset_apply(
+                &ctx,
+                WorkflowProjectReq {
+                    project_id: opened.id,
+                    input: PresetApplyReq {
+                        preset: String::from("balanced"),
+                        approve_upgrade: None,
+                    },
+                },
+            )
+            .unwrap_err(),
+        ] {
+            assert_unsafe_config_refusal(
+                project.session.env(),
+                &project.root,
+                error,
+                entry,
+                ConfigPathRefusal::NotRegularFile,
+                &[],
+            );
+        }
+        assert!(!project.root.join("AGENTS.md").exists());
     }
 }

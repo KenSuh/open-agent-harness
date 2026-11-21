@@ -86,6 +86,57 @@ pub(crate) enum LocalRulesRead {
     },
 }
 
+/// What kind of real project-local entry is expected at an inspected path component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpectedEntry {
+    /// A real folder that may be absent or a regular directory.
+    Directory,
+    /// A real file that may be absent or a regular file.
+    RegularFile,
+}
+
+/// Outcome of classifying one inspected project-local component without following links or reparse entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InspectedEntry {
+    /// The path does not exist on disk.
+    Missing,
+    /// The entry matches the expected non-link, non-reparse directory or regular file kind.
+    Allowed,
+    /// The entry is a symlink, Windows junction, or other Windows reparse point.
+    LinkOrReparse,
+    /// The entry exists and is not a link or reparse point, but does not match the expected kind.
+    Unsupported,
+}
+
+/// Classifies one inspected project-local entry without exposing stored link targets.
+pub(crate) fn classify_inspected_entry(
+    entry: Entry,
+    is_reparse: bool,
+    expected: ExpectedEntry,
+) -> InspectedEntry {
+    match entry {
+        Entry::Missing => InspectedEntry::Missing,
+        Entry::Symlink { .. } | Entry::Junction { .. } => InspectedEntry::LinkOrReparse,
+        _ if is_reparse => InspectedEntry::LinkOrReparse,
+        Entry::Directory if expected == ExpectedEntry::Directory => InspectedEntry::Allowed,
+        Entry::File if expected == ExpectedEntry::RegularFile => InspectedEntry::Allowed,
+        _ => InspectedEntry::Unsupported,
+    }
+}
+
+/// Inspects `path` without following links or Windows reparse points and classifies it against `expected`.
+pub(crate) fn inspect_project_entry(
+    path: &Path,
+    expected: ExpectedEntry,
+) -> Result<InspectedEntry, FsxError> {
+    let entry = fsx::links::inspect(path)?;
+    let is_reparse = match entry {
+        Entry::Missing | Entry::Symlink { .. } | Entry::Junction { .. } => false,
+        _ => is_reparse_point(path)?,
+    };
+    Ok(classify_inspected_entry(entry, is_reparse, expected))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalStep {
     Continue,
@@ -93,7 +144,25 @@ enum LocalStep {
     Stop(LocalRulesRead),
 }
 
+fn map_local_step(
+    inspected: InspectedEntry,
+    last: bool,
+    path: &Path,
+    label: &'static str,
+) -> Result<LocalStep, FsxError> {
+    match inspected {
+        InspectedEntry::Missing => Ok(LocalStep::Stop(LocalRulesRead::Missing)),
+        InspectedEntry::LinkOrReparse => Ok(LocalStep::Stop(LocalRulesRead::RefusedLink {
+            entry: label,
+        })),
+        InspectedEntry::Allowed if !last => Ok(LocalStep::Continue),
+        InspectedEntry::Allowed => Ok(LocalStep::ReadRegular),
+        InspectedEntry::Unsupported => Err(refuse_unsupported(path)),
+    }
+}
+
 /// Classifies one inspected component of `.oah/rules.local.md` without exposing stored link targets.
+#[cfg(test)]
 fn classify_local_component(
     entry: Entry,
     is_reparse: bool,
@@ -101,20 +170,17 @@ fn classify_local_component(
     path: &Path,
     label: &'static str,
 ) -> Result<LocalStep, FsxError> {
-    match entry {
-        Entry::Missing => Ok(LocalStep::Stop(LocalRulesRead::Missing)),
-        Entry::Symlink { .. } | Entry::Junction { .. } => {
-            Ok(LocalStep::Stop(LocalRulesRead::RefusedLink {
-                entry: label,
-            }))
-        }
-        _ if is_reparse => Ok(LocalStep::Stop(LocalRulesRead::RefusedLink {
-            entry: label,
-        })),
-        Entry::Directory if !last => Ok(LocalStep::Continue),
-        Entry::File if last => Ok(LocalStep::ReadRegular),
-        _ => Err(refuse_unsupported(path)),
-    }
+    let expected = if last {
+        ExpectedEntry::RegularFile
+    } else {
+        ExpectedEntry::Directory
+    };
+    map_local_step(
+        classify_inspected_entry(entry, is_reparse, expected),
+        last,
+        path,
+        label,
+    )
 }
 
 fn inspect_local_component(
@@ -122,12 +188,13 @@ fn inspect_local_component(
     last: bool,
     label: &'static str,
 ) -> Result<LocalStep, FsxError> {
-    let entry = fsx::links::inspect(path)?;
-    let is_reparse = match entry {
-        Entry::Missing | Entry::Symlink { .. } | Entry::Junction { .. } => false,
-        _ => is_reparse_point(path)?,
+    let expected = if last {
+        ExpectedEntry::RegularFile
+    } else {
+        ExpectedEntry::Directory
     };
-    classify_local_component(entry, is_reparse, last, path, label)
+    let inspected = inspect_project_entry(path, expected)?;
+    map_local_step(inspected, last, path, label)
 }
 
 #[cfg(windows)]
@@ -283,5 +350,64 @@ mod tests {
             assert_eq!(err.path(), p);
             assert!(err.io_error().is_none());
         }
+    }
+
+    #[test]
+    fn classify_inspected_entry_covers_directory_and_regular_file_policies() {
+        let link_target = PathBuf::from("inert-target");
+
+        for expected in [ExpectedEntry::Directory, ExpectedEntry::RegularFile] {
+            assert_eq!(
+                classify_inspected_entry(Entry::Missing, false, expected),
+                InspectedEntry::Missing
+            );
+            assert_eq!(
+                classify_inspected_entry(
+                    Entry::Symlink {
+                        target: link_target.clone()
+                    },
+                    false,
+                    expected
+                ),
+                InspectedEntry::LinkOrReparse
+            );
+            assert_eq!(
+                classify_inspected_entry(
+                    Entry::Junction {
+                        target: link_target.clone()
+                    },
+                    true,
+                    expected
+                ),
+                InspectedEntry::LinkOrReparse
+            );
+            for reparse_entry in [Entry::Directory, Entry::File, Entry::Other] {
+                assert_eq!(
+                    classify_inspected_entry(reparse_entry, true, expected),
+                    InspectedEntry::LinkOrReparse
+                );
+            }
+            assert_eq!(
+                classify_inspected_entry(Entry::Other, false, expected),
+                InspectedEntry::Unsupported
+            );
+        }
+
+        assert_eq!(
+            classify_inspected_entry(Entry::Directory, false, ExpectedEntry::Directory),
+            InspectedEntry::Allowed
+        );
+        assert_eq!(
+            classify_inspected_entry(Entry::File, false, ExpectedEntry::Directory),
+            InspectedEntry::Unsupported
+        );
+        assert_eq!(
+            classify_inspected_entry(Entry::File, false, ExpectedEntry::RegularFile),
+            InspectedEntry::Allowed
+        );
+        assert_eq!(
+            classify_inspected_entry(Entry::Directory, false, ExpectedEntry::RegularFile),
+            InspectedEntry::Unsupported
+        );
     }
 }

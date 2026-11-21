@@ -4,13 +4,13 @@
 //! [`set_stages`] form takes the project root and the agent statuses explicitly; the session forms take the open
 //! project and the session's agent cache (`app::agents_list`), so the app and the CLI share one implementation.
 
-use super::WorkflowError;
 use super::presets::PRESETS;
 use super::status::{independence_breaks, status};
+use super::{ConfigPathRefusal, WorkflowError};
 use crate::app::{Ctx, agents_list};
 use crate::config::{
-    AgentId, AssignmentSource, Edit, Effective, Format, ProjectConfig, Table, UPGRADE_WARNING,
-    Value, backup_path, save_project,
+    AgentId, AssignmentSource, ConfigFile, Edit, Effective, Format, ProjectConfig, Table,
+    UPGRADE_WARNING, Value, backup_path, save_project,
 };
 use crate::dto::{
     AdvancedDto, AgentIdDto, AgentOptionDto, AgentStatusDto, BannerDto, ConfigFormatDto, DriftDto,
@@ -19,19 +19,105 @@ use crate::dto::{
     WorkflowProjectReq,
 };
 use crate::error::{Error, codes, hint_for};
-use crate::fsx::{Fingerprint, LockOptions};
+use crate::fsx::{self, Fingerprint, FsxError, LockOptions};
 use crate::paths::Env;
 use crate::plan::ItemStatus;
 use crate::rules::body::{AlwaysSkill, agent_name};
+use crate::rules::input::{ExpectedEntry, InspectedEntry, inspect_project_entry};
 use crate::rules::sync::read_block;
 use crate::rules::{RulesSnapshot, SyncInput, SyncResult, apply_sync, plan_sync};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// The action id of *Sync now*: the `rules_sync` command.
 const SYNC_NOW: &str = "rules_sync";
+const CONFIG_DIR_LABEL: &str = ".oah";
+const CONFIG_FILE_LABEL: &str = ".oah/config.toml";
+const CONFIG_LOCK_LABEL: &str = ".oah/config.toml.lock";
+const CONFIG_BACKUP_LABEL: &str = ".oah/config.toml.v0.4.bak";
 
 fn config_path(root: &Path) -> PathBuf {
     root.join(".oah").join("config.toml")
+}
+
+fn refuse_config_path(entry: &'static str, reason: ConfigPathRefusal) -> Error {
+    WorkflowError::UnsafeConfigPath { entry, reason }.into()
+}
+
+/// Checks `.oah` and every project-local path `config::save_project` reads, locks, backs up, or replaces,
+/// without following links or Windows reparse points. Returns `Ok(true)` when `.oah` exists as a regular
+/// folder and `Ok(false)` when `.oah` is absent.
+///
+/// Residual limit: this is a name-based metadata check before calling `config::save_project`; it refuses
+/// pre-existing links, reparse entries, and unsupported file types, but cannot by itself prevent a
+/// concurrent local writer from replacing `.oah` between inspection and `save_project`'s filesystem calls.
+fn check_config_mutation_paths(root: &Path) -> Result<bool, Error> {
+    let dir = root.join(".oah");
+    match inspect_project_entry(&dir, ExpectedEntry::Directory)? {
+        InspectedEntry::Missing => return Ok(false),
+        InspectedEntry::Allowed => {}
+        InspectedEntry::LinkOrReparse => {
+            return Err(refuse_config_path(
+                CONFIG_DIR_LABEL,
+                ConfigPathRefusal::LinkOrReparse,
+            ));
+        }
+        InspectedEntry::Unsupported => {
+            return Err(refuse_config_path(
+                CONFIG_DIR_LABEL,
+                ConfigPathRefusal::NotDirectory,
+            ));
+        }
+    }
+    let config = config_path(root);
+    let lock = dir.join("config.toml.lock");
+    let backup = backup_path(&config);
+    for (entry, path) in [
+        (CONFIG_FILE_LABEL, config),
+        (CONFIG_LOCK_LABEL, lock),
+        (CONFIG_BACKUP_LABEL, backup),
+    ] {
+        match inspect_project_entry(&path, ExpectedEntry::RegularFile)? {
+            InspectedEntry::Missing | InspectedEntry::Allowed => {}
+            InspectedEntry::LinkOrReparse => {
+                return Err(refuse_config_path(entry, ConfigPathRefusal::LinkOrReparse));
+            }
+            InspectedEntry::Unsupported => {
+                return Err(refuse_config_path(entry, ConfigPathRefusal::NotRegularFile));
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn map_config_read_error(error: FsxError) -> Error {
+    if let Some(io) = error.io_error() {
+        #[cfg(unix)]
+        if rustix::io::Errno::from_io_error(io) == Some(rustix::io::Errno::LOOP) {
+            return refuse_config_path(CONFIG_FILE_LABEL, ConfigPathRefusal::LinkOrReparse);
+        }
+        if io.kind() == ErrorKind::InvalidData {
+            return refuse_config_path(CONFIG_FILE_LABEL, ConfigPathRefusal::NotRegularFile);
+        }
+    }
+    error.into()
+}
+
+/// Validates the `.oah` mutation boundary and reads `.oah/config.toml` without following leaf links.
+fn read_config_for_mutation(root: &Path) -> Result<ProjectConfig, Error> {
+    let path = config_path(root);
+    let dir_exists = check_config_mutation_paths(root)?;
+    let bytes = if dir_exists {
+        match fsx::read_regular_optional(&path) {
+            Ok(Some((bytes, _))) => Some(bytes),
+            Ok(None) => None,
+            Err(error) => return Err(map_config_read_error(error)),
+        }
+    } else {
+        None
+    };
+    let file = ConfigFile::from_bytes(&path, bytes)?;
+    Ok(ProjectConfig::from_file(file)?)
 }
 
 fn open_root(ctx: &Ctx<'_>, project_id: Option<&str>) -> Result<PathBuf, Error> {
@@ -328,7 +414,7 @@ pub fn set_stages(
     req: StagesSetReq,
 ) -> Result<StagesSetDto, Error> {
     let path = config_path(root);
-    let snapshot = ProjectConfig::read(&path)?;
+    let snapshot = read_config_for_mutation(root)?;
     let effective = snapshot.effective();
     let known = |id: &str| effective.sections.iter().any(|section| section.id == id);
     let unknown = |id: &str| -> Error {
@@ -369,6 +455,7 @@ pub fn set_stages(
         }
         _ => None,
     };
+    check_config_mutation_paths(root)?;
     let saved = save_project(&snapshot, &edits, approval.as_ref(), LockOptions::default())?;
     if let Some(crate::config::Backup::Written(receipt)) = &saved.backup {
         ctx.session.self_writes().record(receipt);
@@ -386,7 +473,7 @@ pub fn set_stages(
                 .unwrap_or_default()
         )
     });
-    let after = ProjectConfig::read(&path)?;
+    let after = read_config_for_mutation(root)?;
     let result = sync_rules(ctx, root, &after, agents);
     let mut workflow = view(ctx.env, root, agents)?;
     let sync_error = result.error.as_ref().map(|error| error.to_dto(ctx.env));
@@ -507,7 +594,7 @@ pub fn preset_apply(
     let root = open_root(ctx, Some(&req.project_id))?;
     let req = req.input;
     let agents = agents_list(ctx, Empty {})?;
-    let config = ProjectConfig::read(&config_path(&root))?;
+    let config = read_config_for_mutation(&root)?;
     let effective = config.effective();
     let unavailable = |reason: String| -> Error {
         WorkflowError::PresetUnavailable {
