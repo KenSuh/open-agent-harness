@@ -148,7 +148,7 @@ def assert_dry_run_branches(test: unittest.TestCase, source: str, shell: str) ->
     # remain necessary, and the mutation tests prove that unreviewed source fails closed.
     reviewed = {
         "bash": "94ff5efd2c70f1de2cf6f168840835b28914911ae9f05f25d47c345603204193",
-        "powershell": "ad85673cafb0083aa3ea990f644b3fe6d7215d919a1abaea2ef8f0cd3561bc53",
+        "powershell": "7d06f92db3e9610b1b5e1f0bb116adb2998c052e8004fe7dc3c01d444a8d331a",
     }
     test.assertEqual(hashlib.sha256(source.encode("utf-8")).hexdigest(), reviewed[shell],
                      "Review the complete installer and its dry-run boundary before updating its pin.")
@@ -683,7 +683,7 @@ class InstallPs1Test(unittest.TestCase):
                  ('touch "$HOME/changed"', 'curl https://example.invalid/file', 'tar -xf release.tar.gz')),
                 ("powershell", INSTALL_PS1, "        Show-InstallPlan $plan\n",
                  ("[IO.File]::WriteAllText('changed', 'data')", "Save-Release $releaseUri 'file'",
-                  "Expand-Archive release.zip"))):
+                  "[System.IO.Compression.ZipFile]::ExtractToDirectory('release.zip', 'release')"))):
             source = path.read_text(encoding="utf-8")
             for operation in operations:
                 with self.subTest(shell=shell, operation=operation):
