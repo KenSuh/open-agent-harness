@@ -13,6 +13,8 @@
 //! * [`agents`] detects the seven agents and their sign-in through one probe seam, with capability evidence.
 //! * [`rules`] plans and writes the managed block of `AGENTS.md` and the thin files; [`workflow`] is the Team
 //!   Workflow: one assignment operation (config, then rules), the single banner, presets and the rules check.
+//! * [`review`] is the skill review and license core; [`registry`] holds the collectors it reads a source with
+//!   (only the bounded local Git one so far); [`skills`] computes the public `computedHash` of a skill's files.
 
 pub mod agents;
 pub mod app;
@@ -24,7 +26,10 @@ pub mod paths;
 pub mod plan;
 mod proc;
 pub mod project;
+pub mod registry;
+pub mod review;
 pub mod rules;
+pub mod skills;
 pub mod tasks;
 pub mod workflow;
 

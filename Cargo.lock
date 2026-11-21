@@ -442,6 +442,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "caseless"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b6fd507454086c8edfd769ca6ada439193cdb209c7681712ef6275cccbfe5d8"
+dependencies = [
+ "unicode-normalization",
+]
+
+[[package]]
 name = "cc"
 version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2304,6 +2313,7 @@ dependencies = [
 name = "oah-core"
 version = "0.0.0"
 dependencies = [
+ "caseless",
  "junction",
  "rustix",
  "serde",
@@ -2311,6 +2321,8 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "toml_edit 0.22.27",
+ "unicode-general-category",
+ "unicode-normalization",
  "winapi-util",
  "windows-sys 0.61.2",
 ]
@@ -4328,10 +4340,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "unicode-general-category"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1218098468b8085b19a2824104c70d976491d247ce194bbd9dc77181150cdfd6"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "854cbdc4f7bc6ae19c820d44abdc3277ac3e1b2b93db20a636825d9322fb60e6"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"
