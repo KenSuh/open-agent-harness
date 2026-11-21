@@ -53,16 +53,42 @@ describe("initial load", () => {
     expect(toastText()).toBe("");
   });
 
-  it("puts agents that are not installed in a collapsed group with their install page", async () => {
-    await loaded();
+  it("puts agents that are not installed in a collapsed group with an accessible install link", async () => {
+    const t = await loaded();
     const group = document.querySelector<HTMLDetailsElement>("details.not-installed");
     expect(group?.open).toBe(false);
     expect(group?.querySelector("summary")?.textContent).toBe("Not installed (1)");
     expect(group?.textContent).toMatch(/Cursor/);
-    expect(group?.querySelector(".install-url")?.textContent).toBe("https://cursor.com/download");
-    // No anchor: the window opens no external page and never navigates away.
-    expect(group?.querySelector("a")).toBeNull();
+    const link = group?.querySelector<HTMLAnchorElement>("a.install-url");
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe("https://cursor.com/download");
+    expect(link?.getAttribute("href")).toBe("https://cursor.com/download");
+    // No target="_blank": activation flows through Tauri's native on_navigation allowlist and OS browser handoff.
+    expect(link?.getAttribute("target")).toBeNull();
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(link?.getAttribute("aria-label")).toBe("Install Cursor (https://cursor.com/download) — opens in your browser");
+    expect(link?.tabIndex).toBe(0);
     expect(rosterText()).not.toMatch(/Cursor.*[✓✕]/);
+
+    // Expanding the group lets a keyboard user focus and activate the link without app-side IPC or view change.
+    group!.open = true;
+    link!.focus();
+    expect(document.activeElement).toBe(link);
+    const callsBefore = t.calls.length;
+    let reachedNavigationBoundary = false;
+    const onDocumentClick = (event: MouseEvent) => {
+      reachedNavigationBoundary = !event.defaultPrevented;
+      event.preventDefault(); // stop jsdom's unimplemented navigation; Tauri cancels natively in production
+    };
+    document.addEventListener("click", onDocumentClick);
+    try {
+      await click(link!);
+    } finally {
+      document.removeEventListener("click", onDocumentClick);
+    }
+    expect(reachedNavigationBoundary).toBe(true);
+    expect(t.calls.length).toBe(callsBefore);
+    expect(document.querySelector("h1")?.textContent).toBe("Explore");
   });
 
   it("waits quietly for agents-changed when the same request is already running (native focus probe)", async () => {
@@ -154,10 +180,12 @@ describe("read-only Agents view and navigation", () => {
     expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it("shows the neutral note for sign-in-unknown and plain text for a non-command hint", async () => {
-    await loaded();
+  it("shows the neutral note for sign-in-unknown, plain text for a non-command hint, and an accessible install link in detail", async () => {
+    const t = await loaded();
     await click(rosterButton("Copilot CLI"));
-    expect(document.querySelector("article.agent-card")?.textContent).toMatch(/OAH cannot check sign-in for Copilot CLI\./);
+    const copilotCard = document.querySelector("article.agent-card")!;
+    expect(copilotCard.textContent).toMatch(/OAH cannot check sign-in for Copilot CLI\./);
+    expect(copilotCard.querySelector("a.install-url")).toBeNull();
     await click(button("← All agents"));
     const cursor = Array.from(document.querySelectorAll("article.agent-card")).find((card) =>
       /Cursor/.test(card.querySelector("h2")?.textContent ?? ""),
@@ -165,8 +193,127 @@ describe("read-only Agents view and navigation", () => {
     expect(cursor.textContent).toMatch(/Cursor Settings → Sign In/);
     expect(cursor.querySelector("code")).toBeNull();
     expect(cursor.textContent).toMatch(/Not checked: the agent is not installed\./);
-    expect(cursor.querySelector(".install-url")?.textContent).toBe("https://cursor.com/download");
+    const link = cursor.querySelector<HTMLAnchorElement>("a.install-url");
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe("https://cursor.com/download");
+    expect(link?.getAttribute("href")).toBe("https://cursor.com/download");
+    expect(link?.getAttribute("target")).toBeNull();
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(link?.getAttribute("aria-label")).toBe("Install Cursor (https://cursor.com/download) — opens in your browser");
+    expect(link?.tabIndex).toBe(0);
+    link!.focus();
+    expect(document.activeElement).toBe(link);
+    const callsBefore = t.calls.length;
+    let reachedNavigationBoundary = false;
+    const onDocumentClick = (event: MouseEvent) => {
+      reachedNavigationBoundary = !event.defaultPrevented;
+      event.preventDefault();
+    };
+    document.addEventListener("click", onDocumentClick);
+    try {
+      await click(link!);
+    } finally {
+      document.removeEventListener("click", onDocumentClick);
+    }
+    expect(reachedNavigationBoundary).toBe(true);
+    expect(t.calls.length).toBe(callsBefore);
+    expect(document.querySelector("h1")?.textContent).toBe("Agents");
+    expect(document.querySelectorAll("article.agent-card")).toHaveLength(4);
     expect(cursor.textContent).toMatch(/No \(skills and rules only\)/);
+  });
+
+  it("keeps ordinary Enter native and routes modified clicks, middle-click, and modified Enter onto single-window navigation", async () => {
+    const t = await loaded();
+    const group = document.querySelector<HTMLDetailsElement>("details.not-installed")!;
+    group.open = true;
+    const link = group.querySelector<HTMLAnchorElement>("a.install-url")!;
+    link.focus();
+    const callsBefore = t.calls.length;
+
+    const unmodifiedNavigations: HTMLAnchorElement[] = [];
+    const onDocumentClick = (event: MouseEvent) => {
+      if (!event.defaultPrevented && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+        unmodifiedNavigations.push(event.target as HTMLAnchorElement);
+        event.preventDefault();
+      }
+    };
+    document.addEventListener("click", onDocumentClick);
+    try {
+      // Ordinary Enter stays untouched so native keyboard activation runs once without double-firing.
+      let ordinaryEnterCancelled = false;
+      await emit(() => {
+        ordinaryEnterCancelled = !link.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      });
+      expect(ordinaryEnterCancelled).toBe(false);
+      expect(unmodifiedNavigations).toHaveLength(0);
+
+      // Cmd/Ctrl/Shift/Alt+Click are cancelled as popup/download gestures and re-dispatched as single-window clicks.
+      for (const modifier of [
+        { metaKey: true },
+        { ctrlKey: true },
+        { shiftKey: true },
+        { altKey: true },
+      ] as const) {
+        const before = unmodifiedNavigations.length;
+        let modifiedCancelled = false;
+        await emit(() => {
+          modifiedCancelled = !link.dispatchEvent(
+            new MouseEvent("click", { bubbles: true, cancelable: true, ...modifier }),
+          );
+        });
+        expect(modifiedCancelled).toBe(true);
+        expect(unmodifiedNavigations).toHaveLength(before + 1);
+        expect(unmodifiedNavigations.at(-1)).toBe(link);
+      }
+
+      // Middle-click routes onto the same single-window navigation path; right-click stays untouched.
+      const beforeAux = unmodifiedNavigations.length;
+      let middleCancelled = false;
+      let rightCancelled = false;
+      await emit(() => {
+        middleCancelled = !link.dispatchEvent(
+          new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 }),
+        );
+        rightCancelled = !link.dispatchEvent(
+          new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 2 }),
+        );
+      });
+      expect(middleCancelled).toBe(true);
+      expect(rightCancelled).toBe(false);
+      expect(unmodifiedNavigations).toHaveLength(beforeAux + 1);
+
+      // Modified Enter also routes onto the same single-window navigation path.
+      const beforeModEnter = unmodifiedNavigations.length;
+      let modEnterCancelled = false;
+      await emit(() => {
+        modEnterCancelled = !link.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, metaKey: true }),
+        );
+      });
+      expect(modEnterCancelled).toBe(true);
+      expect(unmodifiedNavigations).toHaveLength(beforeModEnter + 1);
+    } finally {
+      document.removeEventListener("click", onDocumentClick);
+    }
+    expect(t.calls.length).toBe(callsBefore);
+    expect(document.querySelector("h1")?.textContent).toBe("Explore");
+  });
+
+  it("refuses to render an interactive link when a synthetic missing agent has a non-HTTPS install URL", async () => {
+    const badMissing: AgentStatusDto = { ...cursorMissing, install_url: "javascript:alert(1)" };
+    await loaded([codexSignedOut, badMissing]);
+    const group = document.querySelector<HTMLDetailsElement>("details.not-installed");
+    expect(group?.querySelector("a.install-url")).toBeNull();
+    expect(group?.querySelector("span.install-url")?.textContent).toBe("javascript:alert(1)");
+
+    await click(rosterButton("Agents"));
+    const cursor = Array.from(document.querySelectorAll("article.agent-card")).find((card) =>
+      /Cursor/.test(card.querySelector("h2")?.textContent ?? ""),
+    )!;
+    expect(cursor.querySelector("a.install-url")).toBeNull();
+    expect(cursor.querySelector("span.install-url")?.textContent).toBe("javascript:alert(1)");
   });
 });
 

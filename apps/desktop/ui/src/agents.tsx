@@ -50,12 +50,58 @@ function SignInMark({ status }: { status: AgentStatus }) {
   );
 }
 
-/** The install page as selectable text, the way `oah doctor` prints it; the window opens no external page. */
-function InstallUrl({ url }: { url: string }) {
+function isHttpsUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.username === "" && parsed.password === "";
+  } catch {
+    return false;
+  }
+}
+
+function hasModifier(event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }): boolean {
+  return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
+}
+
+/**
+ * Official install link (M1-S2 PACKET §9, AC1). Rendered as an ordinary link without `target="_blank"` so activation
+ * goes through Tauri's native `on_navigation` policy, which checks the seven canonical catalog URLs, delegates the
+ * click to the OS default browser, and cancels webview navigation so OAH stays on the current view. Modified clicks,
+ * middle-clicks, and modified Enter are normalized onto the same single-window activation path so the webview does not
+ * swallow them as denied popups or downloads.
+ */
+function InstallUrl({ name, url }: { name: string; url: string }) {
+  if (!isHttpsUrl(url)) {
+    return <span className="install-url">{url}</span>;
+  }
   return (
-    <span className="install-url" title="Install page: copy this address into a browser">
+    <a
+      className="install-url"
+      href={url}
+      rel="noopener noreferrer"
+      aria-label={`Install ${name} (${url}) — opens in your browser`}
+      title={`Open ${name} install page in your browser`}
+      onClick={(event) => {
+        if (hasModifier(event)) {
+          event.preventDefault();
+          event.currentTarget.click();
+        }
+      }}
+      onAuxClick={(event) => {
+        if (event.button === 1) {
+          event.preventDefault();
+          event.currentTarget.click();
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && hasModifier(event)) {
+          event.preventDefault();
+          event.currentTarget.click();
+        }
+      }}
+    >
       {url}
-    </span>
+    </a>
   );
 }
 
@@ -118,7 +164,7 @@ function RosterBody({ agents, checking, selected, onOpen, onReload }: RosterProp
                   {agent.name}
                   {agent.status !== "missing" ? <span className="muted"> · {STATUS_LABEL[agent.status]}</span> : null}
                 </span>
-                <InstallUrl url={agent.install_url} />
+                <InstallUrl name={agent.name} url={agent.install_url} />
               </li>
             ))}
           </ul>
@@ -186,7 +232,7 @@ function AgentDetail({ agent }: { agent: AgentStatusDto }) {
           <>
             <dt>Install page</dt>
             <dd>
-              <InstallUrl url={agent.install_url} />
+              <InstallUrl name={agent.name} url={agent.install_url} />
             </dd>
           </>
         )}
