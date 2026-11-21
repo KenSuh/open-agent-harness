@@ -302,12 +302,14 @@ impl fmt::Display for NetError {
                 retry_after,
             } => {
                 write!(f, "{host} refused more requests for now (rate limit)")?;
-                match (reset_at, retry_after) {
-                    (Some(reset), _) => write!(
-                        f,
-                        "; try again after {}",
-                        crate::dto::rfc3339_utc(UNIX_EPOCH + Duration::from_secs(*reset))
-                    ),
+                const LAST_RFC3339_SECOND: u64 = 253_402_300_799;
+                let reset_time = reset_at
+                    .filter(|&seconds| seconds <= LAST_RFC3339_SECOND)
+                    .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)));
+                match (reset_time, retry_after) {
+                    (Some(reset), _) => {
+                        write!(f, "; try again after {}", crate::dto::rfc3339_utc(reset))
+                    }
                     (None, Some(seconds)) => write!(f, "; try again in {seconds} seconds"),
                     (None, None) => write!(f, "; try again later"),
                 }

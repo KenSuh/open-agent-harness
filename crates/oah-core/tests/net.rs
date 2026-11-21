@@ -179,6 +179,30 @@ fn a_rate_limit_answer_is_typed_with_its_retry_time() {
 }
 
 #[test]
+fn rate_limit_guidance_uses_only_representable_absolute_times() {
+    for (reset_at, retry_after, guidance) in [
+        (u64::MAX, None, "try again later"),
+        (253_402_300_800, Some(60), "try again in 60 seconds"),
+        (
+            253_402_300_799,
+            Some(60),
+            "try again after 9999-12-31T23:59:59Z",
+        ),
+    ] {
+        let error = NetError::RateLimited {
+            host: GITHUB_API.host,
+            reset_at: Some(reset_at),
+            retry_after,
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("api.github.com refused more requests for now (rate limit); {guidance}"),
+            "reset_at={reset_at}"
+        );
+    }
+}
+
+#[test]
 fn only_a_success_has_a_body_and_it_is_bounded_and_uncompressed() {
     let transport = RecordingTransport::new();
     let client = Client::new(&transport);

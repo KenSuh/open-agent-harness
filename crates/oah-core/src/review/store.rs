@@ -263,12 +263,13 @@ impl Store {
 
     fn put_snapshot(&self, snapshot: &Snapshot) -> Result<(), StoreError> {
         let blobs = self.snapshots.join("blobs");
+        let mut blob_writes = Vec::with_capacity(snapshot.blobs.len());
         for (name, data) in &snapshot.blobs {
             let path = blobs.join(name);
             if !is_sha256_hex(name) || sha256_hex(data) != *name {
                 return Err(corrupt(&path, "the collected blob does not match its name"));
             }
-            put(&path, data, BLOB_LIMIT)?;
+            blob_writes.push(PendingWrite::new(path, data, BLOB_LIMIT)?);
         }
         let hex = snapshot.id.trim_start_matches("sha256:");
         let path = self.snapshots.join(format!("{hex}.json"));
@@ -279,20 +280,27 @@ impl Store {
                 "the collected manifest does not match its id",
             ));
         }
-        put(&path, bytes.as_bytes(), MANIFEST_LIMIT)
+        let manifest = PendingWrite::new(path, bytes.as_bytes(), MANIFEST_LIMIT)?;
+        for blob in blob_writes {
+            blob.publish()?;
+        }
+        manifest.publish()
     }
 
-    fn put_review(&self, record: &ReviewedSkillV1) -> Result<(), StoreError> {
+    fn put_new_review(
+        &self,
+        record: &ReviewedSkillV1,
+        snapshot: &Snapshot,
+    ) -> Result<(), StoreError> {
         let hex = record.id.trim_start_matches("sha256:");
         let path = self.reviews.join(format!("{hex}.json"));
         if !is_sha256_hex(hex) || record.content_id() != record.id {
             return Err(corrupt(&path, "the record does not match its id"));
         }
-        put(
-            &path,
-            record_bytes(&record.to_json()).as_bytes(),
-            RECORD_LIMIT,
-        )
+        let bytes = record_bytes(&record.to_json());
+        let review = PendingWrite::new(path, bytes.as_bytes(), RECORD_LIMIT)?;
+        self.put_snapshot(snapshot)?;
+        review.publish()
     }
 }
 
@@ -319,6 +327,13 @@ fn create_dir(path: &Path) -> Result<(), StoreError> {
         .map_err(|error| io_error(path, "cannot create the folder", &error))
 }
 
+fn check_size(path: &Path, size: u64, limit: u64) -> Result<(), StoreError> {
+    if size > limit {
+        return Err(corrupt(path, format!("is larger than {limit} bytes")));
+    }
+    Ok(())
+}
+
 /// A regular file of at most `limit` bytes; `None` when it does not exist. A link or a larger file is corrupt.
 fn read_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, StoreError> {
     let meta = match std::fs::symlink_metadata(path) {
@@ -329,33 +344,42 @@ fn read_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, StoreError> {
     if !meta.file_type().is_file() {
         return Err(corrupt(path, "is not a regular file"));
     }
-    if meta.len() > limit {
-        return Err(corrupt(path, format!("is larger than {limit} bytes")));
-    }
+    check_size(path, meta.len(), limit)?;
     let file = std::fs::File::open(path)
         .map_err(|error| io_error(path, "cannot open the file", &error))?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| io_error(path, "cannot read the file", &error))?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
-        return Err(corrupt(path, format!("is larger than {limit} bytes")));
-    }
+    check_size(path, u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
     Ok(Some(bytes))
 }
 
-/// Creates `path` with `bytes` once. A file already there must hold exactly these bytes.
-fn put(path: &Path, bytes: &[u8], limit: u64) -> Result<(), StoreError> {
-    match publish_new(path, bytes) {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == FsxErrorKind::Exists => match read_file(path, limit)? {
-            Some(existing) if existing == bytes => Ok(()),
-            _ => Err(corrupt(
-                path,
-                "already holds different bytes under the same name",
-            )),
-        },
-        Err(error) => Err(StoreError::File(error)),
+struct PendingWrite<'a> {
+    path: PathBuf,
+    bytes: &'a [u8],
+    limit: u64,
+}
+
+impl<'a> PendingWrite<'a> {
+    fn new(path: PathBuf, bytes: &'a [u8], limit: u64) -> Result<Self, StoreError> {
+        check_size(&path, u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
+        Ok(Self { path, bytes, limit })
+    }
+
+    fn publish(self) -> Result<(), StoreError> {
+        let Self { path, bytes, limit } = self;
+        match publish_new(&path, bytes) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == FsxErrorKind::Exists => match read_file(&path, limit)? {
+                Some(existing) if existing == bytes => Ok(()),
+                _ => Err(corrupt(
+                    &path,
+                    "already holds different bytes under the same name",
+                )),
+            },
+            Err(error) => Err(StoreError::File(error)),
+        }
     }
 }
 
@@ -479,11 +503,13 @@ pub fn commit(
         let existing = stored
             .into_iter()
             .find(|stored| same_review(stored, &record));
-        store.put_snapshot(&snapshot)?;
         match existing {
-            Some(existing) => Ok((existing, true)),
+            Some(existing) => {
+                store.put_snapshot(&snapshot)?;
+                Ok((existing, true))
+            }
             None => {
-                store.put_review(&record)?;
+                store.put_new_review(&record, &snapshot)?;
                 Ok((record, false))
             }
         }
@@ -511,4 +537,47 @@ pub fn review_and_store(
     agents: &[AgentId],
 ) -> Result<ReviewOutcome, Failure> {
     commit(store, prepare(store, collector, request)?, agents)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BLOB_LIMIT, MANIFEST_LIMIT, Snapshot, Store, record_bytes, sha256_hex};
+    use crate::error::{Coded, codes};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn an_oversized_snapshot_file_leaves_no_files() {
+        let blob = b"x".to_vec();
+        let oversized = vec![0; usize::try_from(BLOB_LIMIT).expect("blob limit") + 1];
+        let (blob_name, oversized_name) = (sha256_hex(&blob), sha256_hex(&oversized));
+        assert!(blob_name < oversized_name, "the bounded blob sorts first");
+        let blobs = BTreeMap::from([(blob_name, blob)]);
+        let mut oversized_blobs = blobs.clone();
+        oversized_blobs.insert(oversized_name, oversized);
+        let cases = [
+            (
+                json!({"padding": " ".repeat(usize::try_from(MANIFEST_LIMIT).expect("manifest limit"))}),
+                blobs,
+            ),
+            (json!({}), oversized_blobs),
+        ];
+        for (manifest, blobs) in cases {
+            let state = tempfile::tempdir().expect("state");
+            let store = Store::new(state.path());
+            let _lock = store.lock().expect("store lock");
+            let id = format!("sha256:{}", sha256_hex(record_bytes(&manifest).as_bytes()));
+            let snapshot = Snapshot {
+                id,
+                manifest,
+                blobs,
+            };
+
+            let error = store.put_snapshot(&snapshot).expect_err("oversized file");
+            assert_eq!(error.code(), codes::SKILL_STATE_CORRUPT);
+            assert!(store.snapshot(&snapshot.id).expect("readable").is_none());
+            let blobs_dir = store.snapshots_dir().join("blobs");
+            assert!(blobs_dir.read_dir().expect("blobs").next().is_none());
+        }
+    }
 }

@@ -637,6 +637,29 @@ fn a_repeated_review_is_unchanged_and_writes_nothing_new() {
 }
 
 #[test]
+fn an_oversized_review_record_leaves_no_files() {
+    let state = tempfile::tempdir().expect("state");
+    let store = Store::new(state.path());
+    let transport = scripted(&basic(COMMIT));
+    let collector = GitHub::new(&transport, None);
+    let mut candidate = candidate();
+    candidate.insert("query_id".to_string(), json!("é".repeat(1 << 19)));
+    let Err(Failure::Store(error)) = review_and_store(
+        &store,
+        &collector,
+        &request(&candidate, &allow()),
+        &AgentId::ALL,
+    ) else {
+        panic!("the store must reject a record over its byte limit");
+    };
+    assert_eq!(error.code(), "OAH_SKILL_STATE_CORRUPT");
+    assert!(files_under(state.path()).is_empty());
+
+    let next = store_review(&store, &transport).expect("an in-bound review after the rejection");
+    assert_eq!(store.reviews().expect("readable"), [next.record]);
+}
+
+#[test]
 fn the_recorded_listing_hashes_tricky_names_as_git_does_and_verifies() {
     let scratch = tempfile::tempdir().expect("scratch");
     let dir = scratch.path().join("upstream");
