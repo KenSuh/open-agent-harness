@@ -9,24 +9,24 @@
 #   unverified   [open] items that must settle before the entry can be verified
 #
 # A write-bearing capability (skills_link, native_switch, model_write, model_read, hook_prompt, pack_update)
-# with basis docs reads as unknown at run time: docs do not stand in for a measurement. Every Windows fact
-# starts unknown unless a v0.4.0 fixture carries it; the Windows machine is offline. A first measurement of a
+# with basis docs reads as unknown at run time: docs do not stand in for a measurement. Windows coverage is
+# limited to the measured detection and sign-in status of Claude Code and Codex. A first measurement of a
 # write-bearing capability comes from an owner-attended evidence session (D-30), never from this slice.
 
 [claude.detect]
 status = "verified"
-basis = "carried"
-source = "v0.4:src/oah/setup/tools.py:141-145; conformance/v0.4.0/doctor/status-table"
+basis = "measured"
+source = "claude --version on macOS and Windows (native executable on Windows); v0.4:src/oah/setup/tools.py:141-145; conformance/v0.4.0/doctor/status-table"
 os = ["macos", "windows"]
-verified_on = ""
+verified_on = "2.1.329"
 unverified = []
 
 [claude.sign_in]
 status = "verified"
-basis = "carried"
-source = "v0.4:src/oah/setup/tools.py:141-145; v0.4:src/oah/setup/guide.py:247-257; conformance/v0.4.0/doctor/signed-in"
+basis = "measured"
+source = "claude auth status --json on a signed-in macOS profile and a signed-out Windows profile; v0.4:src/oah/setup/tools.py:141-145; v0.4:src/oah/setup/guide.py:247-257; conformance/v0.4.0/doctor/signed-in"
 os = ["macos", "windows"]
-verified_on = ""
+verified_on = "2.1.329"
 unverified = []
 
 [claude.skills_link]
@@ -79,18 +79,18 @@ unverified = ["U-20"]
 
 [codex.detect]
 status = "verified"
-basis = "carried"
-source = "v0.4:src/oah/setup/tools.py:146-149; conformance/v0.4.0/doctor/status-table"
+basis = "measured"
+source = "codex --version on macOS and Windows (npm shim on Windows); v0.4:src/oah/setup/tools.py:146-149; conformance/v0.4.0/doctor/status-table"
 os = ["macos", "windows"]
-verified_on = ""
+verified_on = "0.170.0"
 unverified = []
 
 [codex.sign_in]
 status = "verified"
-basis = "carried"
-source = "v0.4:src/oah/setup/tools.py:146-149; conformance/v0.4.0/doctor/status-table; [S7] codex login status"
+basis = "measured"
+source = "[S7] codex login status on a signed-in macOS profile and a signed-out Windows profile; v0.4:src/oah/setup/tools.py:146-149; conformance/v0.4.0/doctor/status-table"
 os = ["macos", "windows"]
-verified_on = ""
+verified_on = "0.170.0"
 unverified = []
 
 [codex.skills_link]
