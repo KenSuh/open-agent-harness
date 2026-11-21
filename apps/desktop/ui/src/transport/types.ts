@@ -11,11 +11,13 @@ import type {
   ProjectDto,
   RefreshDto,
   RulesStateDto,
+  ReviewResultDto,
   RulesSyncDto,
   SettingsDto,
   SettingsEdit,
   StagesSetDto,
   StagesSetReq,
+  StartReviewReq,
   TaskEvent,
   TaskId,
   TaskSnapshotDto,
@@ -30,7 +32,7 @@ export interface ScanChanged {
 
 export type Unlisten = () => void;
 
-/** One method per M1-S1, M1-S2 and M2-S1 command of CONTRACTS C15, plus the three global events. */
+/** One method per M1-S1, M1-S2, M1-S3 (start_review) and M2-S1 command of CONTRACTS C15, plus the three global events. */
 export interface Transport {
   appInfo(): Promise<AppInfoDto>;
   projectOpenDialog(): Promise<ProjectDto | null>;
@@ -42,6 +44,7 @@ export interface Transport {
   settingsSet(edits: SettingsEdit[]): Promise<SettingsDto>;
   agentsList(): Promise<AgentStatusDto[]>;
   startAgentsProbe(req: AgentsProbeReq, onEvent: (event: TaskEvent<AgentStatusDto[]>) => void): Promise<TaskId>;
+  startReview(req: StartReviewReq, onEvent: (event: TaskEvent<ReviewResultDto>) => void): Promise<TaskId>;
   sectionsShow(req: WorkflowProjectReq): Promise<WorkflowDto>;
   stagesSet(req: WorkflowProjectReq<StagesSetReq>): Promise<StagesSetDto>;
   presetApply(req: WorkflowProjectReq<PresetApplyReq>): Promise<StagesSetDto>;

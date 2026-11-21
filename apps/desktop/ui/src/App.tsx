@@ -4,6 +4,8 @@ import type { ErrorDto, ProjectDto, Theme } from "./contract";
 import type { Transport } from "./transport/types";
 import { AgentRoster, AgentsView } from "./agents";
 import { TeamWorkflow } from "./workflow";
+import { ExploreView } from "./explore";
+import { useReview } from "./useReview";
 import { useController, type Load, type RefreshTask, type Toast } from "./useController";
 
 type Page = "explore" | "installed" | "team-workflow";
@@ -16,7 +18,7 @@ const PAGES: ReadonlyArray<{ id: Page; label: string; title: string; body: strin
     id: "explore",
     label: "Explore",
     title: "Explore",
-    body: "Skill search is not available yet. Nothing to show.",
+    body: "Enter a GitHub skill folder to review it. Nothing to show yet.",
   },
   {
     id: "installed",
@@ -106,6 +108,7 @@ function AppInfoLine({ info, onRetry }: { info: Load<import("./contract").AppInf
 
 export function App({ transport }: { transport: Transport }) {
   const c = useController(transport);
+  const review = useReview(transport);
   const [view, setView] = useState<View>({ page: "explore" });
   const page = view.page;
   const agentsSelected = view.page === "agents" ? view.agent : undefined;
@@ -242,6 +245,8 @@ export function App({ transport }: { transport: Transport }) {
               <h1 id="page-title">{current.title}</h1>
               {page === "team-workflow" && c.project ? (
                 <TeamWorkflow key={`${c.project.id}:${c.projectRevision}:${agentStatusKey}`} transport={transport} projectId={c.project.id} />
+              ) : page === "explore" ? (
+                <ExploreView review={review} />
               ) : (
                 <p className="empty">{current.body}</p>
               )}
