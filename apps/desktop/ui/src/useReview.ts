@@ -90,7 +90,7 @@ export function useReview(transport: Transport) {
     try {
       await transport.taskCancel(id);
     } catch (error) {
-      if (run.current !== mine) return;
+      if (run.current !== mine || !running.current) return; // a rejection belongs to the review that started it
       setState((s) => (s.phase === "running" ? { ...s, cancelling: false } : s));
       // A failed cancel leaves the review running; say why next to it.
       setCancelError(toErrorDto(error));

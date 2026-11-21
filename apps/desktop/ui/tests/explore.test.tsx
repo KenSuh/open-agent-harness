@@ -144,6 +144,58 @@ describe("Explore review", () => {
     expect(document.querySelector('[aria-label="Review result"]')).toBeNull();
   });
 
+  it("leaves a settled result and the next review alone when a stale cancel rejection arrives", async () => {
+    const t = await openExplore();
+    const cancel = deferred<void>();
+    t.override.taskCancel = () => cancel.promise;
+    await submit("example/skills/skills/one");
+    await click(button("Cancel"));
+    await emit(() => t.emitReview({ event: "done", data: passed }, 0));
+    await act(async () => cancel.reject({ code: "OAH_TASK_GONE", message: "Task already finished.", hint: null }));
+    await flush();
+    expect(document.querySelector('[aria-label="Review result"]')?.textContent).toMatch(/Review passed/);
+    expect(document.body.textContent).not.toMatch(/OAH_TASK_GONE/);
+
+    const late = deferred<void>();
+    t.override.taskCancel = () => late.promise;
+    await submit("example/skills/skills/two");
+    await click(button("Cancel"));
+    await emit(() => t.emitReview({ event: "cancelled" }, 1));
+    await submit("example/skills/skills/three");
+    await act(async () => late.reject({ code: "OAH_TASK_GONE", message: "Task already finished.", hint: null }));
+    await flush();
+    expect(document.body.textContent).not.toMatch(/OAH_TASK_GONE/);
+    expect(status()).toMatch(/Reviewing example\/skills\/skills\/three/);
+    expect(button("Cancel").disabled).toBe(false);
+  });
+
+  it("shows a cancel failure during an active review and lets the user retry", async () => {
+    const t = await openExplore();
+    t.override.taskCancel = async () => {
+      throw { code: "OAH_CANCEL_FAILED", message: "Could not cancel.", hint: null };
+    };
+    await submit("example/skills/skills/tidy");
+    await click(button("Cancel"));
+    expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/OAH_CANCEL_FAILED/);
+    expect(status()).toMatch(/Reviewing/);
+    expect(button("Cancel").disabled).toBe(false);
+    await click(button("Cancel"));
+    expect(t.calls.filter((c) => c === "task_cancel:review-1")).toHaveLength(2);
+  });
+
+  it("shows only the validation message when new input is invalid after a backend failure", async () => {
+    const t = await openExplore();
+    await submit("example/skills/skills/missing");
+    await emit(() => t.emitReview({ event: "failed", data: { code: "OAH_REVIEW_PATH_UNRESOLVED", message: "The folder does not exist.", hint: null } }));
+    expect(document.body.textContent).toMatch(/OAH_REVIEW_PATH_UNRESOLVED/);
+    await submit("example/skills");
+    const alerts = Array.from(document.querySelectorAll('[role="alert"]'));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.textContent).toMatch(/owner\/repo\/folder/);
+    expect(document.body.textContent).not.toMatch(/OAH_REVIEW_PATH_UNRESOLVED/);
+    expect(t.reviewRequests).toHaveLength(1);
+  });
+
   it("ignores events from an older task after a newer review started or finished", async () => {
     const t = await openExplore();
     await submit("example/skills/skills/one");

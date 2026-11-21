@@ -147,7 +147,7 @@ export function ExploreView({ review }: { review: Review }) {
           <strong>{cancelError.code}</strong> {cancelError.message}
         </p>
       ) : null}
-      {state.phase === "failed" ? (
+      {state.phase === "failed" && !invalid ? (
         <div className="error-box" role="alert">
           <strong>{state.error.code}</strong>
           <p>{state.error.message}</p>
