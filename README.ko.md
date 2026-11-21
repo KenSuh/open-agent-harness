@@ -123,6 +123,25 @@ $ oah --version
 oah 0.4.0
 ```
 
+### 데스크톱 앱(v1.0.0 예정)
+
+데스크톱 앱은 v1.0.0에 나올 예정이다. 아직 게시되지 않았으니 지금은 위 방법으로 v0.4.0을 설치한다. v1.0.0이
+[GitHub 릴리스 페이지](https://github.com/KenSuh/open-agent-harness/releases)에 게시되면 다음 파일을 받을 수 있다.
+
+- `OAH_<version>_aarch64.dmg`는 Apple Silicon(M1 이후) Mac용이다. Intel Mac용은 없다.
+- `OAH_<version>_x64-setup.exe`는 64비트 x64 PC의 Windows용이다. Arm 기반 Windows용은 없다.
+- `SHA256SUMS`에는 두 설치 파일의 SHA-256 지문이 들어 있다.
+
+받은 파일을 열기 전에 그 공식 페이지에서 받았는지 확인하고, 설치 안내에 나온 방법(macOS는 `shasum -a 256`,
+Windows는 `Get-FileHash -Algorithm SHA256`)으로 SHA-256 지문을 계산한다. `SHA256SUMS`의 해당 값과 비교해
+일치하지 않는 파일은 열지 않는다.
+
+- macOS 앱은 Apple Developer ID로 서명하지 않았고 Apple 공증(notarization)도 받지 않았다. 임시(ad-hoc) 서명만
+  있다. 처음 열 때 경고가 나올 수 있다. 공식 출처와 SHA-256 지문을 확인한 뒤
+  [앱 열기에 관한 Apple 안내](https://support.apple.com/en-us/102445)를 따른다.
+- Windows 설치 파일은 서명하지 않았고 Windows도 서명되지 않은 파일로 표시한다. Microsoft Defender SmartScreen이
+  경고할 수 있고, 조직 정책이 서명되지 않은 설치 파일을 제한하거나 막을 수 있다.
+
 ## 처음 실행하기
 
 설치 프로그램을 한 번 실행하고, 프로젝트마다 `oah init`을 한 번 실행한다.

@@ -124,6 +124,26 @@ $ oah --version
 oah 0.4.0
 ```
 
+### Desktop app (planned for v1.0.0)
+
+A desktop app is planned for v1.0.0. It is not published yet, so install v0.4.0 with the steps above. When v1.0.0
+is published on the [GitHub Releases page](https://github.com/KenSuh/open-agent-harness/releases), it will offer
+these files:
+
+- `OAH_<version>_aarch64.dmg` for macOS on Apple Silicon (M1 or later). There is no Intel Mac build.
+- `OAH_<version>_x64-setup.exe` for Windows on 64-bit x64 PCs. There is no Windows on Arm build.
+- `SHA256SUMS`, with the SHA-256 digest of both installers.
+
+Before opening a download, check that it came from that official page and compute its SHA-256 digest as the
+install guides show (`shasum -a 256` on macOS, `Get-FileHash -Algorithm SHA256` on Windows). Compare it with
+the file's entry in `SHA256SUMS`, and do not open a file that does not match.
+
+- macOS: the app is not signed with an Apple Developer ID and is not notarized by Apple; it has only an ad-hoc
+  signature. A warning may appear the first time you open it. After you have confirmed the official origin and
+  the SHA-256 digest, follow [Apple's guidance on opening apps](https://support.apple.com/en-us/102445).
+- Windows: the installer is not signed, and Windows reports it as unsigned. Microsoft Defender SmartScreen may
+  warn about it, and your organization's policy may restrict or block unsigned installers.
+
 ## First run
 
 Run the installer once, then run `oah init` once in each project. Open a terminal in your project,
