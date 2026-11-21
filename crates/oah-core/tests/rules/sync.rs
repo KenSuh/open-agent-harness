@@ -1,7 +1,9 @@
 // 규칙 쓰기 시험: 계획대로 쓰고 다시 읽으며, 되읽기 실패는 OAH_RULES_VERIFY, 근거가 바뀌면 아무것도 쓰지 않고, 점검은 쓰지 않는다.
 use crate::config::{AgentId, ProjectConfig};
 use crate::fsx::LockOptions;
-use crate::rules::{RulesSnapshot, SyncInput, apply_sync, apply_sync_with, check_sync, plan_sync};
+use crate::rules::{
+    RulesFiles, RulesSnapshot, SyncInput, apply_sync, apply_sync_with, check_sync, plan_sync,
+};
 use crate::support::write_files;
 use oah_core::Coded;
 use oah_core::plan::{ItemStatus, Outcome, write_target};
@@ -145,16 +147,14 @@ fn an_immediate_rules_apply_checks_the_source_bytes_it_rendered() {
     }
 }
 
-#[cfg(unix)]
 #[test]
-fn local_rules_are_read_through_links_and_the_target_bytes_are_rechecked() {
+fn regular_local_rules_are_rendered_and_rechecked_before_apply() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let guidance = root.join("guidance.md");
-    write_files(root, &[("guidance.md", b"Follow local guidance.\n")]);
-    fs::create_dir(root.join(".oah")).unwrap();
-    let local_rules = root.join(".oah/rules.local.md");
-    std::os::unix::fs::symlink(&guidance, &local_rules).unwrap();
+    write_files(
+        root,
+        &[(".oah/rules.local.md", b"Follow local guidance.\n")],
+    );
     let config = config_at(root);
     let read_plan = || {
         plan_sync(
@@ -166,7 +166,7 @@ fn local_rules_are_read_through_links_and_the_target_bytes_are_rechecked() {
     let plan = read_plan();
     let cancel = CancelToken::new();
     let lock = LockOptions::default();
-    fs::write(&guidance, b"Use the new guidance.\n").unwrap();
+    fs::write(root.join(".oah/rules.local.md"), b"Use the new guidance.\n").unwrap();
     assert_eq!(
         apply_sync(&plan, &cancel, lock).error.unwrap().code(),
         "OAH_PLAN_STALE"
@@ -178,7 +178,83 @@ fn local_rules_are_read_through_links_and_the_target_bytes_are_rechecked() {
             .unwrap()
             .contains("Use the new guidance.")
     );
-    assert_eq!(fs::read_link(local_rules).unwrap(), guidance);
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_local_rules_leaf_and_ancestor_are_refused_before_plan_and_apply() {
+    use std::os::unix::fs::symlink;
+
+    // 1. Leaf symlink at plan time.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let inert = root.join("inert.md");
+    fs::write(&inert, b"inert fixture\n").unwrap();
+    fs::create_dir(root.join(".oah")).unwrap();
+    symlink(&inert, root.join(".oah/rules.local.md")).unwrap();
+    let config = config_at(root);
+    let error = plan_sync(
+        &RulesSnapshot::read(root, &[]).unwrap(),
+        &input_for(&config),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "OAH_RULES_LINK");
+    assert_eq!(RulesFiles::read(root).unwrap_err().code(), "OAH_FILE_IO");
+    assert!(!root.join("AGENTS.md").exists());
+    assert!(!root.join("CLAUDE.md").exists());
+
+    // 2. Traversed in-project ancestor `.oah` symlink at plan time.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let inert_dir = root.join("inert-dir");
+    fs::create_dir(&inert_dir).unwrap();
+    fs::write(inert_dir.join("rules.local.md"), b"inert fixture\n").unwrap();
+    symlink(&inert_dir, root.join(".oah")).unwrap();
+    let config = ProjectConfig::read(&root.join("missing.toml")).unwrap();
+    let error = plan_sync(
+        &RulesSnapshot::read(root, &[]).unwrap(),
+        &input_for(&config),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "OAH_RULES_LINK");
+    assert_eq!(RulesFiles::read(root).unwrap_err().code(), "OAH_FILE_IO");
+    assert!(!root.join("AGENTS.md").exists());
+
+    // 3. Leaf replaced with an in-project symlink (even matching bytes) between plan and apply.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let same_bytes = b"Follow local guidance.\n";
+    let inert = root.join("inert.md");
+    fs::write(&inert, same_bytes).unwrap();
+    write_files(root, &[(".oah/rules.local.md", same_bytes)]);
+    let config = config_at(root);
+    let plan = plan_sync(
+        &RulesSnapshot::read(root, &[]).unwrap(),
+        &input_for(&config),
+    )
+    .unwrap();
+    fs::remove_file(root.join(".oah/rules.local.md")).unwrap();
+    symlink(&inert, root.join(".oah/rules.local.md")).unwrap();
+    let result = apply_sync(&plan, &CancelToken::new(), LockOptions::default());
+    assert_eq!(result.error.unwrap().code(), "OAH_RULES_LINK");
+    assert!(!root.join("AGENTS.md").exists());
+    assert!(!root.join("CLAUDE.md").exists());
+
+    // 4. Absent `.oah` replaced with an in-project symlink between plan and apply.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let inert_dir = root.join("inert-dir");
+    fs::create_dir(&inert_dir).unwrap();
+    let config = config_at(root);
+    let plan = plan_sync(
+        &RulesSnapshot::read(root, &[]).unwrap(),
+        &input_for(&config),
+    )
+    .unwrap();
+    symlink(&inert_dir, root.join(".oah")).unwrap();
+    let result = apply_sync(&plan, &CancelToken::new(), LockOptions::default());
+    assert_eq!(result.error.unwrap().code(), "OAH_RULES_LINK");
+    assert!(!root.join("AGENTS.md").exists());
 }
 
 #[test]

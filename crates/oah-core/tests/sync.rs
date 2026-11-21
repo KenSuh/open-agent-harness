@@ -1,4 +1,5 @@
 // 동기화 등록부 시험: 다섯 단계 id 의 순서, 이 기준에서 등록된 단계는 3 뿐임, 보고는 등록된 단계만 담음, 실제 규칙 단계가 쓰고 다시 읽음을 본다.
+use oah_core::Coded;
 use oah_core::app::Ctx;
 use oah_core::app::Session;
 use oah_core::app::sync::{
@@ -278,4 +279,57 @@ fn a_rules_refusal_plans_nothing_and_becomes_a_warning() {
     assert!(planned.items.is_empty());
     assert_eq!(planned.plan.warnings.len(), 1);
     assert_eq!(planned.plan.warnings[0].code, "OAH_RULES_MARKER_BROKEN");
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_local_rules_is_refused_at_sync_plan_and_sync_apply() {
+    use std::os::unix::fs::symlink;
+
+    // 1. Leaf symlink at sync_plan time becomes an ordinary Rules refusal warning.
+    let (_dir, root, session) = project();
+    let inert = root.join("inert.md");
+    fs::write(&inert, b"inert fixture\n").unwrap();
+    fs::create_dir(root.join(".oah")).unwrap();
+    symlink(&inert, root.join(".oah/rules.local.md")).unwrap();
+    let cancel = CancelToken::new();
+    let ctx = session.ctx(&cancel, &NoProgress);
+    let planned = sync_plan(&ctx, &SyncProject::read(&root).unwrap(), REGISTRY).unwrap();
+    assert!(planned.items.is_empty());
+    assert_eq!(planned.plan.warnings.len(), 1);
+    assert_eq!(planned.plan.warnings[0].code, "OAH_RULES_LINK");
+    assert!(!root.join("AGENTS.md").exists());
+
+    // 2. Traversed `.oah` ancestor symlink at sync_plan time becomes an ordinary Rules refusal warning.
+    let (_dir, root, session) = project();
+    let inert_dir = root.join("inert-dir");
+    fs::create_dir(&inert_dir).unwrap();
+    symlink(&inert_dir, root.join(".oah")).unwrap();
+    let cancel = CancelToken::new();
+    let ctx = session.ctx(&cancel, &NoProgress);
+    let planned = sync_plan(&ctx, &SyncProject::read(&root).unwrap(), REGISTRY).unwrap();
+    assert!(planned.items.is_empty());
+    assert_eq!(planned.plan.warnings.len(), 1);
+    assert_eq!(planned.plan.warnings[0].code, "OAH_RULES_LINK");
+    assert!(!root.join("AGENTS.md").exists());
+
+    // 3. Regular local rules replaced by an in-project symlink (even with identical bytes) before sync_apply.
+    let (_dir, root, session) = project();
+    let same_bytes = b"Original local guidance.\n";
+    let inert = root.join("inert.md");
+    fs::write(&inert, same_bytes).unwrap();
+    fs::create_dir(root.join(".oah")).unwrap();
+    fs::write(root.join(".oah/rules.local.md"), same_bytes).unwrap();
+    let cancel = CancelToken::new();
+    let ctx = session.ctx(&cancel, &NoProgress);
+    let sync_project = SyncProject::read(&root).unwrap();
+    let planned = sync_plan(&ctx, &sync_project, REGISTRY).unwrap();
+    let ids: Vec<&str> = planned.items.iter().map(|item| item.id.as_str()).collect();
+    assert!(!ids.is_empty());
+    fs::remove_file(root.join(".oah/rules.local.md")).unwrap();
+    symlink(&inert, root.join(".oah/rules.local.md")).unwrap();
+    let error = sync_apply(&ctx, &sync_project, &planned, &ids, REGISTRY).unwrap_err();
+    assert_eq!(error.code(), "OAH_RULES_LINK");
+    assert!(!root.join("AGENTS.md").exists());
+    assert!(!root.join("CLAUDE.md").exists());
 }

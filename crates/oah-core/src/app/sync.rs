@@ -16,7 +16,10 @@ use crate::dto::{Empty, NoticeDto};
 use crate::error::Error;
 use crate::fsx::LockOptions;
 use crate::plan::{self, ApplyReport, Basis, ChangePlan, ItemResult, Outcome, PlanItem, Target};
-use crate::rules::{RulesSnapshot, SyncInput, plan_sync, write_file};
+use crate::rules::{
+    LOCAL_RULES, RulesSnapshot, SyncInput, plan_sync, sync::recheck_local_rules, target_path,
+    write_file,
+};
 use std::path::{Path, PathBuf};
 
 /// The five sync steps, in their one order (C11).
@@ -198,7 +201,23 @@ pub fn sync_apply<S: AsRef<str>>(
     accepted: &[S],
     registry: &[StepRow],
 ) -> Result<SyncReport, Error> {
-    let chosen = plan.plan.accept(accepted);
+    let local_rules = target_path(&project.root, LOCAL_RULES);
+    let mut filtered;
+    let change_plan = if plan.steps.contains(&StepId::Rules)
+        && let Some(local_basis) = plan
+            .plan
+            .basis
+            .iter()
+            .find(|basis| basis.target == local_rules)
+    {
+        recheck_local_rules(&project.root, local_basis)?;
+        filtered = plan.plan.clone();
+        filtered.basis.retain(|basis| basis.target != local_rules);
+        &filtered
+    } else {
+        &plan.plan
+    };
+    let chosen = change_plan.accept(accepted);
     let apply = plan::apply(&chosen, ctx.cancel, |target| {
         let items: Vec<&SyncItem> = plan
             .items

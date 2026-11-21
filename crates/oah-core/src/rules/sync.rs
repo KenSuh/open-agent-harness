@@ -35,17 +35,28 @@ use std::path::{Path, PathBuf};
 pub struct RulesSnapshot<'a> {
     root: PathBuf,
     files: RulesFiles,
+    local_rules: ProjectFile,
     gemini_md: ProjectFile,
     cursor_mdc: ProjectFile,
     detected: &'a [AgentId],
 }
 
 impl<'a> RulesSnapshot<'a> {
-    /// Reads the block inputs and Gemini's possible existing file. Cursor's file is read only when detected.
+    /// Reads the block inputs and Gemini's possible existing file without following links or reparse entries.
+    /// Cursor's file is read only when detected.
     pub fn read(root: &Path, detected: &'a [AgentId]) -> Result<Self, FsxError> {
+        let agents = ProjectFile::read(root, AGENTS_MD)?;
+        let claude = ProjectFile::read(root, CLAUDE_MD)?;
+        let local_rules = ProjectFile::read(root, LOCAL_RULES)?;
+        let files = RulesFiles {
+            agents,
+            claude,
+            local_rules: local_rules.bytes().map(<[u8]>::to_vec),
+        };
         Ok(RulesSnapshot {
             root: root.to_path_buf(),
-            files: RulesFiles::read(root)?,
+            files,
+            local_rules,
             gemini_md: ProjectFile::read(root, GEMINI_MD)?,
             cursor_mdc: if cursor_trigger(detected).is_some() {
                 ProjectFile::read(root, CURSOR_MDC)?
@@ -222,11 +233,41 @@ fn summary(file: &FileWrite) -> String {
     }
 }
 
+fn refuse_local_rules_link(file: &ProjectFile) -> Result<(), RulesError> {
+    if let ProjectFile::Link { target } = file {
+        return Err(RulesError::new(
+            Kind::Link,
+            format!(
+                "{LOCAL_RULES} is a link or reparse entry ({}); oah only reads regular project files for \
+                 {LOCAL_RULES}. Replace it with a regular file.",
+                target.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Re-reads `.oah/rules.local.md` with the same non-following regular-file policy as [`RulesSnapshot::read`]
+/// and checks its recorded basis before `crate::plan::apply` runs.
+pub(crate) fn recheck_local_rules(root: &Path, expected: &Basis) -> Result<(), Error> {
+    let current = ProjectFile::read(root, LOCAL_RULES)?;
+    refuse_local_rules_link(&current)?;
+    let now = current.bytes().map(fsx::Fingerprint::of);
+    if now != expected.fingerprint {
+        return Err(PlanError::Stale {
+            target: expected.target.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Renders the 1.0 body from `input` and plans every file; writes nothing. A refusal plans nothing.
 pub fn plan_sync(
     snapshot: &RulesSnapshot<'_>,
     input: &SyncInput<'_>,
 ) -> Result<SyncPlan, RulesError> {
+    refuse_local_rules_link(&snapshot.local_rules)?;
     let effective = input.config.effective();
     let skills = SkillsForBlock::from_config(effective, input.always.to_vec());
     let bodies = render_bodies(effective, &skills);
@@ -367,7 +408,16 @@ where
     W: FnMut(&Target<'_>, &[u8]) -> Outcome,
 {
     let root = &plan.root;
-    let change = plan.to_change_plan();
+    if let Err(error) = recheck_local_rules(root, &plan.sources[1]) {
+        return SyncResult {
+            error: Some(error),
+            ..SyncResult::default()
+        };
+    }
+    let mut change = plan.to_change_plan();
+    change
+        .basis
+        .retain(|basis| basis.target != plan.sources[1].target);
     let ids: Vec<&str> = change.items.iter().map(|item| item.id.as_str()).collect();
     let accepted = change.accept(&ids);
     let applied = crate::plan::apply(&accepted, cancel, |target| {
@@ -436,7 +486,7 @@ fn make_parents(root: &Path, relative: &str) -> Result<(), Error> {
     for part in &parts[..parts.len().saturating_sub(1)] {
         path.push(part);
         match fsx::links::inspect(&path)? {
-            Entry::Directory => {}
+            Entry::Directory if !super::input::is_reparse_point(&path)? => {}
             Entry::Missing => {
                 std::fs::create_dir(&path).map_err(|error| {
                     FsxError::io(FsxErrorKind::Io, &path, "cannot create the folder", error)
@@ -450,6 +500,17 @@ fn make_parents(root: &Path, relative: &str) -> Result<(), Error> {
                          Replace it with a regular folder.",
                         path.display(),
                         target.display()
+                    ),
+                )
+                .into());
+            }
+            _ if super::input::is_reparse_point(&path)? => {
+                return Err(RulesError::new(
+                    Kind::Link,
+                    format!(
+                        "{} is a reparse entry; oah never writes through links or reparse entries. \
+                         Replace it with a regular folder.",
+                        path.display()
                     ),
                 )
                 .into());

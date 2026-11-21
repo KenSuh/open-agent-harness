@@ -324,6 +324,100 @@ fn a_rules_refusal_after_a_saved_config_keeps_the_assignment_and_offers_sync_now
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_linked_local_rules_input_is_refused_consistently_across_read_check_save_and_sync() {
+    use std::os::unix::fs::symlink;
+
+    // 1. Leaf symlink under a real `.oah` directory: read, check, save, and sync all report OAH_RULES_LINK,
+    // and a valid config save keeps the saved assignment with the existing retry notice.
+    let project = Project::new(&[
+        (".oah/config.toml", b"[stages]\nplan = \"claude\"\n"),
+        ("inert.md", b"inert fixture\n"),
+    ]);
+    symlink(
+        project.root.join("inert.md"),
+        project.root.join(".oah/rules.local.md"),
+    )
+    .unwrap();
+    let cancel = CancelToken::new();
+    let ctx = project.session.ctx(&cancel, &NoProgress);
+    let opened = app::project_open(&ctx, &project.root).unwrap();
+
+    let shown = app::sections_show(&ctx, Empty {}).unwrap();
+    assert!(!shown.rules.synced);
+    assert_eq!(
+        shown.rules.error.as_ref().map(|e| e.code.as_str()),
+        Some("OAH_RULES_LINK")
+    );
+    let checked = app::rules_check(&ctx, Empty {}).unwrap();
+    assert_eq!(checked, shown.rules);
+    assert!(!project.root.join("AGENTS.md").exists());
+    assert!(!project.root.join("CLAUDE.md").exists());
+
+    let sync_err = app::rules_sync(&ctx, Empty {}).unwrap_err();
+    assert_eq!(sync_err.code(), "OAH_RULES_LINK");
+    assert!(!project.root.join("AGENTS.md").exists());
+    assert!(!project.root.join("CLAUDE.md").exists());
+
+    let saved = app::stages_set(
+        &ctx,
+        WorkflowProjectReq {
+            project_id: opened.id,
+            input: change("fix", AgentId::Claude),
+        },
+    )
+    .unwrap();
+    assert!(saved.saved);
+    assert!(!saved.synced);
+    assert_eq!(
+        saved.sync_error.as_ref().map(|e| e.code.as_str()),
+        Some("OAH_RULES_LINK")
+    );
+    assert_eq!(saved.actions, ["rules_sync"]);
+    assert!(
+        project
+            .text(".oah/config.toml")
+            .contains("fix = \"claude\""),
+        "the saved assignment stays intact"
+    );
+    let notice = saved
+        .workflow
+        .notices
+        .iter()
+        .find(|n| n.code == "OAH_RULES_NOT_SYNCED")
+        .unwrap();
+    assert_eq!(notice.actions, ["rules_sync"]);
+    assert!(notice.message.contains("OAH_RULES_LINK"));
+    assert_eq!(
+        saved.workflow.rules.error.as_ref().map(|e| e.code.as_str()),
+        Some("OAH_RULES_LINK")
+    );
+    assert!(!project.root.join("AGENTS.md").exists());
+    assert!(!project.root.join("CLAUDE.md").exists());
+
+    // 2. Traversed `.oah` ancestor symlink: read, check, and sync all report OAH_RULES_LINK without writing.
+    let ancestor_project = Project::new(&[]);
+    let inert_dir = ancestor_project.root.join("inert-dir");
+    fs::create_dir(&inert_dir).unwrap();
+    symlink(&inert_dir, ancestor_project.root.join(".oah")).unwrap();
+    let ctx = ancestor_project.session.ctx(&cancel, &NoProgress);
+    app::project_open(&ctx, &ancestor_project.root).unwrap();
+
+    let shown = app::sections_show(&ctx, Empty {}).unwrap();
+    assert!(!shown.rules.synced);
+    assert_eq!(
+        shown.rules.error.as_ref().map(|e| e.code.as_str()),
+        Some("OAH_RULES_LINK")
+    );
+    let checked = app::rules_check(&ctx, Empty {}).unwrap();
+    assert_eq!(checked, shown.rules);
+    let sync_err = app::rules_sync(&ctx, Empty {}).unwrap_err();
+    assert_eq!(sync_err.code(), "OAH_RULES_LINK");
+    assert!(!ancestor_project.root.join("AGENTS.md").exists());
+    assert!(!ancestor_project.root.join("CLAUDE.md").exists());
+}
+
 #[test]
 fn refused_saves_write_nothing_cursor_unknown_sections_and_unlisted_independence_ids() {
     let project = Project::new(&[(".oah/config.toml", b"[stages]\nplan = \"claude\"\n")]);
