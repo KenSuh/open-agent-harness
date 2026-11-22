@@ -161,6 +161,31 @@ impl LocalGit {
                 env.set("GIT_CEILING_DIRECTORIES", parent.as_os_str());
             }
         }
+
+        #[cfg(windows)]
+        let dot_git = {
+            use std::path::{Component, Prefix};
+
+            // Git for Windows needs an ordinary spelling of the validated directory.
+            let normalized =
+                crate::paths::canonical_folder(&dot_git).map_err(|error| CollectError {
+                    message: format!("cannot normalize local fixture .git for Git: {error}"),
+                })?;
+            let ordinary = matches!(
+                normalized.components().next(),
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(..))
+            );
+            if !ordinary
+                || !std::fs::canonicalize(&normalized)
+                    .is_ok_and(|resolved| resolved.as_os_str() == dot_git.as_os_str())
+            {
+                return Err(CollectError {
+                    message: "local fixture .git has no equivalent ordinary Git path".to_string(),
+                });
+            }
+            normalized
+        };
         Ok((dot_git, env))
     }
 
