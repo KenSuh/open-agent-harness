@@ -3,7 +3,7 @@
 //!
 //! Module errors keep their own types; [`Error`] wraps them, one variant per module. Every variant has a stable
 //! `OAH_*` code through [`Coded`]. [`Error::to_dto`] writes the home folder as `~` in the message, so no full user
-//! path crosses IPC; [`hint_for`] is the one table of hints.
+//! path crosses IPC; [`hint_for`] provides the default hints for error codes.
 
 use crate::agents::AgentError;
 use crate::app::ReviewFailed;
@@ -95,10 +95,16 @@ impl Error {
     /// The serialized form, with the home folder written as `~` in the message.
     pub fn to_dto(&self, env: &Env) -> ErrorDto {
         let code = self.code();
+        let hint = match self {
+            Error::ReviewStore(StoreError::WriteTooLarge { .. }) => {
+                Some("Reduce the size of the skill folder or its metadata, then review it again.")
+            }
+            _ => hint_for(code),
+        };
         ErrorDto {
             code: code.to_string(),
             message: crate::dto::display_text(env, &self.message()),
-            hint: hint_for(code).map(str::to_string),
+            hint: hint.map(str::to_string),
         }
     }
 
@@ -320,5 +326,39 @@ impl From<ReviewFailed> for Error {
 impl From<StoreError> for Error {
     fn from(error: StoreError) -> Self {
         Error::ReviewStore(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Env, Error, StoreError, codes};
+
+    #[test]
+    fn oversized_review_refusal_has_a_size_hint_with_the_existing_code() {
+        let state = tempfile::tempdir().expect("state");
+        let env = Env::new(state.path()).expect("test environment");
+        let path = state.path().join("reviews").join("record.json");
+        let refusal = Error::from(StoreError::WriteTooLarge {
+            path: path.clone(),
+            limit: 1_048_576,
+        })
+        .to_dto(&env);
+        let corruption = Error::from(StoreError::Corrupt {
+            path,
+            detail: "is larger than 1048576 bytes".to_string(),
+        })
+        .to_dto(&env);
+
+        assert_eq!(refusal.code, codes::SKILL_STATE_CORRUPT);
+        assert_eq!(corruption.code, refusal.code);
+        assert!(refusal.message.contains("1048576-byte storage limit"));
+        assert!(refusal.message.contains("No files were published"));
+        assert!(refusal.hint.unwrap().contains("Reduce the size"));
+        assert!(
+            corruption
+                .hint
+                .unwrap()
+                .contains("Move the named file aside")
+        );
     }
 }

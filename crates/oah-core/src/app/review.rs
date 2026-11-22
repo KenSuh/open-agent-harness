@@ -4,18 +4,19 @@
 //! desktop's `start_review` both run [`review`] and print or send its [`ReviewOutcomeDto`].
 //!
 //! The token is read here, from the session's environment (`GITHUB_TOKEN`, else `GH_TOKEN`), and only the
-//! collector's API requests carry it; nothing logs it, stores it or puts it in a DTO. Cancellation is honoured before
-//! the first request and again after the collection, before anything is written. The gate offers a passing skill to
-//! every agent and allows the default licenses of DESIGN-C2 §5.2; a project's `license_allow` is not read here.
+//! collector's API requests carry it; nothing logs it, stores it or puts it in a DTO. Cancellation is honoured
+//! between requests and before publication. Each review uses the selected project's license policy or the defaults
+//! of DESIGN-C2 §5.2.
 
 use super::Ctx;
-use crate::config::AgentId;
+use crate::config::{AgentId, ProjectConfig};
 use crate::dto::{ReviewOutcomeDto, ReviewReq};
 use crate::error::{Coded, Error};
 use crate::net::Token;
 use crate::paths;
 use crate::registry::github::{Cause, GitHub};
 use crate::review::gate::DEFAULT_LICENSE_ALLOW;
+use crate::review::identity::source_spec;
 use crate::review::{FailReason, Failure, ReviewError, ReviewRequest, Store, commit, prepare};
 use crate::tasks::{Progress, TaskKey};
 use serde_json::{Map, Value};
@@ -75,14 +76,12 @@ impl std::error::Error for ReviewFailed {
 
 /// One review of a folder runs at a time.
 pub fn review_key(req: &ReviewReq) -> TaskKey {
-    TaskKey::exclusive(
-        REVIEW,
-        format!(
-            "{}:{}",
-            req.spec.repo.trim().to_ascii_lowercase(),
-            req.spec.path
-        ),
-    )
+    let (repo, path) = (&req.spec.repo, &req.spec.path);
+    let subject = match source_spec(repo, path) {
+        Ok(spec) => format!("{}:{}", spec.locator, spec.paths.join(",")),
+        Err(_) => format!("{repo:?}:{path:?}"),
+    };
+    TaskKey::exclusive(REVIEW, subject)
 }
 
 fn unsupported(detail: impl Into<String>) -> Error {
@@ -116,6 +115,22 @@ pub fn review(ctx: &Ctx<'_>, req: ReviewReq) -> Result<ReviewOutcomeDto, Error> 
             "a search name comes with a search result, which this version does not review; leave it out",
         ));
     }
+    let config = ctx
+        .session
+        .project()
+        .map(|open| ProjectConfig::read(&open.project.config_file()))
+        .transpose()?;
+    let configured = config
+        .as_ref()
+        .map(|config| config.effective().skills.license_allow.as_slice())
+        .unwrap_or_default();
+    let defaults;
+    let allow = if configured.is_empty() {
+        defaults = DEFAULT_LICENSE_ALLOW.map(str::to_owned);
+        &defaults[..]
+    } else {
+        configured
+    };
     let store = Store::new(&paths::user_state_dir(ctx.env)?);
     ctx.progress.progress(Progress {
         phase: PHASE,
@@ -123,17 +138,14 @@ pub fn review(ctx: &Ctx<'_>, req: ReviewReq) -> Result<ReviewOutcomeDto, Error> 
         total: Some(2),
     });
     let transport = ctx.session.transport();
-    let collector = GitHub::new(transport.as_ref(), Token::from_env(ctx.env));
+    let collector =
+        GitHub::new(transport.as_ref(), Token::from_env(ctx.env)).with_cancel(ctx.cancel);
     let candidate = candidate();
-    let allow: Vec<String> = DEFAULT_LICENSE_ALLOW
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
     let request = ReviewRequest {
         repo: &req.spec.repo,
         path: &req.spec.path,
         candidate: &candidate,
-        allow: &allow,
+        allow,
         now: SystemTime::now(),
     };
     let failed = |failure: Failure| match failure {
@@ -147,13 +159,15 @@ pub fn review(ctx: &Ctx<'_>, req: ReviewReq) -> Result<ReviewOutcomeDto, Error> 
         }
         Failure::Store(error) => Error::ReviewStore(error),
     };
-    let prepared = prepare(&store, &collector, &request).map_err(failed)?;
+    let prepared = prepare(&store, &collector, &request);
     ctx.cancel.check()?;
+    let prepared = prepared.map_err(failed)?;
     ctx.progress.progress(Progress {
         phase: PHASE,
         done: 1,
         total: Some(2),
     });
+    ctx.cancel.check()?;
     let outcome = commit(&store, prepared, &AgentId::ALL).map_err(failed)?;
     ctx.progress.progress(Progress {
         phase: PHASE,

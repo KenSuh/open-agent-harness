@@ -115,13 +115,28 @@ fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
 }
 
 fn read_regular_with_metadata(path: &Path) -> io::Result<(Vec<u8>, fs::Metadata)> {
-    require_regular(&fs::symlink_metadata(path)?)?;
-    let mut file = open_without_following(path)?;
-    let metadata = file.metadata()?;
-    require_regular(&metadata)?;
+    let (mut file, metadata) = open_regular(path).map_err(|error| match error {
+        RegularOpenError::Inspect(error) | RegularOpenError::Open(error) => error,
+    })?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok((bytes, metadata))
+}
+
+pub(crate) enum RegularOpenError {
+    Inspect(io::Error),
+    Open(io::Error),
+}
+
+/// Opens a regular file without following its final link and returns metadata from that file handle.
+pub(crate) fn open_regular(path: &Path) -> Result<(fs::File, fs::Metadata), RegularOpenError> {
+    fs::symlink_metadata(path)
+        .and_then(|metadata| require_regular(&metadata))
+        .map_err(RegularOpenError::Inspect)?;
+    let file = open_without_following(path).map_err(RegularOpenError::Open)?;
+    let metadata = file.metadata().map_err(RegularOpenError::Open)?;
+    require_regular(&metadata).map_err(RegularOpenError::Open)?;
+    Ok((file, metadata))
 }
 
 fn optional_read<T>(
@@ -148,19 +163,24 @@ fn require_regular(metadata: &fs::Metadata) -> io::Result<()> {
     if metadata.is_file() && !is_reparse {
         Ok(())
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "entry is not a regular file",
-        ))
+        Err(not_regular())
     }
+}
+
+fn not_regular() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "entry is not a regular file")
 }
 
 #[cfg(unix)]
 fn open_without_following(path: &Path) -> io::Result<fs::File> {
     use rustix::fs::{Mode, OFlags, open};
+    use rustix::io::Errno;
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let file = open(path, flags, Mode::empty())?;
-    Ok(fs::File::from(file))
+    match open(path, flags, Mode::empty()) {
+        Ok(file) => Ok(fs::File::from(file)),
+        Err(Errno::LOOP) => Err(not_regular()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(windows)]

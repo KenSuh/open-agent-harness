@@ -715,7 +715,9 @@ mod tests {
         use super::*;
         use oah_core::net::{GITHUB_API, NetError, Offline, RecordingTransport};
         use oah_core::registry::github::Recorded;
+        use oah_core::review::record::policy_digest;
         use serde_json::{Value, json};
+        use std::sync::OnceLock;
 
         const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
         const SKILL: &str =
@@ -758,7 +760,15 @@ mod tests {
                 .file("skills/tidy/SKILL.md", skill);
             let transport = Arc::new(RecordingTransport::new());
             recorded.script(&transport);
-            let env = Env::new(&home).unwrap().with("OAH_HOME", home.join("oah"));
+            let ceiling = oah_core::paths::canonical_folder(home.parent().unwrap()).unwrap();
+            let env = Env::new(&home)
+                .unwrap()
+                .with("PATH", std::env::var_os("PATH").expect("Git on PATH"))
+                .with("HOME", &home)
+                .with("USERPROFILE", &home)
+                .with("GIT_CONFIG_NOSYSTEM", "1")
+                .with("GIT_CEILING_DIRECTORIES", ceiling)
+                .with("OAH_HOME", home.join("oah"));
             let session = Session::with_transport(env, transport.clone());
             let shell = Shell {
                 session: Arc::new(session),
@@ -890,15 +900,111 @@ mod tests {
         }
 
         #[test]
-        fn a_second_review_of_the_same_folder_while_one_runs_is_busy() {
+        fn a_review_rereads_its_selected_project_policy() {
+            let (home, shell, transport, _) = review_shell("policy", SKILL);
+            let project = home.0.join("project");
+            std::fs::create_dir_all(project.join(".oah")).unwrap();
+            shell.call(|ctx| app::project_open(ctx, &project)).unwrap();
+            let config = project.join(".oah/config.toml");
+
+            for (license, eligibility, result) in [
+                ("MIT", "eligible", "pass"),
+                ("Apache-2.0", "excluded", "block"),
+            ] {
+                let text = format!("[skills.review]\nlicense_allow = [\"{license}\"]\n");
+                std::fs::write(&config, &text).unwrap();
+                let (state, events) = review(&shell);
+                assert_eq!(state, TaskState::Done);
+                let data = &events.last().unwrap()["data"];
+                assert_eq!(
+                    data["record"]["policy_digest"],
+                    policy_digest(&[license.into()])
+                );
+                assert_eq!(data["record"]["license"]["eligibility"], eligibility);
+                assert_eq!(data["gate"]["result"], result);
+                assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+            }
+
+            transport.clear();
+            std::fs::write(&config, "[skills.review]\nlicense_allow = [1]\n").unwrap();
+            let (state, events) = review(&shell);
+            assert_eq!(state, TaskState::Failed);
+            assert_eq!(events.last().unwrap()["data"]["code"], "OAH_CONFIG_INVALID");
+            assert!(transport.requests().is_empty());
+        }
+
+        #[test]
+        fn cancelling_the_task_at_publication_emits_one_cancelled_event() {
+            let (home, shell, transport, _) = review_shell("cancelled", SKILL);
+            let (events, record) = seen();
+            let task = Arc::new(OnceLock::<TaskId>::new());
+            let task_to_cancel = Arc::clone(&task);
+            let cancel_shell = Shell {
+                session: Arc::clone(&shell.session),
+            };
+            let listener: Listener<ReviewOutcomeDto> = Arc::new(move |event| {
+                record(event);
+                if let TaskEvent::Progress(progress) = event
+                    && progress.done == 1
+                {
+                    let id = task_to_cancel.get().unwrap().as_str().to_string();
+                    cancel_shell
+                        .call(|ctx| app::task_cancel(ctx, TaskCancelReq { id }))
+                        .unwrap();
+                }
+            });
+            let handle = started(shell.begin_review(&req(), listener));
+            task.set(handle.id().clone()).unwrap();
+            assert_eq!(
+                run_review(&shell.session, handle, req()),
+                TaskState::Cancelled
+            );
+            assert_eq!(
+                events.lock().unwrap().as_slice(),
+                [
+                    json!({"event": "progress", "data": {"phase": "review", "done": 0, "total": 2}}),
+                    json!({"event": "progress", "data": {"phase": "review", "done": 1, "total": 2}}),
+                    json!({"event": "cancelled"}),
+                ]
+            );
+            assert_eq!(transport.requests().len(), 4);
+            assert!(shell.session.tasks().list().is_empty());
+            assert!(!home.0.join("oah").exists());
+        }
+
+        #[test]
+        fn review_exclusivity_uses_the_canonical_repository_and_folder() {
             let (_home, shell, _transport, _recorded) = review_shell("busy", SKILL);
             let (_events, listener) = seen();
             let first = started(shell.begin_review(&req(), listener));
-            let (_more, listener) = seen();
-            match shell.begin_review(&req(), listener) {
-                Err(error) => assert_eq!(shell.to_dto(&error).code, codes::TASK_BUSY),
-                Ok(_) => panic!("a second review of the same folder must be refused"),
+            for repo in ["acme/skills", "Acme/Skills", "ACME/skills.GIT"] {
+                let mut alias = req();
+                alias.spec.repo = repo.into();
+                let (_, listener) = seen();
+                match shell.begin_review(&alias, listener) {
+                    Err(error) => assert_eq!(shell.to_dto(&error).code, codes::TASK_BUSY),
+                    Ok(_) => panic!("a second review of {repo} must be refused"),
+                }
             }
+
+            let mut other = req();
+            other.spec.path = "skills/Tidy".into();
+            let (_, listener) = seen();
+            let other = started(shell.begin_review(&other, listener));
+            assert_ne!(first.id(), other.id());
+
+            let mut invalid = req();
+            invalid.spec.repo = " acme/skills ".into();
+            let (events, listener) = seen();
+            let handle = started(shell.begin_review(&invalid, listener));
+            assert_eq!(
+                run_review(&shell.session, handle, invalid),
+                TaskState::Failed
+            );
+            assert_eq!(
+                events.lock().unwrap().last().unwrap()["data"]["code"],
+                "OAH_SKILL_SOURCE_UNSUPPORTED"
+            );
             assert_eq!(run_review(&shell.session, first, req()), TaskState::Done);
         }
     }

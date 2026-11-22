@@ -26,11 +26,12 @@
 use super::gate::{GateDecision, GatePolicy, gate};
 use super::identity::{SourceSpec, identity};
 use super::json::{record_bytes, sha256_hex};
-use super::record::{ReviewRequest, ReviewedSkillV1, review};
+use super::record::{ReviewRequest, ReviewedSkillV1, digest_record_fields, review};
 use super::snapshot::{BLOB_LIMIT, Collector, Observation, Snapshot, is_sha256_hex};
 use super::{FailReason, ReviewError};
 use crate::config::AgentId;
 use crate::error::{Coded, codes};
+use crate::fsx::{RegularOpenError, open_regular};
 use oah_core::fsx::{FileLock, FsxError, FsxErrorKind, LockOptions, publish_new};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -58,6 +59,8 @@ pub struct ReviewOutcome {
 pub enum StoreError {
     /// `OAH_SKILL_STATE_CORRUPT`: a store file that does not read as what its name says; never repaired.
     Corrupt { path: PathBuf, detail: String },
+    /// Incoming review data that exceeds the store's size limit before publication.
+    WriteTooLarge { path: PathBuf, limit: u64 },
     /// Listing, inspecting or reading a store file failed (`OAH_FILE_IO`).
     Io { path: PathBuf, detail: String },
     /// Creating a folder, a file or the lock failed.
@@ -67,7 +70,9 @@ pub enum StoreError {
 impl Coded for StoreError {
     fn code(&self) -> &'static str {
         match self {
-            StoreError::Corrupt { .. } => codes::SKILL_STATE_CORRUPT,
+            StoreError::Corrupt { .. } | StoreError::WriteTooLarge { .. } => {
+                codes::SKILL_STATE_CORRUPT
+            }
             StoreError::Io { .. } => FsxErrorKind::Io.code(),
             StoreError::File(error) => error.code(),
         }
@@ -77,6 +82,10 @@ impl Coded for StoreError {
         match self {
             StoreError::Corrupt { path, detail } => format!(
                 "{}: {detail}; oah never repairs or resets it. Move the file aside to start that part again",
+                path.display()
+            ),
+            StoreError::WriteTooLarge { path, limit } => format!(
+                "Review data exceeds the {limit}-byte storage limit for {}. No files were published.",
                 path.display()
             ),
             StoreError::Io { path, detail } => format!("{detail} ({})", path.display()),
@@ -101,7 +110,9 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             StoreError::File(error) => Some(error),
-            _ => None,
+            StoreError::Corrupt { .. }
+            | StoreError::WriteTooLarge { .. }
+            | StoreError::Io { .. } => None,
         }
     }
 }
@@ -189,7 +200,7 @@ impl Store {
 
     /// The stored review with `id` (`sha256:<hex>`), checked against its digest; `None` when there is none.
     pub fn review(&self, id: &str) -> Result<Option<ReviewedSkillV1>, StoreError> {
-        match id.strip_prefix("sha256:").filter(|hex| is_sha256_hex(hex)) {
+        match store_id_hex(id) {
             Some(hex) => self.read_review(hex),
             None => Ok(None),
         }
@@ -198,7 +209,7 @@ impl Store {
     /// The stored snapshot with `id`: its manifest and every blob the manifest names, each checked against its
     /// name; `None` when there is no manifest under that id.
     pub fn snapshot(&self, id: &str) -> Result<Option<Snapshot>, StoreError> {
-        let Some(hex) = id.strip_prefix("sha256:").filter(|hex| is_sha256_hex(hex)) else {
+        let Some(hex) = store_id_hex(id) else {
             return Ok(None);
         };
         let path = self.snapshots.join(format!("{hex}.json"));
@@ -243,9 +254,14 @@ impl Store {
         let Some(bytes) = read_file(&path, RECORD_LIMIT)? else {
             return Ok(None);
         };
-        let record: ReviewedSkillV1 =
-            serde_json::from_slice(&bytes).map_err(|_| corrupt(&path, "is not a review record"))?;
-        if record.id != format!("sha256:{hex}") || record.content_id() != record.id {
+        let invalid_record = |_| corrupt(&path, "is not a review record");
+        let record: ReviewedSkillV1 = serde_json::from_slice(&bytes).map_err(invalid_record)?;
+        let stored: Value = serde_json::from_slice(&bytes).map_err(invalid_record)?;
+        let encoded = record.to_json();
+        if !matches_record_shape(&stored, &encoded) {
+            return Err(corrupt(&path, "contains unsupported review record fields"));
+        }
+        if store_id_hex(&record.id) != Some(hex) || digest_record_fields(encoded) != record.id {
             return Err(corrupt(
                 &path,
                 "does not match its own digest (changed after it was stored)",
@@ -271,10 +287,15 @@ impl Store {
             }
             blob_writes.push(PendingWrite::new(path, data, BLOB_LIMIT)?);
         }
-        let hex = snapshot.id.trim_start_matches("sha256:");
+        let Some(hex) = store_id_hex(&snapshot.id) else {
+            return Err(corrupt(
+                &self.snapshots,
+                "the collected manifest does not match its id",
+            ));
+        };
         let path = self.snapshots.join(format!("{hex}.json"));
         let bytes = record_bytes(&snapshot.manifest);
-        if !is_sha256_hex(hex) || sha256_hex(bytes.as_bytes()) != hex {
+        if sha256_hex(bytes.as_bytes()) != hex {
             return Err(corrupt(
                 &path,
                 "the collected manifest does not match its id",
@@ -292,15 +313,40 @@ impl Store {
         record: &ReviewedSkillV1,
         snapshot: &Snapshot,
     ) -> Result<(), StoreError> {
-        let hex = record.id.trim_start_matches("sha256:");
+        let Some(hex) = store_id_hex(&record.id) else {
+            return Err(corrupt(&self.reviews, "the record does not match its id"));
+        };
         let path = self.reviews.join(format!("{hex}.json"));
-        if !is_sha256_hex(hex) || record.content_id() != record.id {
+        if record.content_id() != record.id {
             return Err(corrupt(&path, "the record does not match its id"));
         }
         let bytes = record_bytes(&record.to_json());
         let review = PendingWrite::new(path, bytes.as_bytes(), RECORD_LIMIT)?;
         self.put_snapshot(snapshot)?;
         review.publish()
+    }
+}
+
+fn store_id_hex(id: &str) -> Option<&str> {
+    id.strip_prefix("sha256:").filter(|hex| is_sha256_hex(hex))
+}
+
+/// Compare the fields present on disk so that omitted optional fields retain their decoded defaults.
+fn matches_record_shape(stored: &Value, encoded: &Value) -> bool {
+    match (stored, encoded) {
+        (Value::Object(stored), Value::Object(encoded)) => stored.iter().all(|(key, value)| {
+            encoded
+                .get(key)
+                .is_some_and(|field| matches_record_shape(value, field))
+        }),
+        (Value::Array(stored), Value::Array(encoded)) => {
+            stored.len() == encoded.len()
+                && stored
+                    .iter()
+                    .zip(encoded)
+                    .all(|(value, field)| matches_record_shape(value, field))
+        }
+        (stored, encoded) => stored == encoded,
     }
 }
 
@@ -336,17 +382,24 @@ fn check_size(path: &Path, size: u64, limit: u64) -> Result<(), StoreError> {
 
 /// A regular file of at most `limit` bytes; `None` when it does not exist. A link or a larger file is corrupt.
 fn read_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, StoreError> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error(path, "cannot inspect the file", &error)),
+    let (file, metadata) = match open_regular(path) {
+        Ok(opened) => opened,
+        Err(RegularOpenError::Inspect(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(RegularOpenError::Inspect(error) | RegularOpenError::Open(error))
+            if error.kind() == io::ErrorKind::InvalidData =>
+        {
+            return Err(corrupt(path, "is not a regular file"));
+        }
+        Err(RegularOpenError::Inspect(error)) => {
+            return Err(io_error(path, "cannot inspect the file", &error));
+        }
+        Err(RegularOpenError::Open(error)) => {
+            return Err(io_error(path, "cannot open the file", &error));
+        }
     };
-    if !meta.file_type().is_file() {
-        return Err(corrupt(path, "is not a regular file"));
-    }
-    check_size(path, meta.len(), limit)?;
-    let file = std::fs::File::open(path)
-        .map_err(|error| io_error(path, "cannot open the file", &error))?;
+    check_size(path, metadata.len(), limit)?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -363,7 +416,9 @@ struct PendingWrite<'a> {
 
 impl<'a> PendingWrite<'a> {
     fn new(path: PathBuf, bytes: &'a [u8], limit: u64) -> Result<Self, StoreError> {
-        check_size(&path, u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+            return Err(StoreError::WriteTooLarge { path, limit });
+        }
         Ok(Self { path, bytes, limit })
     }
 
@@ -541,10 +596,132 @@ pub fn review_and_store(
 
 #[cfg(test)]
 mod tests {
-    use super::{BLOB_LIMIT, MANIFEST_LIMIT, Snapshot, Store, record_bytes, sha256_hex};
+    use super::{
+        BLOB_LIMIT, MANIFEST_LIMIT, ReviewedSkillV1, Snapshot, Store, StoreError, read_file,
+        record_bytes, sha256_hex,
+    };
     use crate::error::{Coded, codes};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::collections::BTreeMap;
+    use std::fs;
+
+    fn review_fixture() -> ReviewedSkillV1 {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../conformance/v0.4.0/review/record-mit-reviewed/expect.json"
+        ))
+        .expect("frozen review fixture");
+        serde_json::from_value(fixture["ok"].clone()).expect("v1 record")
+    }
+
+    fn write_review_fixture(store: &Store, id: &str, fixture: &Value) {
+        let hex = id.strip_prefix("sha256:").expect("canonical fixture id");
+        fs::create_dir_all(store.reviews_dir()).expect("reviews directory");
+        let path = store.reviews_dir().join(format!("{hex}.json"));
+        fs::write(path, record_bytes(fixture)).expect("review fixture");
+    }
+
+    #[test]
+    fn stored_v1_rejects_unsupported_fields_in_records_and_nested_entries() {
+        let state = tempfile::tempdir().expect("state");
+        let store = Store::new(state.path());
+        let record = review_fixture();
+        write_review_fixture(&store, &record.id, &record.to_json());
+        assert_eq!(store.review(&record.id).unwrap().as_ref(), Some(&record));
+
+        for object in ["", "/source", "/source/files/0"] {
+            let mut fixture = record.to_json();
+            fixture
+                .pointer_mut(object)
+                .and_then(Value::as_object_mut)
+                .expect("fixture object")
+                .insert("comment".to_string(), json!("sample note"));
+            write_review_fixture(&store, &record.id, &fixture);
+
+            let error = store.review(&record.id).expect_err("unsupported field");
+            assert_eq!(error.code(), codes::SKILL_STATE_CORRUPT, "{object}");
+            assert!(error.message().contains("unsupported review record fields"));
+        }
+    }
+
+    #[test]
+    fn stored_v1_accepts_omitted_optional_fields_and_nested_candidate_data() {
+        let state = tempfile::tempdir().expect("state");
+        let store = Store::new(state.path());
+        let mut record = review_fixture();
+        record.candidate.hit = json!({"details": [{"label": "example", "score": 0.5}]});
+        record.id = record.content_id();
+        let mut fixture = record.to_json();
+        fixture.as_object_mut().unwrap().remove("reason");
+        fixture["frontmatter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("allowed_tools");
+        write_review_fixture(&store, &record.id, &fixture);
+
+        assert_eq!(store.review(&record.id).unwrap(), Some(record));
+    }
+
+    #[test]
+    fn bounded_store_reads_distinguish_absence_regular_files_and_corruption() {
+        let state = tempfile::tempdir().expect("state");
+        let path = state.path().join("data");
+        assert_eq!(read_file(&path, 3).unwrap(), None);
+        fs::write(&path, b"abc").unwrap();
+
+        assert_eq!(
+            read_file(&path, 3).unwrap().as_deref(),
+            Some(b"abc".as_slice())
+        );
+        assert!(matches!(
+            read_file(&path, 2),
+            Err(StoreError::Corrupt { path: stored, detail })
+                if stored == path && detail.contains("larger than 2 bytes")
+        ));
+        assert!(matches!(
+            read_file(state.path(), 3),
+            Err(StoreError::Corrupt { detail, .. }) if detail.contains("is not a regular file")
+        ));
+    }
+
+    #[test]
+    fn publishing_requires_one_sha256_prefix_for_each_id() {
+        let state = tempfile::tempdir().expect("state");
+        let store = Store::new(state.path());
+        let _lock = store.lock().expect("store lock");
+        let manifest = json!({});
+        let manifest_hex = sha256_hex(record_bytes(&manifest).as_bytes());
+        let mut snapshot = Snapshot {
+            id: format!("sha256:{manifest_hex}"),
+            manifest,
+            blobs: BTreeMap::new(),
+        };
+        let canonical_snapshot = snapshot.id.clone();
+        let mut record = review_fixture();
+        record.source.snapshot = canonical_snapshot.clone();
+        let canonical_record = record.content_id();
+        let record_hex = canonical_record.strip_prefix("sha256:").unwrap();
+
+        for prefix in ["", "sha256:sha256:"] {
+            snapshot.id = format!("{prefix}{manifest_hex}");
+            assert!(matches!(
+                store.put_snapshot(&snapshot),
+                Err(StoreError::Corrupt { .. })
+            ));
+            snapshot.id.clone_from(&canonical_snapshot);
+            record.id = format!("{prefix}{record_hex}");
+            assert!(matches!(
+                store.put_new_review(&record, &snapshot),
+                Err(StoreError::Corrupt { .. })
+            ));
+        }
+        assert!(store.reviews().unwrap().is_empty());
+        assert!(store.snapshot(&canonical_snapshot).unwrap().is_none());
+
+        record.id = canonical_record;
+        store.put_new_review(&record, &snapshot).unwrap();
+        assert_eq!(store.review(&record.id).unwrap().as_ref(), Some(&record));
+        assert_eq!(store.snapshot(&snapshot.id).unwrap(), Some(snapshot));
+    }
 
     #[test]
     fn an_oversized_snapshot_file_leaves_no_files() {
@@ -575,6 +752,7 @@ mod tests {
 
             let error = store.put_snapshot(&snapshot).expect_err("oversized file");
             assert_eq!(error.code(), codes::SKILL_STATE_CORRUPT);
+            assert!(matches!(error, StoreError::WriteTooLarge { .. }));
             assert!(store.snapshot(&snapshot.id).expect("readable").is_none());
             let blobs_dir = store.snapshots_dir().join("blobs");
             assert!(blobs_dir.read_dir().expect("blobs").next().is_none());

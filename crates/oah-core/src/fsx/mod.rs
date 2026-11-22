@@ -23,10 +23,10 @@ mod selfwrite;
 mod staging;
 mod validation;
 
-pub(crate) use atomic::read_regular_optional;
 pub use atomic::{
     Fingerprint, WriteReceipt, publish_executable, publish_new, read_optional, write_atomic,
 };
+pub(crate) use atomic::{RegularOpenError, open_regular, read_regular_optional};
 pub use error::{FsxError, FsxErrorKind};
 pub use lock::{FileLock, LockOptions};
 pub use selfwrite::{SelfWriteMatch, SelfWrites};

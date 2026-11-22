@@ -51,6 +51,19 @@ describe("tauri transport (standalone, mocked @tauri-apps/api)", () => {
     expect(received).toEqual([{ event: "cancelled" }]);
   });
 
+  it("calls start_review with the spec under req and a Channel, omitting optional fields", async () => {
+    invoke.mockResolvedValue("task-9");
+    const received: unknown[] = [];
+    const id = await createTauriTransport().startReview({ spec: { repo: "example/skills", path: "skills/tidy" } }, (event) => received.push(event));
+    expect(id).toBe("task-9");
+    const [command, args] = invoke.mock.calls[0]!;
+    expect(command).toBe("start_review");
+    expect(args.req).toEqual({ spec: { repo: "example/skills", path: "skills/tidy" } });
+    expect(args.onEvent).toBeInstanceOf(FakeChannel);
+    args.onEvent.onmessage({ event: "cancelled" });
+    expect(received).toEqual([{ event: "cancelled" }]);
+  });
+
   it("maps a rejected invoke carrying an ErrorDto and any other rejection to ErrorDto", async () => {
     const t = createTauriTransport();
     invoke.mockRejectedValueOnce({ code: "OAH_TASK_BUSY", message: "busy", hint: "wait" });

@@ -9,6 +9,7 @@ import type {
   NoticeDto,
   ProjectDto,
   RefreshDto,
+  ReviewResultDto,
   RulesStateDto,
   RulesSyncDto,
   SettingsDto,
@@ -51,6 +52,11 @@ export function createTauriTransport(): Transport {
       const channel = new Channel<TaskEvent<AgentStatusDto[]>>();
       channel.onmessage = onEvent;
       return call<TaskId>("start_agents_probe", req, { onEvent: channel });
+    },
+    startReview(req, onEvent) {
+      const channel = new Channel<TaskEvent<ReviewResultDto>>();
+      channel.onmessage = onEvent;
+      return call<TaskId>("start_review", req, { onEvent: channel });
     },
     sectionsShow: (req) => call<WorkflowDto>("sections_show", req),
     stagesSet: (req) => call<StagesSetDto>("stages_set", req),

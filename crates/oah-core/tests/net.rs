@@ -128,7 +128,9 @@ fn a_rate_limit_answer_is_typed_with_its_retry_time() {
     let client = Client::new(&transport);
     transport.answer(
         COMMIT_URL,
-        Response::new(429, "slow down").with_header("Retry-After", "120"),
+        Response::new(429, "slow down")
+            .with_header("Retry-After", "120")
+            .with_header("Content-Encoding", "gzip"),
     );
     let limited = client.send(&api(COMMIT_URL)).expect_err("limited");
     assert_eq!(
@@ -203,7 +205,7 @@ fn rate_limit_guidance_uses_only_representable_absolute_times() {
 }
 
 #[test]
-fn only_a_success_has_a_body_and_it_is_bounded_and_uncompressed() {
+fn only_a_success_has_a_body_and_it_is_bounded() {
     let transport = RecordingTransport::new();
     let client = Client::new(&transport);
     transport.answer(COMMIT_URL, Response::new(200, vec![b'x'; 1025]));
@@ -220,28 +222,61 @@ fn only_a_success_has_a_body_and_it_is_bounded_and_uncompressed() {
         (Some("OAH_NET_TOO_LARGE"), "oversize")
     );
 
-    transport.answer(COMMIT_URL, Response::new(404, vec![b'x'; 4096]));
+    transport.answer(
+        COMMIT_URL,
+        Response::new(404, vec![b'x'; 4096]).with_header("Content-Encoding", "gzip"),
+    );
     let answer = client
         .send(&api(COMMIT_URL))
         .expect("an error page is an answer");
     assert_eq!((answer.status, answer.body.len()), (404, 0));
+}
 
-    transport.answer(
-        COMMIT_URL,
-        Response::new(200, "abc").with_header("Content-Encoding", "gzip"),
-    );
-    let error = client.send(&api(COMMIT_URL)).expect_err("compressed");
-    assert_eq!(error.failure(), "content-encoding");
-    assert_eq!(error.code(), None);
+#[test]
+fn a_success_accepts_only_identity_content_encodings() {
+    let transport = RecordingTransport::new();
+    let client = Client::new(&transport);
+    let request = api(COMMIT_URL);
+    let cases: &[(&[&str], bool)] = &[
+        (&["identity", "gzip"], false),
+        (&["identity, gzip"], false),
+        (&["gzip"], false),
+        (&[""], false),
+        (&[], true),
+        (&["  IdEnTiTy\t"], true),
+        (&["identity", "identity, IDENTITY"], true),
+    ];
+    for &(values, identity) in cases {
+        let response = values
+            .iter()
+            .fold(Response::new(200, "abc"), |response, &value| {
+                response.with_header("Content-Encoding", value)
+            });
+        transport.answer(COMMIT_URL, response);
 
-    transport.answer(
-        COMMIT_URL,
-        Response::new(200, "abc").with_header("content-encoding", "identity"),
-    );
-    assert_eq!(
-        client.send(&api(COMMIT_URL)).expect("identity").body,
-        b"abc"
-    );
+        let result = client.send(&request);
+        if identity {
+            assert_eq!(
+                result.expect("identity response").body,
+                b"abc",
+                "{values:?}"
+            );
+        } else {
+            let error = result.expect_err("unsupported or invalid encoding");
+            assert!(
+                matches!(
+                    error,
+                    NetError::BadResponse {
+                        host: "api.github.com",
+                        failure: "content-encoding",
+                        ..
+                    }
+                ),
+                "{values:?}: {error:?}"
+            );
+            assert_eq!(error.code(), None);
+        }
+    }
 }
 
 #[test]

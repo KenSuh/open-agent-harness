@@ -5,9 +5,10 @@
 //! automatic `User-Agent`, `Accept` or `Accept-Encoding`: the request's own headers are all that is sent. Each
 //! call is bounded by its deadline (`timeout_global`, connection to last body byte) and its byte limit.
 
-use super::{NetError, Offline, Request, Response, Transport};
+use super::{NetError, Offline, Request, Response, Transport, check_content_encoding};
 use std::io;
 use ureq::config::AutoHeaderValue;
+use ureq::http::header::{CONTENT_ENCODING, HeaderValue};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 /// The real transport. One agent keeps its connections for the transport's lifetime.
@@ -53,39 +54,52 @@ impl Transport for HttpsTransport {
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
-        let mut answer = builder
+        let answer = builder
             .config()
             .timeout_global(Some(request.deadline))
             .build()
             .call()
             .map_err(|error| failure(host, request.limit, error))?;
-        let status = answer.status().as_u16();
-        let headers = answer
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
-            })
-            .collect();
-        if !answer.status().is_success() {
-            return Ok(Response {
-                status,
-                headers,
-                body: Vec::new(),
-            });
-        }
-        let body = answer
+        read_response(answer, request)
+    }
+}
+
+fn read_response(
+    mut answer: ureq::http::Response<ureq::Body>,
+    request: &Request,
+) -> Result<Response, NetError> {
+    let host = request.row.host;
+    let status = answer.status();
+    let body = if status.is_success() {
+        check_content_encoding(
+            host,
+            answer
+                .headers()
+                .get_all(CONTENT_ENCODING)
+                .iter()
+                .map(HeaderValue::as_bytes),
+        )?;
+        answer
             .body_mut()
             .with_config()
             .limit(request.limit)
             .read_to_vec()
-            .map_err(|error| failure(host, request.limit, error))?;
-        Ok(Response {
-            status,
-            headers,
-            body,
+            .map_err(|error| failure(host, request.limit, error))?
+    } else {
+        Vec::new()
+    };
+    let headers = answer
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
         })
-    }
+        .collect();
+    Ok(Response {
+        status: status.as_u16(),
+        headers,
+        body,
+    })
 }
 
 /// A ureq failure as a [`NetError`]. A TLS handshake failure arrives as an I/O error of kind `InvalidData`.
@@ -106,9 +120,10 @@ fn failure(host: &'static str, limit: u64, error: ureq::Error) -> NetError {
         },
         ureq::Error::ConnectionFailed => offline(Offline::Network),
         ureq::Error::BodyExceedsLimit(_) => NetError::TooLarge { host, limit },
-        ureq::Error::Tls(_) | ureq::Error::Rustls(_) | ureq::Error::Pem(_) => {
-            NetError::Tls { host, detail }
-        }
+        ureq::Error::Tls(_)
+        | ureq::Error::Rustls(_)
+        | ureq::Error::Pem(_)
+        | ureq::Error::TlsRequired => NetError::Tls { host, detail },
         ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed => NetError::BadResponse {
             host,
             failure: "too-many-redirects",
@@ -128,5 +143,55 @@ fn failure(host: &'static str, limit: u64, error: ureq::Error) -> NetError {
             failure: "attempt-failed",
             detail,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::GITHUB_API;
+    use std::time::Duration;
+
+    #[test]
+    fn every_content_encoding_is_checked_before_reading_the_success_body() {
+        let request = Request::get(
+            GITHUB_API,
+            "https://api.github.com/",
+            1,
+            Duration::from_secs(1),
+        );
+        let answer = ureq::http::Response::builder()
+            .status(200)
+            .header("content-encoding", "identity")
+            .header("content-encoding", "gzip")
+            .body(ureq::Body::builder().data("abc"))
+            .expect("a response with a body longer than the limit");
+
+        let error = read_response(answer, &request).expect_err("unsupported content encoding");
+        assert!(
+            matches!(
+                error,
+                NetError::BadResponse {
+                    failure: "content-encoding",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn tls_required_is_a_tls_failure() {
+        let error = failure(GITHUB_API.host, 1, ureq::Error::TlsRequired);
+        assert!(
+            matches!(
+                error,
+                NetError::Tls {
+                    host: "api.github.com",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 }

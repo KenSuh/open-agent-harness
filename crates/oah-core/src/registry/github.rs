@@ -29,14 +29,15 @@ use crate::review::identity::SourceSpec;
 use crate::review::snapshot::{
     CollectError, Collector, Entry, FILE_LIMIT, Observation, Tree, snapshot,
 };
+use crate::tasks::CancelToken;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The REST API version every API request names.
 const API_VERSION: &str = "2022-11-28";
@@ -54,6 +55,7 @@ const LISTING_LIMIT: u64 = 16 << 20;
 /// Why an observation failed, kept for [`GitHub::take_cause`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cause {
+    Cancelled,
     /// The client's typed failure, or an answer whose status the collector does not accept.
     Net(NetError),
     /// GitHub answered, but the answer does not verify; `failure` is its v0.4.0 failure word.
@@ -68,13 +70,14 @@ impl Cause {
     pub fn code(&self) -> Option<&'static str> {
         match self {
             Cause::Net(error) => error.code(),
-            Cause::Invalid { .. } => None,
+            Cause::Cancelled | Cause::Invalid { .. } => None,
         }
     }
 
     /// The v0.4.0 failure word the observation reports.
     pub fn failure(&self) -> &'static str {
         match self {
+            Cause::Cancelled => "cancelled",
             Cause::Net(error) => error.failure(),
             Cause::Invalid { failure, .. } => failure,
         }
@@ -84,6 +87,9 @@ impl Cause {
 impl fmt::Display for Cause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Cause::Cancelled => {
+                f.write_str("the review was cancelled before sending another request")
+            }
             Cause::Net(error) => error.fmt(f),
             Cause::Invalid { detail, .. } => f.write_str(detail),
         }
@@ -94,7 +100,7 @@ impl std::error::Error for Cause {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Cause::Net(error) => Some(error),
-            Cause::Invalid { .. } => None,
+            Cause::Cancelled | Cause::Invalid { .. } => None,
         }
     }
 }
@@ -114,6 +120,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct GitHub<'a> {
     client: Client<'a>,
     token: Option<Token>,
+    cancel: Option<&'a CancelToken>,
     cause: Mutex<Option<Cause>>,
 }
 
@@ -131,8 +138,14 @@ impl<'a> GitHub<'a> {
         GitHub {
             client: Client::new(transport),
             token,
+            cancel: None,
             cause: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn with_cancel(mut self, cancel: &'a CancelToken) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     /// The cause of the last failed observation, once.
@@ -157,23 +170,20 @@ impl<'a> GitHub<'a> {
         until: Instant,
         own: Duration,
     ) -> Result<Duration, CollectError> {
-        until
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
-            .map(|left| left.min(own))
-            .ok_or_else(|| {
-                self.fail(Cause::Net(NetError::Offline {
-                    host,
-                    reason: Offline::Timeout,
-                    detail: format!("the review ran out of its {} s", OBSERVE_DEADLINE.as_secs()),
-                }))
-            })
+        remaining(until, own).ok_or_else(|| {
+            self.fail(Cause::Net(NetError::Offline {
+                host,
+                reason: Offline::Timeout,
+                detail: format!("the review ran out of its {} s", OBSERVE_DEADLINE.as_secs()),
+            }))
+        })
     }
 
-    fn send(&self, request: &Request) -> Result<Response, CollectError> {
-        self.client
-            .send(request)
-            .map_err(|error| self.fail(Cause::Net(error)))
+    fn send(&self, request: &Request) -> Result<Response, Cause> {
+        if self.cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(Cause::Cancelled);
+        }
+        self.client.send(request).map_err(Cause::Net)
     }
 
     /// One API request with GitHub's headers and, when set, the token.
@@ -191,7 +201,7 @@ impl<'a> GitHub<'a> {
         if let Some(token) = &self.token {
             request = request.bearer(token);
         }
-        self.send(&request)
+        self.send(&request).map_err(|cause| self.fail(cause))
     }
 
     fn attempt(&self, spec: &SourceSpec) -> Result<Observation, CollectError> {
@@ -254,6 +264,7 @@ impl<'a> GitHub<'a> {
             commit: &commit,
             listing: &listing,
             until,
+            raw_retry_used: Cell::new(false),
             fetched: RefCell::new(HashMap::new()),
         };
         Ok(Observation::Snapshot(snapshot(
@@ -276,6 +287,20 @@ impl Collector for GitHub<'_> {
             }
         })
     }
+}
+
+fn remaining(until: Instant, limit: Duration) -> Option<Duration> {
+    until
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .map(|left| left.min(limit))
+}
+
+fn immediate_raw_limit(cause: &Cause) -> bool {
+    matches!(cause, Cause::Net(NetError::RateLimited { host, retry_after: Some(0), reset_at })
+    if *host == GITHUB_RAW.host && reset_at.is_none_or(|reset| {
+        SystemTime::now().duration_since(UNIX_EPOCH).is_ok_and(|elapsed| elapsed.as_secs() >= reset)
+    }))
 }
 
 /// `(owner, repo)` of a canonical `https://github.com/<owner>/<repo>` locator, as the review spec writes it.
@@ -402,10 +427,9 @@ struct Item {
     oid: String,
 }
 
-/// A blob's listed size and the paths it is listed at, in order.
 struct Blob {
     size: u64,
-    paths: Vec<String>,
+    regular_paths: Vec<String>,
 }
 
 /// A verified recursive listing: the root tree id and every entry in path order.
@@ -479,7 +503,7 @@ impl Listing {
                 };
                 let blob = blobs.entry(raw.sha.clone()).or_insert(Blob {
                     size,
-                    paths: Vec::new(),
+                    regular_paths: Vec::new(),
                 });
                 if blob.size != size {
                     return Err(invalid(format!(
@@ -487,7 +511,9 @@ impl Listing {
                         raw.sha
                     )));
                 }
-                blob.paths.push(path.clone());
+                if matches!(raw.mode.as_str(), "100644" | "100755") {
+                    blob.regular_paths.push(path.clone());
+                }
             }
             if !seen.insert(path.clone()) {
                 return Err(invalid(format!("{path} is listed twice")));
@@ -501,7 +527,7 @@ impl Listing {
         }
         items.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
         for blob in blobs.values_mut() {
-            blob.paths.sort();
+            blob.regular_paths.sort();
         }
         verify_trees(&answer.sha, &items)?;
         Ok(Listing {
@@ -563,6 +589,7 @@ struct AtCommit<'c, 'a> {
     commit: &'c str,
     listing: &'c Listing,
     until: Instant,
+    raw_retry_used: Cell<bool>,
     fetched: RefCell<HashMap<String, Vec<u8>>>,
 }
 
@@ -633,7 +660,7 @@ impl Tree for AtCommit<'_, '_> {
                 detail: format!("blob {blob} is larger than {FILE_LIMIT} bytes"),
             }));
         }
-        let Some(path) = listed.paths.iter().find(|path| fetchable(path)) else {
+        let Some(path) = listed.regular_paths.iter().find(|path| fetchable(path)) else {
             return Err(self.github.fail(invalid(format!(
                 "blob {blob} is listed at no path the file host can be asked for"
             ))));
@@ -648,8 +675,17 @@ impl Tree for AtCommit<'_, '_> {
         let deadline = self
             .github
             .deadline(GITHUB_RAW.host, self.until, RAW_DEADLINE)?;
-        let request = Request::get(GITHUB_RAW, url, listed.size.max(1), deadline);
-        let answer = self.github.send(&request)?;
+        let mut request = Request::get(GITHUB_RAW, url, listed.size.max(1), deadline);
+        let mut answer = self.github.send(&request);
+        if !self.raw_retry_used.get()
+            && answer.as_ref().is_err_and(immediate_raw_limit)
+            && let Some(deadline) = remaining(self.until, RAW_DEADLINE)
+        {
+            self.raw_retry_used.set(true);
+            request.deadline = deadline;
+            answer = self.github.send(&request);
+        }
+        let answer = answer.map_err(|cause| self.github.fail(cause))?;
         if answer.status != 200 {
             return Err(self.github.fail(Cause::Net(NetError::Status {
                 host: GITHUB_RAW.host,
