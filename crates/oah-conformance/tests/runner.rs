@@ -524,8 +524,8 @@ fn an_input_path_outside_the_case_folder_is_refused() {
 #[test]
 fn a_pending_area_with_a_broken_case_is_still_reported() {
     let scratch = Scratch::new();
-    std::fs::remove_file(scratch.path("hashes/MANIFEST.json")).unwrap();
-    let report = run_area(&scratch.root, "hashes");
+    std::fs::remove_file(scratch.path("models/MANIFEST.json")).unwrap();
+    let report = run_area(&scratch.root, "models");
     assert_eq!(report.state, AreaState::Pending);
     assert_eq!(failed_cases(&report), ["MANIFEST.json"]);
 }

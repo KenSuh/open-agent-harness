@@ -88,6 +88,13 @@ export interface SettingsEdit {
 /** An agent's config id (core `AgentId::as_str`), in core's display order. */
 export type AgentId = "claude" | "codex" | "gemini" | "copilot" | "opencode" | "antigravity" | "cursor";
 
+export interface InstalledSkillDto {
+  readonly name: string;
+  readonly engine: "claude" | "codex";
+  readonly scope: "project" | "user";
+  readonly location: string;
+}
+
 /** §4.2 statuses: v0.4.0's plus `sign-in-unknown`. */
 export type AgentStatus =
   | "ok"
@@ -278,4 +285,63 @@ export interface RulesSyncDto {
   synced: boolean;
   written: { path: string; action: PlanAction; status: ItemStatus }[];
   error: ErrorDto | null;
+}
+
+/** M1-S3 Explore review shapes (core `review`; EXPLORE-PRODUCTION-BRIEF, Independent desktop contract). */
+export interface ReviewSpec {
+  repo: string;
+  path: string;
+  ref?: string | null;
+}
+
+/** `start_review`'s request; the desktop caller leaves the optional fields out in this increment. */
+export interface StartReviewReq {
+  spec: ReviewSpec;
+  search_name?: string | null;
+}
+
+export type GateResultName = "pass" | "warn" | "block";
+
+/** One gate reason, shown as core returns it; `lines` are the `SKILL.md` lines a screening reason is about. */
+export interface GateReasonDto {
+  kind: string;
+  detail: string;
+  lines: number[];
+  overridable?: boolean;
+}
+
+export interface GateDecisionDto {
+  gate?: string;
+  result: GateResultName;
+  reasons: GateReasonDto[];
+  compatible?: AgentId[];
+}
+
+/** The parts of `ReviewedSkillV1` the page shows; the record keeps its other serialized fields. */
+export interface ReviewedSkillDto {
+  version: number;
+  id: string;
+  source: {
+    provider: string;
+    locator: string;
+    commit: string | null;
+    tree: string | null;
+    path: string;
+  };
+  frontmatter: { name: string | null; description: string | null };
+  license: {
+    verdict: "recognized" | "unknown";
+    expression: string | null;
+    eligibility: "eligible" | "eligible-by-choice" | "excluded" | "unknown";
+  };
+  status: "reviewed" | "rejected";
+  reason: string | null;
+  checked_at: string;
+}
+
+/** The terminal `done` payload of a review task. */
+export interface ReviewResultDto {
+  record: ReviewedSkillDto;
+  gate: GateDecisionDto;
+  unchanged: boolean;
 }

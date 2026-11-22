@@ -6,10 +6,12 @@ import type {
   NoticeDto,
   ProjectDto,
   RefreshDto,
+  ReviewResultDto,
   SettingsDto,
   SettingsEdit,
   StagesSetDto,
   StagesSetReq,
+  StartReviewReq,
   PresetApplyReq,
   TaskEvent,
   TaskSnapshotDto,
@@ -83,6 +85,10 @@ export interface FakeTransport extends Transport {
   /** Whether an agents-changed subscription is live. */
   agentsSubscribed(): boolean;
   workflowRequests: WorkflowProjectReq<StagesSetReq | PresetApplyReq | Record<string, never>>[];
+  /** Every `start_review` request, in order. */
+  reviewRequests: StartReviewReq[];
+  /** Sends an event to the channel of the review start at `index` (default: the newest). */
+  emitReview(event: TaskEvent<ReviewResultDto>, index?: number): void;
 }
 
 export function createFakeTransport(initial: { project?: ProjectDto | null; tasks?: TaskSnapshotDto[] } = {}): FakeTransport {
@@ -98,6 +104,7 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
   let scanSink: ((change: ScanChanged) => void) | null = null;
   let probeSink: ((event: TaskEvent<AgentStatusDto[]>) => void) | null = null;
   let agentsSink: ((change: AgentsChangedDto) => void) | null = null;
+  const reviewSinks: Array<(event: TaskEvent<ReviewResultDto>) => void> = [];
   let probeCount = 0;
   const fake: FakeTransport = {
     calls: [],
@@ -114,6 +121,10 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
     async projectCurrent() {
       fake.calls.push("project_current");
       return fake.override.projectCurrent ? fake.override.projectCurrent() : (initial.project ?? null);
+    },
+    async skillsInstalled() {
+      fake.calls.push("skills_installed");
+      return fake.override.skillsInstalled ? fake.override.skillsInstalled() : [];
     },
     async startRefresh(onEvent) {
       fake.calls.push("start_refresh");
@@ -176,6 +187,15 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       };
     },
     workflowRequests: [],
+    reviewRequests: [],
+    async startReview(req, onEvent) {
+      fake.calls.push("start_review");
+      fake.reviewRequests.push(req);
+      reviewSinks.push(onEvent);
+      if (fake.override.startReview) return fake.override.startReview(req, onEvent);
+      return `review-${reviewSinks.length}`;
+    },
+    emitReview: (event, index = reviewSinks.length - 1) => reviewSinks[index]?.(event),
     async sectionsShow(req) {
       fake.calls.push("sections_show");
       return fake.override.sectionsShow ? fake.override.sectionsShow(req) : sampleWorkflow.legacy;

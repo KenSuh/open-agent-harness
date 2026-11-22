@@ -1,0 +1,311 @@
+{
+ "note": "Benign license-discovery fixtures beyond the frozen v0.4.0 cases (the frozen license area omits discover). Both sides build the same one-commit repository: `files` are written and added, `entries` are added to the index only ([mode, path, value]), and the commit uses the fixture author, date and message. A value is text, \"@MIT\" or \"@ISC\" (the frozen fixtures' license texts), \"@MIT-CRLF\" (the MIT text with CRLF line ends), \"@SKILL\" (a benign SKILL.md) or {text, pad, size}. `v040` is what the frozen v0.4.0 Python review answered, computed once by a local run: `result` is the record id or the refusal text, `reason` the license eligibility reason of a review that read SKILL.md.",
+ "repo": "acme/skills",
+ "path": "skills/tidy",
+ "cases": {
+  "notice-beside-license": {
+   "files": {
+    "LICENSE": "@MIT",
+    "NOTICE": "Acme notice.\n",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:ea5fa4620ea5f3fbff113a3acae2028e4f641d451b4e183bfa9271739a575da4",
+    "reason": "MIT is allowed"
+   }
+  },
+  "notices-inside-folder": {
+   "files": {
+    "LICENSE": "@MIT",
+    "skills/tidy/COPYRIGHT.txt": "Copyright notes.\n",
+    "skills/tidy/docs/NOTICE.md": "Nested notice.\n",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:7b8ae437204c79f1681b36a784a87d2fa9494b43caf7f01d242e5359320a3d66",
+    "reason": "MIT is allowed"
+   }
+  },
+  "deepest-license-governs": {
+   "files": {
+    "LICENSE": "@MIT",
+    "skills/tidy/LICENSE": "@ISC",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:b7854a20e82a0157387207c74405ec3f5cdd8647d512b03ebf2ec3db4ed077f1",
+    "reason": "ISC is not in the allowed licenses"
+   }
+  },
+  "license-only-in-skill-folder": {
+   "files": {
+    "skills/tidy/LICENSE.txt": "@MIT",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:fcef1596b6c6e90ff9ed0340732f44d9bfcc2aed140c5d48e888eb23101d9a8f",
+    "reason": "MIT is allowed"
+   }
+  },
+  "nested-license-agrees": {
+   "files": {
+    "LICENSE": "@MIT",
+    "skills/tidy/vendor/LICENSE.md": "@MIT",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:2cfbf66f9634e4c577319b3e1d67c7f025357ff4f49011e8dd7a72965f82b981",
+    "reason": "MIT is allowed"
+   }
+  },
+  "nested-license-differs": {
+   "files": {
+    "LICENSE": "@MIT",
+    "skills/tidy/vendor/LICENSE": "@ISC",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:9d1f79087152e1777446b07d8c8723cc885d05c41605f0512821fba01ffc822d",
+    "reason": "nested license file skills/tidy/vendor/LICENSE does not read as the folder's license"
+   }
+  },
+  "licenses-folder": {
+   "files": {
+    "LICENSE": "@MIT",
+    "LICENSES/MIT.txt": "@MIT",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:be1eb67dcf10b6f3c3539889ea479e1f9d8a757cfe08a69645f375c4ab4f609a",
+    "reason": "the top folder holds a LICENSES folder (per-file licensing), which oah does not review"
+   }
+  },
+  "two-license-texts": {
+   "files": {
+    "LICENSE-MIT": "@MIT",
+    "LICENSE-ISC": "@ISC",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT",
+    "ISC"
+   ],
+   "v040": {
+    "result": "sha256:f9fea371a5e2b87410db95f2ae0d8d15afdc7d76feff9fbedca2ecfc6d77441f",
+    "reason": "several license texts without a declared expression; register the package manifest with --manifest"
+   }
+  },
+  "license-over-one-mib": {
+   "files": {
+    "LICENSE": {
+     "text": "MIT License\n",
+     "pad": " ",
+     "size": 1048577
+    },
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:f4319ad4eadfe79c8d200e54ffbadbe4768732eafed8ae45b5faf2f15b0a8291",
+    "reason": "LICENSE is larger than 1 MiB"
+   }
+  },
+  "license-symlink": {
+   "files": {
+    "COPYING.txt": "@MIT",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [
+    [
+     "120000",
+     "LICENSE",
+     "COPYING.txt"
+    ]
+   ],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:6d01a2b250322e3caa5f5ed5c319de616c853e192b15ae4e3949ba3b97ea9afb",
+    "reason": "LICENSE: not read"
+   }
+  },
+  "executable-license": {
+   "files": {
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [
+    [
+     "100755",
+     "LICENSE",
+     "@MIT"
+    ]
+   ],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:22c36d8266e7af14558b3d6945eb8d287b2435e823d2fd09e8cdb212d16d7156",
+    "reason": "MIT is allowed"
+   }
+  },
+  "unknown-license-text": {
+   "files": {
+    "LICENSE": "All rights reserved by Acme.\n",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:6bd84d14b5787106a5653c5d58cd241498f8c3d0827b3ea1d9faaa6bda5fbf25",
+    "reason": "LICENSE: not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause or Apache-2.0) with supported holder fields"
+   }
+  },
+  "crlf-license": {
+   "files": {
+    "LICENSE": "@MIT-CRLF",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:b644e83adfda0c0d61c5333ba4e7cb87b756b6d14023725256f386306081db2e",
+    "reason": "MIT is allowed"
+   }
+  },
+  "non-ascii-file-name": {
+   "files": {
+    "LICENSE": "@MIT",
+    "skills/tidy/SKILL.md": "@SKILL"
+   },
+   "entries": [
+    [
+     "100644",
+     "skills/tidy/notes/café.md",
+     "Café notes — short.\n"
+    ]
+   ],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:6fa50259973b4625e216091414e74d404edb598b13e10008e92509e7e82fa1e3",
+    "reason": "MIT is allowed"
+   }
+  },
+  "file-at-one-mib": {
+   "files": {
+    "LICENSE": "@MIT",
+    "skills/tidy/SKILL.md": "@SKILL",
+    "skills/tidy/data.txt": {
+     "text": "",
+     "pad": "x",
+     "size": 1048576
+    }
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "sha256:9a54beaaf5ccc66cd923b659a423db9277b88d01c2b0afa96bf519dd9a7e0093",
+    "reason": "MIT is allowed"
+   }
+  },
+  "folder-over-eight-mib": {
+   "files": {
+    "LICENSE": "@MIT",
+    "skills/tidy/SKILL.md": "@SKILL",
+    "skills/tidy/part0.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part1.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part2.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part3.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part4.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part5.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part6.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part7.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    },
+    "skills/tidy/part8.txt": {
+     "text": "",
+     "pad": "y",
+     "size": 1048576
+    }
+   },
+   "entries": [],
+   "allow": [
+    "MIT"
+   ],
+   "v040": {
+    "result": "OAH_SKILL_REVIEW_FAILED(collector): the collector could not verify acme/skills (unverified: oversize)",
+    "reason": null
+   }
+  }
+ }
+}
