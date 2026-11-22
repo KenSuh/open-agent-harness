@@ -6,10 +6,11 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+const OAH_BIN: &str = env!("CARGO_BIN_EXE_oah");
 const CREDENTIAL: &str = "not-a-real-credential";
 
 fn oah(home: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_oah"));
+    let mut command = Command::new(OAH_BIN);
     command
         .env_clear()
         .env("HOME", home)
@@ -31,6 +32,11 @@ fn text(bytes: &[u8]) -> String {
 #[test]
 fn a_missing_option_or_subcommand_is_a_usage_error() {
     let home = tempfile::tempdir().expect("home");
+    let executable = Path::new(OAH_BIN)
+        .file_name()
+        .expect("oah executable basename")
+        .to_string_lossy();
+    let usage = format!("Usage: {executable} skills ");
     for args in [
         &["skills"][..],
         &["skills", "review", "--github", "acme/skills"],
@@ -49,10 +55,10 @@ fn a_missing_option_or_subcommand_is_a_usage_error() {
         let out = oah(home.path(), args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");
+        let stderr = text(&out.stderr);
         assert!(
-            text(&out.stderr).contains("Usage: oah skills"),
-            "{args:?}: {}",
-            text(&out.stderr)
+            stderr.lines().any(|line| line.starts_with(&usage)),
+            "{args:?}: {stderr}"
         );
     }
     assert!(!home.path().join("oah").exists());

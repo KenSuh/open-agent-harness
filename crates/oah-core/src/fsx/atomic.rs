@@ -29,7 +29,7 @@ impl Fingerprint {
     }
 
     /// Lowercase hexadecimal, 64 characters.
-    pub fn to_hex(&self) -> String {
+    pub fn to_hex(self) -> String {
         hex(&self.0)
     }
 

@@ -203,6 +203,7 @@ impl<'a> Fixture<'a> {
             .arg("-c")
             .arg(format!("core.hooksPath={null}"))
             .args(["-c", "core.fsmonitor=false"])
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .args(["-c", "credential.helper="])
             .args(["-c", "core.askPass="])
             .args(["-c", "init.templateDir="])
@@ -759,6 +760,12 @@ mod tests {
             .expect("isolated build");
 
         let dot_git = repo.join(".git");
+        for (key, expected) in [("maintenance.auto", "false"), ("gc.auto", "0")] {
+            let value = fixture
+                .git_in_repo(&repo, &dot_git, &["config", "--get", key], &[])
+                .unwrap_or_else(|error| panic!("read effective {key}: {error}"));
+            assert_eq!(String::from_utf8_lossy(&value).trim(), expected, "{key}");
+        }
         assert!(
             !dot_git.join("benign-template-marker.txt").exists(),
             "host template marker must not be copied into .git"
