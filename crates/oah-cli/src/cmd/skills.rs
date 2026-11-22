@@ -5,6 +5,7 @@ use oah_core::Error;
 use oah_core::app::{self, Session};
 use oah_core::dto::{ReviewOutcomeDto, ReviewReq, ReviewSpecDto};
 use oah_core::paths::Env;
+use oah_core::review::identity::identity;
 use oah_core::tasks::{CancelToken, NoProgress};
 use std::process::ExitCode;
 
@@ -90,7 +91,12 @@ pub fn execute(session: &Session, matches: &ArgMatches) -> Printed {
         search_name: None,
     };
     let cancel = CancelToken::new();
-    match app::review(&session.ctx(&cancel, &NoProgress), req) {
+    let ctx = session.ctx(&cancel, &NoProgress);
+    let result = identity(&req.spec.repo, &req.spec.path)
+        .map_err(|error| Error::Review(app::ReviewFailed { error, cause: None }))
+        .and_then(|_| app::project_open(&ctx, ctx.env.cwd()))
+        .and_then(|_| app::review(&ctx, req));
+    match result {
         Ok(outcome) => {
             let stdout = if json {
                 let shown =
@@ -131,17 +137,29 @@ pub fn exit_code(error: &Error) -> u8 {
     }
 }
 
+fn terminal_text(text: &str) -> String {
+    let mut safe = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}') {
+            safe.extend(ch.escape_debug());
+        } else {
+            safe.push(ch);
+        }
+    }
+    safe
+}
+
 /// v0.4.0's review line, its compatibility problems and flagged lines, then the gate's decision.
 fn summary(outcome: &ReviewOutcomeDto) -> String {
     let record = outcome.record.to_json();
-    let text = |value: &serde_json::Value| value.as_str().unwrap_or("").to_string();
+    let text = |value: &serde_json::Value| terminal_text(value.as_str().unwrap_or_default());
     let source = &record["source"];
     let license = &record["license"];
     let hosts: Vec<String> = record["compatibility"]["hosts"]
         .as_array()
         .map(|hosts| hosts.iter().map(text).collect())
         .unwrap_or_default();
-    let expression = license["expression"].as_str().unwrap_or("unknown");
+    let expression = terminal_text(license["expression"].as_str().unwrap_or("unknown"));
     let mut out = format!(
         "OAH_SKILL_REVIEW {} {} {} {}@{}:{} license={expression}/{} hosts={}\n",
         text(&record["id"]),
@@ -180,19 +198,26 @@ fn summary(outcome: &ReviewOutcomeDto) -> String {
         } else {
             format!(" (line {})", lines.join(", "))
         };
-        out.push_str(&format!("  {}: {}{at}\n", reason.kind, reason.detail));
+        out.push_str(&format!(
+            "  {}: {}{at}\n",
+            terminal_text(&reason.kind),
+            terminal_text(&reason.detail)
+        ));
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Printed, execute};
+    use super::{Printed, execute, summary};
     use oah_core::app::{self, Session};
-    use oah_core::dto::{ReviewReq, ReviewSpecDto};
+    use oah_core::dto::{
+        GateDecisionDto, GateReasonDto, ReviewOutcomeDto, ReviewReq, ReviewSpecDto,
+    };
     use oah_core::net::{GITHUB_API, NetError, Offline, RecordingTransport};
     use oah_core::paths::Env;
     use oah_core::registry::github::Recorded;
+    use oah_core::review::{gate::DEFAULT_LICENSE_ALLOW, record::policy_digest};
     use oah_core::tasks::{CancelToken, NoProgress};
     use serde_json::{Value, json};
     use std::path::Path;
@@ -222,8 +247,14 @@ mod tests {
 
     fn session(transport: Arc<RecordingTransport>) -> (tempfile::TempDir, Session) {
         let home = tempfile::tempdir().expect("home");
+        let ceiling = oah_core::paths::canonical_folder(home.path().parent().unwrap()).unwrap();
         let env = Env::new(home.path())
             .expect("an environment")
+            .with("PATH", std::env::var_os("PATH").expect("Git on PATH"))
+            .with("HOME", home.path())
+            .with("USERPROFILE", home.path())
+            .with("GIT_CONFIG_NOSYSTEM", "1")
+            .with("GIT_CEILING_DIRECTORIES", ceiling)
             .with("OAH_HOME", home.path().join("oah"));
         (home, Session::with_transport(env, transport))
     }
@@ -294,6 +325,89 @@ mod tests {
             printed.stdout
         );
         assert_eq!(printed.stderr, format!("OAH_SKILL_REVIEW unchanged {id}\n"));
+    }
+
+    #[test]
+    fn the_parsed_command_uses_the_invocation_projects_license_policy() {
+        let transport = Arc::new(RecordingTransport::new());
+        recorded(SKILL).script(&transport);
+        let (home, session) = session(transport.clone());
+        let config = home.path().join(".oah/config.toml");
+        std::fs::create_dir(config.parent().unwrap()).unwrap();
+        let args = [&REVIEW[..], &["--json"]].concat();
+        for (configured, effective, eligibility, result) in [
+            ("[]", &DEFAULT_LICENSE_ALLOW[..], "eligible", "pass"),
+            (r#"["MIT"]"#, &["MIT"][..], "eligible", "pass"),
+            (
+                r#"["Apache-2.0"]"#,
+                &["Apache-2.0"][..],
+                "excluded",
+                "block",
+            ),
+        ] {
+            let content = format!("[skills.review]\nlicense_allow = {configured}\n");
+            std::fs::write(&config, &content).unwrap();
+            let printed = run(&session, &args);
+            assert_eq!((printed.code, printed.stderr.as_str()), (0, ""));
+            let shown: Value = serde_json::from_str(&printed.stdout).unwrap();
+            let allow: Vec<_> = effective.iter().map(|id| id.to_string()).collect();
+            assert_eq!(shown["record"]["policy_digest"], policy_digest(&allow));
+            assert_eq!(shown["record"]["license"]["eligibility"], eligibility);
+            assert_eq!(shown["gate"]["result"], result);
+            if result == "block" {
+                assert_eq!(
+                    shown["gate"]["reasons"][0]["detail"],
+                    "The license MIT is not one of the allowed licenses"
+                );
+            }
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), content);
+        }
+
+        let invalid = "[skills.review]\nlicense_allow = [1]\n";
+        std::fs::write(&config, invalid).unwrap();
+        transport.clear();
+        let printed = run(&session, &args);
+        assert_eq!((printed.code, printed.stderr.as_str()), (1, ""));
+        let shown: Value = serde_json::from_str(&printed.stdout).unwrap();
+        assert_eq!(shown["error"]["code"], "OAH_CONFIG_INVALID");
+        assert!(transport.requests().is_empty());
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), invalid);
+    }
+
+    #[test]
+    fn the_plain_summary_escapes_controls_and_line_separators_in_fields() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../conformance/v0.4.0/review/record-mit-reviewed/expect.json"
+        ))
+        .unwrap();
+        let mut outcome = ReviewOutcomeDto {
+            record: serde_json::from_value(fixture["ok"].clone()).unwrap(),
+            gate: GateDecisionDto {
+                gate: "oah-install-gate/v1",
+                result: "block",
+                reasons: vec![GateReasonDto {
+                    kind: "license".into(),
+                    detail: "License notice\u{2029}see docs".into(),
+                    lines: Vec::new(),
+                    overridable: false,
+                }],
+                compatible: Vec::new(),
+            },
+            unchanged: false,
+        };
+        outcome.record.frontmatter.name = Some("정리\t노트\u{85}更新".into());
+        outcome.record.license.expression = Some("MIT\r\nnotice".into());
+        outcome.record.compatibility.problems = vec!["Read\u{2028}docs".into()];
+        let rendered = summary(&outcome);
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 4, "{rendered:?}");
+        assert!(lines[0].contains(r"정리\t노트\u{85}更新"), "{rendered:?}");
+        assert!(
+            lines[0].contains(r"license=MIT\r\nnotice/eligible"),
+            "{rendered:?}"
+        );
+        assert_eq!(lines[1], r"  problem: Read\u{2028}docs");
+        assert_eq!(lines[3], r"  license: License notice\u{2029}see docs");
     }
 
     #[test]

@@ -8,7 +8,8 @@ use oah_core::config::AgentId;
 use oah_core::dto::{ReviewOutcomeDto, ReviewReq, ReviewSpecDto};
 use oah_core::error::{Coded, Error};
 use oah_core::net::{
-    GITHUB_API, GITHUB_RAW, NetError, Offline, RecordingTransport, Response, Token,
+    GITHUB_API, GITHUB_RAW, NetError, Offline, RecordingTransport, Request, Response, Token,
+    Transport,
 };
 use oah_core::paths::Env;
 use oah_core::registry::github::{Cause, GitHub, Recorded};
@@ -90,6 +91,19 @@ fn scripted(recorded: &Recorded) -> RecordingTransport {
     let transport = RecordingTransport::new();
     recorded.script(&transport);
     transport
+}
+
+struct AfterResponse<F> {
+    recording: RecordingTransport,
+    after: F,
+}
+
+impl<F: Fn(&RecordingTransport, &Request) + Send + Sync> Transport for AfterResponse<F> {
+    fn send(&self, request: &Request) -> Result<Response, NetError> {
+        let result = self.recording.send(request);
+        (self.after)(&self.recording, request);
+        result
+    }
 }
 
 fn observe(collector: &GitHub<'_>) -> Observation {
@@ -423,6 +437,7 @@ fn upstream_failures_are_typed() {
             "limit",
             Ok(Response::new(403, "limit")
                 .with_header("x-ratelimit-remaining", "0")
+                .with_header("retry-after", "0")
                 .with_header("x-ratelimit-reset", reset.to_string())),
             "rate-limited",
             Some("OAH_NET_RATE_LIMITED"),
@@ -470,7 +485,7 @@ fn upstream_failures_are_typed() {
                 Cause::Net(NetError::RateLimited {
                     host: GITHUB_API.host,
                     reset_at: Some(reset),
-                    retry_after: None
+                    retry_after: Some(0)
                 })
             );
             assert_eq!(
@@ -502,21 +517,98 @@ fn upstream_failures_are_typed() {
         Some("OAH_NET_TOO_LARGE")
     );
 
-    let transport = scripted(&recorded);
-    transport.answer(
-        recorded.raw_url("LICENSE"),
-        Response::new(429, "").with_header("retry-after", "30"),
-    );
-    let collector = GitHub::new(&transport, None);
-    assert_eq!(failure_word(&observe(&collector)), "rate-limited");
-    assert_eq!(
-        collector.take_cause(),
-        Some(Cause::Net(NetError::RateLimited {
-            host: GITHUB_RAW.host,
-            reset_at: None,
-            retry_after: Some(30)
-        }))
-    );
+    let future_reset = 4_102_444_800;
+    for (retry_after, reset_at) in [
+        (Some(30), None),
+        (Some(0), Some(future_reset)),
+        (None, None),
+    ] {
+        let transport = scripted(&recorded);
+        let license = recorded.raw_url("LICENSE");
+        let mut response = Response::new(429, "");
+        if let Some(seconds) = retry_after {
+            response = response.with_header("retry-after", u64::to_string(&seconds));
+        }
+        if let Some(reset) = reset_at {
+            response = response.with_header("x-ratelimit-reset", u64::to_string(&reset));
+        }
+        transport.answer(&license, response);
+        let collector = GitHub::new(&transport, None);
+        assert_eq!(failure_word(&observe(&collector)), "rate-limited");
+        assert_eq!(
+            collector.take_cause(),
+            Some(Cause::Net(NetError::RateLimited {
+                host: GITHUB_RAW.host,
+                reset_at,
+                retry_after,
+            }))
+        );
+        assert_eq!(
+            transport
+                .requests()
+                .iter()
+                .filter(|req| req.url == license)
+                .count(),
+            1,
+            "retry-after {retry_after:?}, reset {reset_at:?}"
+        );
+    }
+}
+
+#[test]
+fn an_immediate_raw_limit_allows_one_retry_per_observation() {
+    let recorded = basic(COMMIT);
+    let skill = recorded.raw_url("skills/tidy/SKILL.md");
+    let license = recorded.raw_url("LICENSE");
+    let limit = Response::new(429, "").with_header("retry-after", "0");
+
+    for limit_second_file in [false, true] {
+        let recording = scripted(&recorded);
+        recording.answer(&skill, limit.clone());
+        if limit_second_file {
+            recording.answer(&license, limit.clone());
+        }
+        let transport = AfterResponse {
+            recording,
+            after: |recording: &RecordingTransport, request: &Request| {
+                if request.url == skill {
+                    recording.answer(&skill, Response::new(200, SKILL));
+                }
+            },
+        };
+        let collector = GitHub::new(&transport, None);
+        let observed = observe(&collector);
+        if limit_second_file {
+            assert_eq!(failure_word(&observed), "rate-limited");
+            assert_eq!(
+                collector.take_cause(),
+                Some(Cause::Net(NetError::RateLimited {
+                    host: GITHUB_RAW.host,
+                    reset_at: None,
+                    retry_after: Some(0),
+                }))
+            );
+        } else {
+            assert!(matches!(observed, Observation::Snapshot(_)), "{observed:?}");
+            assert_eq!(collector.take_cause(), None);
+        }
+        let requests = transport.recording.requests();
+        let urls: Vec<_> = requests
+            .iter()
+            .map(|request| request.url.as_str())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                recorded.commit_url().as_str(),
+                recorded.listing_url().as_str(),
+                &skill,
+                &skill,
+                &license,
+            ]
+        );
+        assert!(requests[3].deadline <= requests[2].deadline);
+    }
 }
 
 #[test]
@@ -562,6 +654,27 @@ fn an_executable_file_is_reviewed_like_a_regular_one() {
         .map(|file| file.path.as_str())
         .collect();
     assert_eq!(paths, ["skills/tidy/SKILL.md", "skills/tidy/run.sh"]);
+}
+
+#[test]
+fn a_shared_blob_is_requested_at_a_regular_file_path() {
+    let recorded = basic(COMMIT)
+        .symlink("docs/latest", "notes.txt")
+        .file("docs/notes.txt", "Project notes\n")
+        .file("skills/tidy/index.txt", "notes.txt");
+    let transport = scripted(&recorded);
+    let collector = GitHub::new(&transport, None);
+    assert!(matches!(observe(&collector), Observation::Snapshot(_)));
+    let urls: Vec<_> = transport
+        .requests()
+        .into_iter()
+        .map(|request| request.url)
+        .collect();
+    assert!(
+        urls.contains(&recorded.raw_url("skills/tidy/index.txt")),
+        "{urls:?}"
+    );
+    assert!(!urls.contains(&recorded.raw_url("docs/latest")), "{urls:?}");
 }
 
 fn store_review(
@@ -831,7 +944,7 @@ fn a_changed_stored_record_is_corrupt_and_never_repaired() {
     );
 }
 
-fn session(transport: Arc<RecordingTransport>) -> (tempfile::TempDir, Session) {
+fn session(transport: Arc<dyn Transport>) -> (tempfile::TempDir, Session) {
     let home = tempfile::tempdir().expect("home");
     let env = Env::new(home.path())
         .expect("an environment")
@@ -911,6 +1024,37 @@ fn the_review_operation_reports_the_causal_upstream_error() {
         Some("Check the internet connection, then try again.")
     );
     assert_eq!(files_under(&home.path().join("oah")), Vec::<String>::new());
+}
+
+#[test]
+fn cancelling_after_a_recorded_response_stops_requests_and_publication() {
+    let recorded = basic(COMMIT);
+    let skill = recorded.raw_url("skills/tidy/SKILL.md");
+    for (last, count) in [(recorded.commit_url(), 1), (skill.clone(), 3)] {
+        let recording = scripted(&recorded);
+        if last == skill {
+            recording.answer(
+                &skill,
+                Response::new(429, "").with_header("retry-after", "0"),
+            );
+        }
+        let cancel = CancelToken::new();
+        let token = cancel.clone();
+        let transport = Arc::new(AfterResponse {
+            recording,
+            after: move |_: &RecordingTransport, request: &Request| {
+                if request.url == last {
+                    token.cancel();
+                }
+            },
+        });
+        let (home, session) = session(transport.clone());
+        let error = app::review(&session.ctx(&cancel, &NoProgress), spec(None, None))
+            .expect_err("cancelled");
+        assert!(error.is_cancelled(), "{error:?}");
+        assert_eq!(transport.recording.requests().len(), count);
+        assert!(!home.path().join("oah").exists());
+    }
 }
 
 #[test]

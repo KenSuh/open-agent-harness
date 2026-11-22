@@ -93,19 +93,7 @@ impl SourceSpec {
 
 /// The identity and spec of `path` in the GitHub repository `repo` (`owner/name`), tracked by commit.
 pub fn identity(repo: &str, path: &str) -> Result<(Identity, SourceSpec), ReviewError> {
-    if !REPO.is_full(repo) {
-        return Err(ReviewError::SourceUnsupported(format!(
-            "{} is not an owner/repo GitHub name; only GitHub skill folders are reviewed",
-            repr(repo)
-        )));
-    }
-    if !LITERAL.is_full(path) || path.split('/').any(|part| part == "..") {
-        return Err(ReviewError::SourceUnsupported(format!(
-            "{} is not a literal folder path inside the repository",
-            repr(path)
-        )));
-    }
-    let spec = build_spec(repo, path).map_err(ReviewError::SourceUnsupported)?;
+    let spec = source_spec(repo, path)?;
     let fields = IdentityFields {
         provider: "github".to_string(),
         locator: spec.locator.clone(),
@@ -134,8 +122,19 @@ pub fn hit_paths(name: &str) -> Vec<String> {
     vec![format!("skills/{name}"), name.to_string()]
 }
 
-/// `build_spec(url="https://github.com/<repo>", track="commit", paths=[path])`; the error is the `SourceError` text.
-fn build_spec(repo: &str, path: &str) -> Result<SourceSpec, String> {
+pub(crate) fn source_spec(repo: &str, path: &str) -> Result<SourceSpec, ReviewError> {
+    if !REPO.is_full(repo) {
+        return Err(ReviewError::SourceUnsupported(format!(
+            "{} is not an owner/repo GitHub name; only GitHub skill folders are reviewed",
+            repr(repo)
+        )));
+    }
+    if !LITERAL.is_full(path) || path.split('/').any(|part| part == "..") {
+        return Err(ReviewError::SourceUnsupported(format!(
+            "{} is not a literal folder path inside the repository",
+            repr(path)
+        )));
+    }
     let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
     let name = if name.to_lowercase().ends_with(".git") {
         &name[..name.len() - 4]
@@ -143,17 +142,18 @@ fn build_spec(repo: &str, path: &str) -> Result<SourceSpec, String> {
         name
     };
     if !OWNER.is_full(owner) || !REPO_NAME.is_full(name) || name == "." || name == ".." {
-        return Err(
+        return Err(ReviewError::SourceUnsupported(
             "OAH_SOURCES_LOCATOR_INVALID: the owner or repository name is not a GitHub name"
                 .to_string(),
-        );
+        ));
     }
     let locator = format!(
         "https://github.com/{}/{}",
         owner.to_lowercase(),
         name.to_lowercase()
     );
-    let paths = check_paths(&[path.to_string()], "--path")?;
+    let paths =
+        check_paths(&[path.to_string()], "--path").map_err(ReviewError::SourceUnsupported)?;
     Ok(SourceSpec { locator, paths })
 }
 
