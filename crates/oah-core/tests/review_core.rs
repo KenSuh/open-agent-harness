@@ -15,6 +15,17 @@
 
 use oah_core::{config, error, paths};
 
+#[expect(dead_code, reason = "the store only uses the regular-file opener here")]
+#[path = "../src/fsx"]
+mod fsx {
+    mod atomic;
+    mod error;
+    mod selfwrite;
+
+    pub(crate) use atomic::{RegularOpenError, open_regular};
+    pub(crate) use selfwrite::{SelfWriteMatch, SelfWrites};
+}
+
 #[allow(dead_code)]
 #[path = "../src/proc/mod.rs"]
 mod proc;

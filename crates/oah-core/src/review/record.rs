@@ -154,12 +154,15 @@ impl ReviewedSkillV1 {
 
     /// The digest of everything but `id` (v0.4.0 `store.with_id`).
     pub fn content_id(&self) -> String {
-        let mut value = self.to_json();
-        if let Some(object) = value.as_object_mut() {
-            object.remove("id");
-        }
-        digest(&value)
+        digest_record_fields(self.to_json())
     }
+}
+
+pub(super) fn digest_record_fields(mut encoded: Value) -> String {
+    if let Some(object) = encoded.as_object_mut() {
+        object.remove("id");
+    }
+    digest(&encoded)
 }
 
 /// One review: which folder, who asked, which licenses are allowed, and the clock.
