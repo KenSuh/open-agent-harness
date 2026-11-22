@@ -387,6 +387,38 @@ class PacketPlanTest(unittest.TestCase):
                                      "correction": ("opencode", "medium")})
         self.assertEqual(config.read_bytes(), before)
 
+    def test_new_uses_native_order_and_warns_about_ignored_assignments(self):
+        from oah import call
+
+        config = self.repo / ".oah/config.toml"
+        config.parent.mkdir()
+        before = (b'[sections]\norder = ["fix", "review", "plan", "initial"]\n'
+                  b'[stages]\nplan = "copilot"\nreview = "claude"\nbuild = "opencode"\n'
+                  b'initial = "gemini"\ncorrection = 42\nhandoff = "nope"\n')
+        config.write_bytes(before)
+        code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        read = call.read_packet(self.repo, self.path, parse_intent=None)
+        self.assertEqual(list(read.plan.items()), [("correction", ("codex", "medium")),
+                                                   ("review", ("claude", "medium"))])
+        for notice, name in (("OAH_SECTION_UNLISTED", "stages.build"),
+                             ("OAH_SECTION_UNLISTED", "stages.handoff"),
+                             ("OAH_STAGES_LEGACY_IGNORED", "stages.correction")):
+            self.assertTrue(any(notice in line and name in line for line in err.splitlines()), err)
+        self.assertNotIn("stages.initial", err)
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_new_can_record_a_workflow_with_no_source_stages(self):
+        from oah import call
+
+        config = self.repo / ".oah/config.toml"
+        config.parent.mkdir()
+        config.write_text('[sections]\norder = ["plan"]\n', encoding="utf-8")
+        code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(call.read_packet(self.repo, self.path, parse_intent=None).plan, {})
+        self.assertIn("plan: none", out)
+
     def test_risky_scope_and_explicit_axes_raise_the_tier(self):
         code, out, err = self.new("--scope", "db/migrations/001.sql", "--kind", "migration")
         self.assertEqual(code, 0, out + err)

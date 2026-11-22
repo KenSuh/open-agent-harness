@@ -100,6 +100,18 @@ class CliTest(unittest.TestCase):
         self.assertEqual(names(project), before)
         self.assertEqual(project.fix_calls(), [])
 
+    def test_fix_refuses_when_the_worktree_has_no_fix_section(self):
+        project = FixProject(self, config='[sections]\norder = ["build", "review"]\n[stages]\nfix = "codex"\n')
+        project.changes_requested()
+        before = names(project)
+        done = oah(project, "fix", "--task", "t1", "--json")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        result = json.loads(done.stdout)
+        self.assertEqual(result["code"], "OAH_STAGE_UNKNOWN")
+        self.assertIn("sections.order", result["message"])
+        self.assertEqual(names(project), before)
+        self.assertEqual(project.fix_calls(), [])
+
     def test_other_lane_can_start_and_publish_review_during_correction(self):
         project, other = FixProject(self), FixProject(self)
         project.changes_requested()

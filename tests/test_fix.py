@@ -2018,6 +2018,8 @@ class EndToEndTest(unittest.TestCase):
     def test_fix_commit_bind_review_round_trip(self):
         project = FixProject(self, config='[stages]\nfix = "codex"\ncorrection = "claude"\n')
         result = applied(self, project)
+        self.assertTrue(any(warning.startswith("OAH_STAGES_LEGACY_IGNORED") and "stages.correction" in warning
+                            for warning in result.warnings), result.warnings)
         project.run_commands(result.commands)
         self.assertEqual(project.bind().code, "OAH_FIX_BOUND")
         project.queue({})

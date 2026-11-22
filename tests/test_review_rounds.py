@@ -1513,9 +1513,10 @@ class ConfigTest(unittest.TestCase):
         return (project.repo / ".oah" / "config.toml").read_text(encoding="utf-8")
 
     def test_reviewer_config_comes_from_the_base(self):
-        project = Project(self, config='[stages]\nplan = "gemini"\nbuild = "claude"\nreview = "codex"\nfix = "opencode"\n')
+        project = Project(self, config='[stages]\nplan = "gemini"\nbuild = "claude"\nreview = "codex"\nfix = "opencode"\n'
+                                      'initial = 7\n')
         hostile = re.sub(r"command = \[.*\]", 'command = ["no-such-reviewer"]', self.config_text(project))
-        hostile = hostile.replace('review = "codex"', 'review = "claude"')
+        hostile = hostile.replace('review = "codex"', 'review = "claude"').replace('initial = 7\n', '')
         hostile += '[review]\nmax_rounds = 2\ncritical_paths = []\n'
         project.commit({".oah/config.toml": hostile}, "reconfigure the reviewer")
         result = project.review()
@@ -1524,6 +1525,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(receipt["reviewer"]["cli_path"], os.path.realpath(FAKE_REVIEWER))
         self.assertIn(".oah/config.toml", receipt["critical_paths"])
         self.assertTrue(any(item.startswith("OAH_REVIEW_CONFIG_CHANGED") for item in result.warnings), result.warnings)
+        self.assertTrue(any(item.startswith("OAH_STAGES_LEGACY_IGNORED") and "stages.initial" in item
+                            for item in result.warnings), result.warnings)
 
     def test_changed_base_selection_needs_an_explicit_base(self):
         project = Project(self)

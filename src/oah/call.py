@@ -148,6 +148,7 @@ class Settings:
     stages: Mapping[str, str]
     engines: dict
     models: dict
+    stage_warnings: tuple[str, ...] = ()
 
     @classmethod
     def defaults(cls) -> "Settings":
@@ -156,8 +157,16 @@ class Settings:
     @classmethod
     def from_config(cls, config: Config) -> Settings:
         """Read task settings from the config snapshot the caller has already selected."""
-        return cls.validated(routing.stage_settings(config), config.section("engines", ENGINE_DEFAULTS),
-                             config.section("models", models.DEFAULTS))
+        stages = routing.stage_settings(config)
+        settings = cls.validated(stages.owners, config.section("engines", ENGINE_DEFAULTS),
+                                 config.section("models", models.DEFAULTS))
+        return dataclasses.replace(settings, stage_warnings=stages.warnings)
+
+    def evidence(self) -> dict[str, object]:
+        """The existing settings snapshot used by prepared targets and correction capture."""
+        data = dataclasses.asdict(self)
+        del data["stage_warnings"]
+        return data
 
     @classmethod
     def validated(cls, stages: Mapping[str, str], engines: dict, models_section: dict) -> "Settings":
@@ -656,9 +665,9 @@ def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: s
 
 
 def preview(engine: str, stage: str | None, tier: str, kind: str, settings: Settings, *, state_dir: pathlib.Path,
-            env: Mapping[str, str]) -> tuple[dict, tuple[str, ...]]:
+            env: Mapping[str, str], configured: bool = False) -> tuple[dict, tuple[str, ...]]:
     """What a call at this tier would use, through the same selection and `admit`; it launches and writes nothing."""
-    routing.require_runtime(engine, stage)
+    routing.require_runtime(engine, stage, configured=configured)
     floor_tier = _call_floor(stage, (), kind)
     if stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
         tier = floor_tier
@@ -668,7 +677,7 @@ def preview(engine: str, stage: str | None, tier: str, kind: str, settings: Sett
     admitted = admit(resolution, settings, stage=stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
     return ({"engine": engine, "stage": stage, "tier": tier, "model": _shown(resolution.model),
              "effort": resolution.launch_effort, "source": resolution.model_source, **admitted.to_json()},
-            (*resolution.warnings, *admitted.warnings))
+            (*settings.stage_warnings, *resolution.warnings, *admitted.warnings))
 
 
 def admit(resolution: Resolution, settings: Settings, *, stage: str | None, tier: str, floor_tier: str,
@@ -1270,9 +1279,10 @@ def _e_target(request, tier, *, root, state_dir, env, native=False):
 
     settings = load_settings(root)
     if native:
+        routing.check_stage(request.engine, request.stage, settings.stages, override=request.override_stage)
         return _native_target(request.engine, tier, settings, root=root, env=env)
-    checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, persist=False)
     basis = _native_basis(request, settings, root=root, state_dir=state_dir, allow_reference=True)
+    checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, persist=False)
     resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, checked=checked,
                                 floor_tier=_launch_floor(request.stage, tier, basis.floor_tier),
                                 stage=request.stage, record=False)
@@ -1287,7 +1297,7 @@ def _e_target(request, tier, *, root, state_dir, env, native=False):
             "profile_id": f"oah-{tier}", "model": resolution.model, "effort": resolution.launch_effort,
             "platform": sys.platform, "architecture": platform.machine() or "unknown",
             "root_digest": digest(str(root.resolve())),
-            "config_digest": digest({"settings": dataclasses.asdict(settings), "base": resolution.base,
+            "config_digest": digest({"settings": settings.evidence(), "base": resolution.base,
                                       "executable": executable, "driver": driver})}
 
 
@@ -2624,10 +2634,10 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     root = pathlib.Path(root)
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
-        check(dataclasses.asdict(settings))
+        check(settings.evidence())
     briefs.check_footer(footer, has_footer)
-    warnings = list(routing.check_stage(request.engine, request.stage, settings.stages,
-                                        override=request.override_stage))
+    warnings = list(settings.stage_warnings)
+    warnings.extend(routing.check_stage(request.engine, request.stage, settings.stages, override=request.override_stage))
     same = routing.same_engine_warning(settings.stages)
     if same:
         warnings.append(same)
@@ -2843,7 +2853,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                  "inline_complete": design.record["inline_complete"],
                  "evidence_key": design.record["evidence_key"]}) + "\n")
         captured = {"metadata": json.loads(inputs.metadata_json), "lease": json.loads(inputs.lease_json),
-                    "binding": bound, "settings": dataclasses.asdict(settings), "packet": dataclasses.asdict(packet),
+                    "binding": bound, "settings": settings.evidence(), "packet": dataclasses.asdict(packet),
                     "config": json.loads(json.dumps(inputs.config.raw, default=
                         lambda value: dict(value) if isinstance(value, Mapping) else str(value))),
                     "models": [(str(path), text) for path, text in inputs.catalog.original.items()],
@@ -3043,8 +3053,8 @@ class _NativeBasis:
 def _native_basis(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
                   parse_intent=None, read_source=None, allow_reference: bool = False) -> _NativeBasis:
     """The common pure preflight's reads in `_prepare`'s order (lease, packet, binding, design), spending nothing."""
-    warnings = list(routing.check_stage(request.engine, request.stage, settings.stages,
-                                        override=request.override_stage))
+    warnings = list(settings.stage_warnings)
+    warnings.extend(routing.check_stage(request.engine, request.stage, settings.stages, override=request.override_stage))
     same = routing.same_engine_warning(settings.stages)
     if same:
         warnings.append(same)

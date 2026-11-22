@@ -15,7 +15,7 @@ from typing import Callable, NamedTuple
 from oah import briefs, call, launchers, routing, runs
 from oah.launchers import native as native_launcher
 from oah.atomic import StateCorrupt, StorageError
-from oah.config import ConfigError
+from oah.config import ConfigError, load_config
 from oah.discovery import boundaries, inputs, records
 from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
@@ -123,14 +123,10 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 
 def load_settings(root: pathlib.Path) -> call.Settings:
-    from oah.config import load_config
-
     return call.Settings.from_config(load_config(root))
 
 
 def load_call_section(root: pathlib.Path) -> dict:
-    from oah.config import load_config
-
     return load_config(root).section("call", launchers.DEFAULTS)
 
 
@@ -253,16 +249,21 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
             print("OAH_USAGE: --require-detach applies to the process launcher only; an Orca terminal never "
                   "belongs to this terminal. Remove --require-detach", file=sys.stderr)
             return EXIT_USAGE
+        creates_review_tree = not args.worktree and args.stage == "review"
+        stages = routing.stage_settings(load_config(root))
+        routing.check_stage(args.engine, args.stage, stages.owners, override=args.override_stage,
+                            require_match=not creates_review_tree)
+
         from oah.launchers import orca as orca_launcher
 
         orca = orca_launcher.find(section["orca_command"], os.environ)
         orca_launcher.check_runner(os.environ)
-        if args.worktree or args.stage != "review":
-            placement = orca_launcher.existing_worktree(orca, root)
-        else:
+        if creates_review_tree:
             placement = orca_launcher.new_worktree(orca, root, args.task)
             root = placement.path
             state = state_dir(repo_info(root), os.environ)
+        else:
+            placement = orca_launcher.existing_worktree(orca, root)
     settings = load_settings(root)
     tools = intent_tools()
     request = call.CallRequest(

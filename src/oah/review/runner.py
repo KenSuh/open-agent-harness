@@ -40,7 +40,7 @@ import pathlib
 import re
 from typing import Callable, Mapping, Sequence
 
-from oah import call, call_cli, models, preflight, runs
+from oah import call, call_cli, models, preflight, routing, runs
 from oah import intent as oah_intent
 from oah.config import Config, load_config, parse_config
 from oah.engines.effort import DOWNGRADED, MISMATCH
@@ -667,7 +667,7 @@ def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
                           "commit this work started from")
     conf = review_settings.from_config(based)
     call_settings = call.Settings.from_config(based)
-    engine = call_settings.stages["review"]
+    engine = routing.stage_owner("review", call_settings.stages)
     if engine != ENGINE:
         raise ReviewError("OAH_REVIEW_ENGINE_UNSUPPORTED", f"[stages] review is {engine!r} "
                           f"in {based.where}; oah review runs Codex (structured output, ephemeral, ignored user "
@@ -764,8 +764,9 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     decision = request.decision or rounds.round_decision(s)
     command = reviewer_command(call_settings.engines[ENGINE]["command"])
     cli_path, cli_sha = reviewer_binary(command)
-    call_settings = dataclasses.replace(call_settings, engines={
-        **call_settings.engines, ENGINE: {**call_settings.engines[ENGINE], "command": command}})
+    call_settings = dataclasses.replace(
+        call_settings, engines={**call_settings.engines, ENGINE: {**call_settings.engines[ENGINE], "command": command}},
+        stage_warnings=tuple(redact(warning) for warning in call_settings.stage_warnings))
     if conf.codex_sha256 and cli_sha != conf.codex_sha256:
         raise ReviewError("OAH_REVIEW_BINARY_MISMATCH", f"the reviewer CLI {cli_path} has sha256 {cli_sha}, but "
                           f"[review] codex_sha256 pins {conf.codex_sha256}; nothing was launched. If you updated "

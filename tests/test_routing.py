@@ -298,8 +298,14 @@ class RecommendModelTest(unittest.TestCase):
         code, _, err = recommend_in(project, *AXES, "--stage", "initial")
         self.assertEqual(code, 1, err)
         self.assertTrue(err.startswith("OAH_STAGE_ENGINE_UNSUPPORTED:"), err)
-        self.assertIn("stage initial", err)
-        self.assertIn("opencode", err)
+        self.assertIn("stage initial selects 'opencode'", err)
+
+    def test_model_preview_refuses_a_removed_stage(self):
+        project = self.project('[sections]\norder = ["fix"]\n[stages]\nreview = "codex"\n')
+        code, _, err = recommend_in(project, *AXES, "--stage", "review")
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_STAGE_UNKNOWN", err)
+        self.assertIn("sections.order", err)
 
     def test_a_new_kind_gets_a_model_too(self):
         project = self.project()

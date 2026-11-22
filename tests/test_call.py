@@ -1057,7 +1057,9 @@ class RoutingTest(unittest.TestCase):
 
     def test_native_stage_keys_and_values_are_validated(self):
         rows = (
-            ('fix = "codex"\nreveiw = "claude"\n', "OAH_CONFIG_UNKNOWN_KEY", "stages.reveiw"),
+            ('initial = "codex"\nreveiw = "claude"\n', "OAH_CONFIG_UNKNOWN_KEY", "stages.reveiw"),
+            ('initial = 7\n', "OAH_CONFIG_INVALID", "stages.initial"),
+            ('correction = "nope"\n', "OAH_CONFIG_INVALID", "stages.correction"),
             ('fix = 7\n', "OAH_CONFIG_INVALID", "stages.fix"),
             ('plan = "cursor"\n', "OAH_CONFIG_INVALID", "stages.plan"),
             ('build = "codex"\ninitial = 7\n[sections]\norder = ["build", "initial"]\n',
@@ -2250,7 +2252,8 @@ def run_cli(project: Project, *argv: str) -> tuple[int, str, str]:
 
 class CallCliTest(unittest.TestCase):
     def test_cli_calls_use_desktop_assignments(self):
-        project = Project(self, '[stages]\nplan = "gemini"\nbuild = "codex"\nreview = "claude"\nfix = "claude"\n')
+        project = Project(self, '[stages]\nplan = "gemini"\nbuild = "codex"\nreview = "claude"\nfix = "claude"\n'
+                                'initial = 7\n')
         config = project.repo / ".oah/config.toml"
         before = config.read_bytes()
         for stage, engine, mode_flag, mode in (
@@ -2264,6 +2267,9 @@ class CallCliTest(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 record = json.loads(out)
                 self.assertEqual((record["engine"], record["stage"], record["status"]), (engine, stage, "finished"))
+                notice = next(warning for warning in record["warnings"] if warning.startswith("OAH_STAGES_LEGACY_IGNORED"))
+                self.assertIn("stages.initial", notice)
+                self.assertIn(notice, err)
                 argv = project.recorded()["argv"]
                 self.assertEqual(argv[argv.index(mode_flag) + 1], mode)
                 if stage == "review":
@@ -2274,7 +2280,8 @@ class CallCliTest(unittest.TestCase):
         for owner in ("gemini", "copilot", "opencode", "antigravity"):
             with self.subTest(owner=owner):
                 project = Project(self, f'[stages]\nfix = "{owner}"\n[call]\norca_command = ["no-fixture-orca"]\n')
-                for engine, launcher in ((owner, "process"), ("codex", "process"), (owner, "orca")):
+                for engine, launcher in ((owner, "process"), ("codex", "process"), (owner, "orca"),
+                                         ("codex", "native")):
                     code, _, err = run_cli(project, "call", engine, "--stage", "correction", "--task", "t1",
                                            "--launcher", launcher)
                     self.assertEqual(code, call_cli.EXIT_REFUSED, err)
@@ -2283,6 +2290,21 @@ class CallCliTest(unittest.TestCase):
                     self.assertIn(owner, err)
                 self.assertFalse(project.record.exists())
                 self.assertFalse(project.runs())
+
+    def test_cli_distinguishes_requested_engine_from_stage_owner(self):
+        project = Project(self, '[stages]\nbuild = "codex"\n')
+        code, _, err = run_cli(project, "call", "gemini", "--stage", "initial", "--override-stage")
+        self.assertEqual(code, call_cli.EXIT_REFUSED, err)
+        self.assertIn("stage initial request names engine 'gemini'", err)
+        self.assertFalse(project.record.exists())
+
+    def test_removed_stage_cannot_be_selected_with_an_override(self):
+        project = Project(self, '[sections]\norder = ["plan", "review", "fix"]\n[stages]\nbuild = "codex"\n')
+        code, _, err = run_cli(project, "call", "codex", "--stage", "initial", "--override-stage")
+        self.assertEqual(code, call_cli.EXIT_REFUSED, err)
+        self.assertIn("OAH_STAGE_UNKNOWN", err)
+        self.assertIn("sections.order", err)
+        self.assertFalse(project.record.exists())
 
     def test_require_detach_flag_is_forwarded_and_requires_background(self):
         project = Project(self)

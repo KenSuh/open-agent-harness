@@ -88,7 +88,7 @@ def display(path: pathlib.Path, root: pathlib.Path | None) -> str:
 
 
 def _stage_plans(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path,
-                 scope: tuple[str, ...]) -> list[packet.StagePlan]:
+                 scope: tuple[str, ...]) -> tuple[list[packet.StagePlan], tuple[str, ...]]:
     """Each stage scored by rules: its engine, axes, tier, advice and skills (A9, A10)."""
     from oah import call, routing, skillsel
     from oah.config import load_config
@@ -96,7 +96,7 @@ def _stage_plans(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pa
     stages = routing.stage_settings(load_config(root))
     given = {axis: getattr(args, axis) for axis in ("intensity", "reasoning", "risk") if getattr(args, axis)}
     plans = []
-    for stage in routing.STAGES:
+    for stage, owner in stages.owners.items():
         # The task's kind belongs to the implementing stages; the review stage keeps the review kind.
         kind = args.kind if args.kind and stage != "review" else None
         scored = routing.score_axes(stage=stage, kind=kind, scope=scope, overrides=given)
@@ -104,11 +104,11 @@ def _stage_plans(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pa
         selection, status = skillsel.choose(root, kind=scored.axes.kind, stage=stage, risk=scored.axes.risk,
                                             scope=scope, state_dir=state, env=os.environ,
                                             brief_disabled=args.no_rerank)
-        plans.append(packet.StagePlan(stage, stages[stage], scored.axes,
+        plans.append(packet.StagePlan(stage, owner, scored.axes,
                                       recommendation.tier, tuple(scored.reasons) + recommendation.reasons,
                                       call.advise(scored.axes, scope, root=root, state_dir=state,
                                                   brief_disabled=args.no_rerank, env=os.environ), selection, status))
-    return plans
+    return plans, stages.warnings
 
 
 def _packet_design(root: pathlib.Path, spec: str, revision: int | None):
@@ -200,14 +200,15 @@ def _new(args: argparse.Namespace) -> int:
     except ImpactUnavailable as exc:
         impact_line = f"impact=unavailable({exc})"
     state = state_dir(info, os.environ)
-    plans = _stage_plans(args, root, state, scope)
+    plans, warnings = _stage_plans(args, root, state, scope)
     if linked is None:
         path = packet.create(root, args.task, plan=packet.plan_text(plans), scope=scope)
     else:
         source = display(path, root)
         _write_linked(state, root, args.task, source, linked[0], lambda: packet.create(
             root, args.task, plan=packet.plan_text(plans), scope=scope, design=linked[0]))
-    for warning in dict.fromkeys(w for plan in plans for w in plan.selection.warnings if "OAH_SCOPE_EMPTY" in w):
+    scope_warnings = dict.fromkeys(w for plan in plans for w in plan.selection.warnings if "OAH_SCOPE_EMPTY" in w)
+    for warning in (*warnings, *scope_warnings):
         print(f"warning {warning}", file=sys.stderr)
     if not _design_judged(state, args.task):
         print(f"OAH_DESIGN_UNJUDGED: no design judgement is recorded for task {args.task}; before writing the design, "
@@ -218,9 +219,10 @@ def _new(args: argparse.Namespace) -> int:
         print(_linked(*linked))
         print(f"Write the intent from the design: oah design show {linked[0].project} {linked[0].design} "
               f"--revision {linked[0].revision} prints it.")
-    print("plan: " + "; ".join(f"{plan.stage} → {plan.engine} → {plan.tier}" for plan in plans))
-    print("skills: " + " ".join(f"{plan.stage}={','.join(s.id for s in plan.selection.skills) or 'none'}"
-                                for plan in plans) + f" rerank={plans[0].rerank}")
+    print("plan: " + ("; ".join(f"{plan.stage} → {plan.engine} → {plan.tier}" for plan in plans) or "none"))
+    if plans:
+        print("skills: " + " ".join(f"{plan.stage}={','.join(s.id for s in plan.selection.skills) or 'none'}"
+                                    for plan in plans) + f" rerank={plans[0].rerank}")
     print("Next: describe the problem, the outcome and checkable success conditions, check the Scope paths and "
           f"the plan, then change 'Status: draft' to 'Status: accepted' and run: oah packet check {args.task}")
     return EXIT_OK

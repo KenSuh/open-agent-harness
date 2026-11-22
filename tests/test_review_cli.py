@@ -289,6 +289,10 @@ class CliTest(unittest.TestCase):
                 self.assertIn(f"review is {owner!r}", message)
                 self.assertIn("review base", message)
 
+    def test_review_refuses_when_the_base_has_no_review_section(self):
+        project = Project(self, config='[sections]\norder = ["build", "fix"]\n[stages]\nreview = "codex"\n')
+        self.assertIn("sections.order", self.refused(project, "OAH_STAGE_UNKNOWN"))
+
     def test_cli_timeout_must_be_a_positive_number(self):
         project = Project(self)
         for value in ("0", "-1", "inf", "nan", "soon"):

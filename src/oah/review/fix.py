@@ -221,6 +221,7 @@ _ERROR_DIAGNOSTICS = {
     "OAH_INTENT_SOURCE_UNREADABLE": "the intent source cannot be read; restore the accepted packet before retrying.",
     "OAH_CONFIG_INVALID": "project configuration is invalid; correct .oah/config.toml before retrying.",
     "OAH_CONFIG_UNKNOWN_KEY": "project configuration contains an unknown key. Correct .oah/config.toml before retrying.",
+    "OAH_STAGE_UNKNOWN": "stage correction is inactive. Add 'fix' to sections.order in .oah/config.toml.",
     "OAH_CODEX_CONFIG_INVALID": "Codex configuration is invalid; repair its login and configuration before retrying.",
     "OAH_ENGINE_MISSING": "Codex is unavailable; install it and sign in through its own CLI, then retry.",
     "OAH_UNSUPPORTED_BATCH_SHIM": "the engine shim is unsupported; configure a native executable, then retry.",
@@ -1408,7 +1409,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
     judged = _check_design(t, binding)
     config = load_config(t.root)
     settings = call.Settings.from_config(config)
-    engine = settings.stages[STAGE]
+    engine = routing.stage_owner(STAGE, settings.stages)
     if engine != ENGINE:
         raise _EngineUnsupported(engine)
     try:
@@ -1470,7 +1471,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
         bound = call.dispatch_binding(t.state, t.name)
         rules = json.loads(json.dumps(load_rules() if rules is None else list(rules)))
-        metadata = (dataclasses.asdict(request), dataclasses.asdict(settings), committed_text, bound, rules,
+        metadata = (dataclasses.asdict(request), settings.evidence(), committed_text, bound, rules,
                     dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), round_log,
                     findings, classes, instructions, tools.footer, briefs.VERIFY_FOOTER)
         _safe_inputs((config.raw, metadata), redact)
@@ -1493,7 +1494,9 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                                    baseline=baseline, index_baseline=_index_state(t.root), ignored_baseline=ignored_baseline)
                 attempt.history = h
                 with _stop_signals(), inputs.publication():
-                    return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
+                    result = attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
+                result.warnings.extend(redact(warning) for warning in settings.stage_warnings)
+                return result
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
