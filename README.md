@@ -48,9 +48,13 @@ default for planning and building. Codex is the default for review and fixes.
 The desktop app offers **Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode and Antigravity** as workflow
 choices. **Agents** also lists Cursor for skills and rules only. Choose from the agents available on your machine.
 
-The desktop app saves assignments and syncs them into the managed rules in `AGENTS.md`. Use each agent in its
-own tool, or use the source CLI where supported. `oah call` directly runs Claude Code and Codex CLI with its
-configured stage routing. The dedicated `oah review` and automatic `oah fix` commands run Codex.
+The desktop app saves assignments in `.oah/config.toml` and syncs them into the managed rules in `AGENTS.md`.
+Use each agent in its own tool, or use the desktop's bundled commands with that configuration. The bundled
+helper provides `doctor`, `sections show`, `rules check` and `rules sync`. The source CLI has its own settings:
+its task loop does not read the desktop's `.oah/config.toml`, and `oah init` or `oah rules sync` can replace
+the desktop-managed `AGENTS.md` block. Choose either the desktop Team Workflow or the source CLI task loop
+for a repository. The source CLI's `oah call` directly runs Claude Code and Codex CLI with its own stage
+routing; its dedicated `oah review` and automatic `oah fix` commands run Codex.
 
 ## What oah does for you
 
@@ -129,7 +133,7 @@ oah 1.0.0
 
 ## First run
 
-### Set up your team in the desktop app
+### Desktop app path: set up your team
 
 1. **Check the agents.** Open **Agents** to see what OAH found and which sign-in states it can verify.
    Follow the install or sign-in instructions for the agents you want to use, then choose **Rescan agents**.
@@ -151,18 +155,20 @@ oah 1.0.0
    `AGENTS.md`. Review the changes in the worktree before committing them.
 
 The desktop app uses `~/.oah` on macOS or `%USERPROFILE%\.oah` on Windows. It writes `settings.toml`
-and places its helper in `bin/`. The helper provides `doctor`, `sections show`, `rules check` and `rules sync`.
+and places its helper in `bin/`. These bundled commands work with the desktop configuration.
 
-### Initialize a project with the CLI
+### Alternative: initialize a separate project with the source CLI
 
-In a Git repository with a remote, run `oah init` after installing the source CLI. Review and confirm the
-setup plan, then commit the project files it creates. Open your AI in that project and ask in plain words.
+Use a separate working copy that Team Workflow has not configured. In a Git repository with a remote, run
+`oah init` after installing the source CLI. Review and confirm the setup plan, then commit the project files
+it creates. Open your AI in that project and ask in plain words.
 
 - “Build login with oah.”
 - “Is the review done? Did all the gates pass?”
 - “Land this version.” Say this after inspecting the result and the checks.
 
-Use a Git repository with the default Claude Code and Codex stages for the [first-task walkthrough](examples/hello-oah/README.md).
+Use a separate working copy that Team Workflow has not configured for the source CLI
+[first-task walkthrough](examples/hello-oah/README.md).
 [Setup details](docs/how-it-works.md#first-run) explain the plan and the generated files.
 
 ### Inspect and choose skills in the CLI

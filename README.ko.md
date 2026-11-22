@@ -48,9 +48,13 @@ v1.0.0의 **Team Workflow**에서는 저장소의 각 단계를 맡을 에이전
 데스크톱 앱에서는 **Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode, Antigravity**를
 단계에 배정할 수 있다. **Agents**에는 스킬과 규칙 전용인 Cursor도 표시된다. 내 컴퓨터에서 쓸 수 있는 에이전트 중에서 고른다.
 
-앱에서 배정을 저장하고 `AGENTS.md`의 관리 규칙에 동기화한다. 각 에이전트는 해당 도구에서 실행할 수 있다.
-소스 CLI의 `oah call`은 단계 설정에 따라 Claude Code와 Codex CLI를 직접 실행한다.
-전용 명령인 `oah review`와 자동 `oah fix`는 Codex를 실행한다.
+앱은 배정을 `.oah/config.toml`에 저장하고 `AGENTS.md`의 관리 규칙에 동기화한다. 각 에이전트는 해당
+도구에서 실행하거나 이 설정을 사용하는 데스크톱 번들 명령을 쓸 수 있다. 번들 도우미는 `doctor`,
+`sections show`, `rules check`, `rules sync`를 제공한다. 소스 CLI는 별도 설정을 사용한다. 작업 루프는
+데스크톱의 `.oah/config.toml`을 읽지 않으며, `oah init`이나 `oah rules sync`는 데스크톱 관리 블록을
+대체할 수 있다. 저장소에서는 데스크톱 Team Workflow와 소스 CLI 작업 루프 중 하나를 시작점으로 고른다.
+소스 CLI의 `oah call`은 자체 단계 설정에 따라 Claude Code와 Codex CLI를 직접 실행한다. 전용 명령인
+`oah review`와 자동 `oah fix`는 Codex를 실행한다.
 
 ## oah가 챙겨 주는 일
 
@@ -125,7 +129,7 @@ oah 1.0.0
 
 ## 처음 실행하기
 
-### 데스크톱 앱에서 팀 구성하기
+### 데스크톱 앱 경로: 팀 구성하기
 
 1. **에이전트를 확인한다.** **Agents**에서 OAH가 찾은 에이전트와 확인 가능한 로그인 상태를 본다.
    사용할 에이전트의 설치 또는 로그인 안내를 따른 뒤 **Rescan agents**를 누른다.
@@ -147,18 +151,20 @@ oah 1.0.0
    관리 대상 규칙을 갱신한다. 작업 폴더의 변경 사항을 살핀 뒤 커밋한다.
 
 앱은 macOS에서 `~/.oah`, Windows에서 `%USERPROFILE%\.oah` 아래에 `settings.toml`과 `bin/`의 동봉 도구를 저장한다.
-이 도구로 `doctor`, `sections show`, `rules check`, `rules sync`를 실행할 수 있다.
+이 번들 명령은 데스크톱 설정과 함께 작동한다.
 
-### CLI로 프로젝트 초기화하기
+### 다른 경로: 별도 프로젝트에서 소스 CLI 초기화하기
 
-소스 CLI를 설치한 뒤 원격 저장소가 연결된 Git 저장소에서 `oah init`을 실행한다. 설정 계획을 검토하고
-승인한 뒤 생성된 프로젝트 파일을 커밋한다. 그 프로젝트에서 AI를 열고 평소 말로 요청한다.
+Team Workflow가 설정하지 않은 별도 작업 복사본을 사용한다. 소스 CLI를 설치한 뒤 원격 저장소가 연결된
+Git 저장소에서 `oah init`을 실행한다. 설정 계획을 검토하고 승인한 뒤 생성된 프로젝트 파일을 커밋한다.
+그 프로젝트에서 AI를 열고 평소 말로 요청한다.
 
 - “로그인 기능을 oah로 만들어 줘.”
 - “리뷰 끝났어? 게이트 다 통과했어?”
 - “이 버전을 반영해 줘.” 결과와 검사를 살핀 뒤 확인한다.
 
-[첫 작업 따라 하기](examples/hello-oah/README.ko.md)는 Claude Code와 Codex를 기본 단계에 배정한 Git 저장소에서 진행한다.
+Team Workflow가 설정하지 않은 별도 작업 복사본에서 소스 CLI
+[첫 작업 따라 하기](examples/hello-oah/README.ko.md)를 진행한다.
 [설정 상세](docs/ko/how-it-works.md#처음-실행하기)에서 설정 계획과 생성 파일을 설명한다.
 
 ### CLI에서 스킬 확인하고 고르기
