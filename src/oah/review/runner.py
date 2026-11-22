@@ -609,12 +609,6 @@ def config_at(root: pathlib.Path, rev: str) -> Config:
     return parse_config(raw.encode("latin-1"), label=label)
 
 
-def _call_settings(config: Config) -> call.Settings:
-    return call.Settings.validated(config.section("stages", call.STAGE_DEFAULTS),
-                                   config.section("engines", call.ENGINE_DEFAULTS),
-                                   config.section("models", models.DEFAULTS))
-
-
 def _is_ancestor(root: pathlib.Path, commit: str, head: str) -> bool:
     return run_git(root, "merge-base", "--is-ancestor", commit, head).returncode == 0
 
@@ -672,9 +666,10 @@ def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
                           f"{CONFIG_PATH}, which choose the review base; nothing was launched. Pass --base with the "
                           "commit this work started from")
     conf = review_settings.from_config(based)
-    call_settings = _call_settings(based)
-    if call_settings.stages.get("review") != ENGINE:
-        raise ReviewError("OAH_REVIEW_ENGINE_UNSUPPORTED", f"[stages] review is {call_settings.stages.get('review')!r} "
+    call_settings = call.Settings.from_config(based)
+    engine = call_settings.stages["review"]
+    if engine != ENGINE:
+        raise ReviewError("OAH_REVIEW_ENGINE_UNSUPPORTED", f"[stages] review is {engine!r} "
                           f"in {based.where}; oah review runs Codex (structured output, ephemeral, ignored user "
                           'config). Set [stages] review = "codex" in .oah/config.toml and install Codex')
     series_lock = StateLock(receipts.lock_path(state, request.task, span.base), timeout=0)

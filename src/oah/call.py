@@ -82,6 +82,7 @@ import oah.intent as oah_intent
 import oah.packet as oah_packet
 from oah import benchmarks, briefs, launchers, models, routing, runs, scoring, skillsel
 from oah.atomic import StorageError
+from oah.config import Config
 from oah.discovery import boundaries, inputs as input_files, records
 from oah.engines import claude, codex
 from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, load_rules,
@@ -107,7 +108,7 @@ BELOW_FLOOR = "OAH_MODEL_BELOW_FLOOR"
 NOT_LISTED = "OAH_MODEL_NOT_LISTED"
 SUPERSEDED = "OAH_MODEL_SUPERSEDED"
 FLOOR_UNCHECKED = "OAH_MODEL_FLOOR_UNCHECKED"
-STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
+STAGE_DEFAULTS = routing.STAGE_DEFAULTS
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
 ENGINE_DEFAULTS = {
     "claude": {
@@ -130,7 +131,8 @@ ENGINE_DEFAULTS = {
                          "timeout_min": TIMEOUTS[tier]} for tier in routing.TIERS},
     },
 }
-_PLAN_LINE = re.compile(r"^\s*(?:[-*]\s*)?`?(initial|review|correction)`?\s*(?:→|->|:)\s*`?(claude|codex)`?\s*"
+_PLAN_LINE = re.compile(r"^\s*(?:[-*]\s*)?`?(initial|review|correction)`?\s*(?:→|->|:)\s*"
+                        rf"`?({'|'.join(routing.STAGE_OWNERS)})`?\s*"
                         r"(?:→|->|:)\s*`?(low|medium|high|max)`?\b")
 _PLAN_AXES = re.compile(r"^\s*[-*]\s*(initial|review|correction):\s+kind=(\S+)\s+intensity=(\S+)\s+"
                         r"reasoning=(\S+)\s+risk=(\S+)(?:\s|$)")
@@ -143,7 +145,7 @@ SECRET_HELD = "OAH_RERANK_SECRET"  # this name ends in neither KEY nor SECRET, w
 
 @dataclasses.dataclass(frozen=True)
 class Settings:
-    stages: dict
+    stages: Mapping[str, str]
     engines: dict
     models: dict
 
@@ -152,13 +154,19 @@ class Settings:
         return cls.validated(dict(STAGE_DEFAULTS), json.loads(json.dumps(ENGINE_DEFAULTS)), dict(models.DEFAULTS))
 
     @classmethod
-    def validated(cls, stages: dict, engines: dict, models_section: dict) -> "Settings":
+    def from_config(cls, config: Config) -> Settings:
+        """Read task settings from the config snapshot the caller has already selected."""
+        return cls.validated(routing.stage_settings(config), config.section("engines", ENGINE_DEFAULTS),
+                             config.section("models", models.DEFAULTS))
+
+    @classmethod
+    def validated(cls, stages: Mapping[str, str], engines: dict, models_section: dict) -> "Settings":
         def invalid(message: str) -> EngineError:
             return EngineError("OAH_CONFIG_INVALID", f".oah/config.toml: {message}")
 
         for stage, engine in stages.items():
-            if engine not in routing.ENGINES:
-                raise invalid(f"stages.{stage} = {engine!r}; use one of: {', '.join(routing.ENGINES)}")
+            if engine not in routing.STAGE_OWNERS:
+                raise invalid(f"stages.{stage} = {engine!r}; use one of: {', '.join(routing.STAGE_OWNERS)}")
         for engine, section in engines.items():
             if not all(isinstance(item, str) for item in section["quality_order"]):
                 raise invalid(f"engines.{engine}.quality_order must list model names as strings")
@@ -650,6 +658,7 @@ def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: s
 def preview(engine: str, stage: str | None, tier: str, kind: str, settings: Settings, *, state_dir: pathlib.Path,
             env: Mapping[str, str]) -> tuple[dict, tuple[str, ...]]:
     """What a call at this tier would use, through the same selection and `admit`; it launches and writes nothing."""
+    routing.require_runtime(engine, stage)
     floor_tier = _call_floor(stage, (), kind)
     if stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
         tier = floor_tier

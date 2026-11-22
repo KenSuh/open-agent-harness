@@ -13,11 +13,19 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from typing import Final, Mapping, Sequence
+
+from oah.config import Config, ConfigError
 
 TIERS = ("low", "medium", "high", "max")
 STAGES = ("initial", "review", "correction")
 ENGINES = ("claude", "codex")
+STAGE_OWNERS: Final = (*ENGINES, "gemini", "copilot", "opencode", "antigravity")
+STAGE_DEFAULTS: Final = {"initial": "claude", "review": "codex", "correction": "codex"}
+_DESKTOP_STAGES: Final = {"initial": "build", "review": "review", "correction": "fix"}
+_NEW_STAGE_KEYS: Final = ("plan", "build", "fix")
+_LEGACY_STAGE_KEYS: Final = ("initial", "correction")
+_SECTION_ID: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 KIND_SCORES = {
     "quick": 1, "docs": 1, "research": 1,
@@ -197,16 +205,58 @@ def score_axes(*, stage: str, kind: str | None, scope: Sequence[str],
     return ScoredAxes(axes=Axes(**values), reasons=tuple(reasons), warnings=tuple(warnings))
 
 
+def stage_settings(config: Config) -> Mapping[str, str]:
+    """Resolve the three source task stages from legacy or Desktop workflow assignments."""
+    given = config.section("stages", {})
+    if not given:
+        return STAGE_DEFAULTS.copy()
+
+    order = config.section("sections", {}).get("order", [])
+    if (not isinstance(order, list) or any(not isinstance(name, str) or not _SECTION_ID.fullmatch(name)
+                                          for name in order) or len(set(order)) != len(order)):
+        raise ConfigError("OAH_CONFIG_INVALID", f"{config.where}: sections.order must list unique section IDs")
+
+    desktop = any(key in given for key in _NEW_STAGE_KEYS)
+    # A Desktop key selects the whole layout. A legacy key listed as a custom section is still validated.
+    ignored = {key for key in _LEGACY_STAGE_KEYS if desktop and key not in order}
+    schema = {key: None if key in ignored else "" for key in (*STAGES, *_NEW_STAGE_KEYS, *order)}
+    assignments = config.section("stages", schema)
+    for key in given:
+        if key in ignored:
+            continue
+        owner = assignments[key]
+        if owner not in STAGE_OWNERS:
+            raise ConfigError("OAH_CONFIG_INVALID", f"{config.where}: stages.{key} = {owner!r}; "
+                              f"use one of: {', '.join(STAGE_OWNERS)}")
+
+    stages = STAGE_DEFAULTS.copy()
+    for stage, desktop_key in _DESKTOP_STAGES.items():
+        key = desktop_key if desktop else stage
+        if key in given:
+            stages[stage] = assignments[key]
+    return stages
+
+
+def require_runtime(engine: str, stage: str | None) -> None:
+    """Refuse an engine without a source runtime before probing or starting it."""
+    if engine not in STAGE_OWNERS:
+        raise RoutingError("OAH_ENGINE_UNKNOWN", f"engine {engine!r} is not known; use one of: {', '.join(ENGINES)}")
+    if engine not in ENGINES:
+        selection = f"stage {stage} selects {engine!r}" if stage is not None else f"selected engine {engine!r}"
+        raise RoutingError("OAH_STAGE_ENGINE_UNSUPPORTED",
+                           f"{selection}. The source CLI has no runtime adapter for {engine}.")
+
+
 def check_stage(engine: str, stage: str, stages: Mapping[str, str], *, override: bool) -> list[str]:
     """Refuse an engine that is not configured for this stage, unless overridden (then warn)."""
-    if engine not in ENGINES:
-        raise RoutingError("OAH_ENGINE_UNKNOWN", f"engine {engine!r} is not known; use one of: {', '.join(ENGINES)}")
+    require_runtime(engine, stage)
     if stage not in stages:
         raise RoutingError("OAH_STAGE_UNKNOWN", f"stage {stage!r} is not known; use one of: {', '.join(stages)}")
     expected = stages[stage]
     if engine == expected:
         return []
     if not override:
+        require_runtime(expected, stage)
         raise RoutingError("OAH_STAGE_ENGINE_MISMATCH",
                            f"stage {stage} runs on {expected}, not {engine}; run `oah call {expected} --stage "
                            f"{stage}`, change [stages] in .oah/config.toml, or pass --override-stage (recorded)")

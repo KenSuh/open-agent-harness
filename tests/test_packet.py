@@ -370,6 +370,23 @@ class PacketPlanTest(unittest.TestCase):
         self.assertIn("plan: initial → claude → medium; review → codex → medium; correction → codex → medium", out)
         self.assertIn("rerank=unused(not-enabled)", out)
 
+    def test_new_records_desktop_assignments_including_owners_without_a_runtime(self):
+        from oah import call
+
+        config = self.repo / ".oah/config.toml"
+        config.parent.mkdir()
+        before = (b'[sections]\norder = ["plan", "build", "review", "fix", "delivery"]\n'
+                  b'[sections.delivery]\nlabel = "Deliver"\n[agents.opencode]\ncommand = ["opencode"]\n'
+                  b'[stages]\nplan = "copilot"\nbuild = "codex"\nreview = "claude"\nfix = "opencode"\n'
+                  b'delivery = "antigravity"\n')
+        config.write_bytes(before)
+        code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        read = call.read_packet(self.repo, self.path, parse_intent=None)
+        self.assertEqual(read.plan, {"initial": ("codex", "medium"), "review": ("claude", "medium"),
+                                     "correction": ("opencode", "medium")})
+        self.assertEqual(config.read_bytes(), before)
+
     def test_risky_scope_and_explicit_axes_raise_the_tier(self):
         code, out, err = self.new("--scope", "db/migrations/001.sql", "--kind", "migration")
         self.assertEqual(code, 0, out + err)

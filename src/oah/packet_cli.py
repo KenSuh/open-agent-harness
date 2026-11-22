@@ -93,7 +93,7 @@ def _stage_plans(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pa
     from oah import call, routing, skillsel
     from oah.config import load_config
 
-    stages = load_config(root).section("stages", call.STAGE_DEFAULTS)
+    stages = routing.stage_settings(load_config(root))
     given = {axis: getattr(args, axis) for axis in ("intensity", "reasoning", "risk") if getattr(args, axis)}
     plans = []
     for stage in routing.STAGES:
@@ -104,7 +104,7 @@ def _stage_plans(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pa
         selection, status = skillsel.choose(root, kind=scored.axes.kind, stage=stage, risk=scored.axes.risk,
                                             scope=scope, state_dir=state, env=os.environ,
                                             brief_disabled=args.no_rerank)
-        plans.append(packet.StagePlan(stage, stages.get(stage, call.STAGE_DEFAULTS[stage]), scored.axes,
+        plans.append(packet.StagePlan(stage, stages[stage], scored.axes,
                                       recommendation.tier, tuple(scored.reasons) + recommendation.reasons,
                                       call.advise(scored.axes, scope, root=root, state_dir=state,
                                                   brief_disabled=args.no_rerank, env=os.environ), selection, status))

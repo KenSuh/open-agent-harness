@@ -1035,10 +1035,41 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(settings.stages["initial"], "codex")
         self.assertEqual(settings.engines["codex"]["tiers"]["high"], {"model": "gpt-pin", "effort": "high",
                                                                       "timeout_min": 60})
-        bad = Project(self, '[stages]\nreview = "gemini"\n')
-        with self.assertRaises(EngineError) as ctx:
+        bad = Project(self, '[stages]\nreview = "gemnii"\n')
+        with self.assertRaises(ConfigError) as ctx:
             bad.settings()
         self.assertEqual(ctx.exception.code, "OAH_CONFIG_INVALID")
+        self.assertIn("stages.review", str(ctx.exception))
+
+    def test_native_precedence_uses_defaults_for_unspecified_stages(self):
+        legacy = '[stages]\ninitial = "codex"\nreview = "claude"\ncorrection = "claude"\n'
+        rows = (
+            (legacy, {"initial": "codex", "review": "claude", "correction": "claude"}),
+            (legacy + 'plan = "gemini"\n', {"initial": "claude", "review": "claude", "correction": "codex"}),
+            ('[stages]\ncorrection = 7\nbuild = "codex"\n',
+             {"initial": "codex", "review": "codex", "correction": "codex"}),
+            (legacy + '[agents.claude]\ncommand = ["claude"]\n[sections]\norder = ["plan", "build", "review", "fix"]\n',
+             {"initial": "codex", "review": "claude", "correction": "claude"}),
+        )
+        for config, stages in rows:
+            with self.subTest(config=config):
+                self.assertEqual(Project(self, config).settings().stages, stages)
+
+    def test_native_stage_keys_and_values_are_validated(self):
+        rows = (
+            ('fix = "codex"\nreveiw = "claude"\n', "OAH_CONFIG_UNKNOWN_KEY", "stages.reveiw"),
+            ('fix = 7\n', "OAH_CONFIG_INVALID", "stages.fix"),
+            ('plan = "cursor"\n', "OAH_CONFIG_INVALID", "stages.plan"),
+            ('build = "codex"\ninitial = 7\n[sections]\norder = ["build", "initial"]\n',
+             "OAH_CONFIG_INVALID", "stages.initial"),
+        )
+        for config, code, key in rows:
+            with self.subTest(config=config):
+                project = Project(self, "[stages]\n" + config)
+                with self.assertRaises(ConfigError) as ctx:
+                    project.settings()
+                self.assertEqual(ctx.exception.code, code)
+                self.assertIn(key, str(ctx.exception))
 
     def test_single_engine_setup_warns(self):
         project = Project(self, '[stages]\ninitial = "codex"\nreview = "codex"\ncorrection = "codex"\n')
@@ -2218,6 +2249,41 @@ def run_cli(project: Project, *argv: str) -> tuple[int, str, str]:
 
 
 class CallCliTest(unittest.TestCase):
+    def test_cli_calls_use_desktop_assignments(self):
+        project = Project(self, '[stages]\nplan = "gemini"\nbuild = "codex"\nreview = "claude"\nfix = "claude"\n')
+        config = project.repo / ".oah/config.toml"
+        before = config.read_bytes()
+        for stage, engine, mode_flag, mode in (
+            ("initial", "codex", "-s", "workspace-write"),
+            ("review", "claude", "--permission-mode", "plan"),
+            ("correction", "claude", "--permission-mode", "acceptEdits"),
+        ):
+            with self.subTest(stage=stage):
+                code, out, err = run_cli(project, "call", engine, "--stage", stage, "--task", stage,
+                                         "--tier", "high", "--json")
+                self.assertEqual(code, 0, err)
+                record = json.loads(out)
+                self.assertEqual((record["engine"], record["stage"], record["status"]), (engine, stage, "finished"))
+                argv = project.recorded()["argv"]
+                self.assertEqual(argv[argv.index(mode_flag) + 1], mode)
+                if stage == "review":
+                    self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_cli_refuses_desktop_owners_without_a_runtime(self):
+        for owner in ("gemini", "copilot", "opencode", "antigravity"):
+            with self.subTest(owner=owner):
+                project = Project(self, f'[stages]\nfix = "{owner}"\n[call]\norca_command = ["no-fixture-orca"]\n')
+                for engine, launcher in ((owner, "process"), ("codex", "process"), (owner, "orca")):
+                    code, _, err = run_cli(project, "call", engine, "--stage", "correction", "--task", "t1",
+                                           "--launcher", launcher)
+                    self.assertEqual(code, call_cli.EXIT_REFUSED, err)
+                    self.assertTrue(err.startswith("OAH_STAGE_ENGINE_UNSUPPORTED:"), err)
+                    self.assertIn("stage correction", err)
+                    self.assertIn(owner, err)
+                self.assertFalse(project.record.exists())
+                self.assertFalse(project.runs())
+
     def test_require_detach_flag_is_forwarded_and_requires_background(self):
         project = Project(self)
         with mock.patch.object(call, "start_background", return_value="test-run") as start:

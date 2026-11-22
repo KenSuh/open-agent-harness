@@ -59,7 +59,7 @@ import time
 from importlib import resources
 from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
-from oah import briefs, call, call_cli, runs
+from oah import briefs, call, call_cli, routing, runs
 from oah import intent as oah_intent
 from oah import scratch as oah_scratch
 from oah.atomic import StateCorrupt, read_json, write_json_atomic, write_text_atomic
@@ -164,8 +164,8 @@ _ERROR_DIAGNOSTICS = {
                              "reasoning and risk, then retry.",
     "OAH_FIX_WORKER_REFUSED": "dispatched workers cannot run corrections; return the work to the dispatcher "
                               "to run oah fix.",
-    "OAH_FIX_ENGINE_UNSUPPORTED": "correction requires Codex; configure that engine or record Claude's work "
-                                  "with oah fix --manual --engine claude --task <task>.",
+    "OAH_FIX_ENGINE_UNSUPPORTED": "automatic correction requires Codex. Assign Codex to Fix in Team Workflow, "
+                                  'or use "codex" for [stages] fix (correction in a legacy file).',
     "OAH_FIX_PROXY_CREDENTIALS": "proxy userinfo is forbidden; configure a credential-free proxy, then retry.",
     "OAH_FIX_SENSITIVE_SCOPE": "scope metadata contains a credential; remove it from the lease and packet "
                                "scope before retrying oah fix.",
@@ -220,6 +220,7 @@ _ERROR_DIAGNOSTICS = {
     "OAH_PACKET_UNREADABLE": "the packet cannot be read; restore its committed source before retrying.",
     "OAH_INTENT_SOURCE_UNREADABLE": "the intent source cannot be read; restore the accepted packet before retrying.",
     "OAH_CONFIG_INVALID": "project configuration is invalid; correct .oah/config.toml before retrying.",
+    "OAH_CONFIG_UNKNOWN_KEY": "project configuration contains an unknown key. Correct .oah/config.toml before retrying.",
     "OAH_CODEX_CONFIG_INVALID": "Codex configuration is invalid; repair its login and configuration before retrying.",
     "OAH_ENGINE_MISSING": "Codex is unavailable; install it and sign in through its own CLI, then retry.",
     "OAH_UNSUPPORTED_BATCH_SHIM": "the engine shim is unsupported; configure a native executable, then retry.",
@@ -362,8 +363,19 @@ class _ScratchRefusal(ReviewError):
         super().__init__(error.code, redact(error.detail))
 
 
+class _EngineUnsupported(ReviewError):
+    def __init__(self, engine: str) -> None:
+        code = "OAH_FIX_ENGINE_UNSUPPORTED"
+        message = _ERROR_DIAGNOSTICS[code]
+        if engine in routing.STAGE_OWNERS:
+            message = f"stage {STAGE} is assigned to {engine!r}. {message}"
+        if engine == "claude":
+            message += " Record a committed Claude correction with oah fix --manual --engine claude --task <task>."
+        super().__init__(code, message)
+
+
 def _error_diagnostic(exc: BaseException) -> tuple[str, str]:
-    if isinstance(exc, _ScratchRefusal):
+    if isinstance(exc, (_ScratchRefusal, _EngineUnsupported)):
         return exc.code, str(exc)
     code = INTERRUPTED if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", None)
     if not isinstance(code, str) or code not in _ERROR_DIAGNOSTICS:
@@ -1043,7 +1055,7 @@ def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]],
             runs._CORRECTION_CAPTURE.reset(token)
     except oah_scratch.ScratchError as exc:
         raise _ScratchRefusal(exc, redact) from None
-    except _ScratchRefusal:
+    except (_ScratchRefusal, _EngineUnsupported):
         raise
     except BaseException as exc:
         code, diagnostic = _error_diagnostic(exc)
@@ -1395,15 +1407,10 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
     binding = _check_intent(t, LAUNCHED, committed_text=committed_text)
     judged = _check_design(t, binding)
     config = load_config(t.root)
-    settings = call.Settings.validated(config.section("stages", call.STAGE_DEFAULTS),
-                                       config.section("engines", call.ENGINE_DEFAULTS),
-                                       config.section("models", call.models.DEFAULTS))
-    stage = settings.stages.get(STAGE)
-    if stage != ENGINE:
-        raise ReviewError("OAH_FIX_ENGINE_UNSUPPORTED", f"[stages] correction is {stage!r} in .oah/config.toml, and oah "
-                          f"fix runs Codex corrections. {LAUNCHED}. Set [stages] correction = \"codex\" and install "
-                          f"Codex, or record a correction Claude made with oah fix --manual --engine claude --task "
-                          f"{t.name}")
+    settings = call.Settings.from_config(config)
+    engine = settings.stages[STAGE]
+    if engine != ENGINE:
+        raise _EngineUnsupported(engine)
     try:
         launch_env = runner.reviewer_env(env)
     except ReviewError as exc:

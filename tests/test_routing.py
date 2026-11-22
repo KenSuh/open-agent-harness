@@ -162,7 +162,7 @@ class StageTest(unittest.TestCase):
             check_stage("codex", "deploy", STAGES, override=False)
         self.assertEqual(ctx.exception.code, "OAH_STAGE_UNKNOWN")
         with self.assertRaises(RoutingError) as ctx:
-            check_stage("gemini", "review", STAGES, override=True)
+            check_stage("cursor", "review", STAGES, override=True)
         self.assertEqual(ctx.exception.code, "OAH_ENGINE_UNKNOWN")
 
     def test_same_engine_warning(self):
@@ -292,6 +292,14 @@ class RecommendModelTest(unittest.TestCase):
         code, out, err = recommend_in(self.project(), *AXES, "--stage", "review", "--json")
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["model"]["engine"], "codex")
+
+    def test_model_preview_refuses_an_assignment_without_a_runtime(self):
+        project = self.project('[stages]\nbuild = "opencode"\n')
+        code, _, err = recommend_in(project, *AXES, "--stage", "initial")
+        self.assertEqual(code, 1, err)
+        self.assertTrue(err.startswith("OAH_STAGE_ENGINE_UNSUPPORTED:"), err)
+        self.assertIn("stage initial", err)
+        self.assertIn("opencode", err)
 
     def test_a_new_kind_gets_a_model_too(self):
         project = self.project()
