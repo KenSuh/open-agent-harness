@@ -193,3 +193,34 @@ fn list_reports_a_blocked_skill_root_as_an_error() {
             .contains("skills")
     );
 }
+
+#[cfg(any(unix, windows))]
+#[test]
+fn list_uses_only_user_scope_when_the_working_folder_resolves_to_home() {
+    use oah_core::fsx::links::{NativeLinker, SystemLinker};
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let alias = root.path().join("home-alias");
+    for folder in [".claude", ".agents"] {
+        let skill = home.join(folder).join("skills/tidy");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), [0xff]).unwrap();
+    }
+    SystemLinker.link(&home, &alias, &home).unwrap();
+
+    for configured_home in [&home, &alias] {
+        let out = oah_from(configured_home, &home, &["skills", "list", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let actual: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let path = |engine| Path::new("~").join(engine).join("skills").join("tidy");
+        assert_eq!(
+            actual,
+            serde_json::json!([
+                {"name": "tidy", "engine": "claude", "scope": "user", "location": path(".claude")},
+                {"name": "tidy", "engine": "codex", "scope": "user", "location": path(".agents")},
+            ])
+        );
+    }
+    assert!(!home.join("oah").exists());
+}

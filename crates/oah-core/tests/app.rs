@@ -111,25 +111,158 @@ fn inventory_uses_only_user_locations_until_a_project_is_open() {
     assert_eq!(after_project[1], before_project[0]);
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn inventory_lists_linked_user_roots_and_entries_at_visible_paths() {
+    use oah_core::config::AgentId;
+    use oah_core::dto::{AgentIdDto, InstalledSkillDto, SkillScopeDto};
+    use oah_core::fsx::links::{NativeLinker, SystemLinker};
+
+    let fixture = Fixture::new();
+    let dotfiles = fixture.root.join("dotfiles");
+    let claude = dotfiles.join("claude");
+    let codex = dotfiles.join("codex/skills");
+    let store = codex.join("shared");
+    fs::create_dir_all(claude.join("skills")).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("SKILL.md"), [0xff]).unwrap();
+    let agents = fixture.folder(".agents");
+    for (target, link) in [
+        (&claude, fixture.home.join(".claude")),
+        (&codex, agents.join("skills")),
+        (&store, claude.join("skills/alias")),
+    ] {
+        SystemLinker.link(target, &link, target).unwrap();
+    }
+
+    let rows = with_ctx(&fixture, |ctx| app::skills_installed(ctx, Empty {})).unwrap();
+
+    assert_eq!(
+        rows,
+        [
+            InstalledSkillDto {
+                name: "alias".into(),
+                engine: AgentIdDto(AgentId::Claude),
+                scope: SkillScopeDto::User,
+                location: shown(&[".claude", "skills", "alias"]),
+            },
+            InstalledSkillDto {
+                name: "shared".into(),
+                engine: AgentIdDto(AgentId::Codex),
+                scope: SkillScopeDto::User,
+                location: shown(&[".agents", "skills", "shared"]),
+            },
+        ]
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn inventory_lists_relative_project_links_and_skips_escaped_entries() {
+    use oah_core::config::AgentId;
+    use oah_core::dto::{AgentIdDto, InstalledSkillDto, SkillScopeDto};
+    use oah_core::fsx::links::{NativeLinker, SystemLinker};
+
+    let fixture = Fixture::new();
+    let project = fixture.folder("project");
+    let store = fixture.folder("project/.agents/skills/shared");
+    let claude = fixture.folder("project/claude-engine/skills");
+    let outside = fixture.folder("project-other/skill");
+    let staged = fixture.folder("project/claude-engine/skills/.staged");
+    for folder in [&store, &outside, &staged] {
+        fs::write(folder.join("SKILL.md"), [0xff]).unwrap();
+    }
+    let engine = project.join("claude-engine");
+    SystemLinker
+        .link(
+            &engine,
+            &project.join(".claude"),
+            Path::new("claude-engine"),
+        )
+        .unwrap();
+    SystemLinker
+        .link(
+            &store,
+            &claude.join("shared"),
+            Path::new("../../.agents/skills/shared"),
+        )
+        .unwrap();
+    SystemLinker
+        .link(&outside, &claude.join("external"), &outside)
+        .unwrap();
+
+    let rows = with_ctx(&fixture, |ctx| {
+        app::project_open(ctx, &project).unwrap();
+        app::skills_installed(ctx, Empty {}).unwrap()
+    });
+
+    assert_eq!(
+        rows,
+        [
+            InstalledSkillDto {
+                name: "shared".into(),
+                engine: AgentIdDto(AgentId::Claude),
+                scope: SkillScopeDto::Project,
+                location: shown(&["project", ".claude", "skills", "shared"]),
+            },
+            InstalledSkillDto {
+                name: "shared".into(),
+                engine: AgentIdDto(AgentId::Codex),
+                scope: SkillScopeDto::Project,
+                location: shown(&["project", ".agents", "skills", "shared"]),
+            },
+        ]
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn inventory_rejects_project_roots_resolving_outside_the_project() {
+    use oah_core::fsx::links::{NativeLinker, SystemLinker};
+
+    for (parent, name) in [("project", ".claude"), ("project/.agents", "skills")] {
+        let fixture = Fixture::new();
+        let project = fixture.folder("project");
+        let root = fixture.folder(parent).join(name);
+        let outside = fixture.folder("project-other");
+        SystemLinker.link(&outside, &root, &outside).unwrap();
+
+        let error = with_ctx(&fixture, |ctx| {
+            app::project_open(ctx, &project).unwrap();
+            app::skills_installed(ctx, Empty {}).unwrap_err()
+        });
+
+        assert!(matches!(error, Error::Fsx(ref error) if error.path() == root));
+        assert_eq!(error.code(), "OAH_FILE_IO");
+    }
+}
+
 #[cfg(unix)]
 #[test]
-fn inventory_ignores_links_and_hidden_skill_staging_directories() {
+fn inventory_follows_in_scope_skill_markers_and_skips_unresolved_markers() {
     use std::os::unix::fs::symlink;
 
     let fixture = Fixture::new();
-    let outside = fixture.folder("outside/skill");
-    let root = fixture.folder(".claude/skills");
-    let incomplete = fixture.folder(".claude/skills/link-marker");
-    let staging = fixture.folder(".claude/skills/.staged");
-    let marker = outside.join("SKILL.md");
-    fs::write(&marker, b"outside").unwrap();
-    fs::write(staging.join("SKILL.md"), b"staged").unwrap();
-    symlink(&outside, root.join("link-directory")).unwrap();
-    symlink(&marker, incomplete.join("SKILL.md")).unwrap();
-    let cancel = CancelToken::new();
-    let ctx = fixture.session.ctx(&cancel, &NoProgress);
+    let project = fixture.folder("project");
+    let outside = fixture.folder("project-other");
+    fs::write(project.join("marker"), [0xff]).unwrap();
+    fs::write(outside.join("marker"), [0xff]).unwrap();
+    for (name, target) in [
+        ("linked", "../../../marker"),
+        ("external", "../../../../project-other/marker"),
+        ("dangling", "missing"),
+    ] {
+        let folder = fixture.folder(&format!("project/.claude/skills/{name}"));
+        symlink(target, folder.join("SKILL.md")).unwrap();
+    }
 
-    assert!(app::skills_installed(&ctx, Empty {}).unwrap().is_empty());
+    let rows = with_ctx(&fixture, |ctx| {
+        app::project_open(ctx, &project).unwrap();
+        app::skills_installed(ctx, Empty {}).unwrap()
+    });
+
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].name, "linked");
 }
 
 /// Every file and folder below `root` with each file's bytes.
