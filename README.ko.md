@@ -1,264 +1,97 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-ko-dark.svg">
-    <img src="docs/assets/banner-ko-light.svg" alt="open-agent-harness: “그냥 묻고, 확인만 하면 돼.” AI가 만들고 검토하고 기록하며, 사용자는 판단이 필요할 때 답하고 반영 전에 확인한다는 문구와 선으로 그린 OAH 모노그램, oah.rodeo를 보여 준다." width="100%">
-  </picture>
-</p>
-
-<p align="center">
-  <a href="https://oah.rodeo/ko/"><img src="docs/assets/badge-website.svg" alt="웹사이트: oah.rodeo"></a>
-  <a href="../../actions/workflows/ci.yml"><img src="../../actions/workflows/ci.yml/badge.svg?event=pull_request" alt="CI status"></a>
-  <a href="LICENSE"><img src="docs/assets/badge-license.svg" alt="License: MIT"></a>
-  <img src="docs/assets/badge-macos.svg" alt="macOS 13+">
-  <img src="docs/assets/badge-windows.svg" alt="Windows 11, native">
+  <a href="https://oah.rodeo/ko/"><img src="docs/assets/badge-website.svg" alt="OAH 웹사이트"></a>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <strong>한국어</strong></p>
 
 # open-agent-harness (`oah`)
 
+Open Agent Harness(OAH)는 AI 코딩 에이전트가 Git 저장소에서 정해진 범위 안에서 작업하고, 변경을 검토하고, 검사 결과를 기록하도록 돕는다.
+
+## v1.0.0 다운로드
+
+명령줄 도구가 포함된 데스크톱 앱을 받거나 전체 CLI를 소스에서 설치할 수 있다.
+
+- **[macOS용 DMG 받기](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/OAH\_1.0.0_aarch64.dmg)** · Apple Silicon Mac, macOS 13 이상. 임시 서명(ad hoc), Apple 공증 없음.
+- **[Windows용 설치 파일 받기](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/OAH\_1.0.0_x64-setup.exe)** · Windows 11 x64. 서명되지 않은 NSIS 설치 파일.
+
+설치 파일을 열기 전에 [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/SHA256SUMS)와 대조한다. 두 운영체제 모두 보안 경고를 표시할 수 있다. [v1.0.0 릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.0.0)
+
+[첫 실행](#첫-실행) · [CLI 설치](#소스-cli-설치) · [문서](#문서)
+
+## 첫 실행
+
+1. **설치 파일을 검증하고 앱을 연다.** macOS에서는 `shasum -a 256`, PowerShell에서는 `Get-FileHash -Algorithm SHA256`으로 다운로드한 파일을 검사한다. 체크섬이 일치하면 macOS에서는 DMG를 열고 OAH를 응용 프로그램 폴더로 옮긴다. Windows에서는 설치 파일을 실행한다. 설치가 끝나면 OAH를 연다. [Apple의 앱 열기 안내](https://support.apple.com/en-us/102445)
+2. **에이전트를 확인한다.** **Agents**에서 설치 여부와 로그인 상태를 확인한다. 사용할 에이전트의 설치 또는 로그인 안내에 따라 준비한 뒤 **Rescan agents**를 선택한다.
+3. **저장소를 연다.** 상단의 **+ Open…** 버튼을 눌러 Git 작업 폴더를 고른다. **Team Workflow**에서 준비 상태를 확인하고 단계마다 에이전트를 지정한다. **Rules**에 동기화가 필요하다는 안내가 표시되면 **Sync now**를 눌러 `AGENTS.md`의 관리 대상 규칙을 갱신한다.
+
+앱의 기본 데이터 폴더는 macOS에서 `~/.oah`, Windows에서 `%USERPROFILE%\.oah`다. 이곳의 `settings.toml`에 설정을 저장하고 `bin/`에 동봉된 도구를 복사한다. 이 도구로 에이전트 상태를 확인하는 `doctor`, 단계 구성을 보는 `sections show`, 규칙을 확인하고 동기화하는 `rules check`와 `rules sync`를 실행할 수 있다.
+
+## 소스 CLI 설치
+
+프로젝트 초기 설정과 전체 작업 흐름에는 소스 CLI를 사용한다. Git과 Python 3.11 이상이 필요하다. 설치 프로그램은 필요한 도구를 확인하고, 빠진 도구를 설치하기 전에 동의를 구한다.
+
+- **macOS.** [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/install.sh)를 받아 위의 체크섬으로 검증한 뒤, 파일을 받은 폴더에서 `bash ./install.sh`를 실행한다. [macOS CLI 설치 안내](docs/ko/install-macos.md)
+- **Windows.** [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/install.ps1)를 받아 위의 체크섬으로 검증한 뒤, 파일을 받은 폴더에서 `powershell -ExecutionPolicy Bypass -File .\install.ps1`을 실행한다. [Windows CLI 설치 안내](docs/ko/install-windows.md)
+
+[macOS용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/open-agent-harness-v1.0.0.tar.gz) 또는 [Windows용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/open-agent-harness-v1.0.0.zip)을 검증해서 풀고, `install/` 안의 해당 설치 프로그램을 실행해도 된다.
+
+새 터미널에서 `oah --version`을 실행해 `oah 1.0.0`이 나오는지 확인한다. 원격 저장소가 설정된 Git 저장소에서 `oah init`을 실행한다. 설정 계획을 검토하고 승인한 뒤 생성된 프로젝트 파일을 커밋한다. [첫 작업 따라 하기](examples/hello-oah/README.ko.md)
+
 ## 이 프로젝트의 목적
 
-`oah`는 각자에게 맞고 AI가 발전하는 만큼 함께 바뀌는 개발 환경을 만들도록 돕는다.
-가져다 고쳐 쓸 수 있는 참고 구현이자 가이드라인이다. **하네스**는 AI 코딩 도구를 둘러싼 도구와 규칙,
-기록의 묶음이다.
+1. **작업 범위를 정한다.** 무엇을 바꾸고 어떻게 확인할지, 어느 경로까지 수정할 수 있는지 적는다. [리스](docs/ko/concepts.md#리스)로 경로를 예약하고 [영향 지도](docs/ko/concepts.md#영향-지도)에서 관련 코드, 문서, 검사를 확인한다.
+2. **구현하고 검토한다.** 소스 CLI는 단계 설정에 따라 Claude Code 또는 Codex CLI를 실행한다. 기본 구현 에이전트는 Claude Code다. [리뷰와 수정 전용 명령](docs/ko/concepts.md#리뷰-루프와-수정)은 Codex CLI로 읽기 전용 스냅샷을 검토하고 지적 사항을 수정한다.
+3. **검사 결과를 남긴다.** [게이트](docs/ko/concepts.md#게이트)는 어떤 검사를 통과했는지 기록한다. [프로젝트 위키](docs/ko/concepts.md#프로젝트-위키)에는 다음 세션에서 참고할 결정과 그 이유를 남긴다.
+4. **반영 여부를 결정한다.** 변경 사항과 리뷰 결과, 검사 기록을 살핀다. [`oah land`](docs/ko/concepts.md#반영)가 검토한 커밋이 프로젝트의 요건을 충족하는지 확인한다. 대상 브랜치에 반영할 시점은 사용자가 결정한다.
 
-AI가 전문가처럼 프로그램을 만들고 고치는 데 필요한 일을 스스로 챙긴다. 변경의 영향을 살피고, 프로젝트 위키를
-관리하고, 결과를 검사하고, 리뷰와 수정을 이어 간다. v0.3.0에서 권장 선택형 판정기 TypeSafe Jev를 켜면
-난이도를 판단하고 그 등급에 따라 모델도 자동으로 고른다.
-**사용자는 요청하고, AI가 판단을 물으며 멈추면 답하고, 반영 전에 확인한다.**
+## 문서
 
-필요한 부분만 가져가도 되고, 전체 구성으로 시작해 자기 것으로 만들어도 된다. 예전 규칙과 스킬
-(AI가 읽어 쓰는 작업 지침)은 새 모델의 능력을 막거나 결과를 나쁘게 만들 수 있다. 도움이 되는 것은 남기고,
-필요 없어진 것은 지우며, 도구가 바뀌면 규칙도 바꾼다. `oah`도 계속 바뀐다.
-기본값은 이해하고 바꾸기 쉬워야 하며, 작업을 가로막는 규칙은 고쳐야 할 설계 문제다.
+- [동작 방식](docs/ko/how-it-works.md) · [명령 안내](docs/ko/commands.md) · [개념](docs/ko/concepts.md)
+- [문제 해결](docs/ko/troubleshooting.md) · [업그레이드](docs/ko/upgrade.md) · [키 관리](docs/ko/keys.md)
+- [설계 출처](docs/ko/design-sources.md) · [스킬과 도구 연동](docs/ko/skills-and-capabilities.md) · [툴킷](docs/ko/toolkit.md)
+- [CI 시작하기](docs/ko/ci-starter.md) · [동반 앱](docs/ko/companions.md)
 
-### Claude가 구현하고 Codex가 검토하는 이유
+## 로드맵
 
-이 역할 분담은 만든 사람의 개인적인 경험에서 나왔고, 측정한 비교 결과는 아니다. 내가 써 보니 Claude는
-첫 버전을 만들면서 초보자가 놓치기 쉬운 부분까지 채우는 데 강했다. Codex는 정해진 범위 안에서 검사하고
-고치는 데 강했다. 그래서 Claude가 먼저 만들고 Codex가 검토, 수정, 재검토한다.
+[프로젝트 계획](docs/ko/PLAN.md)에서 설계와 앞으로의 작업을, [GitHub 릴리스](https://github.com/KenSuh/open-agent-harness/releases)에서 버전별 변경 사항을 확인할 수 있다.
 
-### 어떤 AI 구성에도 맞춰 쓴다
+## v0.4.0의 새 기능
 
-지금 `oah` 명령은 **Claude Code**와 **Codex CLI**를 움직인다. 그 안의 아이디어는 다른 도구나 하네스를
-포함해 **AI 하나만 써도, 여러 AI를 함께 써도** 적용할 수 있다. 필요한 부분을 가져가고 단계마다 자기에게
-맞는 AI를 고른다.
+[v0.4.0 릴리스](https://github.com/KenSuh/open-agent-harness/releases/tag/v0.4.0)에는 리비전을 남기는 설계 기록, 출처 스냅샷, 검토한 스킬을 관리하는 기능이 추가됐다. 자세한 내용은 [v0.4.0 업그레이드 안내](docs/ko/upgrade.md#7-030에서-040으로)를 참고한다.
 
-## oah가 챙겨 주는 일
+- v0.4.0은 스킬 본문이나 중계한 도구 결과를 전달할 때 호스트의 수용량을 검증한 프로필이 필요했다. 프로필이 없으면 `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)`로 중단했다. [일반 작업의 입장 규칙](docs/ko/skills-and-capabilities.md#일반-작업과-관리-입장)
 
-원하는 결과를 말하면 AI가 다음 도구를 함께 써서 작업을 이어 간다.
+<details>
+<summary>v0.4.0 배너와 작업 흐름 그림</summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-ko-dark.svg">
+  <img src="docs/assets/banner-ko-light.svg" alt="open-agent-harness: “그냥 묻고, 확인만 하면 돼.” AI가 만들고 검토하고 기록하며, 사용자는 판단이 필요할 때 답하고 반영 전에 확인한다는 문구와 선으로 그린 OAH 모노그램, oah.rodeo를 보여 준다." width="100%">
+</picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/features-ko-dark.svg">
   <img src="docs/assets/features-ko-light.svg" alt="영향 지도, 경로를 예약하는 리스와 권장 선택형 판정기 TypeSafe Jev가 Claude Code 구현과 Codex CLI 검토를 돕고 게이트와 위키가 증거와 결정을 남기며, 겹치는 리스는 거절하고 사용자는 질문하고 판단에 답한 뒤 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 v0.3.0에 포함돼 있다." width="100%">
 </picture>
 
-- **[영향 지도](docs/ko/concepts.md#영향-지도).** AI가 파일을 고치면 관련 코드, 문서, 다시 돌릴 검사를 보여 줘서
-  작은 변경도 끝까지 챙기기 쉽다.
-- **[프로젝트 위키](docs/ko/concepts.md#프로젝트-위키).** AI가 작업 이력과 결정, 그 이유를 코드 옆에 남긴다.
-  다음 세션이 읽을 수 있는 기록이 남아 처음부터 다시 설명할 부담이 줄어든다.
-- **[리스](docs/ko/concepts.md#리스).** 작업이 바꿀 경로를 예약하고 겹치는 리스는 거절한다.
-  작업마다 범위가 분명해지고, 끝낼 때 실제 변경이 그 안에 있는지 확인한다.
-- **[게이트](docs/ko/concepts.md#게이트).** AI가 “끝났다”의 기준을 검사로 만들고 결과를 기록한다.
-  무엇이 통과했는지 물어보고 증거를 확인할 수 있다.
-- **[구현과 리뷰](docs/ko/concepts.md#리뷰-루프와-수정).** Claude Code가 만들고 Codex CLI가 검토, 수정, 재검토한다.
-  같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 사용자에게 답을 구한다.
-- **[TypeSafe Jev](docs/ko/how-it-works.md#선택형-판정기-jev).** 권장 선택형 판정기로, 고른 스킬의 순서를 다시 매기고
-  v0.3.0에서는 난이도를 판단해 확신도와 최저 기준을 지키며 그 등급으로 모델을 자동 선택한다.
-  키가 없으면 규칙이 판단한다.
-
-## 어떻게 동작하는가
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-ko-dark.svg">
   <img src="docs/assets/how-it-works-ko-light.svg" alt="사용자가 말로 변경을 요청하면 설치된 규칙에 따라 의도·범위·경로를 예약하는 리스·영향 지도와 권장 선택형 TypeSafe Jev 판정을 준비하고, Claude Code가 구현하며 게이트와 위키가 증거를 남기고 Codex CLI가 검토·수정하며, 같은 문제가 반복되거나 설계 선택이 필요해 멈추면 사용자가 답하고 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 v0.3.0에 포함돼 있고 안내형 설계 대화는 이후 릴리스에 계획돼 있다." width="100%">
 </picture>
 
-AI에게 평소 말로 요청한다. `oah init`이 설치한 규칙과 각 명령의 다음 단계 안내에 따라 AI가 목표와 범위를
-적고, 경로를 예약하고, 모델과 스킬을 고르며 리뷰 라운드 사이에 영향 지도를 확인한다. Jev를 켰다면 그 판정도 쓴다. Claude Code가 구현하고, 게이트는
-검사 결과를, 위키는 이유를 남긴다. Codex CLI는 반영을 막는 지적이 없을 때까지 검토와 수정을 반복한다.
-같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 사용자에게 묻는다. 반복 횟수의 상한은 선택이다.
+</details>
 
-“리뷰 끝났어?”, “게이트 다 통과했어?”라고 물어본다. 결과를 살피고 확인한 뒤 프로젝트의 기본 브랜치에
-반영한다. [전체 동작 방식](docs/ko/how-it-works.md)에서 AI가 내부에서 실행하는 명령을 볼 수 있다.
-그림에 따로 표시한 안내형 설계 대화는 **이후 릴리스에 계획돼 있다**.
+## 기여하기
 
-> [!NOTE]
-> **v0.4.0은 현재 릴리스다.** git과 pull request에 익숙한 개발자를 위한 버전이며 macOS와 네이티브 Windows를
-> 지원한다. Linux는 아직 지원하지 않는다.
-
-## 설치
-
-OS마다 명령 하나로 `oah`를 설치한다. 빠진 도구는 설치하기 전에 묻고 도구마다 공식 명령을 보여 주며, 사용자의
-비밀번호나 키는 보지 않는다. 클론에서 설치하려면 아래 명령을 실행한다. v0.4.0은 저장소의 릴리스 페이지에서
-태그의 소스 압축 파일과 `SHA256SUMS`를 받는 방법도 있다. 압축 파일의 SHA-256이 `SHA256SUMS`의 해당 파일
-지문과 일치할 때만 풀고 안의 설치 프로그램을 실행한다. 확인 방법은 아래 OS별 안내에 있다.
-
-macOS에서는 먼저 git이 있어야 한다(`xcode-select --install`).
-
-```sh
-git clone https://github.com/KenSuh/open-agent-harness.git
-cd open-agent-harness
-bash install/install.sh
-```
-
-Windows PowerShell에서도 먼저 git이 있어야 한다(`winget install --id Git.Git -e`).
-
-```powershell
-git clone https://github.com/KenSuh/open-agent-harness.git
-cd open-agent-harness
-powershell -ExecutionPolicy Bypass -File .\install\install.ps1
-```
-
-`--dry-run`(Windows에서는 `-DryRun`)을 붙이면 아무것도 바꾸지 않고 모든 단계를 보여 준다. 설치 프로그램은 도구를
-확인하고, uv(없으면 pipx나 pip)로 `oah`를 설치하고, 새 터미널에서 `oah`를 찾을 수 있는지 확인한 뒤 `oah doctor`를
-실행한다. 자세한 안내는 [macOS에 설치하기](docs/ko/install-macos.md)와
-[Windows에 설치하기](docs/ko/install-windows.md)에 있다.
-
-그다음 새 터미널을 열고 확인한다.
-
-```console
-$ oah --version
-oah 0.4.0
-```
-
-## 처음 실행하기
-
-설치 프로그램을 한 번 실행하고, 프로젝트마다 `oah init`을 한 번 실행한다.
-원격 저장소가 연결된 내 git 저장소 안에서 터미널을 연다.
-
-```sh
-oah init
-```
-
-안내형 설정이 선택 도구를 물어보고 전체 계획을 보여 준다. 사용자가 확인해야 파일을 바꾼다.
-쓴 파일을 커밋한다. 그다음부터는 그 프로젝트에서 AI를 열고 말로 요청한다. 설치된 규칙이 AI에게 하네스를
-진행하는 방법을 알려 준다.
-
-- “로그인 기능을 oah로 만들어 줘.”
-- “리뷰 끝났어? 게이트 다 통과했어?”
-- “이 버전을 반영해 줘.” 결과와 검사를 살핀 뒤 확인한다.
-
-같은 문제가 반복되거나 설계 선택이 필요해 AI가 멈추면 답하고 이어 간다. 명령은 이 대화 아래에서 실행된다.
-[첫 작업 예제](examples/hello-oah/README.ko.md)는 20분쯤 걸린다. 내가 할 말, AI가 하는 일, 확인할 것을 먼저
-보여 주고 전체 명령 예제를 이어 싣는다. [설정 상세](docs/ko/how-it-works.md#처음-실행하기)에서 모든 선택 사항과
-생성 파일을 설명한다.
-
-## v0.4.0의 새 기능
-
-현재 릴리스에는 다음 변경이 포함돼 있다. 안내형 설계 대화는 여기에 들어 있지 않고 [로드맵](#로드맵)에 남아 있다.
-v0.3.0에서 올릴 때 바뀌는 점은 [업그레이드](docs/ko/upgrade.md#7-030에서-040으로)에 있다.
-
-- **남겨 두는 설계.** `oah design`이 만드는 제품마다 설계를 보관한다. 번호가 붙은 리비전, 이유를 적은 승인 기록,
-  프로젝트 위키의 설계 페이지와 목록을 남긴다. oah 표시 밖의 글은 사용자의 것으로 그대로 둔다. 설계는 그 설계를
-  등록한 브랜치에서만 바뀌고, 다른 워크트리는 그 브랜치의 사본을 읽는다. 규칙은 [설계](docs/ko/concepts.md#설계)에 있다.
-- **승인된 설계를 따르는 작업.** `oah packet new --design`이 작업을 그 설계의 승인된 리비전에 묶는다. 브리프마다
-  그 설계가 실리고 call, review, fix, finish, land가 설계를 다시 확인한다. 더 새로운 리비전이 승인되면 작업은
-  `stale`이 되며, 작업을 다시 시작하거나 그 변경이 작업에 영향이 없다고 `oah design carry`로 기록해야 이어 간다.
-  설계가 현재 상태가 아닌 작업은 `oah land`가 거절한다. 확인 단위는 설계 리비전이다.
-- **확인할 수 있는 출처.** `oah sources`가 설계에 쓰는 공개 라이브러리와 문서를 따라가며, 본 버전마다 릴리스와
-  라이선스 전문을 담은 검증 스냅샷을 남긴다. 라이선스는 사용 가능, 선택 시 사용 가능, 제외, 알 수 없음으로
-  나뉘고 추측하지 않는다. 설계의 재료 결정은 어느 스냅샷을 보고 내렸는지 기록하고, 이후 검사는 업스트림이
-  앞서 나갔거나 결정의 입력이 바뀌면 알려 준다. 검사는 요청할 때나, 직접 설치한 선택형 일일 OS 항목에서 돌며,
-  실패한 검사를 최신으로 표시하지 않는다. 자세한 내용은 [설계 출처](docs/ko/design-sources.md)에 있다.
-- **아홉 설계 단계와 검토한 스킬.** 설계는 목적부터 확인까지 아홉 단계를 담은 `coverage` 부분을 가지며,
-  `oah design coverage`가 열린 단계와 다시 확인할 곳을 보여 준다. `oah skills find --design`은 작은 내장 목록,
-  설치된 스킬, skills.sh를 찾는다. 무언가를 보내는 검색은 skills.sh뿐이고 처음에 안내를 띄운다.
-  `oah skills review`는 스킬 폴더를 커밋에 고정하고 라이선스를 기록하며, `oah skills select`는 검토한 스킬을
-  작업의 필요에 연결한다. 찾기와 검토는 아무것도 설치하지 않는다.
-- **네이티브 하위 에이전트와 도구 경로.** `oah call ... --launcher native`는 검사를 마친 브리프를 준비해 사용자의
-  AI가 자기 하위 에이전트에게 넘기게 하고, `oah call settle`은 돌아온 답을 리드가 보고한 증거로 기록한다.
-  전달을 증명하지는 않는다. `oah capabilities show`는 자식 엔진에 설정된 도구를 보여 주고(이름과 플래그만,
-  값은 보이지 않는다), `plan`은 스킬이 이름 붙인 도구마다 경로를 정하고, `relay`는 리드가 직접 얻은 결과를 저장한다.
-  **한계.** 이번 릴리스에는 용량 검증 프로필을 갖춘 호스트가 없다. 그래서 스킬 본문이나 중계한 도구 결과를
-  실을 실행과 `oah skills find --task`는 아무것도 보내기 전에 `OAH_SKILLS_BUDGET_EXCEEDED(target-capacity-unknown)`로
-  멈춘다. [일반 작업의 입장 규칙](docs/ko/skills-and-capabilities.md#일반-작업과-관리-입장)을 참고한다. 모든 한계는
-  [스킬과 능력](docs/ko/skills-and-capabilities.md#이번-릴리스의-한계)에 있다.
-- **설계 단계의 Jev.** Jev와 그 판정 스위치(`[rerank.judgement]`, 기본은 꺼짐)를 켜면 Jev가 출처 변경이 설계에
-  중요한지 평가하고, 어느 스킬 검색을 먼저 돌릴지 고르고, 다음 설계 단계를 제안할 수 있다. 답은 모두 정해진
-  규칙이 허용한 선택지 안의 조언이다.
-- **더 안전한 리뷰, Jev 호출, 반영.** `[review] codex_version`이 리뷰어 버전을 고정하고, 맞지 않으면 아무것도
-  실행하기 전에 거절한다(`OAH_REVIEW_VERSION_MISMATCH`). 시간 초과, 네트워크 오류, 429나 529 응답이 다섯 번
-  잇달아 나면 Jev를 10분 동안 건너뛰며(`unused(circuit-open)`), `[rerank] max_requests_per_day`로 요청 수에 상한을
-  둘 수 있다. `ABANDON: G<n> ci-check: "<check run>"`으로 CI에 맡긴 게이트는 이름 붙인 check run이 모두 정확한
-  HEAD에서 성공했을 때만 `oah land`가 닫는다.
-- **나만 쓰는 임시 작업 폴더.** 리뷰 스냅샷, 평가 작업 공간 같은 짧게 쓰는 폴더는 사용자 전용 임시 작업 폴더
-  아래에만 두고 시스템 임시 폴더는 쓰지 않는다. 그 폴더가 사용자만의 것임을 증명하지 못하면 `OAH_SCRATCH_UNSAFE`로
-  멈춘다. `oah doctor`는 남은 폴더를 보여 주기만 하고 지우지 않는다. OS별 폴더는
-  [임시 작업 폴더](docs/ko/concepts.md#임시-작업-폴더)에 있다.
-
-## 로드맵
-
-도구가 바뀌면 계획도 바뀔 수 있다. 아래 계획 항목은 v0.4.0에서 쓸 수 없다.
-
-### 계획: 한 번에 하나씩 질문하며 함께 설계하기
-
-**이후 릴리스에 계획된 기능이며 아직 제공하지 않는다.** 만들고 싶은 것을 말하면 oah가 추천안과 함께 설계
-질문을 하나씩 묻는다. 사용자가 구현 전에 설계 결정에 직접 참여한다. 이 대화가 기대는 설계, 단계, 출처는
-v0.4.0에 이미 들어 있다. 이 업데이트에는 다음이 들어갈 예정이다.
-
-- **한 번에 한 질문.** 핵심 설계 질문을 하나씩 묻고, 왜 중요한지와 추천 답을 함께 알려 준다. "모르겠다",
-  "나중에 정하겠다", "해당 없음"으로 답할 수 있고, 멈춘 곳에서 다시 이어 갈 수 있다.
-- **한 가지가 아니라 설계 전체.** 동작, 데이터 보관 기간, 서버가 어떤 판단을 맡는지, 비밀 정보, 프로젝트 밖에
-  미치는 영향, 복구, 비용, 접근성을 다룬다. 결제는 해당하는 경우에 다룬다. 해당 없는 주제는 건너뛰고, 결정이
-  바뀌면 그 결정과 관련된 설계를 다시 확인한다. v0.4.0은 이 주제들을 아홉 coverage 단계에 기록하며, 이를
-  질문하는 일은 계획 단계다.
-- **말하면 시작.** 지원하는 AI 도구에서 평소 말로 설계를 부탁하면 설계 대화가 열리고 한 질문씩 묻는 방식이
-  적용된다. 원하지 않으면 끌 수 있다.
-- **장단점과 함께 기술 조합 제안.** 프로젝트에 맞는 언어와 소스를 함께 추천하고, 그 조합을 배우고 운영할 때의
-  장단점을 설명한다. Rust나 여러 언어를 쓰도록 강요하지 않는다.
-- **작업에 맞춰 새로 확인하는 출처.** v0.4.0은 등록한 출처를 요청할 때나 하루에 한 번 확인한다. 작업을
-  시작하거나 이어 갈 때 새로 확인하는 기능은 계획 단계다. 그때도 확인에 실패하면 최신으로 표시하지 않는다.
-- **영향받는 작업만 오래됨.** v0.4.0에서는 더 새로운 리비전이 승인되면 묶인 작업이 모두 `stale`이 된다.
-  결정마다 영향을 받는 작업 지시와 검토 결과를 추적해 변경을 승인할 때 그것만 "오래됨"으로 표시하는 기능은
-  계획 단계다. 그런 작업을 반영하려면 해당 지시를 갱신하고 다시 검토해야 한다.
-- **설계가 바뀌면 이전 프로젝트 자료까지 자동 수정.** 설계나 결정의 변경을 승인하면 oah가 gbrain으로 이전 설계에
-  따라 만든 위키 페이지, 노트, 문서를 찾는다. 프로젝트에서 설정한 범위 안에서 변경의 영향을 받는 자료를
-  갱신하며, 변경 사항은 되돌릴 수 있다. 검색에는 Ollama가 내 컴퓨터에서 만든 임베딩을 쓴다. 모든 사용자에게
-  기본으로 켜질 예정이다. Ollama와 Bun, 약 2.7 GB의 디스크 공간, 처음 검색 색인을 만드는 시간이 필요하다.
-- **지원하는 모든 호스트에 스킬 전달.** v0.4.0은 Claude Code, Codex, Orca 작업자, 네이티브 하위 에이전트에 같은
-  방식으로 스킬 본문과 도구 결과를 준비하지만, 용량 검증 프로필을 갖춘 호스트에만 전달하며 아직 검증된 호스트가
-  없다. 실제 호스트 검증은 계획 단계다.
-- **반복되는 문제는 원인까지.** 수정 후 검토에서 같은 유형의 문제가 다시 발견되면, 앞선 수정으로 해결되지 않은
-  이유를 설명하고 같은 원인으로 문제가 생긴 곳을 모두 고쳐야 한다. 그 유형의 문제가 다시 생기면 실패하는
-  테스트도 하나 추가해야 한다.
-- **설계 선택지 순위에 Jev 활용.** TypeSafe Jev가 대화 안에서 선택지의 순위를 매기는 데 도움을 줄 수 있다.
-  설계의 기준은 기록된 사실과 사용자의 결정이다.
-
-## 문서
-
-| 문서 | 내용 |
-|---|---|
-| [동작 방식](docs/ko/how-it-works.md) | 각 부분의 연결, 전체 흐름, 검사, 요구 사항과 설정 상세. |
-| [명령 안내](docs/ko/commands.md) | 필요한 명령과 실행 결과의 뜻. |
-| [따라 하기 예제](examples/hello-oah/README.ko.md) | 작업 하나를 전체 흐름에 태워 단계별로 진행한다. |
-| [개념](docs/ko/concepts.md) | 리스, 패킷과 의도, 난이도, 스킬, 영향 지도, 위키, 설계, 게이트, 리뷰, 반영, 업데이트, 툴킷, 임시 작업 폴더, CI, 동반 앱. |
-| [설계 출처](docs/ko/design-sources.md) | 설계가 쓰는 라이브러리와 문서 따라가기, 스냅샷, 라이선스, 일일 검사. |
-| [스킬과 능력](docs/ko/skills-and-capabilities.md) | 아홉 설계 단계, 스킬 찾기와 검토, 네이티브 하위 에이전트, 도구 경로, 이번 릴리스의 한계. |
-| [문제 해결](docs/ko/troubleshooting.md) | 자주 만나는 `OAH_*` 거절의 뜻과 다음에 실행할 명령. |
-| [키](docs/ko/keys.md) | 선택 기능의 키를 어디에 두는지, 없으면 무엇이 꺼지는지. |
-| [업그레이드](docs/ko/upgrade.md) | `oah`, 프로젝트 파일, 스킬, MCP 템플릿, 모델 업데이트와 0.3.0에서 0.4.0으로 바뀌는 점. |
-| [macOS에 설치하기](docs/ko/install-macos.md), [Windows에 설치하기](docs/ko/install-windows.md) | 설치 프로그램 단계별 안내. |
-| [CI 스타터](docs/ko/ci-starter.md) | `oah ci init`, CI 결과 읽기, 검사를 필수로 만들기. |
-| [동반 앱](docs/ko/companions.md) | Orca와 Aside가 더해 주는 것과 설정 방법. |
-| [툴킷](docs/ko/toolkit.md) | 함께 싣거나 연결한 스킬, MCP 템플릿, 명령줄 도구와 각각의 출처, 라이선스. |
-| [계획](docs/ko/PLAN.md) | 전체 설계와 규칙마다의 이유. |
-
-## 개발
-
-[개발 검사](docs/ko/how-it-works.md#개발)에서 테스트, CI, 개인정보 스캔과 커밋 작성 엔진 기록을 설명한다.
+[기여 안내](CONTRIBUTING.md)와 [개발 검사](docs/ko/how-it-works.md#개발)를 참고한다.
 
 ## 보안
 
-API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 저장소와 그 이력, 릴리스, 이슈, CI 로그
-어디에도 넣지 않는다.
-[보안 규칙](docs/ko/how-it-works.md#보안)에서 키 보관, 스캔과 전체 정책을 설명한다.
+API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 저장소나 그 이력, 릴리스, 이슈, CI 로그에 넣지 않는다. 취약점은 [보안 정책](SECURITY.md)에 따라 비공개로 신고한다.
 
 ## 라이선스
 
-`oah`는 [MIT 라이선스](LICENSE)로 배포하며 저작권자는 open-agent-harness 기여자다.
-`skills/`의 스킬은 각 라이선스가 허락하는 것만 원본을 싣고 해당 라이선스를 함께 둔다.
-다이어그램 HTML과 SVG는 MIT 라이선스인 diagram-design의 템플릿과 스타일을 바탕으로 만들었다.
-[외부 저작물 고지](THIRD_PARTY_NOTICES.md)에 이 저작물과 oah가 실행하거나 연결하는 도구인
-unlazy, superpowers, graphify, Claude Code, Codex CLI 등의 출처와 라이선스가 있다.
+OAH는 MIT 라이선스로 배포한다. 함께 제공하는 스킬과 그림, 연동 도구의 라이선스는 [외부 저작물 고지](THIRD_PARTY_NOTICES.md)를 참고한다.
+
+<a href="LICENSE"><img src="docs/assets/badge-license.svg" alt="MIT 라이선스 읽기"></a>

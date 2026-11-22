@@ -15,5 +15,8 @@ oah-core = { path = "../oah-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
+[build-dependencies]
+static_vcruntime = "3.0.0"
+
 [dev-dependencies]
 tempfile = "3.27.0"
