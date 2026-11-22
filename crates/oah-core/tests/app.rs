@@ -217,24 +217,87 @@ fn inventory_lists_relative_project_links_and_skips_escaped_entries() {
 
 #[cfg(any(unix, windows))]
 #[test]
-fn inventory_rejects_project_roots_resolving_outside_the_project() {
+fn inventory_skips_escaped_project_roots_and_keeps_other_rows() {
+    use oah_core::dto::SkillScopeDto;
     use oah_core::fsx::links::{NativeLinker, SystemLinker};
 
-    for (parent, name) in [("project", ".claude"), ("project/.agents", "skills")] {
+    for (parent, name, outside, valid_project) in [
+        ("project", ".claude", "project-other/skills", ".agents"),
+        ("project/.agents", "skills", "project-other", ".claude"),
+    ] {
         let fixture = Fixture::new();
         let project = fixture.folder("project");
-        let root = fixture.folder(parent).join(name);
-        let outside = fixture.folder("project-other");
-        SystemLinker.link(&outside, &root, &outside).unwrap();
+        let alias = fixture.folder(parent).join(name);
+        let valid = fixture.folder(&format!("project/{valid_project}/skills/project-skill"));
+        let user = fixture.folder(".claude/skills/user-skill");
+        let outside_skills = fixture.folder(outside);
+        let outside_root = fixture.folder("project-other");
+        for folder in [&valid, &user] {
+            fs::write(folder.join("SKILL.md"), [0xff]).unwrap();
+        }
+        SystemLinker
+            .link(&outside_root, &alias, &outside_root)
+            .unwrap();
+        SystemLinker
+            .link(&valid, &outside_skills.join("through-outside"), &valid)
+            .unwrap();
 
-        let error = with_ctx(&fixture, |ctx| {
+        let rows = with_ctx(&fixture, |ctx| {
             app::project_open(ctx, &project).unwrap();
-            app::skills_installed(ctx, Empty {}).unwrap_err()
+            app::skills_installed(ctx, Empty {}).unwrap()
         });
 
-        assert!(matches!(error, Error::Fsx(ref error) if error.path() == root));
-        assert_eq!(error.code(), "OAH_FILE_IO");
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.scope))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("project-skill", SkillScopeDto::Project),
+                ("user-skill", SkillScopeDto::User)
+            ],
+            "{alias:?}"
+        );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_skips_looping_skill_locations() {
+    use oah_core::dto::SkillScopeDto;
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let project = fixture.folder("project");
+    let user_engine = fixture.folder(".agents");
+    symlink(".agents", project.join(".agents")).unwrap();
+    symlink("skills", user_engine.join("skills")).unwrap();
+    for (prefix, name) in [("project/", "project-skill"), ("", "user-skill")] {
+        let root = fixture.folder(&format!("{prefix}.claude/skills"));
+        let looping_marker = fixture.folder(&format!("{prefix}.claude/skills/looping-marker"));
+        let valid = fixture.folder(&format!("{prefix}.claude/skills/{name}"));
+        symlink("looping-entry", root.join("looping-entry")).unwrap();
+        symlink("SKILL.md", looping_marker.join("SKILL.md")).unwrap();
+        fs::write(valid.join("SKILL.md"), [0xff]).unwrap();
+    }
+
+    let rows = with_ctx(&fixture, |ctx| {
+        app::project_open(ctx, &project).unwrap();
+        app::skills_installed(ctx, Empty {}).unwrap()
+    });
+
+    let rows: Vec<_> = rows
+        .iter()
+        .map(|row| (row.name.as_str(), row.scope))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("project-skill", SkillScopeDto::Project),
+            ("user-skill", SkillScopeDto::User)
+        ]
+    );
 }
 
 #[cfg(unix)]

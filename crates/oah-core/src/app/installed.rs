@@ -2,7 +2,6 @@ use super::Ctx;
 use crate::config::AgentId;
 use crate::dto::{AgentIdDto, Empty, InstalledSkillDto, SkillScopeDto, display_path};
 use crate::error::Error;
-use crate::fsx::links::{Entry, inspect};
 use crate::fsx::{FsxError, FsxErrorKind};
 use crate::paths::user_home;
 use std::ffi::OsString;
@@ -89,23 +88,11 @@ fn skill_folders(
 }
 
 fn skill_directory(path: &Path, project: Option<&Path>) -> Result<Option<PathBuf>, FsxError> {
-    if matches!(inspect(path)?, Entry::Missing) {
+    let Some(resolved) = resolve(path)? else {
         return Ok(None);
-    }
-    let resolved = fs::canonicalize(path).map_err(|error| {
-        FsxError::io(
-            FsxErrorKind::Io,
-            path,
-            "cannot resolve skills directory",
-            error,
-        )
-    })?;
+    };
     if project.is_some_and(|root| !resolved.starts_with(root)) {
-        return Err(FsxError::new(
-            FsxErrorKind::Io,
-            path,
-            "skills directory resolves outside the selected project",
-        ));
+        return Ok(None);
     }
     if !present(path, fs::symlink_metadata(&resolved))?.is_some_and(|meta| meta.is_dir()) {
         return Err(FsxError::new(
@@ -127,6 +114,26 @@ fn skill_metadata(path: &Path, project: Option<&Path>) -> Result<Option<fs::Meta
     }
 }
 
+fn is_link_loop(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::LOOP)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::ERROR_CANT_RESOLVE_FILENAME;
+
+        error
+            .raw_os_error()
+            .is_some_and(|code| u32::try_from(code) == Ok(ERROR_CANT_RESOLVE_FILENAME))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 fn resolve(path: &Path) -> Result<Option<PathBuf>, FsxError> {
     present(path, fs::canonicalize(path))
 }
@@ -134,7 +141,7 @@ fn resolve(path: &Path) -> Result<Option<PathBuf>, FsxError> {
 fn present<T>(path: &Path, result: io::Result<T>) -> Result<Option<T>, FsxError> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound || is_link_loop(&error) => Ok(None),
         Err(error) => Err(FsxError::io(
             FsxErrorKind::Io,
             path,
