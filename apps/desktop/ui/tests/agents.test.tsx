@@ -463,6 +463,6 @@ describe("existing pages keep working beside the roster", () => {
     expect(rail).toEqual(["Explore", "Installed", "Team Workflow"]);
     await click(button("Installed"));
     expect(document.querySelector("h1")?.textContent).toBe("Installed");
-    expect(byText("p", /No skills are managed yet/)).not.toBeNull();
+    expect(byText("p", /No skills installed in your user folders/)).not.toBeNull();
   });
 });

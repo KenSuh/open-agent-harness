@@ -122,6 +122,10 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       fake.calls.push("project_current");
       return fake.override.projectCurrent ? fake.override.projectCurrent() : (initial.project ?? null);
     },
+    async skillsInstalled() {
+      fake.calls.push("skills_installed");
+      return fake.override.skillsInstalled ? fake.override.skillsInstalled() : [];
+    },
     async startRefresh(onEvent) {
       fake.calls.push("start_refresh");
       refreshSink = onEvent;

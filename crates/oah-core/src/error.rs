@@ -173,7 +173,7 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         "OAH_FILE_BUSY" => {
             "Another OAH window or command is writing this file. Try again in a moment."
         }
-        "OAH_FILE_IO" => "Check that the folder exists and can be written.",
+        "OAH_FILE_IO" => "Check that the folder exists and that you have access to it.",
         "OAH_FILE_UNVERIFIED" => "Refresh to read the file again.",
         codes::NET_OFFLINE => "Check the internet connection, then try again.",
         codes::NET_RATE_LIMITED => {

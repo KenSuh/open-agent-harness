@@ -83,6 +83,55 @@ fn shown(parts: &[&str]) -> String {
         .to_string()
 }
 
+#[test]
+fn inventory_uses_only_user_locations_until_a_project_is_open() {
+    use oah_core::dto::SkillScopeDto;
+
+    let fixture = Fixture::new();
+    let user = fixture.folder(".claude/skills/user-skill");
+    let project = fixture.folder("project");
+    let installed = fixture.folder("project/.agents/skills/project-skill");
+    let incomplete = fixture.folder("project/.claude/skills/incomplete");
+    fs::create_dir(incomplete.join("SKILL.md")).unwrap();
+    fs::write(user.join("SKILL.md"), b"user").unwrap();
+    fs::write(installed.join("SKILL.md"), b"project").unwrap();
+    let cancel = CancelToken::new();
+    let ctx = fixture.session.ctx(&cancel, &NoProgress);
+
+    let before_project = app::skills_installed(&ctx, Empty {}).unwrap();
+    assert_eq!(before_project.len(), 1);
+    assert_eq!(before_project[0].name, "user-skill");
+    assert_eq!(before_project[0].scope, SkillScopeDto::User);
+
+    app::project_open(&ctx, &project).unwrap();
+    let after_project = app::skills_installed(&ctx, Empty {}).unwrap();
+    assert_eq!(after_project.len(), 2);
+    assert_eq!(after_project[0].name, "project-skill");
+    assert_eq!(after_project[0].scope, SkillScopeDto::Project);
+    assert_eq!(after_project[1], before_project[0]);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_ignores_links_and_hidden_skill_staging_directories() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let outside = fixture.folder("outside/skill");
+    let root = fixture.folder(".claude/skills");
+    let incomplete = fixture.folder(".claude/skills/link-marker");
+    let staging = fixture.folder(".claude/skills/.staged");
+    let marker = outside.join("SKILL.md");
+    fs::write(&marker, b"outside").unwrap();
+    fs::write(staging.join("SKILL.md"), b"staged").unwrap();
+    symlink(&outside, root.join("link-directory")).unwrap();
+    symlink(&marker, incomplete.join("SKILL.md")).unwrap();
+    let cancel = CancelToken::new();
+    let ctx = fixture.session.ctx(&cancel, &NoProgress);
+
+    assert!(app::skills_installed(&ctx, Empty {}).unwrap().is_empty());
+}
+
 /// Every file and folder below `root` with each file's bytes.
 fn tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut out = BTreeMap::new();

@@ -54,6 +54,7 @@ pub fn run() {
             commands::rules_check,
             commands::rules_sync,
             commands::start_review,
+            commands::skills_installed,
         ])
         .run(tauri::generate_context!())
         .expect("the OAH desktop app could not start");

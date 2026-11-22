@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use oah_core::app::{self, Ctx, Session};
 use oah_core::dto::{
-    AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, BannerDto, Empty, PresetApplyReq,
-    ProjectDto, RefreshDto, ReviewOutcomeDto, ReviewReq, RulesStateDto, RulesSyncDto, SettingsDto,
-    SettingsSetReq, StagesSetDto, StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto,
-    WorkflowProjectReq,
+    AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, BannerDto, Empty,
+    InstalledSkillDto, PresetApplyReq, ProjectDto, RefreshDto, ReviewOutcomeDto, ReviewReq,
+    RulesStateDto, RulesSyncDto, SettingsDto, SettingsSetReq, StagesSetDto, StagesSetReq,
+    TaskCancelReq, TaskSnapshotDto, WorkflowDto, WorkflowProjectReq,
 };
 use oah_core::error::codes;
 use oah_core::paths::Env;
@@ -267,6 +267,14 @@ pub fn project_current(
     shell: State<'_, Shell>,
 ) -> Result<Option<ProjectDto>, ErrorDto> {
     shell.call(|ctx| app::project_current(ctx, req))
+}
+
+#[tauri::command]
+pub async fn skills_installed(
+    req: Empty,
+    shell: State<'_, Shell>,
+) -> Result<Vec<InstalledSkillDto>, ErrorDto> {
+    shell.call(|ctx| app::skills_installed(ctx, req))
 }
 
 /// Starts the refresh task, or joins the running one (CONTRACTS C4). Its events go to `on_event`; the work runs

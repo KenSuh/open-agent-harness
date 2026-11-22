@@ -6,6 +6,7 @@ import type {
   AppInfoDto,
   ErrorDto,
   BannerDto,
+  InstalledSkillDto,
   NoticeDto,
   PresetApplyReq,
   ProjectDto,
@@ -45,6 +46,7 @@ export interface Transport {
   agentsList(): Promise<AgentStatusDto[]>;
   startAgentsProbe(req: AgentsProbeReq, onEvent: (event: TaskEvent<AgentStatusDto[]>) => void): Promise<TaskId>;
   startReview(req: StartReviewReq, onEvent: (event: TaskEvent<ReviewResultDto>) => void): Promise<TaskId>;
+  skillsInstalled(): Promise<InstalledSkillDto[]>;
   sectionsShow(req: WorkflowProjectReq): Promise<WorkflowDto>;
   stagesSet(req: WorkflowProjectReq<StagesSetReq>): Promise<StagesSetDto>;
   presetApply(req: WorkflowProjectReq<PresetApplyReq>): Promise<StagesSetDto>;

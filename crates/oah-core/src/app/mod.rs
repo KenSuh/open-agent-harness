@@ -9,6 +9,7 @@
 mod agents;
 mod cli_copy;
 mod doctor;
+mod installed;
 mod refresh;
 mod review;
 mod settings;
@@ -26,6 +27,7 @@ pub use cli_copy::{CliCopy, cli_copy};
 pub use doctor::{
     Doctor, doctor, doctor_exit, doctor_project_commands, doctor_project_commands_with, doctor_with,
 };
+pub use installed::skills_installed;
 pub use refresh::{REFRESH, refresh, refresh_key};
 pub use review::{REVIEW, ReviewFailed, review, review_key};
 pub use settings::{settings_get, settings_set};

@@ -6,6 +6,7 @@ import type {
   AgentsChangedDto,
   AppInfoDto,
   BannerDto,
+  InstalledSkillDto,
   NoticeDto,
   ProjectDto,
   RefreshDto,
@@ -58,6 +59,7 @@ export function createTauriTransport(): Transport {
       channel.onmessage = onEvent;
       return call<TaskId>("start_review", req, { onEvent: channel });
     },
+    skillsInstalled: () => call<InstalledSkillDto[]>("skills_installed"),
     sectionsShow: (req) => call<WorkflowDto>("sections_show", req),
     stagesSet: (req) => call<StagesSetDto>("stages_set", req),
     presetApply: (req) => call<StagesSetDto>("preset_apply", req),

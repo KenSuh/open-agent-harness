@@ -88,6 +88,13 @@ export interface SettingsEdit {
 /** An agent's config id (core `AgentId::as_str`), in core's display order. */
 export type AgentId = "claude" | "codex" | "gemini" | "copilot" | "opencode" | "antigravity" | "cursor";
 
+export interface InstalledSkillDto {
+  readonly name: string;
+  readonly engine: "claude" | "codex";
+  readonly scope: "project" | "user";
+  readonly location: string;
+}
+
 /** §4.2 statuses: v0.4.0's plus `sign-in-unknown`. */
 export type AgentStatus =
   | "ok"

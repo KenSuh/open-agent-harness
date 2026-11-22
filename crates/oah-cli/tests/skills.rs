@@ -5,11 +5,16 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
+use std::{env, fs};
 
 const OAH_BIN: &str = env!("CARGO_BIN_EXE_oah");
 const CREDENTIAL: &str = "not-a-real-credential";
 
 fn oah(home: &Path, args: &[&str]) -> Output {
+    oah_from(home, home, args)
+}
+
+fn oah_from(home: &Path, cwd: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(OAH_BIN);
     command
         .env_clear()
@@ -17,10 +22,14 @@ fn oah(home: &Path, args: &[&str]) -> Output {
         .env("USERPROFILE", home)
         .env("OAH_HOME", home.join("oah"))
         .env("GITHUB_TOKEN", CREDENTIAL)
-        .current_dir(home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CEILING_DIRECTORIES", home.parent().unwrap())
+        .current_dir(cwd)
         .args(args);
-    if let Some(root) = std::env::var_os("SYSTEMROOT") {
-        command.env("SYSTEMROOT", root);
+    for name in ["PATH", "SYSTEMROOT"] {
+        if let Some(value) = env::var_os(name) {
+            command.env(name, value);
+        }
     }
     command.output().expect("run oah")
 }
@@ -126,5 +135,61 @@ fn help_names_the_review_options() {
             && help.contains("--path <FOLDER>")
             && help.contains("--json"),
         "{help}"
+    );
+}
+
+#[test]
+fn list_reports_project_and_user_copies_from_a_plain_working_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cwd = home.join("project");
+    let args = ["skills", "list", "--json"];
+    let catalog = cwd.join("skills/catalog-only");
+    fs::create_dir_all(&catalog).unwrap();
+    fs::write(catalog.join("SKILL.md"), b"catalog entry").unwrap();
+
+    let empty = oah_from(&home, &cwd, &args);
+    assert_eq!(empty.status.code(), Some(0), "{}", text(&empty.stderr));
+    assert_eq!(text(&empty.stdout).trim(), "[]");
+
+    for path in [
+        cwd.join(".claude/skills/tidy"),
+        home.join(".agents/skills/tidy"),
+    ] {
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("SKILL.md"), [0xff]).unwrap();
+    }
+
+    let out = oah_from(&home, &cwd, &args);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let actual: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let path = |parts: &[&str]| parts.iter().collect::<std::path::PathBuf>();
+    assert_eq!(
+        actual,
+        serde_json::json!([
+            {"name": "tidy", "engine": "claude", "scope": "project", "location": path(&["~", "project", ".claude", "skills", "tidy"])},
+            {"name": "tidy", "engine": "codex", "scope": "user", "location": path(&["~", ".agents", "skills", "tidy"])}
+        ])
+    );
+    assert!(!home.join("oah").exists());
+}
+
+#[test]
+fn list_reports_a_blocked_skill_root_as_an_error() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".agents");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("skills"), b"not a directory").unwrap();
+
+    let out = oah(home.path(), &["skills", "list", "--json"]);
+
+    assert_eq!(out.status.code(), Some(69));
+    let actual: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(actual["error"]["code"], "OAH_FILE_IO");
+    assert!(
+        actual["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("skills")
     );
 }

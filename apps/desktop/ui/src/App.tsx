@@ -5,6 +5,7 @@ import type { Transport } from "./transport/types";
 import { AgentRoster, AgentsView } from "./agents";
 import { TeamWorkflow } from "./workflow";
 import { ExploreView } from "./explore";
+import { InstalledView } from "./installed";
 import { useReview } from "./useReview";
 import { useController, type Load, type RefreshTask, type Toast } from "./useController";
 
@@ -13,25 +14,10 @@ type Page = "explore" | "installed" | "team-workflow";
 /** Where the main area is: one of the section pages, or the Agents view (all agents, or one agent's detail). */
 type View = { page: Page } | { page: "agents"; agent: string | null };
 
-const PAGES: ReadonlyArray<{ id: Page; label: string; title: string; body: string }> = [
-  {
-    id: "explore",
-    label: "Explore",
-    title: "Explore",
-    body: "Enter a GitHub skill folder to review it. Nothing to show yet.",
-  },
-  {
-    id: "installed",
-    label: "Installed",
-    title: "Installed",
-    body: "No skills are managed yet. Nothing is installed.",
-  },
-  {
-    id: "team-workflow",
-    label: "Team Workflow",
-    title: "Team Workflow",
-    body: "Open a project to choose which agent does each section. Nothing to show.",
-  },
+const PAGES: ReadonlyArray<{ id: Page; label: string }> = [
+  { id: "explore", label: "Explore" },
+  { id: "installed", label: "Installed" },
+  { id: "team-workflow", label: "Team Workflow" },
 ];
 
 const THEMES: ReadonlyArray<{ value: Theme; label: string }> = [
@@ -242,13 +228,15 @@ export function App({ transport }: { transport: Transport }) {
             />
           ) : (
             <section className="page" aria-labelledby="page-title">
-              <h1 id="page-title">{current.title}</h1>
+              <h1 id="page-title">{current.label}</h1>
               {page === "team-workflow" && c.project ? (
                 <TeamWorkflow key={`${c.project.id}:${c.projectRevision}:${agentStatusKey}`} transport={transport} projectId={c.project.id} />
               ) : page === "explore" ? (
                 <ExploreView review={review} />
+              ) : page === "installed" ? (
+                <InstalledView key={c.projectRevision} transport={transport} projectOpen={c.project !== null} />
               ) : (
-                <p className="empty">{current.body}</p>
+                <p className="empty">Open a project to choose which agent does each section. Nothing to show.</p>
               )}
             </section>
           )}

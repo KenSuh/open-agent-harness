@@ -509,10 +509,38 @@ select:disabled {
 }
 
 /* Explore review (M1-S3) */
-.explore {
+.explore,
+.installed,
+.installed-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.installed-controls,
+.installed-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.installed > p,
+.installed-controls p {
+  margin: 0;
+}
+
+.installed-help summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.installed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
 }
 
 .review-form {

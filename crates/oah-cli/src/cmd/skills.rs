@@ -3,17 +3,39 @@ use super::{ENVIRONMENT, REFUSED, USAGE, error_text};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use oah_core::Error;
 use oah_core::app::{self, Session};
-use oah_core::dto::{ReviewOutcomeDto, ReviewReq, ReviewSpecDto};
+use oah_core::dto::{Empty, InstalledSkillDto, ReviewOutcomeDto, ReviewReq, ReviewSpecDto};
 use oah_core::paths::Env;
 use oah_core::review::identity::identity;
 use oah_core::tasks::{CancelToken, NoProgress};
 use std::process::ExitCode;
 
+const SOURCE_CLI_HELP: &str = "Manage toolkit skills from your project with the full Python CLI:
+  oah skills install NAME
+  oah skills install NAME --global
+  oah skills update --project
+  oah skills update --global
+
+Get the source CLI with install.sh (macOS) or install.ps1 (Windows) from the OAH release.
+If oah resolves to the desktop helper, use this prefix in place of oah:
+  uv tool run --from \"/path/to/open-agent-harness\" oah
+Use the absolute path to your OAH source checkout or unpacked source archive.";
+
 pub fn command() -> Command {
     Command::new("skills")
-        .about("Review skills before anything installs them")
+        .about("List locally installed skills or review a GitHub skill folder")
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .subcommand(
+            Command::new("list")
+                .about("List installed skills in the current project and user skill folders")
+                .after_help(SOURCE_CLI_HELP)
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Print the installed inventory as JSON"),
+                ),
+        )
         .subcommand(
             Command::new("review")
                 .about(
@@ -53,8 +75,8 @@ pub struct Printed {
 
 pub fn run(matches: &ArgMatches) -> ExitCode {
     let json = matches
-        .subcommand_matches("review")
-        .is_some_and(|review| review.get_flag("json"));
+        .subcommand()
+        .is_some_and(|(_, subcommand)| subcommand.get_flag("json"));
     let env = match Env::from_process() {
         Ok(env) => env,
         Err(error) => {
@@ -70,16 +92,61 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     ExitCode::from(printed.code)
 }
 
-/// Runs the parsed `skills` command on `session`: the shared review operation, then its outcome DTO as JSON or
-/// text. A completed review exits 0 whatever the gate decided; the gate's result is part of the outcome.
 pub fn execute(session: &Session, matches: &ArgMatches) -> Printed {
-    let Some(("review", matches)) = matches.subcommand() else {
-        return Printed {
+    match matches.subcommand() {
+        Some(("list", list)) => installed(session, list.get_flag("json")),
+        Some(("review", review)) => review_skill(session, review),
+        _ => Printed {
             code: USAGE,
             stdout: String::new(),
             stderr: String::new(),
+        },
+    }
+}
+
+fn installed(session: &Session, json: bool) -> Printed {
+    let cancel = CancelToken::new();
+    let ctx = session.ctx(&cancel, &NoProgress);
+    let skills =
+        app::project_open(&ctx, ctx.env.cwd()).and_then(|_| app::skills_installed(&ctx, Empty {}));
+    match skills {
+        Ok(skills) => Printed {
+            code: 0,
+            stdout: if json {
+                format!("{:#}\n", serde_json::json!(skills))
+            } else {
+                installed_summary(&skills)
+            },
+            stderr: String::new(),
+        },
+        Err(error) => failed(session, &error, json),
+    }
+}
+
+fn installed_summary(skills: &[InstalledSkillDto]) -> String {
+    use oah_core::dto::SkillScopeDto;
+
+    if skills.is_empty() {
+        return "No skills installed in the project or user skill folders.\n".into();
+    }
+    let mut shown = String::new();
+    for skill in skills {
+        let scope = match skill.scope {
+            SkillScopeDto::Project => "project",
+            SkillScopeDto::User => "user",
         };
-    };
+        shown.push_str(&format!(
+            "{} ({}, {})  {}\n",
+            terminal_text(&skill.name),
+            skill.engine.0.as_str(),
+            scope,
+            terminal_text(&skill.location),
+        ));
+    }
+    shown
+}
+
+fn review_skill(session: &Session, matches: &ArgMatches) -> Printed {
     let json = matches.get_flag("json");
     let text = |name: &str| matches.get_one::<String>(name).cloned().unwrap_or_default();
     let req = ReviewReq {
@@ -116,14 +183,20 @@ pub fn execute(session: &Session, matches: &ArgMatches) -> Printed {
                 stderr,
             }
         }
-        Err(error) => {
-            let (stdout, stderr) = error_text(session.env(), &error, json);
-            Printed {
-                code: exit_code(&error),
-                stdout,
-                stderr,
-            }
-        }
+        Err(error) => failed(session, &error, json),
+    }
+}
+
+fn failed(session: &Session, error: &Error, json: bool) -> Printed {
+    let (stdout, stderr) = error_text(session.env(), error, json);
+    let stderr = match stderr.strip_suffix('\n') {
+        Some(line) => format!("{}\n", terminal_text(line)),
+        None => stderr,
+    };
+    Printed {
+        code: exit_code(error),
+        stdout,
+        stderr,
     }
 }
 
