@@ -361,8 +361,8 @@ impl<'a> Client<'a> {
         Client { transport }
     }
 
-    /// Checks `request` ([`check`]), sends it, enforces its byte limit again, refuses a compressed 2xx body and
-    /// turns a rate-limit answer into [`NetError::RateLimited`].
+    /// Checks `request` ([`check`]), sends it, checks the encoding and byte limit of 2xx bodies, and turns a
+    /// rate-limit answer into [`NetError::RateLimited`].
     pub fn send(&self, request: &Request) -> Result<Response, NetError> {
         check(request)?;
         let mut response = self.transport.send(request)?;
@@ -374,6 +374,14 @@ impl<'a> Client<'a> {
                 None => Ok(response),
             };
         }
+        check_content_encoding(
+            host,
+            response
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+                .map(|(_, value)| value.as_bytes()),
+        )?;
         let length = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
         if length > request.limit {
             return Err(NetError::TooLarge {
@@ -381,18 +389,30 @@ impl<'a> Client<'a> {
                 limit: request.limit,
             });
         }
-        let encoding = response.header("content-encoding").map(str::trim);
-        if encoding
-            .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity"))
-        {
-            return Err(NetError::BadResponse {
-                host,
-                failure: "content-encoding",
-                detail: "the answer is compressed although identity was asked for".to_string(),
-            });
-        }
         Ok(response)
     }
+}
+
+fn check_content_encoding<'a>(
+    host: &'static str,
+    mut values: impl Iterator<Item = &'a [u8]>,
+) -> Result<(), NetError> {
+    if values.all(|value| {
+        std::str::from_utf8(value).is_ok_and(|value| {
+            value.split(',').all(|coding| {
+                coding
+                    .trim_matches([' ', '\t'])
+                    .eq_ignore_ascii_case("identity")
+            })
+        })
+    }) {
+        return Ok(());
+    }
+    Err(NetError::BadResponse {
+        host,
+        failure: "content-encoding",
+        detail: "the answer has an unsupported or invalid content encoding".to_string(),
+    })
 }
 
 fn refused(failure: &'static str, detail: impl Into<String>) -> NetError {
