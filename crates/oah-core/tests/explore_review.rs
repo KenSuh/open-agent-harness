@@ -208,6 +208,7 @@ fn the_https_collector_reads_the_frozen_fixture_as_the_local_collector_and_v040_
     let scratch = tempfile::tempdir().expect("scratch");
     let upstream = scratch.path().join("upstream");
     let (commit, tree) = basic_repository(&upstream);
+    assert_ne!(commit, tree);
     let recorded = basic(&commit);
     assert_eq!(
         recorded.tree_id(),
@@ -232,29 +233,37 @@ fn the_https_collector_reads_the_frozen_fixture_as_the_local_collector_and_v040_
 
     let sent = transport.requests();
     let urls: Vec<&str> = sent.iter().map(|request| request.url.as_str()).collect();
-    assert_eq!(urls[0], recorded.commit_url());
-    assert_eq!(urls[1], recorded.listing_url());
-    let mut raw: Vec<&str> = urls[2..].to_vec();
+    let api = "https://api.github.com/repos/acme/skills";
+    assert_eq!(
+        urls[..3],
+        [
+            format!("{api}/commits/HEAD"),
+            format!("{api}/git/commits/{commit}"),
+            format!("{api}/git/trees/{tree}?recursive=1"),
+        ]
+    );
+    let mut raw: Vec<&str> = urls[3..].to_vec();
     raw.sort_unstable();
     assert_eq!(
         raw,
         [
-            recorded.raw_url("LICENSE"),
-            recorded.raw_url("skills/tidy/SKILL.md")
+            format!("https://raw.githubusercontent.com/acme/skills/{commit}/LICENSE"),
+            format!("https://raw.githubusercontent.com/acme/skills/{commit}/skills/tidy/SKILL.md"),
         ]
     );
     assert_eq!(
         sent[0].header_value("accept"),
         Some("application/vnd.github.sha")
     );
-    assert_eq!(
-        sent[1].header_value("accept"),
-        Some("application/vnd.github+json")
-    );
+    for request in &sent[1..3] {
+        assert_eq!(
+            request.header_value("accept"),
+            Some("application/vnd.github+json")
+        );
+    }
     for request in &sent {
         let api = request.row == GITHUB_API;
         assert!(api || request.row == GITHUB_RAW);
-        assert!(request.url.contains(&commit) || request.url.ends_with("/commits/HEAD"));
         assert_eq!(
             request.header_value("user-agent"),
             Some(format!("oah/{}", oah_core::VERSION).as_str())
@@ -282,6 +291,10 @@ fn the_https_collector_reads_the_frozen_fixture_as_the_local_collector_and_v040_
     );
     assert_eq!(
         (sent[1].limit, sent[1].deadline),
+        (1 << 20, Duration::from_secs(30))
+    );
+    assert_eq!(
+        (sent[2].limit, sent[2].deadline),
         (16 << 20, Duration::from_secs(30))
     );
     for path in ["LICENSE", "skills/tidy/SKILL.md"] {
@@ -305,7 +318,7 @@ fn a_token_goes_only_on_api_requests_and_never_into_debug_text() {
     let collector = GitHub::new(&transport, Some(credential));
     assert!(matches!(observe(&collector), Observation::Snapshot(_)));
     let sent = transport.requests();
-    assert_eq!(sent.len(), 4);
+    assert_eq!(sent.len(), 5);
     for request in &sent {
         let carried = request.header_value("authorization");
         if request.row == GITHUB_API {
@@ -382,7 +395,7 @@ fn a_listing_that_does_not_verify_is_refused() {
     );
     assert_eq!(
         transport.requests().len(),
-        2,
+        3,
         "no file is fetched from a listing that does not verify"
     );
 
@@ -394,11 +407,13 @@ fn a_listing_that_does_not_verify_is_refused() {
     );
     assert_eq!(failure_word(&observe(&collector)), "oversize");
 
-    let mut moved_root = recorded.listing();
-    moved_root["sha"] = json!("2222222222222222222222222222222222222222");
+    let mut changed_root = basic(COMMIT)
+        .file("README.md", "Fixture notes.\n")
+        .listing();
+    changed_root["sha"] = json!(recorded.tree_id());
     transport.answer(
         recorded.listing_url(),
-        Response::new(200, serde_json::to_vec(&moved_root).expect("JSON")),
+        Response::new(200, changed_root.to_string()),
     );
     assert_eq!(failure_word(&observe(&collector)), "bad-response");
     assert!(
@@ -408,6 +423,82 @@ fn a_listing_that_does_not_verify_is_refused() {
             .to_string()
             .contains("the top tree is listed as")
     );
+}
+
+#[test]
+fn responses_with_unverified_git_ids_are_refused_before_raw_download_or_publication() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let upstream = scratch.path().join("upstream");
+    let (commit, _) = basic_repository(&upstream);
+    fixture_git(
+        &upstream,
+        &["commit", "--allow-empty", "-qm", "Second commit"],
+    );
+    let other_commit = fixture_git(&upstream, &["rev-parse", "HEAD"]);
+    assert_ne!(commit, other_commit);
+
+    let recorded = basic(&commit);
+    let other_tree = basic(&commit).file("README.md", "Fixture notes.\n");
+    assert_ne!(recorded.tree_id(), other_tree.tree_id());
+    let mut noncanonical_tree = recorded.metadata();
+    noncanonical_tree["tree"]["sha"] = json!(recorded.tree_id().to_ascii_uppercase());
+    let api_urls = [
+        recorded.commit_url(),
+        recorded.metadata_url(),
+        recorded.listing_url(),
+    ];
+    for (name, answer, expected) in [
+        (
+            "different commit",
+            basic(&other_commit).metadata(),
+            &api_urls[..2],
+        ),
+        ("noncanonical tree", noncanonical_tree, &api_urls[..2]),
+        ("different root", other_tree.listing(), &api_urls[..]),
+    ] {
+        let transport = scripted(&recorded);
+        let url = expected
+            .last()
+            .expect("request receiving the substituted answer");
+        transport.answer(url, Response::new(200, answer.to_string()));
+
+        let state = tempfile::tempdir().expect("state");
+        let collector = GitHub::new(&transport, None);
+        let (candidate, allow) = (candidate(), allow());
+        let result = review_and_store(
+            &Store::new(state.path()),
+            &collector,
+            &request(&candidate, &allow),
+            &AgentId::ALL,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Failure::Review(ReviewError::Failed {
+                    reason: FailReason::Collector,
+                    ..
+                }))
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(
+            matches!(
+                collector.take_cause(),
+                Some(Cause::Invalid {
+                    failure: "bad-response",
+                    ..
+                })
+            ),
+            "{name}"
+        );
+        let urls: Vec<String> = transport
+            .requests()
+            .into_iter()
+            .map(|request| request.url)
+            .collect();
+        assert_eq!(urls, expected, "{name}");
+        assert!(files_under(state.path()).is_empty(), "{name}");
+    }
 }
 
 /// One scripted commit answer: its name, the answer, the failure word and the typed code.
@@ -495,15 +586,18 @@ fn upstream_failures_are_typed() {
         }
     }
 
-    let transport = scripted(&recorded);
-    transport.answer(recorded.commit_url(), Response::new(409, ""));
-    let collector = GitHub::new(&transport, None);
-    assert_eq!(
-        observe(&collector),
-        Observation::Blocked {
-            problems: vec!["ref-missing".to_string()]
-        }
-    );
+    for status in [409, 422] {
+        let transport = scripted(&recorded);
+        transport.answer(recorded.commit_url(), Response::new(status, ""));
+        let collector = GitHub::new(&transport, None);
+        assert_eq!(
+            observe(&collector),
+            Observation::Blocked {
+                problems: vec!["ref-missing".to_string()]
+            }
+        );
+        assert_eq!(transport.requests().len(), 1);
+    }
 
     let transport = scripted(&recorded);
     transport.answer(
@@ -601,13 +695,14 @@ fn an_immediate_raw_limit_allows_one_retry_per_observation() {
             urls,
             [
                 recorded.commit_url().as_str(),
+                recorded.metadata_url().as_str(),
                 recorded.listing_url().as_str(),
                 &skill,
                 &skill,
                 &license,
             ]
         );
-        assert!(requests[3].deadline <= requests[2].deadline);
+        assert!(requests[4].deadline <= requests[3].deadline);
     }
 }
 
@@ -1030,7 +1125,12 @@ fn the_review_operation_reports_the_causal_upstream_error() {
 fn cancelling_after_a_recorded_response_stops_requests_and_publication() {
     let recorded = basic(COMMIT);
     let skill = recorded.raw_url("skills/tidy/SKILL.md");
-    for (last, count) in [(recorded.commit_url(), 1), (skill.clone(), 3)] {
+    for (last, count) in [
+        (recorded.commit_url(), 1),
+        (recorded.metadata_url(), 2),
+        (recorded.listing_url(), 3),
+        (skill.clone(), 4),
+    ] {
         let recording = scripted(&recorded);
         if last == skill {
             recording.answer(

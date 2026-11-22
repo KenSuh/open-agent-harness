@@ -4,22 +4,21 @@
 //! One observation sends, through the one bounded [`Client`]:
 //!
 //! 1. `GET https://api.github.com/repos/{owner}/{repo}/commits/HEAD` with `Accept: application/vnd.github.sha`:
-//!    the default branch's commit as 40 hex digits. Every later request names that commit, so the review reads one
-//!    commit however the branch moves meanwhile. An empty repository (409) or a `HEAD` GitHub cannot resolve (422)
-//!    is blocked as `ref-missing`, as the local collector blocks an unborn `HEAD`.
-//! 2. `GET https://api.github.com/repos/{owner}/{repo}/git/trees/{commit}?recursive=1`: the whole tree at that
-//!    commit. A truncated listing fails as `oversize`. Every tree object is rebuilt from the listing and hashed with
-//!    Git's SHA-1; each must equal its listed id and the root the answer's `sha`, so no entry can be added, dropped
-//!    or changed without the ids disagreeing.
-//! 3. `GET https://raw.githubusercontent.com/{owner}/{repo}/{commit}/{path}` for each file the review reads (the
+//!    the default branch's commit as 40 hex digits. An empty repository (409) or a `HEAD` GitHub cannot
+//!    resolve (422) is blocked as `ref-missing`, as the local collector blocks an unborn `HEAD`.
+//! 2. `GET https://api.github.com/repos/{owner}/{repo}/git/commits/{commit}` resolves the pinned commit to its
+//!    root tree. The returned commit ID must match the pin and the root must be a canonical SHA-1 ID.
+//! 3. `GET https://api.github.com/repos/{owner}/{repo}/git/trees/{tree}?recursive=1` lists that root tree.
+//!    A truncated listing fails as `oversize`. Every tree object is rebuilt from the listing and hashed with
+//!    Git's SHA-1. Each must equal its listed ID, and the root must agree with the pinned commit metadata.
+//! 4. `GET https://raw.githubusercontent.com/{owner}/{repo}/{commit}/{path}` for each file the review reads (the
 //!    skill folder, the governing license and notice files), never with a token. Each body must have its listed size
 //!    and hash to its blob id (`sha1("blob <len>\\0" + data)`) before the snapshot records its SHA-256. A blob read
 //!    twice is fetched once.
 //!
-//! The commit object itself is not fetched or hashed: GitHub resolves the commit to its root tree, and the listing
-//! is verified from that root down. The user's token, when set, goes only on the two API requests. A failed
-//! observation keeps its typed cause for [`GitHub::take_cause`], so a caller can report `OAH_NET_*` with the
-//! retry time rather than only the v0.4.0 failure word the observation carries.
+//! GitHub's commit metadata supplies the commit-to-tree mapping. The user's token, when set, goes only on API
+//! requests. A failed observation keeps its typed cause for [`GitHub::take_cause`], so a caller can report
+//! `OAH_NET_*` with the retry time as well as the v0.4.0 failure word the observation carries.
 
 use crate::net::{
     Client, GITHUB_API, GITHUB_RAW, NetError, Offline, RecordingTransport, Request, Response,
@@ -47,8 +46,10 @@ const API_DEADLINE: Duration = Duration::from_secs(30);
 const RAW_DEADLINE: Duration = Duration::from_secs(60);
 /// The longest a whole observation may take, as for the local collector.
 const OBSERVE_DEADLINE: Duration = Duration::from_secs(120);
-/// The largest commit answer read: 40 hex digits and some room.
-const COMMIT_LIMIT: u64 = 4 << 10;
+/// The largest HEAD answer read, with room for the 40 hex digits.
+const HEAD_LIMIT: u64 = 4 << 10;
+/// The largest Git commit metadata response, including message and verification fields.
+const COMMIT_METADATA_LIMIT: u64 = 1 << 20;
 /// The largest tree listing read, as the local collector bounds `ls-tree`.
 const LISTING_LIMIT: u64 = 16 << 20;
 
@@ -219,7 +220,7 @@ impl<'a> GitHub<'a> {
         let answer = self.api(
             format!("{base}/commits/HEAD"),
             "application/vnd.github.sha",
-            COMMIT_LIMIT,
+            HEAD_LIMIT,
             until,
         )?;
         let commit = match answer.status {
@@ -245,7 +246,29 @@ impl<'a> GitHub<'a> {
             }
         };
         let answer = self.api(
-            format!("{base}/git/trees/{commit}?recursive=1"),
+            format!("{base}/git/commits/{commit}"),
+            "application/vnd.github+json",
+            COMMIT_METADATA_LIMIT,
+            until,
+        )?;
+        if answer.status != 200 {
+            return Err(self.fail(Cause::Net(NetError::Status {
+                host: GITHUB_API.host,
+                status: answer.status,
+            })));
+        }
+        let metadata: CommitAnswer = serde_json::from_slice(&answer.body)
+            .map_err(|_| self.fail(invalid("the commit metadata is not GitHub's commit answer")))?;
+        if metadata.sha != commit {
+            return Err(self.fail(invalid("the commit metadata names a different commit")));
+        }
+        let root = metadata.tree.sha;
+        if !is_sha1(&root) {
+            return Err(self.fail(invalid("the commit metadata names no root tree id")));
+        }
+
+        let answer = self.api(
+            format!("{base}/git/trees/{root}?recursive=1"),
             "application/vnd.github+json",
             LISTING_LIMIT,
             until,
@@ -256,7 +279,7 @@ impl<'a> GitHub<'a> {
                 status: answer.status,
             })));
         }
-        let listing = Listing::parse(&answer.body).map_err(|cause| self.fail(cause))?;
+        let listing = Listing::parse(&answer.body, &root).map_err(|cause| self.fail(cause))?;
         let tree = AtCommit {
             github: self,
             owner,
@@ -268,10 +291,7 @@ impl<'a> GitHub<'a> {
             fetched: RefCell::new(HashMap::new()),
         };
         Ok(Observation::Snapshot(snapshot(
-            &tree,
-            &commit,
-            &listing.root,
-            spec,
+            &tree, &commit, &root, spec,
         )?))
     }
 }
@@ -395,6 +415,17 @@ fn encode_path(path: &str) -> String {
 }
 
 #[derive(Deserialize)]
+struct CommitAnswer {
+    sha: String,
+    tree: CommitTree,
+}
+
+#[derive(Deserialize)]
+struct CommitTree {
+    sha: String,
+}
+
+#[derive(Deserialize)]
 struct TreeAnswer {
     sha: String,
     tree: Vec<TreeItem>,
@@ -432,15 +463,14 @@ struct Blob {
     regular_paths: Vec<String>,
 }
 
-/// A verified recursive listing: the root tree id and every entry in path order.
+/// A verified recursive listing with entries in path order.
 struct Listing {
-    root: String,
     items: Vec<Item>,
     blobs: HashMap<String, Blob>,
 }
 
 impl Listing {
-    fn parse(body: &[u8]) -> Result<Listing, Cause> {
+    fn parse(body: &[u8], root: &str) -> Result<Listing, Cause> {
         let answer: TreeAnswer = serde_json::from_slice(body)
             .map_err(|_| invalid("the tree listing is not GitHub's tree answer"))?;
         if answer.truncated {
@@ -453,6 +483,9 @@ impl Listing {
         }
         if !is_sha1(&answer.sha) {
             return Err(invalid("the tree listing names no root tree id"));
+        }
+        if answer.sha != root {
+            return Err(invalid("the tree listing names a different root tree"));
         }
         let mut items = Vec::with_capacity(answer.tree.len());
         let mut blobs: HashMap<String, Blob> = HashMap::new();
@@ -530,11 +563,7 @@ impl Listing {
             blob.regular_paths.sort();
         }
         verify_trees(&answer.sha, &items)?;
-        Ok(Listing {
-            root: answer.sha,
-            items,
-            blobs,
-        })
+        Ok(Listing { items, blobs })
     }
 }
 
@@ -789,9 +818,18 @@ impl Recorded {
         format!("{}/commits/HEAD", self.api_base())
     }
 
+    /// The pinned commit metadata request's address.
+    pub fn metadata_url(&self) -> String {
+        format!("{}/git/commits/{}", self.api_base(), self.commit)
+    }
+
     /// The tree listing request's address.
     pub fn listing_url(&self) -> String {
-        format!("{}/git/trees/{}?recursive=1", self.api_base(), self.commit)
+        format!(
+            "{}/git/trees/{}?recursive=1",
+            self.api_base(),
+            self.tree_id()
+        )
     }
 
     /// The raw file request's address for `path`.
@@ -920,7 +958,12 @@ impl Recorded {
         self.nodes().1
     }
 
-    /// The listing GitHub answers for the commit: `{sha, url, tree, truncated}`.
+    /// The commit metadata fields the collector reads.
+    pub fn metadata(&self) -> Value {
+        json!({"sha": self.commit, "tree": {"sha": self.tree_id()}})
+    }
+
+    /// The listing GitHub answers for the root tree: `{sha, url, tree, truncated}`.
     pub fn listing(&self) -> Value {
         let (nodes, root) = self.nodes();
         let base = self.api_base();
@@ -946,12 +989,17 @@ impl Recorded {
         json!({"sha": root, "url": format!("{base}/git/trees/{root}"), "tree": tree, "truncated": false})
     }
 
-    /// Scripts the commit answer, the listing and every file's raw answer onto `transport`.
+    /// Scripts the HEAD and commit metadata answers, the listing and every file's raw answer.
     pub fn script(&self, transport: &RecordingTransport) {
         transport.answer(
             self.commit_url(),
             Response::new(200, self.commit.as_bytes())
                 .with_header("content-type", "application/vnd.github.sha; charset=utf-8"),
+        );
+        transport.answer(
+            self.metadata_url(),
+            Response::new(200, self.metadata().to_string())
+                .with_header("content-type", "application/json; charset=utf-8"),
         );
         let listing = serde_json::to_vec(&self.listing()).unwrap_or_default();
         transport.answer(

@@ -967,7 +967,7 @@ mod tests {
                     json!({"event": "cancelled"}),
                 ]
             );
-            assert_eq!(transport.requests().len(), 4);
+            assert_eq!(transport.requests().len(), 5);
             assert!(shell.session.tasks().list().is_empty());
             assert!(!home.0.join("oah").exists());
         }
