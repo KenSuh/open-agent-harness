@@ -350,11 +350,11 @@ CONCEPT_DIAGRAMS = (
     "concepts-routing-rules", "concepts-routing-skills", "concepts-impact-freshness",
     "concepts-impact-ranked", "concepts-review", "concepts-landing-local", "concepts-landing-checks",
 )
-DIAGRAMS = ("banner", "features", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review",
+DIAGRAMS = ("banner", "features", "how-it-works", "how-it-works-v1", "architecture-build", "architecture-land", "loop-start", "loop-review",
             *CONCEPT_DIAGRAMS)
 DIAGRAM_PAGES = {
-    "README.md": ("banner", "features", "how-it-works"),
-    "README.ko.md": ("banner-ko", "features-ko", "how-it-works-ko"),
+    "README.md": ("banner", "features", "how-it-works-v1"),
+    "README.ko.md": ("banner-ko", "features-ko", "how-it-works-v1-ko"),
     "docs/how-it-works.md": ("how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review"),
     "docs/ko/how-it-works.md": ("how-it-works-ko", "architecture-build-ko", "architecture-land-ko", "loop-start-ko", "loop-review-ko"),
     "docs/concepts.md": CONCEPT_DIAGRAMS,
