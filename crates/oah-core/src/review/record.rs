@@ -216,7 +216,28 @@ pub fn review(
                     detail,
                 });
             }
-            record(&identity, &spec, &snapshot, request)
+            let candidate = |key: &str| request.candidate.get(key).cloned().unwrap_or(Value::Null);
+            record_from_snapshot(
+                &identity,
+                &spec,
+                &snapshot,
+                SnapshotReview {
+                    repo: request.repo,
+                    path: request.path,
+                    candidate: Candidate {
+                        provider: request
+                            .candidate
+                            .get("provider")
+                            .cloned()
+                            .unwrap_or_else(|| json!("github")),
+                        query_id: candidate("query_id"),
+                        hit: candidate("hit"),
+                        seed: candidate("seed"),
+                    },
+                    allow: request.allow,
+                    checked_at: utc_text(request.now),
+                },
+            )
         }
         _ => {
             let listed = if problems.is_empty() {
@@ -252,11 +273,19 @@ fn text_of<'a>(item: &'a Value, key: &str) -> &'a str {
     item.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn record(
+pub(super) struct SnapshotReview<'a> {
+    pub repo: &'a str,
+    pub path: &'a str,
+    pub candidate: Candidate,
+    pub allow: &'a [String],
+    pub checked_at: String,
+}
+
+pub(super) fn record_from_snapshot(
     identity: &Identity,
     spec: &SourceSpec,
     snapshot: &Snapshot,
-    request: &ReviewRequest<'_>,
+    request: SnapshotReview<'_>,
 ) -> Result<ReviewedSkillV1, ReviewError> {
     let manifest = &snapshot.manifest;
     let folder = format!("{}/", request.path);
@@ -318,8 +347,9 @@ fn record(
         .filter(|item| !item.present)
         .map(|item| format!("missing-reference: {}", item.path))
         .collect();
-    let hit = request.candidate.get("hit").cloned().unwrap_or(Value::Null);
-    let hit_name = hit
+    let hit_name = request
+        .candidate
+        .hit
         .as_object()
         .filter(|hit| !hit.is_empty())
         .and_then(|hit| hit.get("name"))
@@ -355,19 +385,9 @@ fn record(
         .get("license")
         .and_then(|license| license.get("files"))
         .and_then(Value::as_array);
-    let candidate = |key: &str| request.candidate.get(key).cloned().unwrap_or(Value::Null);
     let mut record = ReviewedSkillV1 {
         version: 1,
-        candidate: Candidate {
-            provider: request
-                .candidate
-                .get("provider")
-                .cloned()
-                .unwrap_or_else(|| json!("github")),
-            query_id: candidate("query_id"),
-            hit,
-            seed: candidate("seed"),
-        },
+        candidate: request.candidate,
         source: RecordSource {
             provider: "github".to_string(),
             source_id: identity.source_id.clone(),
@@ -425,7 +445,7 @@ fn record(
         screening: screen,
         status,
         reason,
-        checked_at: utc_text(request.now),
+        checked_at: request.checked_at,
         policy_digest: policy_digest(request.allow),
         id: String::new(),
     };

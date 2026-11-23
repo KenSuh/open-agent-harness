@@ -9,9 +9,10 @@
 //! * [`record`]: `ReviewedSkillV1` and [`record::review`]; [`gate`]: the pure install gate.
 //! * [`store`]: the reviews and snapshots under `OAH_HOME/state` (CONTRACTS C9) and [`store::review_and_store`],
 //!   the review operation over a collector: identity check, record, `unchanged`, writes, gate.
+//! * [`delivery`]: admission of a stored review and its exact snapshot for a confirmed project skill operation.
 //!
-//! Skill text and metadata are only ever data here: nothing is installed, executed or delivered, and nothing is
-//! fetched except through the collector a caller passes in. The
+//! Skill text and metadata are only ever data here. Collection uses the caller's collector, and admission
+//! returns verified bytes for the caller to publish. The
 //! v0.4.0 regular expressions are kept as written and read by a private matcher with Python's rules; the limits of
 //! the Unicode tables behind it are listed in its helper module.
 //!
@@ -23,6 +24,7 @@ mod license_texts;
 mod pattern;
 mod pystr;
 
+pub mod delivery;
 pub mod frontmatter;
 pub mod gate;
 pub mod identity;
