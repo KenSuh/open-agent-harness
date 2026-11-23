@@ -4,9 +4,9 @@
 //! directory handles, the cooperative lock, and its acquisition receipts outside the live tree.
 //! It supports local APFS and fixed local NTFS. Updates use two non-replacing moves. Between
 //! them the old tree is in the receipt's recovery directory. On failure it returns to a vacant
-//! live name when verifiable. Repeating the same confirmed request verifies both trees and resumes.
+//! live name when verifiable. A verified rollback can resume or accept a different confirmed review.
 //! Each successful update retains its predecessor. A later update verifies and prunes that backup
-//! before staging the next revision. Unpublished drafts and uncertain entries stay available for inspection.
+//! before staging the next revision. Superseded generations remain available for inspection.
 
 #[cfg(any(target_os = "macos", windows))]
 use super::Fingerprint;
@@ -178,20 +178,33 @@ impl From<io::Error> for PublishError {
     }
 }
 
-/// Hold this handle for the lifetime of the project selection, including across confirmation.
+/// Keep the selected project and session home identities across confirmation.
 #[derive(Clone, Debug)]
 pub struct ProjectRoot {
     #[cfg(any(target_os = "macos", windows))]
-    dir: native::Dir,
+    project: native::Selection,
+    #[cfg(any(target_os = "macos", windows))]
+    home: native::Selection,
 }
 
 #[cfg(any(target_os = "macos", windows))]
 impl ProjectRoot {
-    /// Opens every component of the selected absolute path as a plain directory without writing.
-    pub fn open(path: &Path) -> Result<Self, PublishError> {
-        Ok(Self {
-            dir: native::Dir::project(path)?,
-        })
+    /// Qualifies the absolute project and session home paths without writing.
+    pub fn open(path: &Path, session_home: &Path) -> Result<Self, PublishError> {
+        let (home, home_dir) = native::Selection::open(session_home)?;
+        let (project, project_dir) = native::Selection::open(path)?;
+        project_dir.outside_home_metadata(&home_dir)?;
+        Ok(Self { project, home })
+    }
+
+    fn with_project<T>(
+        &self,
+        operation: impl FnOnce(&native::Dir) -> Result<T, PublishError>,
+    ) -> Result<T, PublishError> {
+        let home = self.home.pin()?;
+        let project = self.project.pin()?;
+        project.outside_home_metadata(&home)?;
+        operation(&project)
     }
 
     /// Returns a managed acquisition only after verifying the receipt, live object and complete inventory.
@@ -201,7 +214,7 @@ impl ProjectRoot {
         engine: Engine,
         leaf: &SkillLeaf,
     ) -> Result<Option<Acquisition>, PublishError> {
-        transaction::installed(&self.dir, engine, leaf)
+        self.with_project(|dir| transaction::installed(dir, engine, leaf))
     }
 
     /// With no expected revision, installs into a vacant location or verifies an exact duplicate.
@@ -215,13 +228,15 @@ impl ProjectRoot {
         files: &BTreeMap<String, Vec<u8>>,
         expected_review_id: Option<&str>,
     ) -> Result<PublishStatus, PublishError> {
-        transaction::apply(&self.dir, engine, leaf, binding, files, expected_review_id)
+        self.with_project(|dir| {
+            transaction::apply(dir, engine, leaf, binding, files, expected_review_id)
+        })
     }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
 impl ProjectRoot {
-    pub fn open(_: &Path) -> Result<Self, PublishError> {
+    pub fn open(_: &Path, _: &Path) -> Result<Self, PublishError> {
         Err(PublishError::Unsupported)
     }
     pub fn installed(&self, _: Engine, _: &SkillLeaf) -> Result<Option<Acquisition>, PublishError> {

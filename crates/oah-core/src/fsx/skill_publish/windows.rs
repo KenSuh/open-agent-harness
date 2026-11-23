@@ -104,10 +104,6 @@ pub(super) fn identity(file: &File) -> Result<ObjectId> {
     })
 }
 
-pub(super) fn inspect_directory_identity(path: &Path) -> Result<ObjectId> {
-    identity(&open_directory(path, FILE_READ_ATTRIBUTES)?)
-}
-
 pub(super) fn open_root(path: &Path) -> Result<File> {
     pin_directory(path)
 }

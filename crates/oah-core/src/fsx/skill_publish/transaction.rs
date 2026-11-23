@@ -2,7 +2,7 @@ use super::inventory::{Payload, validate};
 use super::native::{Dir, FileAccess};
 use super::{
     Acquisition, Engine, Fingerprint, ObjectId, PublishError, PublishStatus, ReviewBinding,
-    SkillLeaf,
+    SkillLeaf, os,
 };
 use crate::review::identity::portable_component_key;
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,12 @@ impl Scope {
         let mut last = 0;
         for entry in self.slot.names()? {
             let name = entry.to_str().ok_or(PublishError::InvalidReceipt)?;
-            if name.starts_with("build-") {
+            if name.strip_prefix("build-").is_some_and(|id| {
+                id.len() == 16
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            }) {
                 continue;
             }
             let number = name
@@ -99,6 +104,7 @@ impl Scope {
             return Err(PublishError::InvalidReceipt);
         }
         let file = dir.regular("receipt.json", FileAccess::Read)?;
+        os::plain_payload(&file)?;
         let mut bytes = Vec::new();
         file.take(RECEIPT_LIMIT + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > RECEIPT_LIMIT {
@@ -107,13 +113,17 @@ impl Scope {
         let sealed: Sealed =
             serde_json::from_slice(&bytes).map_err(|_| PublishError::InvalidReceipt)?;
         let record = sealed.record;
+        let valid_version = match record.version {
+            1 => (last == 1) == record.previous.is_none(),
+            2 => last != 1 || record.previous.is_none(),
+            _ => false,
+        };
         if record.digest()? != sealed.sha256
-            || record.version != 1
+            || !valid_version
             || record.number != last
             || record.target != self.target
             || record.generation != *dir.id()
             || !record.next.valid()
-            || (last == 1) != record.previous.is_none()
             || record.previous.as_ref().is_some_and(|old| {
                 !old.valid()
                     || !old.binding.same_source(&record.next.binding)
@@ -122,8 +132,15 @@ impl Scope {
         {
             return Err(PublishError::InvalidReceipt);
         }
+        let marker = format!("published-{}", sealed.sha256);
+        let phase = Phase::read(&dir, &record, &marker)?;
         dir.check()?;
-        Ok(Some(Generation { dir, record }))
+        Ok(Some(Generation {
+            dir,
+            record,
+            marker,
+            phase,
+        }))
     }
 
     fn prepare(
@@ -137,7 +154,7 @@ impl Scope {
         let dir = self.slot.create_dir(&draft)?;
         let next = Acquisition::stage(&dir.create_dir("next")?, binding, files)?;
         let record = Record {
-            version: 1,
+            version: 2,
             number,
             generation: dir.id().clone(),
             target: self.target.clone(),
@@ -164,6 +181,16 @@ impl Scope {
 
     fn live_tree(&self) -> Result<Option<Dir>> {
         self.live.directory(&self.target.leaf, false)
+    }
+
+    fn require_vacancy(&self, expected: Option<&str>) -> Result<()> {
+        if expected.is_some() {
+            return Err(PublishError::StaleRevision);
+        }
+        if self.live.contains(&self.target.leaf)? {
+            return Err(PublishError::Occupied);
+        }
+        Ok(())
     }
 }
 
@@ -205,9 +232,83 @@ struct Sealed {
 struct Generation {
     dir: Dir,
     record: Record,
+    marker: String,
+    phase: Phase,
+}
+
+#[derive(Clone, Copy)]
+enum Backup {
+    Previous,
+    Pruning,
+}
+
+enum Phase {
+    Pending {
+        parked: bool,
+    },
+    Unstaged {
+        published: bool,
+        backup: Option<Backup>,
+    },
+}
+
+impl Phase {
+    fn read(dir: &Dir, record: &Record, marker: &str) -> Result<Self> {
+        os::plain_payload(dir.file())?;
+        let (mut next, mut published) = (false, false);
+        let mut backup = None;
+        for name in dir.names()? {
+            match name.to_str() {
+                Some("receipt.json") => {}
+                Some("next") => next = true,
+                Some("previous") if backup.is_none() => backup = Some(Backup::Previous),
+                Some("pruning") if backup.is_none() => backup = Some(Backup::Pruning),
+                Some(name) if name == marker => {
+                    let file = dir.regular(marker, FileAccess::Read)?;
+                    if file.metadata()?.len() != 0 {
+                        return Err(PublishError::InvalidReceipt);
+                    }
+                    os::plain_payload(&file)?;
+                    published = true;
+                }
+                _ => return Err(PublishError::InvalidReceipt),
+            }
+        }
+        if backup.is_some() && record.previous.is_none() {
+            return Err(PublishError::InvalidReceipt);
+        }
+        match (next, published, backup) {
+            (true, false, backup @ (None | Some(Backup::Previous))) => Ok(Self::Pending {
+                parked: backup.is_some(),
+            }),
+            (false, published, backup) => Ok(Self::Unstaged { published, backup }),
+            (true, _, _) => Err(PublishError::InvalidReceipt),
+        }
+    }
 }
 
 impl Generation {
+    fn mark_published(&self) -> Result<()> {
+        self.dir.write_new(&self.marker, &[])?;
+        Ok(())
+    }
+
+    fn verify_vacant_history(&self, published: bool, backup: Option<Backup>) -> Result<()> {
+        if !published {
+            return Err(self.recovery(PublishError::Changed));
+        }
+        match backup {
+            Some(Backup::Previous) => self
+                .record
+                .previous
+                .as_ref()
+                .ok_or(PublishError::InvalidReceipt)?
+                .verify(&self.dir.child("previous")?),
+            Some(Backup::Pruning) => Err(PublishError::Pending),
+            None => Ok(()),
+        }
+    }
+
     fn prune_previous(&self) -> Result<()> {
         let Some(old) = &self.record.previous else {
             return Ok(());
@@ -263,7 +364,9 @@ impl Generation {
         self.retire(scope)?;
         self.dir
             .move_new("next", &scope.live, &scope.target.leaf, &next.directory)?;
-        next.verify(&scope.live.child(&scope.target.leaf)?)?;
+        let live = scope.live.child(&scope.target.leaf)?;
+        next.verify(&live)?;
+        self.mark_published()?;
         Ok(if self.record.previous.is_some() {
             PublishStatus::Updated
         } else {
@@ -330,7 +433,7 @@ pub(super) fn installed(
     let Some(gen_record) = scope.latest()? else {
         return Ok(None);
     };
-    let pending = gen_record.dir.contains("next")?;
+    let pending = matches!(gen_record.phase, Phase::Pending { .. });
     let result = (|| {
         let live = scope.live_tree()?.ok_or(PublishError::Changed)?;
         let record = &gen_record.record;
@@ -401,59 +504,93 @@ fn apply_locked(
     files: &Payload,
     expected: Option<&str>,
 ) -> Result<PublishStatus> {
-    let (number, previous) = match scope.latest()? {
-        None => {
-            if expected.is_some() {
-                return Err(PublishError::StaleRevision);
-            }
-            if scope.live.contains(&scope.target.leaf)? {
-                return Err(PublishError::Occupied);
-            }
-            (1, None)
-        }
-        Some(generation) => {
-            let record = &generation.record;
-            if generation.dir.contains("next")? {
-                if expected != record.expected() || !record.next.matches(binding, files) {
-                    return Err(generation.recovery(PublishError::Pending));
-                }
+    let Some(generation) = scope.latest()? else {
+        scope.require_vacancy(expected)?;
+        return scope.prepare(1, None, binding, files)?.complete(scope);
+    };
+    let record = &generation.record;
+    let number = record.number;
+    let exact = record.next.matches(binding, files);
+    let review_mismatch = !exact && record.next.binding.review_id == binding.review_id;
+    let previous = match generation.phase {
+        Phase::Pending { parked } => {
+            if exact && expected == record.expected() {
                 return generation.complete(scope);
             }
-            let live = scope.live_tree()?.ok_or(PublishError::Changed)?;
-            record.next.verify(&live)?;
-            if let Some(revision) = expected
-                && revision != record.next.binding.review_id
-                && !(Some(revision) == record.expected() && record.next.matches(binding, files))
-            {
-                return Err(PublishError::StaleRevision);
+            if parked {
+                return Err(generation.recovery(PublishError::Pending));
             }
-            if record.next.matches(binding, files) {
-                return Ok(PublishStatus::Unchanged);
-            }
-            if expected.is_none() {
-                return Err(PublishError::Occupied);
-            }
-            if !record.next.binding.same_source(binding) {
-                return Err(PublishError::SourceMismatch);
-            }
-            if record.next.binding.review_id == binding.review_id {
+            if review_mismatch {
                 return Err(PublishError::InvalidPayload);
             }
-            if record.next.same_bytes(files) {
-                return Ok(PublishStatus::Unchanged);
+            record.next.verify(&generation.dir.child("next")?)?;
+            match &record.previous {
+                Some(old) => {
+                    old.verify(&scope.live_tree()?.ok_or(PublishError::Changed)?)?;
+                    authorize_update(old, binding, expected)?;
+                    if old.same_bytes(files) {
+                        return Ok(PublishStatus::Unchanged);
+                    }
+                }
+                None => scope.require_vacancy(expected)?,
             }
-            generation.prune_previous()?;
-            (
-                record
-                    .number
-                    .checked_add(1)
-                    .ok_or(PublishError::InvalidReceipt)?,
-                Some(generation.record.next),
-            )
+            generation.record.previous
+        }
+        Phase::Unstaged { published, backup } => {
+            if let Some(live) = scope.live_tree()? {
+                record.next.verify(&live)?;
+                if exact {
+                    if expected.is_some()
+                        && expected != Some(record.next.binding.review_id.as_str())
+                        && expected != record.expected()
+                    {
+                        return Err(PublishError::StaleRevision);
+                    }
+                } else {
+                    authorize_update(&record.next, binding, expected)?;
+                }
+                if !published {
+                    generation.mark_published()?;
+                }
+                if exact || record.next.same_bytes(files) {
+                    return Ok(PublishStatus::Unchanged);
+                }
+                drop(live);
+                generation.prune_previous()?;
+                Some(generation.record.next)
+            } else {
+                if expected.is_some() {
+                    return Err(PublishError::Changed);
+                }
+                generation.verify_vacant_history(published, backup)?;
+                if review_mismatch {
+                    return Err(PublishError::InvalidPayload);
+                }
+                None
+            }
         }
     };
+    let number = number.checked_add(1).ok_or(PublishError::InvalidReceipt)?;
     let generation = scope.prepare(number, previous, binding, files)?;
     generation.complete(scope)
+}
+
+fn authorize_update(
+    acquisition: &Acquisition,
+    binding: &ReviewBinding,
+    expected: Option<&str>,
+) -> Result<()> {
+    let revision = expected.ok_or(PublishError::Occupied)?;
+    if revision != acquisition.binding.review_id {
+        return Err(PublishError::StaleRevision);
+    }
+    if !acquisition.binding.same_source(binding) {
+        return Err(PublishError::SourceMismatch);
+    }
+    if revision == binding.review_id {
+        return Err(PublishError::InvalidPayload);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -465,10 +602,11 @@ mod tests {
     use std::fs;
 
     fn scope(f: &Fixture) -> (Dir, Scope) {
-        let state = below(&f.root.dir, &[".oah", "project-skills-v1"], false)
+        let root = f.root.project.pin().unwrap();
+        let state = below(&root, &[".oah", "project-skills-v1"], false)
             .unwrap()
             .unwrap();
-        let scope = Scope::open(&f.root.dir, &state, Engine::Codex, &f.leaf, false)
+        let scope = Scope::open(&root, &state, Engine::Codex, &f.leaf, false)
             .unwrap()
             .unwrap();
         (state, scope)
@@ -490,9 +628,17 @@ mod tests {
                 .unwrap()
         };
         assert!(!f.live().exists());
+        assert!(matches!(
+            f.apply(3, Some(&binding(1).review_id)),
+            Err(PublishError::Recovery { .. })
+        ));
+        assert!(matches!(
+            f.apply(3, None),
+            Err(PublishError::Recovery { .. })
+        ));
         fs::create_dir(f.live()).unwrap();
         fs::write(f.live().join("keep"), b"intervening directory").unwrap();
-        let reopened = super::super::ProjectRoot::open(&f.path).unwrap();
+        let reopened = super::super::ProjectRoot::open(&f.path, &f.home).unwrap();
         let retry = || {
             reopened.apply(
                 Engine::Codex,
@@ -567,8 +713,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_native_publication_failure_restores_the_old_tree_to_a_vacant_destination() {
+    fn rolled_back_update() -> (Fixture, Acquisition) {
         let f = Fixture::new();
         f.apply(1, None).unwrap();
         let old = f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap();
@@ -613,9 +758,178 @@ mod tests {
             old
         );
         assert!(!next.parent().unwrap().join("previous").exists());
+        (f, old)
+    }
+
+    #[test]
+    fn a_native_publication_failure_restores_the_old_tree_to_a_vacant_destination() {
+        let (f, old) = rolled_back_update();
         assert_eq!(
             f.apply(2, Some(&old.binding.review_id)).unwrap(),
             PublishStatus::Updated
+        );
+    }
+
+    #[test]
+    fn a_different_confirmed_update_can_follow_a_verified_rollback() {
+        let (f, old) = rolled_back_update();
+        assert!(matches!(
+            f.apply(3, Some(&binding(9).review_id)),
+            Err(PublishError::StaleRevision)
+        ));
+        let mut wrong_source = binding(3);
+        wrong_source.repo = "fixture/other".into();
+        assert!(matches!(
+            f.root.apply(
+                Engine::Codex,
+                &f.leaf,
+                &wrong_source,
+                &files(3),
+                Some(&old.binding.review_id),
+            ),
+            Err(PublishError::SourceMismatch)
+        ));
+        assert_eq!(
+            f.apply(3, Some(&old.binding.review_id)).unwrap(),
+            PublishStatus::Updated
+        );
+        assert_eq!(
+            f.apply(3, Some(&old.binding.review_id)).unwrap(),
+            PublishStatus::Unchanged
+        );
+        let live = f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap();
+        assert_eq!(live.binding, binding(3));
+        assert_eq!(
+            fs::read(f.live().join("references/nested/note.txt")).unwrap(),
+            [3, 0, 255]
+        );
+    }
+
+    #[test]
+    fn a_new_install_can_follow_a_verified_unpublished_install() {
+        let f = Fixture::new();
+        let next = stage_initial_install(&f);
+        assert!(next.is_dir());
+        assert!(!f.live().exists());
+        assert_eq!(f.apply(2, None).unwrap(), PublishStatus::Installed);
+        let live = f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap();
+        assert_eq!(live.binding, binding(2));
+        assert_eq!(
+            fs::read(f.live().join("references/nested/note.txt")).unwrap(),
+            [2, 0, 255]
+        );
+    }
+
+    fn stage_initial_install(f: &Fixture) -> std::path::PathBuf {
+        let root = f.root.project.pin().unwrap();
+        let state = below(&root, &[".oah", "project-skills-v1"], true)
+            .unwrap()
+            .unwrap();
+        state
+            .with_lock(|| {
+                let scope = Scope::open(&root, &state, Engine::Codex, &f.leaf, true)?.unwrap();
+                let staged = scope.prepare(1, None, &binding(1), &files(1))?;
+                Ok(staged.dir.path().join("next"))
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_new_install_preserves_unverified_staging_and_foreign_entries() {
+        for variant in [
+            "staged edit",
+            "missing stage",
+            "unknown journal entry",
+            "foreign leaf",
+        ] {
+            let f = Fixture::new();
+            let next = stage_initial_install(&f);
+            let keep = match variant {
+                "staged edit" => next.join("SKILL.md"),
+                "missing stage" => {
+                    let moved = f.path.join("saved");
+                    fs::rename(&next, &moved).unwrap();
+                    moved.join("SKILL.md")
+                }
+                "unknown journal entry" => next.with_file_name("local-note"),
+                "foreign leaf" => {
+                    fs::create_dir(f.live()).unwrap();
+                    f.live().join("SKILL.md")
+                }
+                _ => unreachable!(),
+            };
+            fs::write(&keep, b"user bytes").unwrap();
+            let refused = f.apply(2, None);
+            assert!(
+                match variant {
+                    "staged edit" | "missing stage" =>
+                        matches!(refused, Err(PublishError::Changed)),
+                    "unknown journal entry" => matches!(refused, Err(PublishError::InvalidReceipt)),
+                    "foreign leaf" => matches!(refused, Err(PublishError::Occupied)),
+                    _ => unreachable!(),
+                },
+                "{variant}: {refused:?}"
+            );
+            assert_eq!(fs::read(keep).unwrap(), b"user bytes");
+            if variant != "foreign leaf" {
+                assert!(!f.live().exists());
+            }
+        }
+    }
+
+    #[test]
+    fn a_legacy_publication_needs_verified_live_bytes_before_reinstall_at_vacancy() {
+        let f = Fixture::new();
+        f.apply(1, None).unwrap();
+        let prior = {
+            let (state, scope) = scope(&f);
+            state
+                .with_lock(|| {
+                    let old = scope.latest()?.unwrap().record.next;
+                    let mut staged = scope.prepare(2, Some(old), &binding(2), &files(2))?;
+                    staged.record.version = 1;
+                    let receipt = Sealed {
+                        sha256: staged.record.digest()?,
+                        record: staged.record,
+                    };
+                    fs::write(
+                        staged.dir.path().join("receipt.json"),
+                        serde_json::to_vec(&receipt).unwrap(),
+                    )?;
+                    let staged = scope.latest()?.unwrap();
+                    staged.retire(&scope)?;
+                    staged.dir.move_new(
+                        "next",
+                        &scope.live,
+                        &scope.target.leaf,
+                        &staged.record.next.directory,
+                    )?;
+                    Ok(staged.dir.path().join("previous"))
+                })
+                .unwrap()
+        };
+        let live = f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap();
+        assert_eq!(live.binding, binding(2));
+        let saved = f.path.join("saved-live");
+        fs::rename(f.live(), &saved).unwrap();
+        assert!(matches!(
+            f.apply(3, None),
+            Err(PublishError::Recovery { path, .. }) if path == prior
+        ));
+        assert_eq!(
+            fs::read(prior.join("references/nested/note.txt")).unwrap(),
+            [1, 0, 255]
+        );
+        fs::rename(&saved, f.live()).unwrap();
+        assert_eq!(
+            f.apply(2, Some(&binding(1).review_id)).unwrap(),
+            PublishStatus::Unchanged
+        );
+        fs::remove_dir_all(f.live()).unwrap();
+        assert_eq!(f.apply(3, None).unwrap(), PublishStatus::Installed);
+        assert_eq!(
+            fs::read(prior.join("SKILL.md")).unwrap(),
+            files(1)["SKILL.md"]
         );
     }
 

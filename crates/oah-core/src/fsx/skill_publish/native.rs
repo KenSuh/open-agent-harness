@@ -27,8 +27,72 @@ struct Pinned {
     id: ObjectId,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct Selection {
+    #[cfg(target_os = "macos")]
+    dir: Dir,
+    #[cfg(windows)]
+    path: PathBuf,
+    #[cfg(windows)]
+    identities: Vec<ObjectId>,
+}
+
+impl Selection {
+    pub(super) fn open(path: &Path) -> Result<(Self, Dir)> {
+        let dir = Dir::open(path)?;
+        let selection = Self {
+            #[cfg(target_os = "macos")]
+            dir: dir.clone(),
+            #[cfg(windows)]
+            path: path.to_owned(),
+            #[cfg(windows)]
+            identities: dir.ancestors().map(|part| part.id().clone()).collect(),
+        };
+        Ok((selection, dir))
+    }
+
+    #[cfg(windows)]
+    pub(super) fn pin(&self) -> Result<Dir> {
+        let dir = Dir::open(&self.path)?;
+        if dir.ancestors().map(Dir::id).ne(&self.identities) {
+            return Err(PublishError::UnsafePath);
+        }
+        Ok(dir)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn pin(&self) -> Result<Dir> {
+        self.dir.check()?;
+        Ok(self.dir.clone())
+    }
+}
+
 impl Dir {
-    pub(super) fn project(path: &Path) -> Result<Self> {
+    fn open(path: &Path) -> Result<Self> {
+        let dir = Self::walk(path)?;
+        #[cfg(windows)]
+        let dir = {
+            let canonical = path.canonicalize()?;
+            if canonical == dir.path() {
+                dir
+            } else {
+                let physical = Self::walk(&canonical)?;
+                if physical
+                    .ancestors()
+                    .map(Dir::id)
+                    .ne(dir.ancestors().map(Dir::id))
+                {
+                    return Err(PublishError::UnsafePath);
+                }
+                physical
+            }
+        };
+        os::qualify(dir.file())?;
+        dir.check()?;
+        Ok(dir)
+    }
+
+    fn walk(path: &Path) -> Result<Self> {
         let root = os::root(path)?;
         let mut dir = Self::pin(None, root.clone(), os::open_root(&root)?)?;
         for component in path
@@ -41,42 +105,38 @@ impl Dir {
             };
             dir = dir.open_child(name, false)?;
         }
-        os::qualify(dir.file())?;
-        dir.outside_home_skills(&std::env::home_dir().ok_or(PublishError::Unsupported)?)?;
-        dir.check()?;
         Ok(dir)
     }
 
-    pub(super) fn outside_home_skills(&self, home: &Path) -> Result<()> {
-        let home = home.canonicalize()?;
-        #[cfg(windows)]
-        let home_id = os::inspect_directory_identity(&home)?;
-        #[cfg(target_os = "macos")]
-        let home_id = os::identity(&os::open_root(&home)?)?;
-        let mut branch: Vec<&OsStr> = Vec::new();
-        let mut current = Some(self);
-        while let Some(dir) = current {
-            if *dir.id() == home_id {
-                let mut relative = branch
-                    .iter()
-                    .rev()
-                    .map(|s| s.to_str().map(portable_component_key));
-                if branch.is_empty()
-                    || (matches!(
-                        relative.next().flatten().as_deref(),
-                        Some(".claude" | ".agents")
-                    ) && relative.next().flatten().as_deref() == Some("skills"))
-                {
-                    return Err(PublishError::UnsafePath);
-                }
-                break;
-            }
-            if let Some(name) = dir.path().file_name() {
-                branch.push(name);
-            }
-            current = dir.0.parent.as_ref();
+    pub(super) fn outside_home_metadata(&self, home: &Dir) -> Result<()> {
+        if self.in_metadata_tree_of(home) || home.in_metadata_tree_of(self) {
+            return Err(PublishError::UnsafePath);
         }
         Ok(())
+    }
+
+    fn in_metadata_tree_of(&self, root: &Dir) -> bool {
+        let mut child: Option<&Dir> = None;
+        for dir in self.ancestors() {
+            if dir.id() == root.id() {
+                return child.is_none_or(|part| {
+                    matches!(
+                        part.path()
+                            .file_name()
+                            .and_then(OsStr::to_str)
+                            .map(portable_component_key)
+                            .as_deref(),
+                        Some(".claude" | ".agents" | ".oah")
+                    )
+                });
+            }
+            child = Some(dir);
+        }
+        false
+    }
+
+    fn ancestors(&self) -> impl Iterator<Item = &Dir> {
+        std::iter::successors(Some(self), |dir| dir.0.parent.as_ref())
     }
 
     fn pin(parent: Option<Dir>, path: PathBuf, file: File) -> Result<Self> {
@@ -101,13 +161,11 @@ impl Dir {
 
     pub(super) fn lineage(&self, root: &Self) -> Result<Vec<ObjectId>> {
         let mut ids = Vec::new();
-        let mut next = Some(self);
-        while let Some(dir) = next {
+        for dir in self.ancestors() {
             ids.push(dir.id().clone());
             if Arc::ptr_eq(&root.0, &dir.0) {
                 return Ok(ids);
             }
-            next = dir.0.parent.as_ref();
         }
         Err(PublishError::UnsafePath)
     }

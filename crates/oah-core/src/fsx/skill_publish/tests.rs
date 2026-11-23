@@ -25,17 +25,23 @@ pub(super) struct Fixture {
     pub root: ProjectRoot,
     pub leaf: SkillLeaf,
     pub path: PathBuf,
+    pub home: PathBuf,
     _temp: TempDir,
 }
 
 impl Fixture {
     pub fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().canonicalize().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let path = base.join("project");
+        let home = base.join("home");
+        fs::create_dir(&path).unwrap();
+        fs::create_dir(&home).unwrap();
         Self {
-            root: ProjectRoot::open(&path).unwrap(),
+            root: ProjectRoot::open(&path, &home).unwrap(),
             leaf: SkillLeaf::new("notes").unwrap(),
             path,
+            home,
             _temp: temp,
         }
     }
@@ -70,7 +76,7 @@ fn publishes_exact_nested_bytes_for_both_engines_and_reopens_after_restart() {
             PublishStatus::Installed
         );
         let reopened =
-            ProjectRoot::open(&crate::paths::canonical_folder(&f.path).unwrap()).unwrap();
+            ProjectRoot::open(&crate::paths::canonical_folder(&f.path).unwrap(), &f.home).unwrap();
         let acq = reopened.installed(engine, &f.leaf).unwrap().unwrap();
         assert_eq!(acq.binding, binding(1));
         assert_eq!(
@@ -206,7 +212,7 @@ fn refuses_linked_project_ancestors_state_engine_and_nested_acquisitions() {
             "selected" => {
                 let alias = f.path.join("alias");
                 directory_link(&outside, &alias);
-                assert!(ProjectRoot::open(&alias).is_err());
+                assert!(ProjectRoot::open(&alias, &f.home).is_err());
             }
             _ => {
                 directory_link(&outside, &f.path.join(name));
@@ -239,19 +245,20 @@ fn refuses_invalid_input_before_creating_project_state() {
 #[test]
 fn native_nonreplacing_move_preserves_an_occupied_directory() {
     let f = Fixture::new();
-    let source = f.root.dir.create_dir("source").unwrap();
+    let root = f.root.project.pin().unwrap();
+    let source = root.create_dir("source").unwrap();
     let id = source.id().clone();
     source.write_new("note", b"original").unwrap();
     drop(source);
-    let empty = f.root.dir.create_dir("empty").unwrap();
+    let empty = root.create_dir("empty").unwrap();
     let empty_id = empty.id().clone();
     drop(empty);
-    assert!(os::rename_new(&f.root.dir, "source", &f.root.dir, "empty", &id).is_err());
-    assert_eq!(f.root.dir.child("empty").unwrap().id(), &empty_id);
+    assert!(os::rename_new(&root, "source", &root, "empty", &id).is_err());
+    assert_eq!(root.child("empty").unwrap().id(), &empty_id);
     assert_eq!(fs::read_dir(f.path.join("empty")).unwrap().count(), 0);
     fs::create_dir(f.path.join("occupied")).unwrap();
     fs::write(f.path.join("occupied/note"), b"neighbor").unwrap();
-    assert!(os::rename_new(&f.root.dir, "source", &f.root.dir, "occupied", &id).is_err());
+    assert!(os::rename_new(&root, "source", &root, "occupied", &id).is_err());
     assert_eq!(fs::read(f.path.join("source/note")).unwrap(), b"original");
     assert_eq!(fs::read(f.path.join("occupied/note")).unwrap(), b"neighbor");
 }
@@ -273,6 +280,31 @@ fn a_new_review_of_unchanged_files_keeps_the_exact_prior_acquisition() {
     assert_eq!(
         f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap(),
         prior
+    );
+}
+
+#[test]
+fn a_new_install_can_follow_removal_of_the_managed_leaf() {
+    let f = Fixture::new();
+    f.apply(1, None).unwrap();
+    f.apply(2, Some(&binding(1).review_id)).unwrap();
+    fs::remove_dir_all(f.live()).unwrap();
+    assert!(f.apply(3, Some(&binding(2).review_id)).is_err());
+    assert!(!f.live().exists());
+
+    let mut new_source = binding(3);
+    new_source.repo = "fixture/replacement".into();
+    let install = || {
+        f.root
+            .apply(Engine::Codex, &f.leaf, &new_source, &files(3), None)
+    };
+    assert_eq!(install().unwrap(), PublishStatus::Installed);
+    assert_eq!(install().unwrap(), PublishStatus::Unchanged);
+    let live = f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap();
+    assert_eq!(live.binding, new_source);
+    assert_eq!(
+        fs::read(f.live().join("references/nested/note.txt")).unwrap(),
+        [3, 0, 255]
     );
 }
 
@@ -341,33 +373,77 @@ fn a_user_ignore_file_is_preserved_and_private_state_is_ignored_by_git() {
 }
 
 #[test]
-fn rejects_the_home_root_and_projects_inside_user_skill_trees() {
+fn rejects_the_session_home_and_its_metadata_trees() {
     let f = Fixture::new();
-    let project = f.path.join(".agents/skills/notes");
-    fs::create_dir_all(&project).unwrap();
     assert!(matches!(
-        f.root.dir.outside_home_skills(&f.path),
+        ProjectRoot::open(&f.home, &f.home),
         Err(PublishError::UnsafePath)
     ));
+    for subtree in [".claude", ".agents", ".oah"] {
+        let top = f.home.join(subtree);
+        let deep = top.join("nested/project");
+        fs::create_dir_all(&deep).unwrap();
+        for path in [&top, &deep] {
+            assert!(matches!(
+                ProjectRoot::open(path, &f.home),
+                Err(PublishError::UnsafePath)
+            ));
+        }
+        assert_eq!(fs::read_dir(deep).unwrap().count(), 0);
+    }
+
+    let nested_home = f.path.join(".oah/home");
+    fs::create_dir_all(&nested_home).unwrap();
     assert!(matches!(
-        ProjectRoot::open(&project)
-            .unwrap()
-            .dir
-            .outside_home_skills(&f.path),
+        ProjectRoot::open(&f.path, &nested_home),
         Err(PublishError::UnsafePath)
     ));
+
+    let ordinary = f.home.join("projects/notes");
+    fs::create_dir_all(&ordinary).unwrap();
+    let project = ProjectRoot::open(&ordinary, &f.home).unwrap();
+    assert_eq!(
+        project
+            .apply(Engine::Claude, &f.leaf, &binding(1), &files(1), None)
+            .unwrap(),
+        PublishStatus::Installed
+    );
+    assert_eq!(f.apply(1, None).unwrap(), PublishStatus::Installed);
 }
 
-#[cfg(target_os = "macos")]
+#[test]
+fn session_home_has_to_remain_a_physical_selection() {
+    let f = Fixture::new();
+    let alias = f.path.join("home-link");
+    directory_link(&f.home, &alias);
+    for unusable in [
+        Path::new("relative-home"),
+        &alias,
+        &f.path.join("missing-home"),
+    ] {
+        assert!(ProjectRoot::open(&f.path, unusable).is_err());
+    }
+    fs::rename(&f.home, f.home.with_file_name("former-home")).unwrap();
+    fs::create_dir(&f.home).unwrap();
+    assert!(matches!(f.apply(1, None), Err(PublishError::UnsafePath)));
+    assert!(!f.path.join(".oah").exists());
+    assert!(!f.path.join(".agents").exists());
+}
+
 #[test]
 fn a_replaced_selected_root_cannot_redirect_writes() {
     let f = Fixture::new();
     let selected = f.path.join("chosen");
     fs::create_dir(&selected).unwrap();
-    let root = ProjectRoot::open(&selected).unwrap();
+    let root = ProjectRoot::open(&selected, &f.home).unwrap();
+    assert!(root.installed(Engine::Codex, &f.leaf).unwrap().is_none());
     let moved = f.path.join("moved");
     fs::rename(&selected, &moved).unwrap();
     fs::create_dir(&selected).unwrap();
+    assert!(matches!(
+        root.installed(Engine::Codex, &f.leaf),
+        Err(PublishError::UnsafePath)
+    ));
     assert!(matches!(
         root.apply(Engine::Codex, &f.leaf, &binding(1), &files(1), None),
         Err(PublishError::UnsafePath)
@@ -409,7 +485,7 @@ fn a_pinned_ancestor_cannot_be_moved_until_released() {
     let f = Fixture::new();
     let project = f.path.join("ancestor/project");
     fs::create_dir_all(&project).unwrap();
-    let root = &f.root.dir;
+    let root = &f.root.project.pin().unwrap();
     let ancestor = root.child("ancestor").unwrap();
     let id = ancestor.id().clone();
 
