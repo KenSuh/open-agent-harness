@@ -3,6 +3,7 @@ import type {
   AgentsChangedDto,
   AgentsProbeReq,
   AppInfoDto,
+  ApplyProjectSkillReq,
   NoticeDto,
   ProjectDto,
   RefreshDto,
@@ -87,6 +88,8 @@ export interface FakeTransport extends Transport {
   workflowRequests: WorkflowProjectReq<StagesSetReq | PresetApplyReq | Record<string, never>>[];
   /** Every `start_review` request, in order. */
   reviewRequests: StartReviewReq[];
+  /** Every `apply_project_skill` request, in order. */
+  applyRequests: ApplyProjectSkillReq[];
   /** Sends an event to the channel of the review start at `index` (default: the newest). */
   emitReview(event: TaskEvent<ReviewResultDto>, index?: number): void;
 }
@@ -188,6 +191,13 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
     },
     workflowRequests: [],
     reviewRequests: [],
+    applyRequests: [],
+    async applyProjectSkill(req) {
+      fake.calls.push("apply_project_skill");
+      fake.applyRequests.push(req);
+      if (fake.override.applyProjectSkill) return fake.override.applyProjectSkill(req);
+      return { status: req.expected_review_id === null ? "installed" : "updated", review_id: req.review_id };
+    },
     async startReview(req, onEvent) {
       fake.calls.push("start_review");
       fake.reviewRequests.push(req);

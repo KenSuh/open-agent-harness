@@ -606,3 +606,39 @@ select:disabled {
 code {
   overflow-wrap: anywhere;
 }
+
+/* Skill install and update (apply flow) */
+.install-panel,
+.managed-update {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.install-panel {
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.install-panel h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.install-panel fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.managed-update > button,
+.install-panel > button,
+.review-result > button {
+  align-self: flex-start;
+}
+
+.apply-status p {
+  margin: 0;
+}

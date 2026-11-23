@@ -18,6 +18,15 @@ beforeEach(() => {
 });
 
 describe("tauri transport (standalone, mocked @tauri-apps/api)", () => {
+  it("calls apply_project_skill with the request fields under req", async () => {
+    invoke.mockResolvedValue({ status: "installed", review_id: "rec-1" });
+    const req = { project: "p1", engine: "codex" as const, review_id: "rec-1", expected_review_id: null, acknowledge_warnings: false };
+    expect(await createTauriTransport().applyProjectSkill(req)).toEqual({ status: "installed", review_id: "rec-1" });
+    expect(invoke.mock.calls).toEqual([["apply_project_skill", { req }]]);
+    invoke.mockRejectedValue({ code: "OAH_X", message: "no", hint: null });
+    await expect(createTauriTransport().applyProjectSkill(req)).rejects.toEqual({ code: "OAH_X", message: "no", hint: null });
+  });
+
   it("calls the exact M1-S1 command names with a single req argument", async () => {
     invoke.mockResolvedValue(null);
     const t = createTauriTransport();

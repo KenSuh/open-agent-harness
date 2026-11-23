@@ -15,6 +15,7 @@ import type {
 } from "./contract";
 import { toErrorDto, type Transport } from "./transport/types";
 import { useAgents } from "./useAgents";
+import { useSkillWrites } from "./useApply";
 
 export type Load<T> =
   | { status: "loading" }
@@ -72,6 +73,9 @@ export function useController(transport: Transport) {
       setToasts((current) => current.filter((item) => item.key !== key));
     }, TOAST_MS);
   }, []);
+
+  const notifyInfo = useCallback((text: string) => pushToast({ level: "info", text }), [pushToast]);
+  const { writes, inventoryRevision } = useSkillWrites(transport, projectRef, notifyInfo);
 
   const dismissToast = useCallback((key: number) => {
     setToasts((current) => current.filter((item) => item.key !== key));
@@ -289,5 +293,8 @@ export function useController(transport: Transport) {
     setTheme,
     dismissQuickStart,
     dismissToast,
+    notifyInfo,
+    writes,
+    inventoryRevision,
   };
 }

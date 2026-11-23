@@ -232,9 +232,21 @@ export function App({ transport }: { transport: Transport }) {
               {page === "team-workflow" && c.project ? (
                 <TeamWorkflow key={`${c.project.id}:${c.projectRevision}:${agentStatusKey}`} transport={transport} projectId={c.project.id} />
               ) : page === "explore" ? (
-                <ExploreView review={review} />
+                <ExploreView
+                  review={review}
+                  project={c.project}
+                  agents={agents.agents.status === "ready" ? agents.agents.value : null}
+                  writes={c.writes}
+                />
               ) : page === "installed" ? (
-                <InstalledView key={c.projectRevision} transport={transport} projectOpen={c.project !== null} />
+                <InstalledView
+                  key={c.projectRevision}
+                  transport={transport}
+                  projectOpen={c.project !== null}
+                  projectId={c.project?.id ?? null}
+                  writes={c.writes}
+                  inventoryRevision={c.inventoryRevision}
+                />
               ) : (
                 <p className="empty">Open a project to choose which agent does each section. Nothing to show.</p>
               )}
