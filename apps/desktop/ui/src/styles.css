@@ -453,6 +453,8 @@ select:disabled {
 /* Team Workflow (M2-S1) */
 .team-workflow {
   display: grid;
+  /* Keep the main pane's automatic minimum independent of the workflow's contents. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -477,7 +479,7 @@ select:disabled {
 
 .section-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -491,6 +493,11 @@ select:disabled {
   display: flex;
   gap: 6px;
   align-items: center;
+}
+
+.section-card select {
+  /* Disabled options still contribute to the select's intrinsic width. Let it shrink in the label. */
+  min-width: 0;
 }
 
 .presets {
