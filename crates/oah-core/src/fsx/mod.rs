@@ -11,7 +11,8 @@
 //!   fallback.
 //! * [`SelfWrites`] remembers OAH's own verified writes so a later watcher can tell them from external edits.
 //!
-//! Every failure is a typed [`FsxError`]; nothing here retries forever or claims a durability it cannot prove.
+//! [`skill_publish`] owns project skill acquisitions and reports transaction failures through its
+//! [`skill_publish::PublishError`]. The other primitives return [`FsxError`].
 
 mod atomic;
 mod error;
@@ -20,6 +21,7 @@ pub mod links;
 mod lock;
 mod ownership;
 mod selfwrite;
+pub mod skill_publish;
 mod staging;
 mod validation;
 
