@@ -20,6 +20,7 @@ use crate::review::identity::source_spec;
 use crate::review::{FailReason, Failure, ReviewError, ReviewRequest, Store, commit, prepare};
 use crate::tasks::{Progress, TaskKey};
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 use std::fmt;
 use std::time::SystemTime;
 
@@ -101,6 +102,14 @@ fn candidate() -> Map<String, Value> {
     candidate
 }
 
+pub(super) fn license_allow(configured: &[String]) -> Cow<'_, [String]> {
+    if configured.is_empty() {
+        Cow::Owned(Vec::from(DEFAULT_LICENSE_ALLOW.map(str::to_owned)))
+    } else {
+        Cow::Borrowed(configured)
+    }
+}
+
 /// Reviews `req.spec` at the default branch's commit, keeps the review and its snapshot under
 /// `OAH_HOME/state`, and returns the record with the gate's decision.
 pub fn review(ctx: &Ctx<'_>, req: ReviewReq) -> Result<ReviewOutcomeDto, Error> {
@@ -124,13 +133,7 @@ pub fn review(ctx: &Ctx<'_>, req: ReviewReq) -> Result<ReviewOutcomeDto, Error> 
         .as_ref()
         .map(|config| config.effective().skills.license_allow.as_slice())
         .unwrap_or_default();
-    let defaults;
-    let allow = if configured.is_empty() {
-        defaults = DEFAULT_LICENSE_ALLOW.map(str::to_owned);
-        &defaults[..]
-    } else {
-        configured
-    };
+    let allow = license_allow(configured);
     let store = Store::new(&paths::user_state_dir(ctx.env)?);
     ctx.progress.progress(Progress {
         phase: PHASE,
@@ -145,7 +148,7 @@ pub fn review(ctx: &Ctx<'_>, req: ReviewReq) -> Result<ReviewOutcomeDto, Error> 
         repo: &req.spec.repo,
         path: &req.spec.path,
         candidate: &candidate,
-        allow,
+        allow: &allow,
         now: SystemTime::now(),
     };
     let failed = |failure: Failure| match failure {

@@ -13,6 +13,7 @@ mod installed;
 mod refresh;
 mod review;
 mod settings;
+mod skill_apply;
 pub mod sync;
 
 pub use crate::workflow::{
@@ -31,16 +32,19 @@ pub use installed::skills_installed;
 pub use refresh::{REFRESH, refresh, refresh_key};
 pub use review::{REVIEW, ReviewFailed, review, review_key};
 pub use settings::{settings_get, settings_set};
+pub use skill_apply::apply_project_skill;
 
 use crate::dto::{
     AppInfoDto, CliDto, Empty, ProjectDto, TaskCancelReq, TaskSnapshotDto, display_path,
 };
-use crate::error::Error;
+use crate::error::{Error, ProjectSkillError};
 use crate::fsx::SelfWrites;
+use crate::fsx::skill_publish::ProjectRoot;
 use crate::net::{HttpsTransport, Transport};
 use crate::paths::{self, Env};
 use crate::project::{self, OpenProject};
 use crate::tasks::{CancelToken, ProgressSink, TaskHandle, TaskRegistry, TaskState};
+use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -97,7 +101,14 @@ pub(crate) struct Stamp {
 #[derive(Debug, Default)]
 struct ProjectSlot {
     issued: u64,
-    held: Option<(Stamp, OpenProject)>,
+    held: Option<ProjectSelection>,
+}
+
+#[derive(Debug)]
+struct ProjectSelection {
+    stamp: Stamp,
+    opened: OpenProject,
+    skill_root: Result<ProjectRoot, ProjectSkillError>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -151,7 +162,7 @@ impl Session {
         lock(&self.project)
             .held
             .as_ref()
-            .map(|(_, project)| project.clone())
+            .map(|held| held.opened.clone())
     }
 
     /// The CLI copy of this start; `None` until [`cli_copy`] ran.
@@ -182,24 +193,40 @@ impl Session {
     /// The root of the selected project with a stamp for re-reading it; `None` when no project is open.
     pub(crate) fn stamp_refresh(&self) -> Option<(Stamp, PathBuf)> {
         let mut slot = lock(&self.project);
-        let (held, project) = slot.held.as_ref()?;
-        let (selection, root) = (held.selection, project.project.root.clone());
+        let held = slot.held.as_ref()?;
+        let (selection, root) = (held.stamp.selection, held.opened.project.root.clone());
         slot.issued += 1;
         let read = slot.issued;
         Some((Stamp { selection, read }, root))
     }
 
-    /// Publishes `read`, taken under `stamp`, unless the session holds a newer read; returns the project the
-    /// session holds afterwards, so the caller reports that instead of a result that lost to newer work.
+    /// Refresh the view while retaining the pin from the explicit open. If re-discovery locates a different
+    /// root, that view is still readable and needs an explicit open before skill publication.
     pub(crate) fn publish_project(&self, stamp: Stamp, read: OpenProject) -> OpenProject {
         let mut slot = lock(&self.project);
-        match &slot.held {
-            Some((held, newer)) if *held > stamp => newer.clone(),
-            _ => {
-                slot.held = Some((stamp, read.clone()));
-                read
+        let Some(held) = slot.held.as_mut() else {
+            return read;
+        };
+        if held.stamp.selection == stamp.selection && held.stamp <= stamp {
+            if held.opened.id != read.id || held.opened.project.root != read.project.root {
+                held.skill_root = Err(ProjectSkillError::ProjectChanged);
             }
+            held.stamp = stamp;
+            held.opened = read;
         }
+        held.opened.clone()
+    }
+
+    fn publish_selection(&self, selected: ProjectSelection) -> OpenProject {
+        let mut slot = lock(&self.project);
+        if let Some(held) = &slot.held
+            && held.stamp.selection > selected.stamp.selection
+        {
+            return held.opened.clone();
+        }
+        let opened = selected.opened.clone();
+        slot.held = Some(selected);
+        opened
     }
 
     pub(crate) fn set_cli(&self, copy: CliCopy) {
@@ -244,8 +271,28 @@ pub fn app_info(ctx: &Ctx<'_>, _req: Empty) -> Result<AppInfoDto, Error> {
 /// published first, this older one changes nothing and returns the project the session holds.
 pub fn project_open(ctx: &Ctx<'_>, folder: &Path) -> Result<ProjectDto, Error> {
     let stamp = ctx.session.stamp_open();
-    let opened = project::open(ctx.env, folder)?;
-    Ok(ctx.session.publish_project(stamp, opened).to_dto(ctx.env))
+    let folder = if folder.is_absolute() {
+        Cow::Borrowed(folder)
+    } else {
+        Cow::Owned(ctx.env.cwd().join(folder))
+    };
+    let picked = ProjectRoot::open(&folder);
+    let opened = project::open(ctx.env, &folder)?;
+    let root = &opened.project.root;
+    let skill_root = skill_apply::refuse_home(ctx.env, root).and_then(|()| {
+        let picked = picked?;
+        if folder.as_ref() == root {
+            Ok(picked)
+        } else {
+            Ok(ProjectRoot::open(root)?)
+        }
+    });
+    let selected = ProjectSelection {
+        stamp,
+        opened,
+        skill_root,
+    };
+    Ok(ctx.session.publish_selection(selected).to_dto(ctx.env))
 }
 
 /// `project_current`: the open project as last read, or `None`.
@@ -286,8 +333,13 @@ mod tests {
         let session = Session::new(env);
         let older = session.stamp_open();
         let newer = session.stamp_open();
-        let held_b = session.publish_project(newer, project::open(session.env(), &b).unwrap());
-        let returned = session.publish_project(older, project::open(session.env(), &a).unwrap());
+        let selection = |stamp, folder: &Path| ProjectSelection {
+            stamp,
+            opened: project::open(session.env(), folder).unwrap(),
+            skill_root: ProjectRoot::open(folder).map_err(ProjectSkillError::from),
+        };
+        let held_b = session.publish_selection(selection(newer, &b));
+        let returned = session.publish_selection(selection(older, &a));
         assert_eq!(held_b.project.root, b);
         assert_eq!(
             returned.project.root, b,

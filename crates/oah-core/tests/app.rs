@@ -21,10 +21,10 @@ const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
 /// bundles. As in `tests/paths.rs`, the environment is built from nothing: the process's `PATH` (to find Git),
 /// the platform's home variable, no system Git configuration, and a ceiling so Git never looks above the root.
 struct Fixture {
-    _dir: tempfile::TempDir,
+    session: Session,
     root: PathBuf,
     home: PathBuf,
-    session: Session,
+    _dir: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -145,12 +145,14 @@ fn inventory_lists_linked_user_roots_and_entries_at_visible_paths() {
                 engine: AgentIdDto(AgentId::Claude),
                 scope: SkillScopeDto::User,
                 location: shown(&[".claude", "skills", "alias"]),
+                managed: None,
             },
             InstalledSkillDto {
                 name: "shared".into(),
                 engine: AgentIdDto(AgentId::Codex),
                 scope: SkillScopeDto::User,
                 location: shown(&[".agents", "skills", "shared"]),
+                managed: None,
             },
         ]
     );
@@ -204,12 +206,14 @@ fn inventory_lists_relative_project_links_and_skips_escaped_entries() {
                 engine: AgentIdDto(AgentId::Claude),
                 scope: SkillScopeDto::Project,
                 location: shown(&["project", ".claude", "skills", "shared"]),
+                managed: None,
             },
             InstalledSkillDto {
                 name: "shared".into(),
                 engine: AgentIdDto(AgentId::Codex),
                 scope: SkillScopeDto::Project,
                 location: shown(&["project", ".agents", "skills", "shared"]),
+                managed: None,
             },
         ]
     );

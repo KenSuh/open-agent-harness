@@ -1,49 +1,82 @@
-use super::Ctx;
-use crate::config::AgentId;
-use crate::dto::{AgentIdDto, Empty, InstalledSkillDto, SkillScopeDto, display_path};
+use super::skill_apply::{agent_id, stored_binding};
+use super::{Ctx, lock};
+use crate::dto::{
+    AgentIdDto, Empty, InstalledSkillDto, ManagedSkillDto, SkillScopeDto, display_path,
+};
 use crate::error::Error;
+use crate::fsx::skill_publish::{Engine, ProjectRoot, SkillLeaf};
 use crate::fsx::{FsxError, FsxErrorKind};
-use crate::paths::user_home;
+use crate::paths::{user_home, user_state_dir};
+use crate::review::Store;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 // The full CLI's install targets (src/oah/toolkit/install.py), at each scope.
-const ENGINE_FOLDERS: [(AgentId, &str); 2] =
-    [(AgentId::Claude, ".claude"), (AgentId::Codex, ".agents")];
+const ENGINE_FOLDERS: [(Engine, &str); 2] =
+    [(Engine::Claude, ".claude"), (Engine::Codex, ".agents")];
 
 /// Lists local project and user skills from directory entries and `SKILL.md` metadata.
 pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkillDto>, Error> {
-    let project = ctx.session.project();
+    let selected = lock(&ctx.session.project).held.as_ref().map(|held| {
+        (
+            held.opened.project.root.clone(),
+            held.skill_root.as_ref().ok().cloned(),
+        )
+    });
     let home = user_home(ctx.env)?;
-    let project_scope = if let Some(opened) = &project
-        && let Some(boundary) = resolve(&opened.project.root)?
+    let store = Store::new(&user_state_dir(ctx.env)?);
+    let project_scope = if let Some((root, pin)) = &selected
+        && let Some(boundary) = resolve(root)?
         && resolve(&home)?.as_ref() != Some(&boundary)
     {
         Some((
-            opened.project.root.as_path(),
+            root.as_path(),
             SkillScopeDto::Project,
             Some(boundary),
+            pin.as_ref(),
         ))
     } else {
         None
     };
     let mut skills = Vec::new();
-    let user_scope = (home.as_path(), SkillScopeDto::User, None);
-    for (base, scope, boundary) in project_scope.into_iter().chain([user_scope]) {
+    let user_scope = (home.as_path(), SkillScopeDto::User, None, None);
+    for (base, scope, boundary, pin) in project_scope.into_iter().chain([user_scope]) {
         for (engine, engine_dir) in ENGINE_FOLDERS {
             for (name, folder) in skill_folders(base, engine_dir, boundary.as_deref())? {
                 skills.push(InstalledSkillDto {
                     name: name.to_string_lossy().into_owned(),
-                    engine: AgentIdDto(engine),
+                    engine: AgentIdDto(agent_id(engine)),
                     scope,
                     location: display_path(ctx.env, &folder),
+                    managed: pin
+                        .and_then(|root| managed_skill(&store, root, engine, name.to_str()?)),
                 });
             }
         }
     }
     Ok(skills)
+}
+
+fn managed_skill(
+    store: &Store,
+    root: &ProjectRoot,
+    engine: Engine,
+    name: &str,
+) -> Option<ManagedSkillDto> {
+    let leaf = SkillLeaf::new(name).ok()?;
+    let installed = root.installed(engine, &leaf).ok()??;
+    let binding = installed.binding;
+    if stored_binding(store, &binding.review_id, name).ok()? != binding {
+        return None;
+    }
+    Some(ManagedSkillDto {
+        review_id: binding.review_id,
+        snapshot_id: binding.snapshot_id,
+        repo: binding.repo,
+        path: binding.path,
+    })
 }
 
 fn skill_folders(

@@ -2,7 +2,8 @@
 //! The M1-S1, M1-S2 and M2-S1 commands of CONTRACTS C15, exactly: `app_info`, `project_open_dialog`,
 //! `project_current`, `start_refresh`, `task_cancel`, `tasks_list`, `settings_get`, `settings_set`, `agents_list`,
 //! `start_agents_probe`, `sections_show`, `stages_set`, `preset_apply`, `workflow_status`, `rules_check` and
-//! `rules_sync`, and M1-S3's `start_review`. Each takes one argument named `req`; the `start_*` commands also take the task channel
+//! `rules_sync`, `start_review`, `skills_installed` and `apply_project_skill`. Each takes one argument named `req`;
+//! the `start_*` commands also take the task channel
 //! `on_event` (JS key `onEvent`, CONTRACTS C4). A command body converts arguments, makes one `oah-core` call and
 //! converts the result. The shell's own part is transport only: the native folder picker, the task channel, the
 //! blocking thread a task runs on, the `scan-changed` and `agents-changed` events, and starting the agents probe
@@ -13,10 +14,11 @@ use std::sync::Arc;
 
 use oah_core::app::{self, Ctx, Session};
 use oah_core::dto::{
-    AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, BannerDto, Empty,
-    InstalledSkillDto, PresetApplyReq, ProjectDto, RefreshDto, ReviewOutcomeDto, ReviewReq,
-    RulesStateDto, RulesSyncDto, SettingsDto, SettingsSetReq, StagesSetDto, StagesSetReq,
-    TaskCancelReq, TaskSnapshotDto, WorkflowDto, WorkflowProjectReq,
+    AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, ApplyProjectSkillDto,
+    ApplyProjectSkillReq, ApplyProjectSkillStatus, BannerDto, Empty, InstalledSkillDto,
+    PresetApplyReq, ProjectDto, RefreshDto, ReviewOutcomeDto, ReviewReq, RulesStateDto,
+    RulesSyncDto, SettingsDto, SettingsSetReq, StagesSetDto, StagesSetReq, TaskCancelReq,
+    TaskSnapshotDto, WorkflowDto, WorkflowProjectReq,
 };
 use oah_core::error::codes;
 use oah_core::paths::Env;
@@ -38,8 +40,7 @@ pub const AGENTS_CHANGED: &str = "agents-changed";
 /// The result type of an agents probe task: what the session then holds for the probed agents.
 type Statuses = Vec<AgentStatusDto>;
 
-/// The `scan-changed` payload of CONTRACTS C4. Core has no emitter and no type for it; M1-S1 only ever sends
-/// `{ scope: "all", keys: [] }`, after a project opened or a refresh ended `done`.
+/// The `scan-changed` payload of CONTRACTS C4. Core has no emitter and no type for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScanChanged {
     pub scope: &'static str,
@@ -275,6 +276,33 @@ pub async fn skills_installed(
     shell: State<'_, Shell>,
 ) -> Result<Vec<InstalledSkillDto>, ErrorDto> {
     shell.call(|ctx| app::skills_installed(ctx, req))
+}
+
+#[tauri::command]
+pub async fn apply_project_skill(
+    req: ApplyProjectSkillReq,
+    app: AppHandle,
+    shell: State<'_, Shell>,
+) -> Result<ApplyProjectSkillDto, ErrorDto> {
+    let shell = Shell {
+        session: Arc::clone(&shell.session),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = shell.call(|ctx| app::apply_project_skill(ctx, &req))?;
+        match result.status {
+            ApplyProjectSkillStatus::Installed | ApplyProjectSkillStatus::Updated => {
+                emit_scan_changed(&app);
+            }
+            ApplyProjectSkillStatus::Unchanged => {}
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|_| ErrorDto {
+        code: "OAH_SKILL_APPLY_INTERRUPTED".to_owned(),
+        message: "The project skill operation stopped before reporting its result.".to_owned(),
+        hint: Some("Refresh Installed and retry the same confirmation if needed.".to_owned()),
+    })?
 }
 
 /// Starts the refresh task, or joins the running one (CONTRACTS C4). Its events go to `on_event`; the work runs
