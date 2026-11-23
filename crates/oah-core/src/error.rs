@@ -9,6 +9,7 @@ use crate::agents::AgentError;
 use crate::app::ReviewFailed;
 use crate::config::ConfigError;
 use crate::fsx::FsxError;
+use crate::fsx::skill_publish::PublishError;
 use crate::paths::{Env, PathsError};
 use crate::plan::PlanError;
 use crate::project::ProjectError;
@@ -19,6 +20,7 @@ use crate::tasks::{Cancelled, TaskError};
 use crate::workflow::WorkflowError;
 use serde::Serialize;
 use std::fmt;
+use std::sync::Arc;
 
 /// The codes M1-S1, M1-S2, M1-S3 and M2-S1 add (CONTRACTS C16).
 pub mod codes {
@@ -78,6 +80,7 @@ pub enum Error {
     Project(ProjectError),
     Agents(AgentError),
     Rules(RulesError),
+    ProjectSkill(ProjectSkillError),
     Workflow(WorkflowError),
     /// A skill review that ended without an outcome, with the upstream cause behind it (M1-S3).
     Review(ReviewFailed),
@@ -146,6 +149,27 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         }
         codes::PROJECT_NOT_OPEN => "Open a project folder first.",
         codes::PROJECT_CHANGED => "Open the intended project and repeat the action.",
+        "OAH_SKILL_HOME_SCOPE" | "OAH_SKILL_PATH_UNSAFE" => {
+            "Open an ordinary local project folder and review the skill there."
+        }
+        "OAH_SKILL_HOME_UNVERIFIED" => "Check that your home and project folders are accessible.",
+        "OAH_SKILL_FS_UNSUPPORTED" => "Choose an APFS or fixed local NTFS project folder.",
+        "OAH_SKILL_PAYLOAD_INVALID" | "OAH_SKILL_SOURCE_MISMATCH" | "OAH_SKILL_REVISION_STALE" => {
+            "Refresh Installed, then review the skill from its source again."
+        }
+        "OAH_SKILL_REVIEW_MISSING" | "OAH_SKILL_REVIEW_INVALID" | "OAH_SKILL_INSTALL_BLOCKED" => {
+            "Review the skill again under the current project policy."
+        }
+        "OAH_SKILL_APPROVAL_REQUIRED" => "Read and acknowledge the warnings for this review.",
+        "OAH_SKILL_RECEIPT_INVALID" | "OAH_SKILL_ACQUISITION_CHANGED" => {
+            "Refresh Installed and check the local skill and its original review."
+        }
+        "OAH_SKILL_DESTINATION_OCCUPIED" => "Check the skill already present at this destination.",
+        "OAH_SKILL_WRITER_BUSY" => "Wait for the other skill operation to finish, then try again.",
+        "OAH_SKILL_TRANSACTION_PENDING" | "OAH_SKILL_RECOVERY_REQUIRED" => {
+            "Retry the same confirmed change to resume publication."
+        }
+        "OAH_SKILL_FS_IO" => "Check access to the project folder, then try again.",
         codes::SECTION_UNKNOWN => "Add the section id to sections.order in .oah/config.toml first.",
         codes::PRESET_UNAVAILABLE => {
             "Install the agents the preset names, or assign each section by hand."
@@ -208,6 +232,7 @@ impl Coded for Error {
             Error::Project(error) => error.code(),
             Error::Agents(error) => error.code(),
             Error::Rules(error) => Coded::code(error),
+            Error::ProjectSkill(error) => error.code(),
             Error::Workflow(error) => error.code(),
             Error::Review(error) => error.code(),
             Error::ReviewStore(error) => error.code(),
@@ -225,6 +250,7 @@ impl Coded for Error {
             Error::Project(error) => Coded::message(error),
             Error::Agents(error) => Coded::message(error),
             Error::Rules(error) => Coded::message(error),
+            Error::ProjectSkill(error) => error.message(),
             Error::Workflow(error) => Coded::message(error),
             Error::Review(error) => error.message(),
             Error::ReviewStore(error) => error.message(),
@@ -319,6 +345,75 @@ impl From<RulesError> for Error {
 impl From<WorkflowError> for Error {
     fn from(error: WorkflowError) -> Self {
         Error::Workflow(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ProjectSkillError {
+    NoProject,
+    ProjectChanged,
+    HomeScope,
+    HomeUnverified,
+    Publish(Arc<PublishError>),
+}
+
+impl Coded for ProjectSkillError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::NoProject => codes::PROJECT_NOT_OPEN,
+            Self::ProjectChanged => codes::PROJECT_CHANGED,
+            Self::HomeScope => "OAH_SKILL_HOME_SCOPE",
+            Self::HomeUnverified => "OAH_SKILL_HOME_UNVERIFIED",
+            Self::Publish(error) => error.code(),
+        }
+    }
+
+    fn message(&self) -> String {
+        use PublishError as Publish;
+
+        let detail = match self {
+            Self::NoProject => "Open a project to apply a reviewed skill.",
+            Self::ProjectChanged => "The selected project changed.",
+            Self::HomeScope => "The home folder cannot be used for a project skill install.",
+            Self::HomeUnverified => "OAH could not distinguish the project from your home folder.",
+            Self::Publish(error) => match error.as_ref() {
+                Publish::Unsupported => "This filesystem cannot publish project skills safely.",
+                Publish::UnsafePath => "The skill destination contains an unsafe path component.",
+                Publish::InvalidPayload => {
+                    "The reviewed files could not be used for this destination."
+                }
+                Publish::InvalidReceipt => "The original skill acquisition could not be verified.",
+                Publish::Occupied => "A skill already occupies this project destination.",
+                Publish::Changed => "The project destination or installed skill changed on disk.",
+                Publish::StaleRevision => "The expected skill revision is no longer installed.",
+                Publish::SourceMismatch => "The new review must match the original GitHub source.",
+                Publish::Busy => "Another OAH operation is writing project skills.",
+                Publish::Pending => "An earlier confirmed skill operation is still pending.",
+                Publish::Recovery { .. } => {
+                    "OAH kept the previous skill under .oah/project-skills-v1."
+                }
+                Publish::Io(_) => "OAH could not access the project skill files.",
+            },
+        };
+        detail.to_owned()
+    }
+}
+
+impl From<PublishError> for ProjectSkillError {
+    fn from(error: PublishError) -> Self {
+        Self::Publish(Arc::new(error))
+    }
+}
+
+impl From<ProjectSkillError> for Error {
+    fn from(error: ProjectSkillError) -> Self {
+        Self::ProjectSkill(error)
+    }
+}
+
+impl From<PublishError> for Error {
+    fn from(error: PublishError) -> Self {
+        ProjectSkillError::from(error).into()
     }
 }
 

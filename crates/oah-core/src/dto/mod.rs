@@ -33,7 +33,10 @@ pub use review::{
     GateDecisionDto, GateReasonDto, ReviewOutcomeDto, ReviewReq, ReviewSpecDto, kind_name,
     result_name,
 };
-pub use skills::{InstalledSkillDto, SkillScopeDto};
+pub use skills::{
+    ApplyProjectSkillDto, ApplyProjectSkillReq, ApplyProjectSkillStatus, InstalledSkillDto,
+    ManagedSkillDto, SkillScopeDto,
+};
 pub use task::{Progress, TaskCancelReq, TaskEvent, TaskId, TaskSnapshotDto, TaskState};
 pub use workflow::{
     AdvancedDto, AgentOptionDto, BannerAgentDto, BannerDto, BannerPairDto, BannerSectionDto,
