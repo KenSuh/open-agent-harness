@@ -20,7 +20,7 @@
 **v1.1.0 downloads** · [macOS DMG](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_aarch64.dmg) · [Windows installer](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_x64-setup.exe) · [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/SHA256SUMS) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.1.0)
 
 The macOS app has an ad hoc signature and no Apple notarization. The Windows installer is unsigned.
-[Desktop installation and signing](#desktop-app) · [First run](#first-run) · [Source CLI](#source-cli) · [Skills CLI](#inspect-and-choose-skills-in-the-cli) · [Documentation](#documentation)
+[Desktop installation and signing](#desktop-app) · [First run](#first-run) · [Skill guide](#find-install-and-update-skills-in-desktop) · [Source CLI](#source-cli) · [Skills CLI](#inspect-and-choose-skills-in-the-cli) · [Documentation](#documentation)
 
 ## Purpose: a harness that keeps adapting
 
@@ -154,9 +154,7 @@ oah 1.1.0
 3. **Check the project rules.** If **Rules** shows drift, choose **Sync now** to update the managed block in
    `AGENTS.md`. Review the changes in the worktree before committing them.
 
-4. **Install or update a project skill.** In **Explore**, review a GitHub skill folder, choose a compatible installed
-   agent (Claude Code or Codex), acknowledge any warnings and select **Confirm install**. For an existing OAH-managed
-   project skill, open **Installed**, select **Check for update**, review the result and select **Apply update** when offered.
+4. **Add a project skill.** Follow the [Desktop skill guide](#find-install-and-update-skills-in-desktop).
 
 The desktop app uses `~/.oah` on macOS or `%USERPROFILE%\.oah` on Windows. It writes `settings.toml`
 and places its helper in `bin/`. These bundled commands work with the desktop configuration.
@@ -175,23 +173,53 @@ Use a separate working copy that Team Workflow has not configured for the source
 [first-task walkthrough](examples/hello-oah/README.md).
 [Setup details](docs/how-it-works.md#first-run) explain the plan and the generated files.
 
+### Find, install and update skills in Desktop
+
+1. **Find a skill folder.** Browse the [OAH toolkit catalog](docs/toolkit.md) for repositories and licenses, or find
+   a GitHub folder containing `SKILL.md`. In **Explore**, paste `dietrichgebert/ponytail/skills/ponytail` into
+   **GitHub skill folder** to try Ponytail (MIT). Use `owner/repo/folder`, with the full folder path within the repository.
+2. **Review and install.** Select **Review** to see the source pinned to a commit, the license and the review decision.
+   To install an eligible skill, open the destination project with **+ Open…**. Choose an installed, compatible
+   agent and check the destination. Claude Code uses `.claude/skills/` and Codex uses `.agents/skills/` in the project.
+   Acknowledge any warnings, then select **Confirm install**.
+3. **Find installed copies and check for updates.** **Installed** shows copies in the open project and your user
+   folders, with the engine, scope and path for each copy. **Refresh inventory** rereads those folders. For an eligible
+   OAH-managed project copy, select **Check for update** to review the upstream revision. When a compatible new
+   revision passes review, read the result, acknowledge any warnings and select **Apply update** to confirm.
+
+For search by technology and toolkit management, use the [Python source CLI](#inspect-and-choose-skills-in-the-cli).
+
 ### Inspect and choose skills in the CLI
 
-Run `oah skills list` to see bundled, linked and installed skills. For an existing design, find candidates and
-review a result before linking it. Use your project and design IDs, then the result and review IDs printed
-by the commands.
+Use the full [Python source CLI](#source-cli) for these commands. Desktop ships its own helper. Run the commands
+from a Git project folder. Start with a built-in catalog search by technology, which needs no design.
 
 ```sh
-oah skills find --design PROJECT/DESIGN --provider seed
-oah skills review --hit QUERY_ID:N
+oah skills find --tech database=postgresql --provider seed
+oah skills review --seed S1
 oah skills read --review REVIEW_ID
 ```
 
-A review records the skill's source commit and license. To choose it for a design stage, use the `link-skill`
-operation with `oah design coverage edit PROJECT DESIGN --from EDITS.json`, then run the `oah design save`
-command it prints. To preview a separate project install, run
-`oah skills install ponytail --project --target claude --dry-run`. The install targets are `claude`, `codex`
-and `both`. [Finding and reviewing skills](docs/skills-and-capabilities.md#finding-and-reviewing-skills) · [Design stages](docs/skills-and-capabilities.md#the-nine-design-stages)
+The seed search lists `S1` for `supabase-postgres-best-practices`. Use the ID printed by `review` in place of
+`REVIEW_ID` to read the reviewed text. A review records the source commit and license. For a provider that returns
+stored query hits, use `--hit QUERY_ID:N` with the query ID and result index from `find --json`.
+
+For an existing design, search with `oah skills find --design PROJECT/DESIGN --provider seed`. Link a review to a
+stage with the `link-skill` operation in `oah design coverage edit PROJECT DESIGN --from EDITS.json`, then run the
+`oah design save` command it prints.
+[Finding and reviewing skills](docs/skills-and-capabilities.md#finding-and-reviewing-skills) · [Design stages](docs/skills-and-capabilities.md#the-nine-design-stages)
+
+For a project install, choose a bundled or linked entry by name from `oah skills list`. Preview the bundled
+`ponytail` entry for Codex, then run the install without `--dry-run` to apply it.
+
+```sh
+oah skills list
+oah skills install ponytail --project --target codex --dry-run
+oah skills install ponytail --project --target codex
+```
+
+Use `oah skills update --project --check` to check for updates and `oah skills update --project` to apply updates
+to OAH toolkit copies tracked in that project. The install targets are `claude`, `codex` and `both`. [Toolkit commands](docs/toolkit.md#commands)
 
 v1.1.0 ships with no qualified host profile for managed worker delivery. `oah skills find --task` needs
 that profile to create the needs file used by `oah skills select --needs FILE --review REVIEW_ID`.

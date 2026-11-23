@@ -20,7 +20,7 @@
 **v1.1.0 다운로드** · [macOS DMG](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_aarch64.dmg) · [Windows 설치 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_x64-setup.exe) · [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/SHA256SUMS) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.1.0)
 
 macOS 앱은 임시 서명(ad hoc)만 적용했고 Apple 공증은 받지 않았다. Windows 설치 파일은 서명되지 않았다.
-[데스크톱 설치와 서명 안내](#데스크톱-앱) · [처음 실행하기](#처음-실행하기) · [소스 CLI](#소스-cli) · [스킬 CLI](#cli에서-스킬-확인하고-고르기) · [문서](#문서)
+[데스크톱 설치와 서명 안내](#데스크톱-앱) · [처음 실행하기](#처음-실행하기) · [스킬 가이드](#데스크톱에서-스킬-찾기-설치-갱신) · [소스 CLI](#소스-cli) · [스킬 CLI](#cli에서-스킬-확인하고-고르기) · [문서](#문서)
 
 ## 이 프로젝트의 목적
 
@@ -150,9 +150,7 @@ oah 1.1.0
 3. **프로젝트 규칙을 확인한다.** **Rules**에 동기화가 필요하다고 나오면 **Sync now**를 눌러 `AGENTS.md`의
    관리 대상 규칙을 갱신한다. 작업 폴더의 변경 사항을 살핀 뒤 커밋한다.
 
-4. **프로젝트 스킬을 설치하거나 갱신한다.** **Explore**에서 GitHub 스킬 폴더를 검토하고, 설치된 호환 에이전트
-   (Claude Code 또는 Codex)를 고른다. 경고가 있으면 확인한 뒤 **Confirm install**을 누른다. 기존 OAH 관리 프로젝트
-   스킬은 **Installed**에서 **Check for update**를 누르고, 검토 결과를 확인한 뒤 **Apply update** 버튼이 나타나면 누른다.
+4. **프로젝트에 스킬을 추가한다.** [데스크톱 스킬 가이드](#데스크톱에서-스킬-찾기-설치-갱신)를 따라 한다.
 
 앱은 macOS에서 `~/.oah`, Windows에서 `%USERPROFILE%\.oah` 아래에 `settings.toml`과 `bin/`의 동봉 도구를 저장한다.
 이 번들 명령은 데스크톱 설정과 함께 작동한다.
@@ -171,21 +169,52 @@ Team Workflow가 설정하지 않은 별도 작업 복사본에서 소스 CLI
 [첫 작업 따라 하기](examples/hello-oah/README.ko.md)를 진행한다.
 [설정 상세](docs/ko/how-it-works.md#처음-실행하기)에서 설정 계획과 생성 파일을 설명한다.
 
+### 데스크톱에서 스킬 찾기, 설치, 갱신
+
+1. **스킬 폴더를 찾는다.** [OAH 툴킷 목록](docs/ko/toolkit.md)에서 저장소와 라이선스를 확인하거나, GitHub에서
+   `SKILL.md`가 들어 있는 폴더를 찾는다. Ponytail(MIT)을 써 보려면 **Explore**의 **GitHub skill folder**에
+   `dietrichgebert/ponytail/skills/ponytail`을 붙여 넣는다. `owner/repo/folder` 형식에서 `folder`는 저장소 안의 전체 폴더 경로다.
+2. **검토하고 설치한다.** **Review**를 누르면 출처와 고정된 커밋, 라이선스, 검토 결과를 볼 수 있다. 설치 가능한
+   스킬이면 **+ Open…**으로 설치할 프로젝트를 열고, 설치된 호환 에이전트를 골라 대상 경로를 확인한다. 프로젝트 안에서
+   Claude Code는 `.claude/skills/`, Codex는 `.agents/skills/`를 쓴다. 경고가 있으면 읽고 확인한 뒤 **Confirm install**을 누른다.
+3. **설치된 스킬과 갱신 여부를 확인한다.** **Installed**에는 열어 둔 프로젝트와 사용자 폴더의 스킬이 각각 에이전트,
+   범위, 경로와 함께 표시된다. **Refresh inventory**는 폴더를 다시 읽는다. 갱신할 수 있는 OAH 관리 프로젝트 사본에서
+   **Check for update**를 누르면 원본의 최신 버전을 검토한다. 호환되는 새 버전이 검토를 통과하면 결과를 살피고
+   경고가 있으면 확인한 뒤 **Apply update**를 눌러 갱신을 확정한다.
+
+기술별 스킬 검색과 툴킷 관리는 [Python 소스 CLI](#cli에서-스킬-확인하고-고르기)를 쓴다.
+
 ### CLI에서 스킬 확인하고 고르기
 
-`oah skills list`로 동봉하거나 연결한 스킬과 설치된 스킬을 확인한다. 이미 만든 설계에서 후보를 찾고
-연결하기 전에 검토한다. 프로젝트와 설계의 ID를 넣고, 이후에는 각 명령이 출력한 검색 결과와 검토의 ID를 쓴다.
+다음 명령은 Git 프로젝트 폴더에서 전체 기능을 제공하는 [Python 소스 CLI](#소스-cli)로 실행한다.
+데스크톱 앱에는 별도 동봉 도구가 있다. 설계가 없어도 내장 목록에서 기술별로 스킬을 찾을 수 있다.
 
 ```sh
-oah skills find --design PROJECT/DESIGN --provider seed
-oah skills review --hit QUERY_ID:N
+oah skills find --tech database=postgresql --provider seed
+oah skills review --seed S1
 oah skills read --review REVIEW_ID
 ```
 
-스킬을 검토하면 출처의 커밋과 라이선스가 기록된다. 검토한 스킬을 설계 단계에 연결하려면
-`oah design coverage edit PROJECT DESIGN --from EDITS.json`에서 `link-skill` 작업을 쓰고, 출력된 `oah design save`
-명령을 실행한다. 프로젝트에 설치할 스킬을 미리 보려면 `oah skills install ponytail --project --target claude --dry-run`을
-실행한다. 설치 대상은 `claude`, `codex`, `both`다. [스킬 찾기와 검토](docs/ko/skills-and-capabilities.md#스킬-찾기와-검토) · [설계 단계](docs/ko/skills-and-capabilities.md#아홉-설계-단계)
+내장 목록에서 `supabase-postgres-best-practices`는 `S1`로 표시된다. `REVIEW_ID` 자리에 `review`가 출력한 ID를 넣으면
+검토한 본문을 읽을 수 있다. 검토 기록에는 출처의 커밋과 라이선스가 담긴다. 저장된 검색 결과를 돌려주는 제공자를 썼다면
+`find --json`에 나온 검색 ID와 결과 번호를 `--hit QUERY_ID:N`에 넣는다.
+
+기존 설계에서는 `oah skills find --design PROJECT/DESIGN --provider seed`로 후보를 찾는다.
+`oah design coverage edit PROJECT DESIGN --from EDITS.json`의 `link-skill` 작업으로 검토한 스킬을 단계에 연결하고,
+출력된 `oah design save` 명령을 실행한다.
+[스킬 찾기와 검토](docs/ko/skills-and-capabilities.md#스킬-찾기와-검토) · [설계 단계](docs/ko/skills-and-capabilities.md#아홉-설계-단계)
+
+프로젝트에 설치할 스킬은 `oah skills list`에 나온 동봉 또는 연결 툴킷 항목의 이름으로 고른다. 아래 명령으로
+Codex용 `ponytail` 항목의 설치 계획을 미리 보고, `--dry-run`을 빼고 실행해 설치한다.
+
+```sh
+oah skills list
+oah skills install ponytail --project --target codex --dry-run
+oah skills install ponytail --project --target codex
+```
+
+`oah skills update --project --check`로 갱신할 내용을 확인하고 `oah skills update --project`로 프로젝트가 추적하는
+OAH 툴킷 사본을 갱신한다. 설치 대상은 `claude`, `codex`, `both`다. [툴킷 명령](docs/ko/toolkit.md#명령)
 
 v1.1.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스트 프로필이 없다. `oah skills select --needs FILE --review REVIEW_ID`에
 쓰는 파일을 `oah skills find --task`로 만들려면 해당 프로필이 필요하다.
