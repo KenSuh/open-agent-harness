@@ -8,6 +8,8 @@ export type ApplyOperation = "install" | "update";
 /** What the user confirmed; copied once at click time and never rebuilt from live selections afterwards. */
 export interface ApplyConfirmation {
   readonly project: string;
+  /** Selection generation the confirmation was rendered under; a different live generation voids it. */
+  readonly generation: number;
   readonly engine: ProjectSkillEngine;
   readonly name: string;
   readonly operation: ApplyOperation;
@@ -27,12 +29,15 @@ export type WriteEntry = { readonly confirmation: ApplyConfirmation } & (
 export interface SkillWrites {
   /** One entry per project and destination, keyed by `writeKey`. */
   readonly entries: Readonly<Record<string, WriteEntry>>;
-  apply(confirmation: Omit<ApplyConfirmation, "project">): Promise<void>;
+  /** Generation of the selection currently rendered; confirmations copy it when they are created. */
+  readonly generation: number;
+  /** Sends nothing unless the live selection still equals the confirmation's project and generation. */
+  apply(confirmation: ApplyConfirmation): Promise<void>;
   /** Drops a finished outcome; an entry that is still applying is kept. */
   clear(key: string): void;
 }
 
-export const NO_WRITES: SkillWrites = { entries: {}, apply: async () => undefined, clear: () => undefined };
+export const NO_WRITES: SkillWrites = { entries: {}, generation: 0, apply: async () => undefined, clear: () => undefined };
 
 export function writeKey(project: string, engine: ProjectSkillEngine, name: string): string {
   return JSON.stringify([project, engine, name]);
@@ -75,6 +80,8 @@ export function successText(confirmation: ApplyConfirmation, result: ApplyProjec
 export function useSkillWrites(
   transport: Transport,
   projectRef: RefObject<ProjectDto | null>,
+  selectionRef: RefObject<number>,
+  generation: number,
   notify: (text: string) => void,
 ) {
   const [entries, setEntries] = useState<Record<string, WriteEntry>>({});
@@ -84,10 +91,10 @@ export function useSkillWrites(
   notifyRef.current = notify;
 
   const apply = useCallback(
-    async (input: Omit<ApplyConfirmation, "project">) => {
-      const target = projectRef.current?.id ?? null;
-      if (target === null) return; // needs an open project
-      const confirmation: ApplyConfirmation = { ...input, project: target };
+    async (confirmation: ApplyConfirmation) => {
+      const target = confirmation.project;
+      // The confirmation carries the project and generation it was rendered under; the live selection must still match.
+      if (projectRef.current?.id !== target || selectionRef.current !== confirmation.generation) return;
       const key = writeKey(target, confirmation.engine, confirmation.name);
       if (busy.current.has(key)) return; // one write per destination at a time
       busy.current.add(key);
@@ -120,7 +127,7 @@ export function useSkillWrites(
         busy.current.delete(key);
       }
     },
-    [transport, projectRef],
+    [transport, projectRef, selectionRef],
   );
 
   const clear = useCallback((key: string) => {
@@ -132,5 +139,5 @@ export function useSkillWrites(
     });
   }, []);
 
-  return { writes: { entries, apply, clear } satisfies SkillWrites, inventoryRevision };
+  return { writes: { entries, generation, apply, clear } satisfies SkillWrites, inventoryRevision };
 }

@@ -142,7 +142,8 @@ function InstallPanel({
     (engine) => installedIds.has(engine) && (gate.compatible === undefined || gate.compatible.includes(engine)),
   );
   const [choice, setChoice] = useState<ProjectSkillEngine | null>(null);
-  const [acknowledged, setAcknowledged] = useState(false);
+  // null = not edited; see `acknowledgedNow` for the single value behind checkbox, eligibility and request.
+  const [edited, setEdited] = useState<boolean | null>(null);
   const warningsId = useId();
   const skillId = useId();
   const ack = needsAcknowledgement(result);
@@ -179,7 +180,8 @@ function InstallPanel({
   const applying = entry?.phase === "applying";
   const done = mine?.phase === "done";
   const destination = mine?.confirmation.destination ?? (engine ? `${project.root}/${ENGINE_ROOT[engine]}/${name}` : "");
-  const acknowledgedNow = mine ? mine.confirmation.acknowledge_warnings : acknowledged;
+  const acknowledgedNow =
+    mine && mine.phase !== "failed" ? mine.confirmation.acknowledge_warnings : (edited ?? (mine ? mine.confirmation.acknowledge_warnings : false));
   return (
     <section className="install-panel" aria-label="Install in project">
       <h3>Install in this project</h3>
@@ -213,7 +215,7 @@ function InstallPanel({
                   checked={acknowledgedNow}
                   disabled={applying || done}
                   aria-describedby={skillId}
-                  onChange={(event) => setAcknowledged(event.target.checked)}
+                  onChange={(event) => setEdited(event.target.checked)}
                 />{" "}
                 I have read these warnings.
               </label>
@@ -222,16 +224,18 @@ function InstallPanel({
           <button
             type="button"
             aria-describedby={skillId}
-            disabled={applying || done || engine === null || (ack && !acknowledged && !mine)}
+            disabled={applying || done || engine === null || (ack && !acknowledgedNow)}
             onClick={() =>
               engine &&
               void writes.apply({
+                project: project.id,
+                generation: writes.generation,
                 engine,
                 name,
                 operation: "install",
                 review_id: record.id,
                 expected_review_id: null,
-                acknowledge_warnings: ack && acknowledged,
+                acknowledge_warnings: ack && acknowledgedNow,
                 destination,
               })
             }

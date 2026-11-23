@@ -38,7 +38,8 @@ function ManagedUpdate({
 }) {
   const managed = skill.managed!;
   const [check, setCheck] = useState<Check>({ phase: "idle" });
-  const [acknowledged, setAcknowledged] = useState(false);
+  // null = not edited since the check; the one editable acknowledgement value (see `shownAck`).
+  const [edited, setEdited] = useState<boolean | null>(null);
   const checking = useRef(false);
   const alive = useRef(true);
   const project = useRef(projectId);
@@ -57,7 +58,7 @@ function ManagedUpdate({
     if (checking.current) return;
     checking.current = true;
     const started = project.current;
-    setAcknowledged(false);
+    setEdited(null);
     clear(key); // a fresh check supersedes the old apply error and outcome
     setCheck({ phase: "checking" });
     reviewOnce(transport, managed.repo, managed.path).then(
@@ -94,11 +95,14 @@ function ManagedUpdate({
   // After the inventory re-read the check is gone; the finished write still explains the new row.
   const settled =
     entry?.phase === "done" &&
+    entry.confirmation.operation === "update" &&
     (entry.confirmation.review_id === managed.review_id || entry.confirmation.expected_review_id === managed.review_id)
       ? entry
       : undefined;
   const outcome = mine?.phase === "done" ? mine : settled;
   // A failure stays visible for its candidate, or after a re-read dropped the check (never for a different candidate).
+  // One value drives the checkbox, the button and the request; only an attempt in flight or finished freezes it.
+  const shownAck = mine && mine.phase !== "failed" ? mine.confirmation.acknowledge_warnings : (edited ?? (mine ? mine.confirmation.acknowledge_warnings : false));
   const failure =
     entry?.phase === "failed" && entry.confirmation.expected_review_id === managed.review_id && (result === null || mine === entry)
       ? entry
@@ -142,10 +146,10 @@ function ManagedUpdate({
               <label>
                 <input
                   type="checkbox"
-                  checked={mine ? mine.confirmation.acknowledge_warnings : acknowledged}
+                  checked={shownAck}
                   disabled={applying || done}
                   aria-describedby={nameId}
-                  onChange={(event) => setAcknowledged(event.target.checked)}
+                  onChange={(event) => setEdited(event.target.checked)}
                 />{" "}
                 I have read these warnings.
               </label>
@@ -154,15 +158,17 @@ function ManagedUpdate({
           <button
             type="button"
             aria-describedby={nameId}
-            disabled={applying || done || (ack && !acknowledged && !mine)}
+            disabled={applying || done || (ack && !shownAck)}
             onClick={() =>
               void writes.apply({
+                project: projectId,
+                generation: writes.generation,
                 engine: skill.engine,
                 name: skill.name,
                 operation: "update",
                 review_id: result.record.id,
                 expected_review_id: managed.review_id,
-                acknowledge_warnings: ack && acknowledged,
+                acknowledge_warnings: ack && shownAck,
                 destination: skill.location,
               })
             }
@@ -174,6 +180,11 @@ function ManagedUpdate({
       {failure ? <ErrorLines error={failure.error} /> : null}
       <div className="apply-status" role="status" aria-live="polite" aria-atomic="true" aria-label={`Update status for ${skill.name}`}>
         {check.phase === "checking" ? <p>Checking {skill.name} for updates…</p> : null}
+        {result && blocked ? <p>Update blocked. The installed copy is unchanged.</p> : null}
+        {result && incompatible ? (
+          <p>Update not compatible with {skill.engine === "claude" ? "Claude Code" : "Codex"}. The installed copy is unchanged.</p>
+        ) : null}
+        {result && available ? <p>Update available. New review {result.gate.result}.</p> : null}
         {same ? <p>Up to date. The current review matches the installed one.</p> : null}
         {applying ? <p>Applying the update to {skill.name}…</p> : null}
         {outcome ? <p>{outcome.result.status === "unchanged" ? "Already current; nothing changed." : "Updated."}</p> : null}
@@ -207,16 +218,23 @@ export function InstalledView({
 }) {
   const [load, setLoad] = useState<Load<InstalledSkillDto[]>>({ status: "loading" });
   const [read, setRead] = useState(0);
+  // A re-read keeps the rows (and their live status regions) mounted; only the first read replaces the view.
+  const [reading, setReading] = useState(false);
 
   useEffect(() => {
     let current = true;
-    setLoad((previous) => (previous.status === "loading" ? previous : { status: "loading" }));
+    setReading(true);
+    setLoad((previous) => (previous.status === "ready" || previous.status === "loading" ? previous : { status: "loading" }));
     transport.skillsInstalled().then(
       (value) => {
-        if (current) setLoad({ status: "ready", value });
+        if (!current) return;
+        setReading(false);
+        setLoad({ status: "ready", value });
       },
       (error) => {
-        if (current) setLoad({ status: "error", error: toErrorDto(error) });
+        if (!current) return;
+        setReading(false);
+        setLoad({ status: "error", error: toErrorDto(error) });
       },
     );
     return () => {
@@ -234,7 +252,7 @@ export function InstalledView({
             ? "Showing skills in this project and your user folders."
             : "Showing user skills. Open a project to see its skills."}
         </p>
-        <button type="button" onClick={refresh} disabled={load.status === "loading"}>
+        <button type="button" onClick={refresh} disabled={load.status === "loading" || reading}>
           Refresh inventory
         </button>
       </div>
@@ -259,7 +277,7 @@ export function InstalledView({
           {" "}in place of <code>oah</code>. Use the absolute path to your OAH source checkout or unpacked source archive.
         </p>
       </details>
-      {load.status === "loading" ? <p className="muted" role="status">Reading installed skills…</p> : null}
+      {load.status === "loading" || (reading && load.status === "ready") ? <p className="muted" role="status">Reading installed skills…</p> : null}
       {load.status === "error" ? (
         <div className="error-box" role="alert">
           <strong>{load.error.code}</strong>

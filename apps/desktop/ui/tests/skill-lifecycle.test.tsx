@@ -459,3 +459,219 @@ describe("C2 guards: row compatibility, stale outcomes, labelling (G33 G34 G35)"
     expect(region.textContent).toContain("Installed tidy");
   });
 });
+
+describe("C3 guard: a visible confirmation never retargets another project (G36)", () => {
+  /** Resolves the open dialog and clicks the still-mounted confirmation before React commits the new project. */
+  async function clickDuringSwitch(open: (project: ProjectDto) => void, target: ProjectDto, stale: HTMLButtonElement) {
+    await act(async () => {
+      open(target);
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+      stale.click(); // the old project's confirmation is still on screen
+    });
+    await flush();
+  }
+
+  function controlledOpen(t: FakeTransport) {
+    const opens: Array<(p: ProjectDto) => void> = [];
+    t.override.projectOpenDialog = () => new Promise<ProjectDto>((resolve) => opens.push(resolve));
+    return (project: ProjectDto) => opens.shift()!(project);
+  }
+
+  it("install: sends nothing when project B arrives before the A confirmation unmounts", async () => {
+    const t = await exploreApp();
+    await review(t, pass);
+    const stale = button("Confirm install");
+    const open = controlledOpen(t);
+    await click(button("+ Open…"));
+    await clickDuringSwitch(open, otherProject, stale);
+    expect(t.applyRequests).toHaveLength(0);
+  });
+
+  it("install: sends nothing for A to B to A with the old confirmation still mounted", async () => {
+    const t = await exploreApp();
+    await review(t, pass);
+    const stale = button("Confirm install");
+    const open = controlledOpen(t);
+    await click(button("+ Open…"));
+    await act(async () => open(otherProject));
+    await click(button("+ Open…"));
+    await clickDuringSwitch(open, sampleProject, stale);
+    expect(t.applyRequests).toHaveLength(0);
+  });
+
+  it("update: sends nothing when project B arrives before the A confirmation unmounts", async () => {
+    const { t } = await installedApp();
+    await check(t, pass);
+    const stale = button("Apply update");
+    const open = controlledOpen(t);
+    await click(button("+ Open…"));
+    await clickDuringSwitch(open, otherProject, stale);
+    expect(t.applyRequests).toHaveLength(0);
+  });
+
+  it("update: sends nothing for A to B to A with the old confirmation still mounted", async () => {
+    const { t } = await installedApp();
+    await check(t, pass);
+    const stale = button("Apply update");
+    const open = controlledOpen(t);
+    await click(button("+ Open…"));
+    await act(async () => open(otherProject));
+    await click(button("+ Open…"));
+    await clickDuringSwitch(open, sampleProject, stale);
+    expect(t.applyRequests).toHaveLength(0);
+  });
+
+  it("still sends the confirmed project after a same-selection project refresh", async () => {
+    const t = await exploreApp();
+    await review(t, pass);
+    const open = controlledOpen(t);
+    await click(button("+ Open…"));
+    await act(async () => open({ ...sampleProject }));
+    await review(t, pass);
+    await click(button("Confirm install"));
+    expect(t.applyRequests.map((r) => r.project)).toEqual([sampleProject.id]);
+  });
+});
+
+describe("C2/C5/C6 guards from review R2 (G32 G35 G37)", () => {
+  const updatedRow = { name: "tidy", engine: "claude", scope: "project", location: `${sampleProject.root}/.claude/skills/tidy`, managed: { ...managed, review_id: "rec-new" } } satisfies InstalledSkillDto;
+  const retryable = { code: "OAH_RETRY", message: "Try again.", hint: null } as const;
+
+  it("never retargets a visible project A confirmation during a project B response", async () => {
+    const t = await exploreApp();
+    const opening = deferred<ProjectDto>();
+    t.override.projectOpenDialog = () => opening.promise;
+    await review(t, pass);
+    await click(button("+ Open…"));
+
+    await act(async () => {
+      opening.resolve(otherProject);
+      for (let step = 0; step < 5; step++) await Promise.resolve();
+      expect(panel()?.textContent).toContain(updatedRow.location);
+      button("Confirm install").click();
+    });
+
+    expect(t.applyRequests.map((request) => request.project)).not.toContain(otherProject.id);
+  });
+
+  it("never retargets a visible project A update during a project B response", async () => {
+    const { t } = await installedApp();
+    const opening = deferred<ProjectDto>();
+    t.override.projectOpenDialog = () => opening.promise;
+    await check(t, pass);
+    await click(button("+ Open…"));
+
+    await act(async () => {
+      opening.resolve(otherProject);
+      for (let step = 0; step < 5; step++) await Promise.resolve();
+      expect(byText(".installed-list code", updatedRow.location)?.textContent).toBe(updatedRow.location);
+      button("Apply update").click();
+    });
+
+    expect(t.applyRequests.map((request) => request.project)).not.toContain(otherProject.id);
+  });
+
+  it.each(["installed", "unchanged"] as const)("keeps an Explore %s result out of the Installed row's update status", async (status) => {
+    const t = await exploreApp();
+    const pending = deferred<ApplyProjectSkillDto>();
+    t.override.applyProjectSkill = () => pending.promise;
+    t.override.skillsInstalled = async () => status === "unchanged" ? [updatedRow] : [];
+    await review(t, pass);
+    await click(button("Confirm install"));
+    await click(button("Installed"));
+
+    t.override.skillsInstalled = async () => [updatedRow];
+    await emit(() => pending.resolve({ status, review_id: "rec-new" }));
+
+    expect(document.querySelector(".managed-update")?.getAttribute("role")).toBe("group");
+    expect(document.querySelector(".managed-update [role=status]")?.textContent).toBe("");
+  });
+
+  it("sends the displayed warning acknowledgement when a failed install is retried after navigation", async () => {
+    const t = await exploreApp();
+    t.override.applyProjectSkill = () => Promise.reject(retryable);
+    await review(t, warn);
+    const check = panel()?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    if (!check) throw new Error("The review warning acknowledgement is missing");
+    await click(check);
+    await click(button("Confirm install"));
+    expect(alertText()).toContain(retryable.code);
+
+    await click(button("Installed"));
+    await click(button("Explore"));
+    expect(panel()?.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
+    t.override.applyProjectSkill = undefined;
+    await click(button("Confirm install"));
+
+    expect(t.applyRequests.map((request) => request.acknowledge_warnings)).toEqual([true, true]);
+  });
+
+  it("allows revoking the warning acknowledgement after a failed update", async () => {
+    const { t } = await installedApp();
+    t.override.applyProjectSkill = () => Promise.reject(retryable);
+    await check(t, warn);
+    const checkbox = document.querySelector<HTMLInputElement>('.managed-update input[type="checkbox"]');
+    if (!checkbox) throw new Error("The update warning acknowledgement is missing");
+    await click(checkbox);
+    await click(button("Apply update"));
+    expect(alertText()).toContain(retryable.code);
+
+    await click(checkbox);
+
+    expect(checkbox.checked).toBe(false);
+    expect(button("Apply update").disabled).toBe(true);
+  });
+
+  it.each([
+    ["available", pass, /available/i],
+    ["blocked", block, /blocked/i],
+    ["incompatible", { ...pass, gate: { ...pass.gate, compatible: ["codex"] } }, /compatib/i],
+  ] satisfies readonly (readonly [string, ReviewResultDto, RegExp])[])("announces when an update check is %s", async (_label, result, announcement) => {
+    const { t } = await installedApp();
+
+    await check(t, result);
+
+    const region = document.querySelector('.managed-update [role="status"]');
+    expect(region?.textContent).toMatch(announcement);
+  });
+
+  it("retains the live update status during the inventory read triggered by success", async () => {
+    const { t } = await installedApp();
+    const refresh = deferred<InstalledSkillDto[]>();
+    const status = document.querySelector('.managed-update [role="status"]');
+    expect(status?.isConnected).toBe(true);
+    await check(t, pass);
+    t.override.skillsInstalled = () => refresh.promise;
+
+    await click(button("Apply update"));
+
+    expect(status?.isConnected).toBe(true);
+    expect(status?.textContent).toMatch(/updated/i);
+    await emit(() => refresh.resolve([updatedRow]));
+  });
+
+  it("replaces a stale A inventory read after a pending install settles through A to B to A", async () => {
+    const t = await exploreApp();
+    const pending = deferred<ApplyProjectSkillDto>();
+    const stale = deferred<InstalledSkillDto[]>();
+    const bRow = { ...updatedRow, name: "b-only", location: `${otherProject.root}/.claude/skills/b-only` };
+    t.override.applyProjectSkill = () => pending.promise;
+    await review(t, pass);
+    await click(button("Confirm install"));
+    t.override.projectOpenDialog = async () => otherProject;
+    await click(button("+ Open…"));
+    t.override.skillsInstalled = async () => [bRow];
+    await click(button("Installed"));
+    expect(document.querySelector('[data-skill="b-only"]')).not.toBeNull();
+
+    t.override.projectOpenDialog = async () => sampleProject;
+    t.override.skillsInstalled = () => stale.promise;
+    await click(button("+ Open…"));
+    expect(document.querySelector('[data-skill="b-only"]')).toBeNull();
+    t.override.skillsInstalled = async () => [updatedRow];
+    await emit(() => pending.resolve({ status: "installed", review_id: "rec-new" }));
+    await emit(() => stale.resolve([]));
+
+    expect(document.querySelector('[data-skill="tidy"] code')?.textContent).toBe(updatedRow.location);
+  });
+});

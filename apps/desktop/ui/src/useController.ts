@@ -59,6 +59,8 @@ export function useController(transport: Transport) {
   const refreshRunning = useRef(false);
   const refreshRun = useRef(0);
   const projectRef = useRef<ProjectDto | null>(null);
+  const selectionRef = useRef(0);
+  const [selectionGeneration, setSelectionGeneration] = useState(0);
   const projectReads = useRef(0);
 
   const pushToast = useCallback((toast: Omit<Toast, "key">) => {
@@ -75,7 +77,13 @@ export function useController(transport: Transport) {
   }, []);
 
   const notifyInfo = useCallback((text: string) => pushToast({ level: "info", text }), [pushToast]);
-  const { writes, inventoryRevision } = useSkillWrites(transport, projectRef, notifyInfo);
+  const { writes, inventoryRevision } = useSkillWrites(
+    transport,
+    projectRef,
+    selectionRef,
+    selectionGeneration,
+    notifyInfo,
+  );
 
   const dismissToast = useCallback((key: number) => {
     setToasts((current) => current.filter((item) => item.key !== key));
@@ -93,6 +101,11 @@ export function useController(transport: Transport) {
   const agents = useAgents(transport, agentNotify);
 
   const applyProject = useCallback((project: ProjectDto | null, projectRevision: number) => {
+    // A new project ID (including A to B to A) is a new selection; a same-project refresh keeps its generation.
+    if (projectRef.current?.id !== project?.id) {
+      selectionRef.current += 1;
+      setSelectionGeneration(selectionRef.current);
+    }
     projectRef.current = project;
     setProjectRead({ project, projectRevision });
   }, []);
