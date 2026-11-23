@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "oah-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "oah-core",
@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "oah-conformance"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "oah-core",
  "serde_json",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "oah-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "caseless",
  "junction",
@@ -2373,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "oah-desktop"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "oah-core",
  "serde",

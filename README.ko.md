@@ -17,7 +17,7 @@
 
 # open-agent-harness (`oah`)
 
-**v1.0.0 다운로드** · [macOS DMG](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/OAH\_1.0.0_aarch64.dmg) · [Windows 설치 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/OAH\_1.0.0_x64-setup.exe) · [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/SHA256SUMS) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.0.0)
+**v1.1.0 다운로드** · [macOS DMG](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_aarch64.dmg) · [Windows 설치 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_x64-setup.exe) · [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/SHA256SUMS) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.1.0)
 
 macOS 앱은 임시 서명(ad hoc)만 적용했고 Apple 공증은 받지 않았다. Windows 설치 파일은 서명되지 않았다.
 [데스크톱 설치와 서명 안내](#데스크톱-앱) · [처음 실행하기](#처음-실행하기) · [소스 CLI](#소스-cli) · [스킬 CLI](#cli에서-스킬-확인하고-고르기) · [문서](#문서)
@@ -100,7 +100,7 @@ AI에게 평소 말로 요청한다. `oah init`이 설치한 규칙과 각 명�
 ### 데스크톱 앱
 
 DMG는 macOS 13 이상을 실행하는 Apple Silicon Mac용이다. NSIS 설치 파일은 Windows 11 x64용이다.
-[v1.0.0 다운로드](#open-agent-harness-oah)에서 설치 파일과 `SHA256SUMS`를 받는다. macOS에서는 `shasum -a 256`,
+[v1.1.0 다운로드](#open-agent-harness-oah)에서 설치 파일과 `SHA256SUMS`를 받는다. macOS에서는 `shasum -a 256`,
 PowerShell에서는 `Get-FileHash -Algorithm SHA256`으로 받은 파일을 검사한다. 체크섬이 일치하면 파일을 연다.
 
 - **macOS.** DMG를 열고 OAH를 응용 프로그램 폴더로 옮긴다. 앱은 임시 서명만 적용했고 Apple 공증은 받지 않아
@@ -113,18 +113,18 @@ PowerShell에서는 `Get-FileHash -Algorithm SHA256`으로 받은 파일을 검�
 프로젝트 초기 설정, 스킬, 전체 작업 흐름에는 소스 CLI를 쓴다. Git과 Python 3.11 이상이 필요하다.
 설치 프로그램은 필요한 도구를 확인하고 빠진 도구를 설치하기 전에 묻는다.
 
-- **macOS.** [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/install.sh)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `bash ./install.sh`를 실행한다. [macOS CLI 설치 안내](docs/ko/install-macos.md)
-- **Windows.** [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/install.ps1)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `powershell -ExecutionPolicy Bypass -File .\install.ps1`을 실행한다. [Windows CLI 설치 안내](docs/ko/install-windows.md)
+- **macOS.** [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/install.sh)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `bash ./install.sh`를 실행한다. [macOS CLI 설치 안내](docs/ko/install-macos.md)
+- **Windows.** [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/install.ps1)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `powershell -ExecutionPolicy Bypass -File .\install.ps1`을 실행한다. [Windows CLI 설치 안내](docs/ko/install-windows.md)
 
-[macOS용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/open-agent-harness-v1.0.0.tar.gz)
-또는 [Windows용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/open-agent-harness-v1.0.0.zip)을
+[macOS용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/open-agent-harness-v1.1.0.tar.gz)
+또는 [Windows용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/open-agent-harness-v1.1.0.zip)을
 검증해서 풀고 `install/` 안의 해당 설치 프로그램을 실행해도 된다. `--dry-run`(Windows에서는 `-DryRun`)을 붙이면 진행 단계를 미리 볼 수 있다.
 
 그다음 새 터미널을 열어 버전을 확인한다.
 
 ```console
 $ oah --version
-oah 1.0.0
+oah 1.1.0
 ```
 
 ## 처음 실행하기
@@ -149,6 +149,10 @@ oah 1.0.0
 
 3. **프로젝트 규칙을 확인한다.** **Rules**에 동기화가 필요하다고 나오면 **Sync now**를 눌러 `AGENTS.md`의
    관리 대상 규칙을 갱신한다. 작업 폴더의 변경 사항을 살핀 뒤 커밋한다.
+
+4. **프로젝트 스킬을 설치하거나 갱신한다.** **Explore**에서 GitHub 스킬 폴더를 검토하고, 설치된 호환 에이전트
+   (Claude Code 또는 Codex)를 고른다. 경고가 있으면 확인한 뒤 **Confirm install**을 누른다. 기존 OAH 관리 프로젝트
+   스킬은 **Installed**에서 **Check for update**를 누르고, 검토 결과를 확인한 뒤 **Apply update** 버튼이 나타나면 누른다.
 
 앱은 macOS에서 `~/.oah`, Windows에서 `%USERPROFILE%\.oah` 아래에 `settings.toml`과 `bin/`의 동봉 도구를 저장한다.
 이 번들 명령은 데스크톱 설정과 함께 작동한다.
@@ -183,7 +187,7 @@ oah skills read --review REVIEW_ID
 명령을 실행한다. 프로젝트에 설치할 스킬을 미리 보려면 `oah skills install ponytail --project --target claude --dry-run`을
 실행한다. 설치 대상은 `claude`, `codex`, `both`다. [스킬 찾기와 검토](docs/ko/skills-and-capabilities.md#스킬-찾기와-검토) · [설계 단계](docs/ko/skills-and-capabilities.md#아홉-설계-단계)
 
-v1.0.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스트 프로필이 없다. `oah skills select --needs FILE --review REVIEW_ID`에
+v1.1.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스트 프로필이 없다. `oah skills select --needs FILE --review REVIEW_ID`에
 쓰는 파일을 `oah skills find --task`로 만들려면 해당 프로필이 필요하다.
 [관리형 전달 요구 사항](docs/ko/skills-and-capabilities.md#필수-관리-전달)
 

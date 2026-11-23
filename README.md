@@ -17,7 +17,7 @@
 
 # open-agent-harness (`oah`)
 
-**v1.0.0 downloads** · [macOS DMG](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/OAH\_1.0.0_aarch64.dmg) · [Windows installer](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/OAH\_1.0.0_x64-setup.exe) · [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/SHA256SUMS) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.0.0)
+**v1.1.0 downloads** · [macOS DMG](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_aarch64.dmg) · [Windows installer](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_x64-setup.exe) · [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/SHA256SUMS) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.1.0)
 
 The macOS app has an ad hoc signature and no Apple notarization. The Windows installer is unsigned.
 [Desktop installation and signing](#desktop-app) · [First run](#first-run) · [Source CLI](#source-cli) · [Skills CLI](#inspect-and-choose-skills-in-the-cli) · [Documentation](#documentation)
@@ -102,7 +102,7 @@ The guided design conversation in the figure is planned for a later release.
 ### Desktop app
 
 The DMG supports Apple silicon Macs running macOS 13 or later. The NSIS installer supports Windows 11 x64.
-Get the installer and `SHA256SUMS` from the [v1.0.0 downloads](#open-agent-harness-oah). Check the downloaded
+Get the installer and `SHA256SUMS` from the [v1.1.0 downloads](#open-agent-harness-oah). Check the downloaded
 file with `shasum -a 256` on macOS or `Get-FileHash -Algorithm SHA256` in PowerShell. Open it only after the
 digest matches the corresponding entry.
 
@@ -117,18 +117,18 @@ digest matches the corresponding entry.
 Use the source CLI for project setup, skills and the full task loop. It needs Git and Python 3.11 or later.
 The installers check prerequisites and ask before installing missing tools.
 
-- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
-- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
+- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
+- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
 
-You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/open-agent-harness-v1.0.0.tar.gz)
-or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.0.0/open-agent-harness-v1.0.0.zip),
+You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/open-agent-harness-v1.1.0.tar.gz)
+or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/open-agent-harness-v1.1.0.zip),
 then run the corresponding installer under `install/`. Add `--dry-run` (`-DryRun` on Windows) to preview the steps.
 
 Then open a new terminal and check the version.
 
 ```console
 $ oah --version
-oah 1.0.0
+oah 1.1.0
 ```
 
 ## First run
@@ -153,6 +153,10 @@ oah 1.0.0
 
 3. **Check the project rules.** If **Rules** shows drift, choose **Sync now** to update the managed block in
    `AGENTS.md`. Review the changes in the worktree before committing them.
+
+4. **Install or update a project skill.** In **Explore**, review a GitHub skill folder, choose a compatible installed
+   agent (Claude Code or Codex), acknowledge any warnings and select **Confirm install**. For an existing OAH-managed
+   project skill, open **Installed**, select **Check for update**, review the result and select **Apply update** when offered.
 
 The desktop app uses `~/.oah` on macOS or `%USERPROFILE%\.oah` on Windows. It writes `settings.toml`
 and places its helper in `bin/`. These bundled commands work with the desktop configuration.
@@ -189,7 +193,7 @@ command it prints. To preview a separate project install, run
 `oah skills install ponytail --project --target claude --dry-run`. The install targets are `claude`, `codex`
 and `both`. [Finding and reviewing skills](docs/skills-and-capabilities.md#finding-and-reviewing-skills) · [Design stages](docs/skills-and-capabilities.md#the-nine-design-stages)
 
-v1.0.0 ships with no qualified host profile for managed worker delivery. `oah skills find --task` needs
+v1.1.0 ships with no qualified host profile for managed worker delivery. `oah skills find --task` needs
 that profile to create the needs file used by `oah skills select --needs FILE --review REVIEW_ID`.
 [Managed delivery requirements](docs/skills-and-capabilities.md#required-managed-delivery)
 
