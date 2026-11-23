@@ -6,7 +6,6 @@ import {
   checkResponse,
   requestFor,
   sameAcquisition,
-  successText,
   writeKey,
   type Acquired,
   type Confirmation,
@@ -19,6 +18,8 @@ export type Operation = { readonly confirmation: Confirmation; readonly acknowle
   | { readonly phase: "done"; readonly result: ApplyProjectSkillDto }
   | { readonly phase: "failed"; readonly error: ErrorDto }
 );
+
+export type CompletedOperation = Extract<Operation, { phase: "done" }>;
 
 export interface SkillConfirmations {
   /** The committed selection confirmations are built under; `project` is `null` when none is open. */
@@ -55,13 +56,41 @@ interface Acknowledgement {
 const NOTHING_OBSERVED: Observed = { project: null, generation: -1, folders: {} };
 const NO_FOLDERS: Readonly<Record<string, Acquired>> = {};
 
+function isSelected(confirmation: Confirmation, project: string | null, generation: number): boolean {
+  return confirmation.project === project && confirmation.generation === generation;
+}
+
+function ownsConfirmation(
+  confirmation: Confirmation,
+  project: string | null,
+  generation: number,
+  observed: Observed,
+  result?: ApplyProjectSkillDto,
+): boolean {
+  if (!isSelected(confirmation, project, generation)) return false;
+  const { acquired, candidate, destination } = confirmation;
+  if (acquired === null) return true;
+  if (observed.project !== project || observed.generation !== generation) return false;
+  const current = observed.folders[destination];
+  if (current === undefined) return false;
+  if (current.revision === acquired.revision) return sameAcquisition(current.acquisition, acquired.acquisition);
+
+  const { review_id, snapshot, repo, path } = candidate;
+  return (
+    result?.review_id === review_id &&
+    current.revision === acquired.revision + 1 &&
+    snapshot !== null &&
+    sameAcquisition(current.acquisition, { review_id, snapshot_id: snapshot, repo, path })
+  );
+}
+
 export function useSkillConfirmations(
   transport: Transport,
   projectRef: RefObject<ProjectDto | null>,
   selectionRef: RefObject<number>,
   project: string | null,
   generation: number,
-  notify: (text: string) => void,
+  notify: (operation: CompletedOperation) => void,
 ) {
   const [operations, setOperations] = useState<Record<string, Operation>>({});
   const [inventoryRevision, setInventoryRevision] = useState(0);
@@ -79,8 +108,9 @@ export function useSkillConfirmations(
     setAcknowledgements(next);
   }, []);
 
-  const selected = useCallback(
-    (confirmation: Confirmation) => projectRef.current?.id === confirmation.project && selectionRef.current === confirmation.generation,
+  const ownsCurrent = useCallback(
+    (confirmation: Confirmation, result?: ApplyProjectSkillDto) =>
+      ownsConfirmation(confirmation, projectRef.current?.id ?? null, selectionRef.current, observedRef.current, result),
     [projectRef, selectionRef],
   );
 
@@ -126,7 +156,7 @@ export function useSkillConfirmations(
 
   const acknowledge = useCallback(
     (confirmation: Confirmation, value: boolean) => {
-      if (!selected(confirmation)) return;
+      if (!isSelected(confirmation, projectRef.current?.id ?? null, selectionRef.current)) return;
       saveAcknowledgements({
         ...acknowledgementsRef.current,
         [confirmation.key]: {
@@ -137,46 +167,46 @@ export function useSkillConfirmations(
         },
       });
     },
-    [selected, saveAcknowledgements],
+    [projectRef, selectionRef, saveAcknowledgements],
   );
 
   const apply = useCallback(
     async (confirmation: Confirmation) => {
-      if (!selected(confirmation)) return; // the selection it was built under is gone
-      const { acquired, destination } = confirmation;
-      if (acquired !== null) {
-        const seen = observedRef.current;
-        const now = seen.project === confirmation.project && seen.generation === confirmation.generation ? seen.folders[destination] : undefined;
-        // Only the exact receipt the check started from, unchanged since then, may be replaced.
-        if (now === undefined || now.revision !== acquired.revision || !sameAcquisition(now.acquisition, acquired.acquisition)) return;
-      }
+      if (!ownsCurrent(confirmation)) return;
+      const { destination } = confirmation;
       const acknowledged = confirmation.warnings && acknowledgementsRef.current[confirmation.key]?.value === true;
       if (confirmation.warnings && !acknowledged) return;
       if (busy.current.has(destination)) return; // one write per destination at a time
       busy.current.add(destination);
-      const settle = (operation: Operation) => setOperations((current) => ({ ...current, [destination]: operation }));
-      settle({ confirmation, acknowledged, phase: "applying" });
+      const sent = { confirmation, acknowledged };
+      const store = (operation: Operation | null) => setOperations((current) => {
+        if (operation) return { ...current, [destination]: operation };
+        const { [destination]: _dropped, ...rest } = current;
+        return rest;
+      });
+      const fail = (error: ErrorDto) => store(ownsCurrent(confirmation) ? { ...sent, phase: "failed", error } : null);
+      store({ ...sent, phase: "applying" });
       try {
         const result = await transport.applyProjectSkill(requestFor(confirmation, acknowledged));
         const problem = checkResponse(confirmation, result);
-        const open = projectRef.current?.id === confirmation.project;
         if (problem) {
-          settle({ confirmation, acknowledged, phase: "failed", error: problem });
-          if (open) setInventoryRevision((n) => n + 1); // disk state is unknown now: re-read the real inventory
-          return;
+          fail(problem);
+        } else if (ownsCurrent(confirmation, result)) {
+          const completed: CompletedOperation = { ...sent, phase: "done", result };
+          store(completed);
+          notifyRef.current(completed);
+        } else {
+          store(null);
         }
-        settle({ confirmation, acknowledged, phase: "done", result });
         // Any selection of the written project re-reads it; a different open project re-reads on its own project read.
-        if (open) setInventoryRevision((n) => n + 1);
-        // Only the selection that confirmed the write hears its success; an A to B to A return starts fresh.
-        if (selected(confirmation)) notifyRef.current(successText(confirmation, result));
+        if (projectRef.current?.id === confirmation.project) setInventoryRevision((n) => n + 1);
       } catch (error) {
-        settle({ confirmation, acknowledged, phase: "failed", error: toErrorDto(error) });
+        fail(toErrorDto(error));
       } finally {
         busy.current.delete(destination);
       }
     },
-    [transport, projectRef, selected],
+    [transport, projectRef, ownsCurrent],
   );
 
   const clear = useCallback((destination: string) => {
@@ -195,8 +225,15 @@ export function useSkillConfirmations(
 
   const selection = useMemo(() => ({ project, generation }), [project, generation]);
   const acquired = observed.project === project && observed.generation === generation ? observed.folders : NO_FOLDERS;
+  const visibleOperations = Object.fromEntries(
+    Object.entries(operations).filter(([, operation]) => {
+      if (operation.phase === "applying") return true;
+      const result = operation.phase === "done" ? operation.result : undefined;
+      return ownsConfirmation(operation.confirmation, project, generation, observed, result);
+    }),
+  );
   return {
-    confirmations: { selection, operations, acquired, acknowledged, acknowledge, apply, clear, observe } satisfies SkillConfirmations,
+    confirmations: { selection, operations: visibleOperations, acquired, acknowledged, acknowledge, apply, clear, observe } satisfies SkillConfirmations,
     inventoryRevision,
   };
 }

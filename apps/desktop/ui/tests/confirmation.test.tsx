@@ -37,7 +37,7 @@ const candidate: ReviewResultDto = {
     // The wire record also carries the pinned snapshot.
     source: {
       provider: "github",
-      locator: "example/skills",
+      locator: "https://github.com/example/skills",
       commit: "0123456789abcdef0123456789abcdef01234567",
       tree: null,
       path: "skills/tidy",
@@ -93,7 +93,7 @@ function replaced(patch: Partial<typeof receipt>) {
 /** An update of a replaced receipt; the review is the same one pinned to that receipt's source, which an update must share. */
 function receiptVariant(patch: Partial<typeof receipt>): Confirmation {
   const { skill, seen } = replaced(patch);
-  return update(selection, skill, seen, withSource(candidate, { locator: seen.acquisition.repo, path: seen.acquisition.path }));
+  return update(selection, skill, seen, withSource(candidate, { locator: `https://github.com/${seen.acquisition.repo}`, path: seen.acquisition.path }));
 }
 
 const receiptChanges = [
@@ -114,7 +114,7 @@ const candidateChanges = [
 /** Facts an install may take from any review but an update must share with the receipt it replaces. */
 const sourceChanges = [
   ["skill name", (result: ReviewResultDto) => named(result, "neat")],
-  ["repo", (result: ReviewResultDto) => withSource(result, { locator: "fork/skills" })],
+  ["repo", (result: ReviewResultDto) => withSource(result, { locator: "https://github.com/fork/skills" })],
   ["path", (result: ReviewResultDto) => withSource(result, { path: "skills/tidy/v2" })],
 ] as const;
 

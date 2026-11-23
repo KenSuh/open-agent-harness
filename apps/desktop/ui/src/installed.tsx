@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { ErrorDto, InstalledSkillDto, ReviewResultDto } from "./contract";
-import { acquisitionOf, explains, judgeUpdate, sameAcquisition, updateBasis, writeKey, type UpdateBasis, type UpdateVerdict } from "./confirmation";
+import { judgeUpdate, updateBasis, writeKey, type UpdateBasis, type UpdateVerdict } from "./confirmation";
 import { HEADLINE, Reason, SourceFacts, WarningList } from "./explore";
 import { reviewOnce } from "./reviewOnce";
 import { toErrorDto, type Transport } from "./transport/types";
@@ -40,10 +40,9 @@ function updateAnnouncement(
   check: Check,
   verdict: UpdateVerdict | null,
   update: Operation | undefined,
-  finished: Operation | undefined,
 ): string | null {
   if (update?.phase === "applying") return `Applying the update to ${skill.name}…`;
-  if (finished?.phase === "done") return finished.result.status === "unchanged" ? "Already current; nothing changed." : "Updated.";
+  if (update?.phase === "done") return update.result.status === "unchanged" ? "Already current; nothing changed." : "Updated.";
   if (check.phase === "checking") return `Checking ${skill.name} for updates…`;
   if (check.phase !== "result" || verdict === null) return null;
   switch (verdict.kind) {
@@ -90,22 +89,9 @@ function ManagedUpdate({
   const busy = operation?.phase === "applying";
   const mine = confirmation !== null && update?.confirmation.key === confirmation.key ? update : undefined;
   const done = mine?.phase === "done";
-  const receipt = acquisitionOf(skill.managed);
-  // A finished outcome stays with the selection that sent it; a write still running locks the folder under any selection.
-  const settled = update?.phase !== "applying" && update?.confirmation.generation === generation ? update : undefined;
-  // A finished update keeps explaining the row after the inventory re-read replaced the receipt its check started from.
-  const finished = settled?.phase === "done" && explains(settled.confirmation, settled.result, receipt) ? settled : undefined;
-  // A failure stays with its own confirmation, or with the unchanged receipt once no check is shown; never with a replaced one.
-  const failed = settled?.phase === "failed" ? settled : undefined;
-  const failure =
-    failed &&
-    (confirmation !== null
-      ? mine === failed
-      : current.phase === "idle" && sameAcquisition(failed.confirmation.acquired?.acquisition ?? null, receipt))
-      ? failed
-      : undefined;
+  const failure = update?.phase === "failed" && (mine === update || current.phase === "idle") ? update : undefined;
   const acknowledged = confirmation !== null && confirmations.acknowledged(confirmation);
-  const announcement = updateAnnouncement(skill, current, verdict, update, finished);
+  const announcement = updateAnnouncement(skill, current, verdict, update);
 
   const runCheck = () => {
     if (basis === null || running.current === basis.key) return;
@@ -213,13 +199,13 @@ function InstalledRow({ skill, children }: { skill: InstalledSkillDto; children:
 
 export function InstalledView({
   transport,
-  projectOpen,
   confirmations,
+  projectRevision,
   inventoryRevision,
 }: {
   transport: Transport;
-  projectOpen: boolean;
   confirmations: SkillConfirmations;
+  projectRevision: number;
   /** Bumped by the controller after a confirmed install or update; a bump re-reads the real inventory. */
   inventoryRevision: number;
 }) {
@@ -229,6 +215,7 @@ export function InstalledView({
   const [reading, setReading] = useState(false);
   const { observe } = confirmations;
   const { project, generation } = confirmations.selection;
+  const projectOpen = project !== null;
 
   useEffect(() => {
     let current = true;
@@ -251,7 +238,7 @@ export function InstalledView({
     return () => {
       current = false;
     };
-  }, [transport, read, inventoryRevision, observe, project, generation]);
+  }, [transport, read, projectRevision, inventoryRevision, observe, project, generation]);
 
   const refresh = () => setRead((previous) => previous + 1);
 
@@ -302,8 +289,8 @@ export function InstalledView({
         </p>
       ) : (
         <ul className="installed-list" aria-label="Installed skills">
-          {load.value.map((skill, index) => (
-            <InstalledRow key={`${skill.scope}:${skill.location}:${index}`} skill={skill}>
+          {load.value.map((skill) => (
+            <InstalledRow key={JSON.stringify([skill.scope, skill.engine, skill.location])} skill={skill}>
               {(nameId) => (
                 <>
               <div className="installed-heading">

@@ -240,10 +240,10 @@ export function App({ transport }: { transport: Transport }) {
                 />
               ) : page === "installed" ? (
                 <InstalledView
-                  key={c.projectRevision}
+                  key={JSON.stringify([c.confirmations.selection.project, c.confirmations.selection.generation])}
                   transport={transport}
-                  projectOpen={c.project !== null}
                   confirmations={c.confirmations}
+                  projectRevision={c.projectRevision}
                   inventoryRevision={c.inventoryRevision}
                 />
               ) : (

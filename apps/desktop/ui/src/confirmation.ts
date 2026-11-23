@@ -11,6 +11,8 @@ import type {
 
 export type ApplyOperation = "install" | "update";
 
+const GITHUB_LOCATOR_PREFIX = "https://github.com/";
+
 /** The project selection a confirmation is built under; a new project ID (A to B to A included) is a new generation. */
 export interface Selection {
   readonly project: string;
@@ -88,14 +90,15 @@ export function sameAcquisition(a: Acquisition | null, b: Acquisition | null): b
   return a.review_id === b.review_id && a.snapshot_id === b.snapshot_id && a.repo === b.repo && a.path === b.path;
 }
 
-function candidateOf(result: ReviewResultDto): Candidate {
+function candidateOf(result: ReviewResultDto): Candidate | null {
   const { id, source } = result.record;
+  if (source.provider !== "github" || !source.locator.startsWith(GITHUB_LOCATOR_PREFIX)) return null;
   // The wire record carries its snapshot ID although the page's DTO type does not list it.
-  const snapshot = (source as { readonly snapshot?: unknown }).snapshot;
+  const snapshot = "snapshot" in source && typeof source.snapshot === "string" ? source.snapshot : null;
   return {
     review_id: id,
-    snapshot: typeof snapshot === "string" ? snapshot : null,
-    repo: source.locator,
+    snapshot,
+    repo: source.locator.slice(GITHUB_LOCATOR_PREFIX.length),
     path: source.path,
     commit: source.commit,
     tree: source.tree,
@@ -119,7 +122,8 @@ function confirmation(parts: Omit<Confirmation, "key" | "destination">): Confirm
 /** An install of the reviewed candidate for `engine` in the selected project; `null` when this review cannot be written there. */
 export function confirmInstall(selection: Selection, engine: ProjectSkillEngine, folder: string, result: ReviewResultDto): Confirmation | null {
   const name = result.record.frontmatter.name;
-  if (!name || !isInstallable(result) || !compatible(result, engine)) return null;
+  const candidate = candidateOf(result);
+  if (!name || candidate === null || !isInstallable(result) || !compatible(result, engine)) return null;
   return confirmation({
     project: selection.project,
     generation: selection.generation,
@@ -127,7 +131,7 @@ export function confirmInstall(selection: Selection, engine: ProjectSkillEngine,
     name,
     operation: "install",
     acquired: null,
-    candidate: candidateOf(result),
+    candidate,
     warnings: needsAcknowledgement(result),
     folder,
   });
@@ -172,10 +176,17 @@ export type UpdateVerdict =
 /** What a finished check means for the receipt it started from; only an eligible new review of the same skill and source becomes a confirmation. */
 export function judgeUpdate(basis: UpdateBasis, result: ReviewResultDto): UpdateVerdict {
   const { acquisition } = basis.acquired;
-  if (result.record.id === acquisition.review_id) return { kind: "current" };
   // A review of another skill name, repository or folder cannot replace this receipt; the writer refuses it as well.
-  const { frontmatter, source } = result.record;
-  if (frontmatter.name !== basis.name || source.locator !== acquisition.repo || source.path !== acquisition.path) return { kind: "mismatch" };
+  const candidate = candidateOf(result);
+  if (
+    candidate === null ||
+    result.record.frontmatter.name !== basis.name ||
+    candidate.repo !== acquisition.repo ||
+    candidate.path !== acquisition.path
+  ) {
+    return { kind: "mismatch" };
+  }
+  if (candidate.review_id === acquisition.review_id) return { kind: "current" };
   if (!isInstallable(result)) return { kind: "blocked" };
   if (!compatible(result, basis.engine)) return { kind: "incompatible" };
   return {
@@ -187,7 +198,7 @@ export function judgeUpdate(basis: UpdateBasis, result: ReviewResultDto): Update
       name: basis.name,
       operation: "update",
       acquired: basis.acquired,
-      candidate: candidateOf(result),
+      candidate,
       warnings: needsAcknowledgement(result),
       folder: basis.folder,
     }),
@@ -237,12 +248,4 @@ export function successText(confirmation: Confirmation, result: ApplyProjectSkil
     return result.status === "unchanged" ? "Skill already installed; nothing changed." : "Skill installed in the project.";
   }
   return result.status === "unchanged" ? `${confirmation.name} is already current.` : `Updated ${confirmation.name}.`;
-}
-
-/** Whether a finished update still describes the folder's receipt: the one it replaced (not re-read yet, or identical files) or the one it reported. */
-export function explains(confirmation: Confirmation, result: ApplyProjectSkillDto, current: Acquisition | null): boolean {
-  const replaced = confirmation.acquired?.acquisition;
-  if (!replaced || current === null) return false;
-  if (sameAcquisition(current, replaced)) return true;
-  return current.review_id === result.review_id && current.repo === replaced.repo && current.path === replaced.path;
 }

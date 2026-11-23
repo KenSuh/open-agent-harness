@@ -13,9 +13,10 @@ import type {
   TaskStateName,
   Theme,
 } from "./contract";
+import { successText } from "./confirmation";
 import { toErrorDto, type Transport } from "./transport/types";
 import { useAgents } from "./useAgents";
-import { useSkillConfirmations } from "./useApply";
+import { useSkillConfirmations, type CompletedOperation } from "./useApply";
 
 export type Load<T> =
   | { status: "loading" }
@@ -34,6 +35,8 @@ export interface Toast {
   text: string;
   hint?: string | null;
 }
+
+type StoredToast = Toast & { readonly operation?: CompletedOperation };
 
 const TOAST_MS = 6000;
 
@@ -54,7 +57,7 @@ export function useController(transport: Transport) {
   const [projectBusy, setProjectBusy] = useState(false);
   const [eventNotices, setEventNotices] = useState<NoticeDto[]>([]);
   const [refresh, setRefresh] = useState<RefreshTask | null>(null);
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [toasts, setToasts] = useState<StoredToast[]>([]);
   const toastKey = useRef(0);
   const refreshRunning = useRef(false);
   const refreshRun = useRef(0);
@@ -63,27 +66,30 @@ export function useController(transport: Transport) {
   const [selectionGeneration, setSelectionGeneration] = useState(0);
   const projectReads = useRef(0);
 
-  const pushToast = useCallback((toast: Omit<Toast, "key">) => {
+  const pushToast = useCallback((toast: Omit<StoredToast, "key">) => {
     const key = ++toastKey.current;
     // An identical message already on screen is not stacked again.
-    setToasts((current) =>
-      current.some((item) => item.text === toast.text && item.level === toast.level)
-        ? current
-        : [...current, { ...toast, key }],
-    );
+    setToasts((current) => {
+      const sameMessage = (item: StoredToast) => item.text === toast.text && item.level === toast.level;
+      if (!toast.operation && current.some(sameMessage)) return current;
+      return [...current.filter((item) => !sameMessage(item)), { ...toast, key }];
+    });
     window.setTimeout(() => {
       setToasts((current) => current.filter((item) => item.key !== key));
     }, TOAST_MS);
   }, []);
 
-  const notifyInfo = useCallback((text: string) => pushToast({ level: "info", text }), [pushToast]);
+  const notifySkill = useCallback(
+    (operation: CompletedOperation) => pushToast({ level: "info", text: successText(operation.confirmation, operation.result), operation }),
+    [pushToast],
+  );
   const { confirmations, inventoryRevision } = useSkillConfirmations(
     transport,
     projectRef,
     selectionRef,
     project?.id ?? null,
     selectionGeneration,
-    notifyInfo,
+    notifySkill,
   );
 
   const dismissToast = useCallback((key: number) => {
@@ -297,7 +303,7 @@ export function useController(transport: Transport) {
     projectBusy,
     notices,
     refresh,
-    toasts,
+    toasts: toasts.filter(({ operation }) => !operation || confirmations.operations[operation.confirmation.destination] === operation),
     agents,
     reloadInfo: loadInfo,
     reloadSettings: loadSettings,
@@ -307,7 +313,6 @@ export function useController(transport: Transport) {
     setTheme,
     dismissQuickStart,
     dismissToast,
-    notifyInfo,
     confirmations,
     inventoryRevision,
   };
