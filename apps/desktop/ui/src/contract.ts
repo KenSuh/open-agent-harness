@@ -88,11 +88,37 @@ export interface SettingsEdit {
 /** An agent's config id (core `AgentId::as_str`), in core's display order. */
 export type AgentId = "claude" | "codex" | "gemini" | "copilot" | "opencode" | "antigravity" | "cursor";
 
+/** Present only on a project installation the backend proved was installed from a reviewed snapshot. */
+export interface ManagedSkillDto {
+  readonly review_id: string;
+  readonly snapshot_id: string;
+  readonly repo: string;
+  readonly path: string;
+}
+
 export interface InstalledSkillDto {
   readonly name: string;
   readonly engine: "claude" | "codex";
   readonly scope: "project" | "user";
   readonly location: string;
+  readonly managed?: ManagedSkillDto;
+}
+
+export type ProjectSkillEngine = "claude" | "codex";
+
+/** `apply_project_skill`'s request: the project handle (never a path), the engine and the immutable review IDs. */
+export interface ApplyProjectSkillReq {
+  project: string;
+  engine: ProjectSkillEngine;
+  review_id: string;
+  /** `null` on install; the previously installed review ID on update. */
+  expected_review_id: string | null;
+  acknowledge_warnings: boolean;
+}
+
+export interface ApplyProjectSkillDto {
+  status: "installed" | "updated" | "unchanged";
+  review_id: string;
 }
 
 /** §4.2 statuses: v0.4.0's plus `sign-in-unknown`. */

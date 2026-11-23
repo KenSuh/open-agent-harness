@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppInfoDto,
+  ApplyProjectSkillDto,
   ErrorDto,
   NoticeDto,
   Progress,
@@ -72,6 +73,13 @@ export function useController(transport: Transport) {
       setToasts((current) => current.filter((item) => item.key !== key));
     }, TOAST_MS);
   }, []);
+
+  const notifyInfo = useCallback((text: string) => pushToast({ level: "info", text }), [pushToast]);
+  const notifyApplied = useCallback(
+    (result: ApplyProjectSkillDto) =>
+      pushToast({ level: "info", text: result.status === "unchanged" ? "Skill already installed; nothing changed." : "Skill installed in the project." }),
+    [pushToast],
+  );
 
   const dismissToast = useCallback((key: number) => {
     setToasts((current) => current.filter((item) => item.key !== key));
@@ -289,5 +297,7 @@ export function useController(transport: Transport) {
     setTheme,
     dismissQuickStart,
     dismissToast,
+    notifyInfo,
+    notifyApplied,
   };
 }

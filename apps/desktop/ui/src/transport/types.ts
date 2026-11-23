@@ -13,6 +13,8 @@ import type {
   RefreshDto,
   RulesStateDto,
   ReviewResultDto,
+  ApplyProjectSkillDto,
+  ApplyProjectSkillReq,
   RulesSyncDto,
   SettingsDto,
   SettingsEdit,
@@ -47,6 +49,7 @@ export interface Transport {
   startAgentsProbe(req: AgentsProbeReq, onEvent: (event: TaskEvent<AgentStatusDto[]>) => void): Promise<TaskId>;
   startReview(req: StartReviewReq, onEvent: (event: TaskEvent<ReviewResultDto>) => void): Promise<TaskId>;
   skillsInstalled(): Promise<InstalledSkillDto[]>;
+  applyProjectSkill(req: ApplyProjectSkillReq): Promise<ApplyProjectSkillDto>;
   sectionsShow(req: WorkflowProjectReq): Promise<WorkflowDto>;
   stagesSet(req: WorkflowProjectReq<StagesSetReq>): Promise<StagesSetDto>;
   presetApply(req: WorkflowProjectReq<PresetApplyReq>): Promise<StagesSetDto>;
