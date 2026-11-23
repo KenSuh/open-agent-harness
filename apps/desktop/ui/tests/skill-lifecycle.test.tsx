@@ -259,3 +259,203 @@ describe("Installed update", () => {
     await emit(() => pending.resolve({ status: "updated", review_id: "rec-new" }));
   });
 });
+
+describe("C2 guards: write lock above the views (G31)", () => {
+  it("keeps the install lock across Explore to Installed to Explore and refreshes inventory when the write settles away from Explore", async () => {
+    const t = await exploreApp();
+    let reads = 0;
+    t.override.skillsInstalled = async () => {
+      reads += 1;
+      return [];
+    };
+    const pending = deferred<ApplyProjectSkillDto>();
+    t.override.applyProjectSkill = () => pending.promise;
+    await review(t, pass);
+    await click(button("Confirm install"));
+    await click(button("Installed"));
+    const before = reads;
+    await emit(() => pending.resolve({ status: "installed", review_id: "rec-new" }));
+    expect(reads).toBeGreaterThan(before);
+    expect(document.querySelector(".toast")?.textContent).toContain("installed");
+    await click(button("Explore"));
+    expect(button("Confirm install").disabled).toBe(true);
+    expect(t.applyRequests).toHaveLength(1);
+  });
+
+  it("keeps a pending write locked through A to B to A and shows no success while on B", async () => {
+    const t = await exploreApp();
+    const pending = deferred<ApplyProjectSkillDto>();
+    t.override.applyProjectSkill = () => pending.promise;
+    await review(t, pass);
+    await click(button("Confirm install"));
+    t.override.projectOpenDialog = async () => otherProject;
+    await click(button("+ Open…"));
+    await emit(() => pending.resolve({ status: "installed", review_id: "rec-new" }));
+    expect(document.querySelector(".toast")).toBeNull();
+    expect(document.body.textContent).not.toContain("Installed tidy");
+    t.override.projectOpenDialog = async () => sampleProject;
+    await click(button("+ Open…"));
+    expect(t.applyRequests).toHaveLength(1);
+    await review(t, pass);
+    // A's own finished write belongs to A's destination and still blocks a duplicate there.
+    expect(button("Confirm install").disabled).toBe(true);
+    expect(t.applyRequests).toHaveLength(1);
+  });
+
+  it("blocks a second click on A after returning to A while the first write still runs", async () => {
+    const t = await exploreApp();
+    const pending = deferred<ApplyProjectSkillDto>();
+    t.override.applyProjectSkill = () => pending.promise;
+    await review(t, pass);
+    await click(button("Confirm install"));
+    t.override.projectOpenDialog = async () => otherProject;
+    await click(button("+ Open…"));
+    t.override.projectOpenDialog = async () => sampleProject;
+    await click(button("+ Open…"));
+    await review(t, pass);
+    expect(button(/Installing/).disabled).toBe(true);
+    await act(async () => button(/Installing/).click());
+    expect(t.applyRequests).toHaveLength(1);
+    await emit(() => pending.resolve({ status: "installed", review_id: "rec-new" }));
+    expect(panel()?.textContent).toContain("Installed tidy");
+  });
+});
+
+describe("C2 guards: confirmed request and validated response (G32)", () => {
+  it("keeps destination and engine after an agent list refresh while the request runs", async () => {
+    const t = await exploreApp();
+    const pending = deferred<ApplyProjectSkillDto>();
+    t.override.applyProjectSkill = () => pending.promise;
+    await review(t, pass);
+    await click(button("Confirm install"));
+    t.agents = [agent("claude", false), agent("codex")];
+    await emit(() => t.emitAgentsChanged({ agents: ["claude"] }));
+    expect(panel()?.textContent).toContain(`${sampleProject.root}/.claude/skills/tidy`);
+    expect(panel()?.textContent).not.toContain(".agents/skills/tidy");
+    await emit(() => pending.resolve({ status: "installed", review_id: "rec-new" }));
+    expect(panel()?.textContent).toContain(`${sampleProject.root}/.claude/skills/tidy`);
+    expect(t.applyRequests[0]?.engine).toBe("claude");
+  });
+
+  it.each([
+    ["a different review id", { status: "installed", review_id: "rec-other" } as const],
+    ["an update status for an install", { status: "updated", review_id: "rec-new" } as const],
+    ["an unchanged install for another review", { status: "unchanged", review_id: "rec-other" } as const],
+  ])("rejects %s as a success for an install", async (_label, response) => {
+    const t = await exploreApp();
+    t.override.applyProjectSkill = async () => response;
+    await review(t, pass);
+    await click(button("Confirm install"));
+    expect(alertText()).toContain("UI_APPLY_RESPONSE_MISMATCH");
+    expect(panel()?.textContent).not.toContain("Installed tidy");
+    expect(document.querySelector(".toast")).toBeNull();
+  });
+
+  it("distinguishes an exact duplicate install (unchanged) from an install", async () => {
+    const t = await exploreApp();
+    t.override.applyProjectSkill = async () => ({ status: "unchanged", review_id: "rec-new" });
+    await review(t, pass);
+    await click(button("Confirm install"));
+    expect(panel()?.textContent).toContain("Already installed; nothing changed.");
+    expect(panel()?.textContent).not.toContain("Installed tidy");
+  });
+
+  it.each([
+    ["an install status", { status: "installed", review_id: "rec-new" } as const],
+    ["another review id", { status: "updated", review_id: "rec-other" } as const],
+    ["an unchanged update for the new review", { status: "unchanged", review_id: "rec-new" } as const],
+  ])("rejects %s as a success for an update", async (_label, response) => {
+    const { t } = await installedApp();
+    t.override.applyProjectSkill = async () => response;
+    await check(t, pass);
+    await click(button("Apply update"));
+    expect(alertText()).toContain("UI_APPLY_RESPONSE_MISMATCH");
+    expect(document.querySelector(".toast")).toBeNull();
+  });
+
+  it("accepts an unchanged update that returns the prior expected receipt", async () => {
+    const { t } = await installedApp();
+    t.override.applyProjectSkill = async () => ({ status: "unchanged", review_id: "rec-old" });
+    await check(t, pass);
+    await click(button("Apply update"));
+    expect(alertText()).toBe("");
+    expect(document.querySelector(".toast")?.textContent).toContain("already current");
+  });
+});
+
+describe("C2 guards: row compatibility, stale outcomes, labelling (G33 G34 G35)", () => {
+  it("explains an incompatible update from the fresh review's engine list and sends nothing", async () => {
+    const { t } = await installedApp();
+    await check(t, { ...pass, gate: { ...pass.gate, compatible: ["codex"] } });
+    expect(document.querySelector('[aria-label="Update not compatible"]')?.textContent).toContain("not compatible with Claude Code");
+    expect(byText("button", "Apply update")).toBeNull();
+    expect(t.applyRequests).toHaveLength(0);
+  });
+
+  it("offers the update when the fresh review lists the row's engine", async () => {
+    const { t } = await installedApp();
+    await check(t, { ...pass, gate: { ...pass.gate, compatible: ["claude"] } });
+    expect(button("Apply update").disabled).toBe(false);
+  });
+
+  it("clears the superseded apply error when a fresh check starts, and keeps it for the same candidate until then", async () => {
+    const { t } = await installedApp();
+    await check(t, pass);
+    t.override.applyProjectSkill = async () => {
+      throw { code: "OAH_LOCAL_EDIT", message: "Local edits found.", hint: null };
+    };
+    await click(button("Apply update"));
+    expect(alertText()).toContain("OAH_LOCAL_EDIT");
+    await click(button("Apply update"));
+    expect(alertText()).toContain("OAH_LOCAL_EDIT");
+    await click(button("Check for update"));
+    expect(alertText()).toBe("");
+    await emit(() => t.emitReview({ event: "done", data: pass }));
+    expect(alertText()).toBe("");
+    expect(button("Apply update").disabled).toBe(false);
+  });
+
+  it("shows repository, folder and pinned commit together for the review and the update candidate", async () => {
+    const t = await exploreApp();
+    await review(t, pass);
+    const facts = (root: ParentNode) => Array.from(root.querySelectorAll("dt")).map((dt) => dt.textContent);
+    const result = document.querySelector('[aria-label="Review result"]')!;
+    expect(facts(result)).toEqual(expect.arrayContaining(["GitHub repository", "Folder in repository", "Pinned commit"]));
+    expect(result.textContent).toContain("example/skills");
+    expect(result.textContent).toContain("skills/tidy");
+    expect(result.textContent).toContain(record.source.commit);
+    await unmount();
+    const { t: t2 } = await installedApp();
+    await check(t2, pass);
+    const candidate = document.querySelector('[aria-label="Update available"]')!;
+    expect(facts(candidate)).toEqual(expect.arrayContaining(["GitHub repository", "Folder in repository", "Pinned commit"]));
+    expect(candidate.textContent).toContain("example/skills");
+    expect(candidate.textContent).toContain(record.source.commit);
+  });
+
+  it("associates controls with the skill and keeps one live status region across the whole update", async () => {
+    const { t } = await installedApp();
+    const group = document.querySelector<HTMLElement>(".managed-update")!;
+    const nameId = group.getAttribute("aria-labelledby")!;
+    expect(document.getElementById(nameId)?.textContent).toBe("tidy");
+    expect(group.getAttribute("role")).toBe("group");
+    expect(button("Check for update").getAttribute("aria-describedby")).toBe(nameId);
+    const region = group.querySelector('[role="status"]')!;
+    expect(region.getAttribute("aria-live")).toBe("polite");
+    await check(t, pass);
+    expect(button("Apply update").getAttribute("aria-describedby")).toBe(nameId);
+    await click(button("Apply update"));
+    expect(group.querySelector('[role="status"]')).toBe(region);
+  });
+
+  it("labels the install panel's controls with the skill and keeps its status region mounted", async () => {
+    const t = await exploreApp();
+    await review(t, pass);
+    const region = panel()!.querySelector('[role="status"]')!;
+    const skillId = button("Confirm install").getAttribute("aria-describedby")!;
+    expect(document.getElementById(skillId)?.textContent).toBe("tidy");
+    await click(button("Confirm install"));
+    expect(panel()!.querySelector('[role="status"]')).toBe(region);
+    expect(region.textContent).toContain("Installed tidy");
+  });
+});

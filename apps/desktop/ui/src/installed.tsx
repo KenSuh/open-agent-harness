@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
-import type { ApplyProjectSkillDto, ErrorDto, InstalledSkillDto, ReviewResultDto } from "./contract";
-import { isInstallable, needsAcknowledgement, Reason, WarningList } from "./explore";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import type { ErrorDto, InstalledSkillDto, ReviewResultDto } from "./contract";
+import { isInstallable, needsAcknowledgement, Reason, SourceFacts, WarningList } from "./explore";
 import { reviewOnce } from "./reviewOnce";
 import { toErrorDto, type Transport } from "./transport/types";
 import type { Load } from "./useController";
-import { useApply } from "./useApply";
+import { writeKey, type SkillWrites } from "./useApply";
 
 type Check =
   | { phase: "idle" }
@@ -27,12 +27,14 @@ function ManagedUpdate({
   skill,
   transport,
   projectId,
-  onApplied,
+  writes,
+  nameId,
 }: {
   skill: InstalledSkillDto;
   transport: Transport;
   projectId: string;
-  onApplied: (skill: InstalledSkillDto, result: ApplyProjectSkillDto) => void;
+  writes: SkillWrites;
+  nameId: string;
 }) {
   const managed = skill.managed!;
   const [check, setCheck] = useState<Check>({ phase: "idle" });
@@ -47,13 +49,16 @@ function ManagedUpdate({
       alive.current = false;
     };
   }, []);
-  const { state, apply } = useApply(transport, projectId, (result) => onApplied(skill, result));
+  const key = writeKey(projectId, skill.engine, skill.name);
+  const entry = writes.entries[key];
+  const { clear } = writes;
 
   const runCheck = () => {
     if (checking.current) return;
     checking.current = true;
     const started = project.current;
     setAcknowledged(false);
+    clear(key); // a fresh check supersedes the old apply error and outcome
     setCheck({ phase: "checking" });
     reviewOnce(transport, managed.repo, managed.path).then(
       (result) => {
@@ -70,18 +75,42 @@ function ManagedUpdate({
   const result = check.phase === "result" ? check.result : null;
   const same = result !== null && result.record.id === managed.review_id;
   const blocked = result !== null && !same && !isInstallable(result);
+  // The fresh review's own compatible list decides whether this row's engine can take it.
+  const incompatible =
+    result !== null && !same && !blocked && result.gate.compatible !== undefined && !result.gate.compatible.includes(skill.engine);
+  const available = result !== null && !same && !blocked && !incompatible;
   const ack = result !== null && needsAcknowledgement(result);
-  const applying = state.phase === "applying";
-  const done = state.phase === "done";
+  // The outcome belongs to the displayed candidate only.
+  const mine =
+    result !== null &&
+    entry !== undefined &&
+    entry.confirmation.operation === "update" &&
+    entry.confirmation.review_id === result.record.id &&
+    entry.confirmation.expected_review_id === managed.review_id
+      ? entry
+      : undefined;
+  const applying = entry?.phase === "applying";
+  const done = mine?.phase === "done";
+  // After the inventory re-read the check is gone; the finished write still explains the new row.
+  const settled =
+    entry?.phase === "done" &&
+    (entry.confirmation.review_id === managed.review_id || entry.confirmation.expected_review_id === managed.review_id)
+      ? entry
+      : undefined;
+  const outcome = mine?.phase === "done" ? mine : settled;
+  // A failure stays visible for its candidate, or after a re-read dropped the check (never for a different candidate).
+  const failure =
+    entry?.phase === "failed" && entry.confirmation.expected_review_id === managed.review_id && (result === null || mine === entry)
+      ? entry
+      : undefined;
   return (
-    <div className="managed-update">
-      <button type="button" onClick={runCheck} disabled={check.phase === "checking" || applying}>
+    <div className="managed-update" role="group" aria-labelledby={nameId}>
+      <button type="button" aria-describedby={nameId} onClick={runCheck} disabled={check.phase === "checking" || applying}>
         {check.phase === "checking" ? "Checking…" : "Check for update"}
       </button>
       {check.phase === "failed" ? <ErrorLines error={check.error} /> : null}
-      {same ? <p role="status">Up to date. The current review matches the installed one.</p> : null}
       {result && blocked ? (
-        <div className="review-result quarantine" role="status" aria-label="Update blocked">
+        <div className="review-result quarantine" aria-label="Update blocked">
           <p>Blocked: the newest review of this skill cannot be applied. The installed copy is unchanged.</p>
           <ul className="gate-reasons">
             {(result.gate.reasons ?? []).map((reason, index) => (
@@ -90,20 +119,32 @@ function ManagedUpdate({
           </ul>
         </div>
       ) : null}
-      {result && !same && !blocked ? (
-        <div className="review-result" aria-label="Update available">
+      {result && incompatible ? (
+        <div className="review-result" aria-label="Update not compatible">
           <p>
-            Update available. New review {result.gate.result}
-            {result.record.source.commit ? <> at <code>{result.record.source.commit}</code></> : null}.
+            This update cannot be applied: the new review is not compatible with {skill.engine === "claude" ? "Claude Code" : "Codex"}, the
+            agent this copy belongs to. The installed copy is unchanged.
           </p>
+          <dl className="agent-facts">
+            <SourceFacts source={result.record.source} />
+          </dl>
+        </div>
+      ) : null}
+      {result && available ? (
+        <div className="review-result" aria-label="Update available">
+          <p>Update available. New review {result.gate.result}.</p>
+          <dl className="agent-facts">
+            <SourceFacts source={result.record.source} />
+          </dl>
           {ack ? (
             <>
               <WarningList result={result} />
               <label>
                 <input
                   type="checkbox"
-                  checked={acknowledged}
+                  checked={mine ? mine.confirmation.acknowledge_warnings : acknowledged}
                   disabled={applying || done}
+                  aria-describedby={nameId}
                   onChange={(event) => setAcknowledged(event.target.checked)}
                 />{" "}
                 I have read these warnings.
@@ -112,13 +153,17 @@ function ManagedUpdate({
           ) : null}
           <button
             type="button"
-            disabled={applying || done || (ack && !acknowledged)}
+            aria-describedby={nameId}
+            disabled={applying || done || (ack && !acknowledged && !mine)}
             onClick={() =>
-              void apply({
+              void writes.apply({
                 engine: skill.engine,
+                name: skill.name,
+                operation: "update",
                 review_id: result.record.id,
                 expected_review_id: managed.review_id,
                 acknowledge_warnings: ack && acknowledged,
+                destination: skill.location,
               })
             }
           >
@@ -126,11 +171,23 @@ function ManagedUpdate({
           </button>
         </div>
       ) : null}
-      {state.phase === "failed" ? <ErrorLines error={state.error} /> : null}
-      {state.phase === "done" ? (
-        <p role="status">{state.result.status === "unchanged" ? "Already current; nothing changed." : "Updated."}</p>
-      ) : null}
+      {failure ? <ErrorLines error={failure.error} /> : null}
+      <div className="apply-status" role="status" aria-live="polite" aria-atomic="true" aria-label={`Update status for ${skill.name}`}>
+        {check.phase === "checking" ? <p>Checking {skill.name} for updates…</p> : null}
+        {same ? <p>Up to date. The current review matches the installed one.</p> : null}
+        {applying ? <p>Applying the update to {skill.name}…</p> : null}
+        {outcome ? <p>{outcome.result.status === "unchanged" ? "Already current; nothing changed." : "Updated."}</p> : null}
+      </div>
     </div>
+  );
+}
+
+function InstalledRow({ skill, children }: { skill: InstalledSkillDto; children: (nameId: string) => ReactNode }) {
+  const nameId = useId();
+  return (
+    <li className="agent-card" data-skill={skill.name}>
+      {children(nameId)}
+    </li>
   );
 }
 
@@ -138,18 +195,22 @@ export function InstalledView({
   transport,
   projectOpen,
   projectId = null,
-  onNotify,
+  writes,
+  inventoryRevision,
 }: {
   transport: Transport;
   projectOpen: boolean;
   projectId?: string | null;
-  onNotify?: (text: string) => void;
+  writes: SkillWrites;
+  /** Bumped by the controller after a confirmed install or update; a bump re-reads the real inventory. */
+  inventoryRevision: number;
 }) {
   const [load, setLoad] = useState<Load<InstalledSkillDto[]>>({ status: "loading" });
   const [read, setRead] = useState(0);
 
   useEffect(() => {
     let current = true;
+    setLoad((previous) => (previous.status === "loading" ? previous : { status: "loading" }));
     transport.skillsInstalled().then(
       (value) => {
         if (current) setLoad({ status: "ready", value });
@@ -161,17 +222,9 @@ export function InstalledView({
     return () => {
       current = false;
     };
-  }, [transport, read]);
+  }, [transport, read, inventoryRevision]);
 
-  const refresh = () => {
-    setLoad({ status: "loading" });
-    setRead((previous) => previous + 1);
-  };
-
-  const applied = (skill: InstalledSkillDto, result: ApplyProjectSkillDto) => {
-    onNotify?.(result.status === "unchanged" ? `${skill.name} is already current.` : `Updated ${skill.name}.`);
-    refresh(); // re-read the real inventory after a confirmed success
-  };
+  const refresh = () => setRead((previous) => previous + 1);
 
   return (
     <div className="installed">
@@ -221,18 +274,22 @@ export function InstalledView({
       ) : (
         <ul className="installed-list" aria-label="Installed skills">
           {load.value.map((skill, index) => (
-            <li className="agent-card" key={`${skill.scope}:${skill.location}:${index}`}>
+            <InstalledRow key={`${skill.scope}:${skill.location}:${index}`} skill={skill}>
+              {(nameId) => (
+                <>
               <div className="installed-heading">
-                <strong>{skill.name}</strong>
+                <strong id={nameId}>{skill.name}</strong>
                 <span className="muted">
                   {skill.engine === "claude" ? "Claude Code" : "Codex"} · {skill.scope === "project" ? "Project" : "User"}
                 </span>
               </div>
               <code className="muted">{skill.location}</code>
               {skill.scope === "project" && skill.managed && projectId ? (
-                <ManagedUpdate skill={skill} transport={transport} projectId={projectId} onApplied={applied} />
+                <ManagedUpdate skill={skill} transport={transport} projectId={projectId} writes={writes} nameId={nameId} />
               ) : null}
-            </li>
+                </>
+              )}
+            </InstalledRow>
           ))}
         </ul>
       ))}

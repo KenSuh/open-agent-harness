@@ -2,14 +2,12 @@
 import { useId, useState, type FormEvent } from "react";
 import type {
   AgentStatusDto,
-  ApplyProjectSkillDto,
   GateReasonDto,
   ProjectDto,
   ProjectSkillEngine,
   ReviewResultDto,
 } from "./contract";
-import type { Transport } from "./transport/types";
-import { useApply } from "./useApply";
+import { writeKey, type SkillWrites, type WriteEntry } from "./useApply";
 import { parseTarget, type useReview } from "./useReview";
 
 type Review = ReturnType<typeof useReview>;
@@ -26,6 +24,22 @@ export function Reason({ reason }: { reason: GateReasonDto }) {
       <strong>{reason.kind}</strong> <span>{reason.detail}</span>
       {lines ? <span className="muted"> ({lines})</span> : null}
     </li>
+  );
+}
+
+/** Repository, nested folder and pinned commit shown together as rows of an enclosing `dl`. */
+export function SourceFacts({ source }: { source: ReviewResultDto["record"]["source"] }) {
+  return (
+    <>
+      <dt>GitHub repository</dt>
+      <dd>{source.locator}</dd>
+      <dt>Folder in repository</dt>
+      <dd>
+        <code>{source.path}</code>
+      </dd>
+      <dt>Pinned commit</dt>
+      <dd>{source.commit ? <code>{source.commit}</code> : "Not pinned"}</dd>
+    </>
   );
 }
 
@@ -52,12 +66,7 @@ function ReviewResult({ result }: { result: ReviewResultDto }) {
       <dl className="agent-facts">
         <dt>Skill</dt>
         <dd>{record.frontmatter.name ?? "(no name)"}</dd>
-        <dt>Folder</dt>
-        <dd>
-          {record.source.locator} / {record.source.path}
-        </dd>
-        <dt>Pinned commit</dt>
-        <dd>{record.source.commit ? <code>{record.source.commit}</code> : "Not pinned"}</dd>
+        <SourceFacts source={record.source} />
         <dt>License</dt>
         <dd>
           {record.license.expression ?? "Unknown"} ({record.license.eligibility})
@@ -119,14 +128,12 @@ function InstallPanel({
   result,
   project,
   agents,
-  transport,
-  onApplied,
+  writes,
 }: {
   result: ReviewResultDto;
   project: ProjectDto | null;
   agents: readonly AgentStatusDto[] | null;
-  transport: Transport;
-  onApplied: (result: ApplyProjectSkillDto) => void;
+  writes: SkillWrites;
 }) {
   const { record, gate } = result;
   const name = record.frontmatter.name;
@@ -136,41 +143,66 @@ function InstallPanel({
   );
   const [choice, setChoice] = useState<ProjectSkillEngine | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
-  const { state, apply } = useApply(transport, project?.id ?? null, onApplied);
   const warningsId = useId();
-  const engine = choice !== null && engines.includes(choice) ? choice : (engines[0] ?? null);
+  const skillId = useId();
   const ack = needsAcknowledgement(result);
 
   if (!isInstallable(result)) return null;
   if (!project) return <p className="muted">Open a project to install this skill.</p>;
   if (!name) return <p className="muted">This skill has no name, so it cannot be installed.</p>;
 
-  const applying = state.phase === "applying";
-  const done = state.phase === "done";
+  // A request in flight or finished for this review pins its engine, whatever the agent list says later.
+  const pinned: WriteEntry | undefined = Object.values(writes.entries).find(
+    (entry) =>
+      entry.confirmation.project === project.id &&
+      entry.confirmation.name === name &&
+      entry.confirmation.operation === "install" &&
+      entry.confirmation.review_id === record.id &&
+      entry.phase !== "failed",
+  );
+  // After a failure the confirmed engine stays the default for the retry until the user picks another.
+  const failedEngine = Object.values(writes.entries).find(
+    (entry) =>
+      entry.phase === "failed" &&
+      entry.confirmation.project === project.id &&
+      entry.confirmation.name === name &&
+      entry.confirmation.operation === "install" &&
+      entry.confirmation.review_id === record.id,
+  )?.confirmation.engine;
+  const engine: ProjectSkillEngine | null =
+    pinned?.confirmation.engine ??
+    (choice !== null && engines.includes(choice) ? choice : failedEngine !== undefined ? failedEngine : (engines[0] ?? null));
+  const kept = pinned?.confirmation.engine ?? failedEngine;
+  const shown = kept && !engines.includes(kept) ? [kept, ...engines] : engines;
+  const entry = engine ? writes.entries[writeKey(project.id, engine, name)] : undefined;
+  const mine = entry !== undefined && entry.confirmation.review_id === record.id && entry.confirmation.operation === "install" ? entry : undefined;
+  const applying = entry?.phase === "applying";
+  const done = mine?.phase === "done";
+  const destination = mine?.confirmation.destination ?? (engine ? `${project.root}/${ENGINE_ROOT[engine]}/${name}` : "");
+  const acknowledgedNow = mine ? mine.confirmation.acknowledge_warnings : acknowledged;
   return (
     <section className="install-panel" aria-label="Install in project">
       <h3>Install in this project</h3>
-      {engines.length === 0 ? (
+      {shown.length === 0 ? (
         <p className="muted">No compatible Claude Code or Codex is installed on this computer, so nothing can be installed.</p>
       ) : (
         <>
-          <fieldset disabled={applying || done}>
+          <fieldset disabled={applying || done} aria-describedby={skillId}>
             <legend>Agent</legend>
-            {engines.map((item) => (
+            {shown.map((item) => (
               <label key={item}>
                 <input type="radio" name="install-engine" checked={engine === item} onChange={() => setChoice(item)} /> {ENGINE_LABEL[item]}
               </label>
             ))}
           </fieldset>
           <dl className="agent-facts">
+            <dt>Skill</dt>
+            <dd id={skillId}>{name}</dd>
             <dt>Destination</dt>
             <dd>
-              <code>
-                {project.root}/{engine ? ENGINE_ROOT[engine] : ""}/{name}
-              </code>
+              <code>{destination}</code>
             </dd>
-            <dt>Snapshot</dt>
-            <dd>{record.source.commit ? <code>{record.source.commit}</code> : "Not pinned"}</dd>
+            <SourceFacts source={record.source} />
           </dl>
           {ack ? (
             <div id={warningsId}>
@@ -178,8 +210,9 @@ function InstallPanel({
               <label>
                 <input
                   type="checkbox"
-                  checked={acknowledged}
+                  checked={acknowledgedNow}
                   disabled={applying || done}
+                  aria-describedby={skillId}
                   onChange={(event) => setAcknowledged(event.target.checked)}
                 />{" "}
                 I have read these warnings.
@@ -188,14 +221,18 @@ function InstallPanel({
           ) : null}
           <button
             type="button"
-            disabled={applying || done || engine === null || (ack && !acknowledged)}
+            aria-describedby={skillId}
+            disabled={applying || done || engine === null || (ack && !acknowledged && !mine)}
             onClick={() =>
               engine &&
-              void apply({
+              void writes.apply({
                 engine,
+                name,
+                operation: "install",
                 review_id: record.id,
                 expected_review_id: null,
                 acknowledge_warnings: ack && acknowledged,
+                destination,
               })
             }
           >
@@ -203,19 +240,22 @@ function InstallPanel({
           </button>
         </>
       )}
-      {state.phase === "failed" ? (
+      <div className="apply-status" role="status" aria-live="polite" aria-atomic="true" aria-describedby={skillId}>
+        {applying ? <p>Installing {name}…</p> : null}
+        {mine?.phase === "done" ? (
+          <p>
+            {mine.result.status === "unchanged"
+              ? "Already installed; nothing changed."
+              : `Installed ${name}. It now appears in Installed.`}
+          </p>
+        ) : null}
+      </div>
+      {mine?.phase === "failed" ? (
         <div className="error-box" role="alert">
-          <strong>{state.error.code}</strong>
-          <p>{state.error.message}</p>
-          {state.error.hint ? <p className="muted">{state.error.hint}</p> : null}
+          <strong>{mine.error.code}</strong>
+          <p>{mine.error.message}</p>
+          {mine.error.hint ? <p className="muted">{mine.error.hint}</p> : null}
         </div>
-      ) : null}
-      {state.phase === "done" ? (
-        <p role="status">
-          {state.result.status === "unchanged"
-            ? "Already installed; nothing changed."
-            : `Installed ${name}. It now appears in Installed.`}
-        </p>
       ) : null}
     </section>
   );
@@ -223,16 +263,14 @@ function InstallPanel({
 
 export function ExploreView({
   review,
-  transport,
   project,
   agents,
-  onApplied,
+  writes,
 }: {
   review: Review;
-  transport: Transport;
   project: ProjectDto | null;
   agents: readonly AgentStatusDto[] | null;
-  onApplied: (result: ApplyProjectSkillDto) => void;
+  writes: SkillWrites;
 }) {
   const { state, submit, cancel, cancelError } = review;
   const [input, setInput] = useState("");
@@ -319,8 +357,7 @@ export function ExploreView({
           result={state.result}
           project={project}
           agents={agents}
-          transport={transport}
-          onApplied={onApplied}
+          writes={writes}
         />
       ) : null}
       {state.phase === "idle" ? <p className="empty">Enter a GitHub skill folder to review it. Nothing to show yet.</p> : null}

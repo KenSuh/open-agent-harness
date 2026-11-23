@@ -2,7 +2,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppInfoDto,
-  ApplyProjectSkillDto,
   ErrorDto,
   NoticeDto,
   Progress,
@@ -16,6 +15,7 @@ import type {
 } from "./contract";
 import { toErrorDto, type Transport } from "./transport/types";
 import { useAgents } from "./useAgents";
+import { useSkillWrites } from "./useApply";
 
 export type Load<T> =
   | { status: "loading" }
@@ -75,11 +75,7 @@ export function useController(transport: Transport) {
   }, []);
 
   const notifyInfo = useCallback((text: string) => pushToast({ level: "info", text }), [pushToast]);
-  const notifyApplied = useCallback(
-    (result: ApplyProjectSkillDto) =>
-      pushToast({ level: "info", text: result.status === "unchanged" ? "Skill already installed; nothing changed." : "Skill installed in the project." }),
-    [pushToast],
-  );
+  const { writes, inventoryRevision } = useSkillWrites(transport, projectRef, notifyInfo);
 
   const dismissToast = useCallback((key: number) => {
     setToasts((current) => current.filter((item) => item.key !== key));
@@ -298,6 +294,7 @@ export function useController(transport: Transport) {
     dismissQuickStart,
     dismissToast,
     notifyInfo,
-    notifyApplied,
+    writes,
+    inventoryRevision,
   };
 }

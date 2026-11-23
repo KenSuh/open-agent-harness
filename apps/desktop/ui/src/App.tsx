@@ -234,10 +234,9 @@ export function App({ transport }: { transport: Transport }) {
               ) : page === "explore" ? (
                 <ExploreView
                   review={review}
-                  transport={transport}
                   project={c.project}
                   agents={agents.agents.status === "ready" ? agents.agents.value : null}
-                  onApplied={c.notifyApplied}
+                  writes={c.writes}
                 />
               ) : page === "installed" ? (
                 <InstalledView
@@ -245,7 +244,8 @@ export function App({ transport }: { transport: Transport }) {
                   transport={transport}
                   projectOpen={c.project !== null}
                   projectId={c.project?.id ?? null}
-                  onNotify={c.notifyInfo}
+                  writes={c.writes}
+                  inventoryRevision={c.inventoryRevision}
                 />
               ) : (
                 <p className="empty">Open a project to choose which agent does each section. Nothing to show.</p>
