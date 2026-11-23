@@ -13,6 +13,7 @@ use crate::paths::{Env, PathsError};
 use crate::plan::PlanError;
 use crate::project::ProjectError;
 use crate::review::StoreError;
+use crate::review::delivery::DeliveryError;
 use crate::rules::RulesError;
 use crate::tasks::{Cancelled, TaskError};
 use crate::workflow::WorkflowError;
@@ -57,6 +58,7 @@ pub mod codes {
     pub const NET_TOO_LARGE: &str = "OAH_NET_TOO_LARGE";
     /// A stored review or snapshot file OAH cannot use; it is never repaired or reset (v0.4.0 code, M1-S3).
     pub const SKILL_STATE_CORRUPT: &str = "OAH_SKILL_STATE_CORRUPT";
+    pub const SKILL_APPROVAL_REQUIRED: &str = "OAH_SKILL_APPROVAL_REQUIRED";
 }
 
 /// A failure with a stable code and a message for a person.
@@ -81,6 +83,7 @@ pub enum Error {
     Review(ReviewFailed),
     /// The review store under `OAH_HOME/state` could not be read or written (M1-S3).
     ReviewStore(StoreError),
+    SkillDelivery(DeliveryError),
 }
 
 /// The serialized error: `code` is stable, `message` and `hint` are English text for a person.
@@ -208,6 +211,7 @@ impl Coded for Error {
             Error::Workflow(error) => error.code(),
             Error::Review(error) => error.code(),
             Error::ReviewStore(error) => error.code(),
+            Error::SkillDelivery(error) => error.code(),
         }
     }
 
@@ -224,6 +228,7 @@ impl Coded for Error {
             Error::Workflow(error) => Coded::message(error),
             Error::Review(error) => error.message(),
             Error::ReviewStore(error) => error.message(),
+            Error::SkillDelivery(error) => error.message(),
         }
     }
 }
@@ -244,7 +249,6 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {
-    /// The upstream cause of a failed review, or the store failure; no source for the other variants.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Review(error) => error
@@ -252,6 +256,7 @@ impl std::error::Error for Error {
                 .as_ref()
                 .map(|cause| cause as &(dyn std::error::Error + 'static)),
             Error::ReviewStore(error) => Some(error),
+            Error::SkillDelivery(error) => Some(error),
             _ => None,
         }
     }
@@ -326,6 +331,20 @@ impl From<ReviewFailed> for Error {
 impl From<StoreError> for Error {
     fn from(error: StoreError) -> Self {
         Error::ReviewStore(error)
+    }
+}
+
+impl From<DeliveryError> for Error {
+    fn from(error: DeliveryError) -> Self {
+        match error {
+            DeliveryError::Store(error) => Error::ReviewStore(error),
+            refusal @ (DeliveryError::ReviewMissing
+            | DeliveryError::InvalidReview(_)
+            | DeliveryError::Blocked(_)
+            | DeliveryError::UnsupportedTarget(_)
+            | DeliveryError::IncompatibleTarget(_)
+            | DeliveryError::ApprovalRequired) => Error::SkillDelivery(refusal),
+        }
     }
 }
 

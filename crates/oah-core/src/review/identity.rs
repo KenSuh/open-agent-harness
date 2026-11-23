@@ -20,6 +20,7 @@ use std::sync::LazyLock;
 pub const POLICY_VERSION: &str = "oah-skill-review/v1";
 /// The source verification policy every snapshot spec names.
 pub const VERIFICATION_POLICY: &str = "source-verification-v1";
+pub(super) const GITHUB_LOCATOR_PREFIX: &str = "https://github.com/";
 /// The longest repository path a spec accepts.
 const PATH_MAX: usize = 300;
 /// File names Windows reserves for devices, in any case and with any extension.
@@ -93,7 +94,25 @@ impl SourceSpec {
 
 /// The identity and spec of `path` in the GitHub repository `repo` (`owner/name`), tracked by commit.
 pub fn identity(repo: &str, path: &str) -> Result<(Identity, SourceSpec), ReviewError> {
-    let spec = source_spec(repo, path)?;
+    Ok(identify(source_spec(repo, path)?))
+}
+
+pub(super) fn stored_identity(
+    locator: &str,
+    path: &str,
+) -> Result<(Identity, SourceSpec), ReviewError> {
+    let invalid = || ReviewError::SourceUnsupported("expected a canonical GitHub locator".into());
+    let repo = locator
+        .strip_prefix(GITHUB_LOCATOR_PREFIX)
+        .ok_or_else(invalid)?;
+    let spec = github_spec(repo, path, false)?;
+    if spec.locator != locator {
+        return Err(invalid());
+    }
+    Ok(identify(spec))
+}
+
+fn identify(spec: SourceSpec) -> (Identity, SourceSpec) {
     let fields = IdentityFields {
         provider: "github".to_string(),
         locator: spec.locator.clone(),
@@ -111,7 +130,7 @@ pub fn identity(repo: &str, path: &str) -> Result<(Identity, SourceSpec), Review
         full,
         fields,
     };
-    Ok((identity, spec))
+    (identity, spec)
 }
 
 /// The literal folders a search hit may live in: `skills/<name>`, then `<name>`; none for a non-literal name.
@@ -123,6 +142,10 @@ pub fn hit_paths(name: &str) -> Vec<String> {
 }
 
 pub(crate) fn source_spec(repo: &str, path: &str) -> Result<SourceSpec, ReviewError> {
+    github_spec(repo, path, true)
+}
+
+fn github_spec(repo: &str, path: &str, strip_git_suffix: bool) -> Result<SourceSpec, ReviewError> {
     if !REPO.is_full(repo) {
         return Err(ReviewError::SourceUnsupported(format!(
             "{} is not an owner/repo GitHub name; only GitHub skill folders are reviewed",
@@ -136,7 +159,7 @@ pub(crate) fn source_spec(repo: &str, path: &str) -> Result<SourceSpec, ReviewEr
         )));
     }
     let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
-    let name = if name.to_lowercase().ends_with(".git") {
+    let name = if strip_git_suffix && name.to_lowercase().ends_with(".git") {
         &name[..name.len() - 4]
     } else {
         name
@@ -148,7 +171,7 @@ pub(crate) fn source_spec(repo: &str, path: &str) -> Result<SourceSpec, ReviewEr
         ));
     }
     let locator = format!(
-        "https://github.com/{}/{}",
+        "{GITHUB_LOCATOR_PREFIX}{}/{}",
         owner.to_lowercase(),
         name.to_lowercase()
     );
