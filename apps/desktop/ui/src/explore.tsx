@@ -7,7 +7,8 @@ import type {
   ProjectSkillEngine,
   ReviewResultDto,
 } from "./contract";
-import { writeKey, type SkillWrites, type WriteEntry } from "./useApply";
+import { confirmInstall, isInstallable, needsAcknowledgement } from "./confirmation";
+import type { Operation, SkillConfirmations } from "./useApply";
 import { parseTarget, type useReview } from "./useReview";
 
 type Review = ReturnType<typeof useReview>;
@@ -43,7 +44,7 @@ export function SourceFacts({ source }: { source: ReviewResultDto["record"]["sou
   );
 }
 
-const HEADLINE = {
+export const HEADLINE = {
   pass: "Review passed",
   warn: "Review passed with warnings",
   block: "Quarantined: the gate blocked this skill",
@@ -96,16 +97,6 @@ function ReviewResult({ result }: { result: ReviewResultDto }) {
 const ENGINE_LABEL: Record<ProjectSkillEngine, string> = { claude: "Claude Code", codex: "Codex" };
 const ENGINE_ROOT: Record<ProjectSkillEngine, string> = { claude: ".claude/skills", codex: ".agents/skills" };
 
-/** Warnings the user must acknowledge before an install or update can be confirmed. */
-export function needsAcknowledgement(result: ReviewResultDto): boolean {
-  return result.gate.result === "warn" || result.record.license.eligibility === "eligible-by-choice";
-}
-
-/** A result the gate did not block and the record accepted; only these can be written. */
-export function isInstallable(result: ReviewResultDto): boolean {
-  return result.gate.result !== "block" && result.record.status === "reviewed";
-}
-
 export function WarningList({ result }: { result: ReviewResultDto }) {
   const reasons = result.gate.reasons ?? [];
   return (
@@ -124,16 +115,25 @@ export function WarningList({ result }: { result: ReviewResultDto }) {
   );
 }
 
+/** The single status line of an install: the write in progress, then its confirmed outcome. */
+function installAnnouncement(name: string, operation: Operation | undefined): string | null {
+  if (operation?.phase === "applying") return `Installing ${name}…`;
+  if (operation?.phase === "done") {
+    return operation.result.status === "unchanged" ? "Already installed; nothing changed." : `Installed ${name}. It now appears in Installed.`;
+  }
+  return null;
+}
+
 function InstallPanel({
   result,
   project,
   agents,
-  writes,
+  confirmations,
 }: {
   result: ReviewResultDto;
   project: ProjectDto | null;
   agents: readonly AgentStatusDto[] | null;
-  writes: SkillWrites;
+  confirmations: SkillConfirmations;
 }) {
   const { record, gate } = result;
   const name = record.frontmatter.name;
@@ -142,46 +142,45 @@ function InstallPanel({
     (engine) => installedIds.has(engine) && (gate.compatible === undefined || gate.compatible.includes(engine)),
   );
   const [choice, setChoice] = useState<ProjectSkillEngine | null>(null);
-  // null = not edited; see `acknowledgedNow` for the single value behind checkbox, eligibility and request.
-  const [edited, setEdited] = useState<boolean | null>(null);
   const warningsId = useId();
   const skillId = useId();
-  const ack = needsAcknowledgement(result);
 
   if (!isInstallable(result)) return null;
   if (!project) return <p className="muted">Open a project to install this skill.</p>;
   if (!name) return <p className="muted">This skill has no name, so it cannot be installed.</p>;
 
-  // A request in flight or finished for this review pins its engine, whatever the agent list says later.
-  const pinned: WriteEntry | undefined = Object.values(writes.entries).find(
-    (entry) =>
-      entry.confirmation.project === project.id &&
-      entry.confirmation.name === name &&
-      entry.confirmation.operation === "install" &&
-      entry.confirmation.review_id === record.id &&
-      entry.phase !== "failed",
+  // This review's install operations in this project. One in flight pins its engine and locks its folder under any selection of
+  // the project; a finished one pins it only for the selection that confirmed it, whatever the agent list says later.
+  const { generation } = confirmations.selection;
+  const own = (operation: Operation) =>
+    operation.confirmation.operation === "install" &&
+    operation.confirmation.project === project.id &&
+    operation.confirmation.name === name &&
+    operation.confirmation.candidate.review_id === record.id;
+  const operations = Object.values(confirmations.operations).filter(own);
+  const pinned = operations.find(
+    (operation) => operation.phase === "applying" || (operation.phase === "done" && operation.confirmation.generation === generation),
   );
   // After a failure the confirmed engine stays the default for the retry until the user picks another.
-  const failedEngine = Object.values(writes.entries).find(
-    (entry) =>
-      entry.phase === "failed" &&
-      entry.confirmation.project === project.id &&
-      entry.confirmation.name === name &&
-      entry.confirmation.operation === "install" &&
-      entry.confirmation.review_id === record.id,
-  )?.confirmation.engine;
+  const failedEngine = operations.find((operation) => operation.phase === "failed" && operation.confirmation.generation === generation)
+    ?.confirmation.engine;
   const engine: ProjectSkillEngine | null =
-    pinned?.confirmation.engine ??
-    (choice !== null && engines.includes(choice) ? choice : failedEngine !== undefined ? failedEngine : (engines[0] ?? null));
+    pinned?.confirmation.engine ?? (choice !== null && engines.includes(choice) ? choice : (failedEngine ?? engines[0] ?? null));
   const kept = pinned?.confirmation.engine ?? failedEngine;
   const shown = kept && !engines.includes(kept) ? [kept, ...engines] : engines;
-  const entry = engine ? writes.entries[writeKey(project.id, engine, name)] : undefined;
-  const mine = entry !== undefined && entry.confirmation.review_id === record.id && entry.confirmation.operation === "install" ? entry : undefined;
-  const applying = entry?.phase === "applying";
+  const confirmation = engine
+    ? confirmInstall({ project: project.id, generation }, engine, `${project.root}/${ENGINE_ROOT[engine]}/${name}`, result)
+    : null;
+  const operation = confirmation ? confirmations.operations[confirmation.destination] : undefined;
+  const busy = operation?.phase === "applying";
+  // The outcome shown is this exact confirmation's; this review's write from an earlier selection only shows while it runs.
+  const mine = operation && (operation.confirmation.key === confirmation?.key || (busy && own(operation))) ? operation : undefined;
   const done = mine?.phase === "done";
-  const destination = mine?.confirmation.destination ?? (engine ? `${project.root}/${ENGINE_ROOT[engine]}/${name}` : "");
-  const acknowledgedNow =
-    mine && mine.phase !== "failed" ? mine.confirmation.acknowledge_warnings : (edited ?? (mine ? mine.confirmation.acknowledge_warnings : false));
+  const folder = mine?.confirmation.folder ?? confirmation?.folder ?? "";
+  const ack = needsAcknowledgement(result);
+  // The checkbox, the button and the request all read this confirmation's own acknowledgement.
+  const acknowledged = confirmation !== null && confirmations.acknowledged(confirmation);
+  const announcement = installAnnouncement(name, mine);
   return (
     <section className="install-panel" aria-label="Install in project">
       <h3>Install in this project</h3>
@@ -189,7 +188,7 @@ function InstallPanel({
         <p className="muted">No compatible Claude Code or Codex is installed on this computer, so nothing can be installed.</p>
       ) : (
         <>
-          <fieldset disabled={applying || done} aria-describedby={skillId}>
+          <fieldset disabled={busy || done} aria-describedby={skillId}>
             <legend>Agent</legend>
             {shown.map((item) => (
               <label key={item}>
@@ -202,7 +201,7 @@ function InstallPanel({
             <dd id={skillId}>{name}</dd>
             <dt>Destination</dt>
             <dd>
-              <code>{destination}</code>
+              <code>{folder}</code>
             </dd>
             <SourceFacts source={record.source} />
           </dl>
@@ -212,10 +211,10 @@ function InstallPanel({
               <label>
                 <input
                   type="checkbox"
-                  checked={acknowledgedNow}
-                  disabled={applying || done}
+                  checked={acknowledged}
+                  disabled={busy || done || confirmation === null}
                   aria-describedby={skillId}
-                  onChange={(event) => setEdited(event.target.checked)}
+                  onChange={(event) => confirmation && confirmations.acknowledge(confirmation, event.target.checked)}
                 />{" "}
                 I have read these warnings.
               </label>
@@ -224,35 +223,15 @@ function InstallPanel({
           <button
             type="button"
             aria-describedby={skillId}
-            disabled={applying || done || engine === null || (ack && !acknowledgedNow)}
-            onClick={() =>
-              engine &&
-              void writes.apply({
-                project: project.id,
-                generation: writes.generation,
-                engine,
-                name,
-                operation: "install",
-                review_id: record.id,
-                expected_review_id: null,
-                acknowledge_warnings: ack && acknowledgedNow,
-                destination,
-              })
-            }
+            disabled={busy || done || confirmation === null || (ack && !acknowledged)}
+            onClick={() => confirmation && void confirmations.apply(confirmation)}
           >
-            {applying ? "Installing…" : "Confirm install"}
+            {busy ? "Installing…" : "Confirm install"}
           </button>
         </>
       )}
       <div className="apply-status" role="status" aria-live="polite" aria-atomic="true" aria-describedby={skillId}>
-        {applying ? <p>Installing {name}…</p> : null}
-        {mine?.phase === "done" ? (
-          <p>
-            {mine.result.status === "unchanged"
-              ? "Already installed; nothing changed."
-              : `Installed ${name}. It now appears in Installed.`}
-          </p>
-        ) : null}
+        {announcement ? <p>{announcement}</p> : null}
       </div>
       {mine?.phase === "failed" ? (
         <div className="error-box" role="alert">
@@ -269,12 +248,12 @@ export function ExploreView({
   review,
   project,
   agents,
-  writes,
+  confirmations,
 }: {
   review: Review;
   project: ProjectDto | null;
   agents: readonly AgentStatusDto[] | null;
-  writes: SkillWrites;
+  confirmations: SkillConfirmations;
 }) {
   const { state, submit, cancel, cancelError } = review;
   const [input, setInput] = useState("");
@@ -361,7 +340,7 @@ export function ExploreView({
           result={state.result}
           project={project}
           agents={agents}
-          writes={writes}
+          confirmations={confirmations}
         />
       ) : null}
       {state.phase === "idle" ? <p className="empty">Enter a GitHub skill folder to review it. Nothing to show yet.</p> : null}

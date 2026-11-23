@@ -236,15 +236,14 @@ export function App({ transport }: { transport: Transport }) {
                   review={review}
                   project={c.project}
                   agents={agents.agents.status === "ready" ? agents.agents.value : null}
-                  writes={c.writes}
+                  confirmations={c.confirmations}
                 />
               ) : page === "installed" ? (
                 <InstalledView
                   key={c.projectRevision}
                   transport={transport}
                   projectOpen={c.project !== null}
-                  projectId={c.project?.id ?? null}
-                  writes={c.writes}
+                  confirmations={c.confirmations}
                   inventoryRevision={c.inventoryRevision}
                 />
               ) : (

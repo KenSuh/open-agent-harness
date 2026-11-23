@@ -1,16 +1,20 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { ErrorDto, InstalledSkillDto, ReviewResultDto } from "./contract";
-import { isInstallable, needsAcknowledgement, Reason, SourceFacts, WarningList } from "./explore";
+import { acquisitionOf, explains, judgeUpdate, sameAcquisition, updateBasis, writeKey, type UpdateBasis, type UpdateVerdict } from "./confirmation";
+import { HEADLINE, Reason, SourceFacts, WarningList } from "./explore";
 import { reviewOnce } from "./reviewOnce";
 import { toErrorDto, type Transport } from "./transport/types";
 import type { Load } from "./useController";
-import { writeKey, type SkillWrites } from "./useApply";
+import type { Operation, SkillConfirmations } from "./useApply";
 
+/** A check belongs to the exact basis (selection, folder and receipt revision) that started it. */
 type Check =
-  | { phase: "idle" }
-  | { phase: "checking" }
-  | { phase: "result"; result: ReviewResultDto }
-  | { phase: "failed"; error: ErrorDto };
+  | { readonly phase: "idle" }
+  | { readonly phase: "checking"; readonly basis: UpdateBasis; readonly token: number }
+  | { readonly phase: "result"; readonly basis: UpdateBasis; readonly result: ReviewResultDto }
+  | { readonly phase: "failed"; readonly basis: UpdateBasis; readonly error: ErrorDto };
+
+const IDLE: Check = { phase: "idle" };
 
 function ErrorLines({ error }: { error: ErrorDto }) {
   return (
@@ -22,98 +26,112 @@ function ErrorLines({ error }: { error: ErrorDto }) {
   );
 }
 
+function engineLabel(engine: InstalledSkillDto["engine"]): string {
+  return engine === "claude" ? "Claude Code" : "Codex";
+}
+
+function headline(result: ReviewResultDto): string {
+  return HEADLINE[result.gate.result] ?? `Gate result: ${String(result.gate.result)}`;
+}
+
+/** The single current status line: a write in progress or finished owns it ahead of any check. */
+function updateAnnouncement(
+  skill: InstalledSkillDto,
+  check: Check,
+  verdict: UpdateVerdict | null,
+  update: Operation | undefined,
+  finished: Operation | undefined,
+): string | null {
+  if (update?.phase === "applying") return `Applying the update to ${skill.name}…`;
+  if (finished?.phase === "done") return finished.result.status === "unchanged" ? "Already current; nothing changed." : "Updated.";
+  if (check.phase === "checking") return `Checking ${skill.name} for updates…`;
+  if (check.phase !== "result" || verdict === null) return null;
+  switch (verdict.kind) {
+    case "current":
+      return "Up to date. The current review matches the installed one.";
+    case "mismatch":
+      return "Update not applicable. The review does not match the installed copy. The installed copy is unchanged.";
+    case "blocked":
+      return "Update blocked. The installed copy is unchanged.";
+    case "incompatible":
+      return `Update not compatible with ${engineLabel(skill.engine)}. The installed copy is unchanged.`;
+    case "reviewed":
+      return `New revision reviewed. ${headline(check.result)}.`;
+  }
+}
+
 /** Explicit update check for a managed project row; nothing is written until the apply click. */
 function ManagedUpdate({
   skill,
+  project,
   transport,
-  projectId,
-  writes,
+  confirmations,
   nameId,
 }: {
   skill: InstalledSkillDto;
+  project: string;
   transport: Transport;
-  projectId: string;
-  writes: SkillWrites;
+  confirmations: SkillConfirmations;
   nameId: string;
 }) {
-  const managed = skill.managed!;
-  const [check, setCheck] = useState<Check>({ phase: "idle" });
-  // null = not edited since the check; the one editable acknowledgement value (see `shownAck`).
-  const [edited, setEdited] = useState<boolean | null>(null);
-  const checking = useRef(false);
-  const alive = useRef(true);
-  const project = useRef(projectId);
-  project.current = projectId;
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
-  const key = writeKey(projectId, skill.engine, skill.name);
-  const entry = writes.entries[key];
-  const { clear } = writes;
+  const [check, setCheck] = useState<Check>(IDLE);
+  const running = useRef<string | null>(null); // basis key of the check in flight
+  const tokens = useRef(0);
+  const { generation } = confirmations.selection;
+  const destination = writeKey(project, skill.engine, skill.name);
+  const basis = updateBasis({ project, generation }, skill, confirmations.acquired[destination]);
+  // A changed selection or receipt leaves the check behind: it shows nothing and confirms nothing.
+  const current: Check = check.phase !== "idle" && basis !== null && check.basis.key === basis.key ? check : IDLE;
+  const result = current.phase === "result" ? current.result : null;
+  const verdict = current.phase === "result" ? judgeUpdate(current.basis, current.result) : null;
+  const confirmation = verdict?.kind === "reviewed" ? verdict.confirmation : null;
+  const operation = confirmations.operations[destination];
+  const update = operation?.confirmation.operation === "update" ? operation : undefined;
+  const busy = operation?.phase === "applying";
+  const mine = confirmation !== null && update?.confirmation.key === confirmation.key ? update : undefined;
+  const done = mine?.phase === "done";
+  const receipt = acquisitionOf(skill.managed);
+  // A finished outcome stays with the selection that sent it; a write still running locks the folder under any selection.
+  const settled = update?.phase !== "applying" && update?.confirmation.generation === generation ? update : undefined;
+  // A finished update keeps explaining the row after the inventory re-read replaced the receipt its check started from.
+  const finished = settled?.phase === "done" && explains(settled.confirmation, settled.result, receipt) ? settled : undefined;
+  // A failure stays with its own confirmation, or with the unchanged receipt once no check is shown; never with a replaced one.
+  const failed = settled?.phase === "failed" ? settled : undefined;
+  const failure =
+    failed &&
+    (confirmation !== null
+      ? mine === failed
+      : current.phase === "idle" && sameAcquisition(failed.confirmation.acquired?.acquisition ?? null, receipt))
+      ? failed
+      : undefined;
+  const acknowledged = confirmation !== null && confirmations.acknowledged(confirmation);
+  const announcement = updateAnnouncement(skill, current, verdict, update, finished);
 
   const runCheck = () => {
-    if (checking.current) return;
-    checking.current = true;
-    const started = project.current;
-    setEdited(null);
-    clear(key); // a fresh check supersedes the old apply error and outcome
-    setCheck({ phase: "checking" });
-    reviewOnce(transport, managed.repo, managed.path).then(
-      (result) => {
-        checking.current = false;
-        if (alive.current && project.current === started) setCheck({ phase: "result", result });
-      },
-      (error) => {
-        checking.current = false;
-        if (alive.current && project.current === started) setCheck({ phase: "failed", error: toErrorDto(error) });
-      },
+    if (basis === null || running.current === basis.key) return;
+    const started = basis;
+    const token = ++tokens.current;
+    running.current = started.key;
+    confirmations.clear(started.destination); // a fresh check supersedes the old apply error and outcome
+    setCheck({ phase: "checking", basis: started, token });
+    const settle = (next: Check) => {
+      if (running.current === started.key) running.current = null;
+      setCheck((previous) => (previous.phase === "checking" && previous.token === token ? next : previous));
+    };
+    // The source is the receipt's own repository and folder, fixed when the check starts.
+    reviewOnce(transport, started.acquired.acquisition.repo, started.acquired.acquisition.path).then(
+      (value) => settle({ phase: "result", basis: started, result: value }),
+      (error) => settle({ phase: "failed", basis: started, error: toErrorDto(error) }),
     );
   };
 
-  const result = check.phase === "result" ? check.result : null;
-  const same = result !== null && result.record.id === managed.review_id;
-  const blocked = result !== null && !same && !isInstallable(result);
-  // The fresh review's own compatible list decides whether this row's engine can take it.
-  const incompatible =
-    result !== null && !same && !blocked && result.gate.compatible !== undefined && !result.gate.compatible.includes(skill.engine);
-  const available = result !== null && !same && !blocked && !incompatible;
-  const ack = result !== null && needsAcknowledgement(result);
-  // The outcome belongs to the displayed candidate only.
-  const mine =
-    result !== null &&
-    entry !== undefined &&
-    entry.confirmation.operation === "update" &&
-    entry.confirmation.review_id === result.record.id &&
-    entry.confirmation.expected_review_id === managed.review_id
-      ? entry
-      : undefined;
-  const applying = entry?.phase === "applying";
-  const done = mine?.phase === "done";
-  // After the inventory re-read the check is gone; the finished write still explains the new row.
-  const settled =
-    entry?.phase === "done" &&
-    entry.confirmation.operation === "update" &&
-    (entry.confirmation.review_id === managed.review_id || entry.confirmation.expected_review_id === managed.review_id)
-      ? entry
-      : undefined;
-  const outcome = mine?.phase === "done" ? mine : settled;
-  // A failure stays visible for its candidate, or after a re-read dropped the check (never for a different candidate).
-  // One value drives the checkbox, the button and the request; only an attempt in flight or finished freezes it.
-  const shownAck = mine && mine.phase !== "failed" ? mine.confirmation.acknowledge_warnings : (edited ?? (mine ? mine.confirmation.acknowledge_warnings : false));
-  const failure =
-    entry?.phase === "failed" && entry.confirmation.expected_review_id === managed.review_id && (result === null || mine === entry)
-      ? entry
-      : undefined;
   return (
     <div className="managed-update" role="group" aria-labelledby={nameId}>
-      <button type="button" aria-describedby={nameId} onClick={runCheck} disabled={check.phase === "checking" || applying}>
-        {check.phase === "checking" ? "Checking…" : "Check for update"}
+      <button type="button" aria-describedby={nameId} onClick={runCheck} disabled={basis === null || current.phase === "checking" || busy}>
+        {current.phase === "checking" ? "Checking…" : "Check for update"}
       </button>
-      {check.phase === "failed" ? <ErrorLines error={check.error} /> : null}
-      {result && blocked ? (
+      {current.phase === "failed" ? <ErrorLines error={current.error} /> : null}
+      {result && verdict?.kind === "blocked" ? (
         <div className="review-result quarantine" aria-label="Update blocked">
           <p>Blocked: the newest review of this skill cannot be applied. The installed copy is unchanged.</p>
           <ul className="gate-reasons">
@@ -123,33 +141,44 @@ function ManagedUpdate({
           </ul>
         </div>
       ) : null}
-      {result && incompatible ? (
-        <div className="review-result" aria-label="Update not compatible">
+      {result && verdict?.kind === "mismatch" ? (
+        <div className="review-result" aria-label="Update not applicable">
           <p>
-            This update cannot be applied: the new review is not compatible with {skill.engine === "claude" ? "Claude Code" : "Codex"}, the
-            agent this copy belongs to. The installed copy is unchanged.
+            This review cannot update the installed copy: it names a different skill, repository or folder than the one installed.
+            The installed copy is unchanged.
           </p>
           <dl className="agent-facts">
             <SourceFacts source={result.record.source} />
           </dl>
         </div>
       ) : null}
-      {result && available ? (
-        <div className="review-result" aria-label="Update available">
-          <p>Update available. New review {result.gate.result}.</p>
+      {result && verdict?.kind === "incompatible" ? (
+        <div className="review-result" aria-label="Update not compatible">
+          <p>
+            This update cannot be applied: the new review is not compatible with {engineLabel(skill.engine)}, the agent this copy
+            belongs to. The installed copy is unchanged.
+          </p>
           <dl className="agent-facts">
             <SourceFacts source={result.record.source} />
           </dl>
-          {ack ? (
+        </div>
+      ) : null}
+      {result && confirmation ? (
+        <div className="review-result" aria-label="New revision reviewed">
+          <p>New revision reviewed. {headline(result)}.</p>
+          <dl className="agent-facts">
+            <SourceFacts source={result.record.source} />
+          </dl>
+          {confirmation.warnings ? (
             <>
               <WarningList result={result} />
               <label>
                 <input
                   type="checkbox"
-                  checked={shownAck}
-                  disabled={applying || done}
+                  checked={acknowledged}
+                  disabled={busy || done}
                   aria-describedby={nameId}
-                  onChange={(event) => setEdited(event.target.checked)}
+                  onChange={(event) => confirmations.acknowledge(confirmation, event.target.checked)}
                 />{" "}
                 I have read these warnings.
               </label>
@@ -158,36 +187,16 @@ function ManagedUpdate({
           <button
             type="button"
             aria-describedby={nameId}
-            disabled={applying || done || (ack && !shownAck)}
-            onClick={() =>
-              void writes.apply({
-                project: projectId,
-                generation: writes.generation,
-                engine: skill.engine,
-                name: skill.name,
-                operation: "update",
-                review_id: result.record.id,
-                expected_review_id: managed.review_id,
-                acknowledge_warnings: ack && shownAck,
-                destination: skill.location,
-              })
-            }
+            disabled={busy || done || (confirmation.warnings && !acknowledged)}
+            onClick={() => void confirmations.apply(confirmation)}
           >
-            {applying ? "Applying…" : "Apply update"}
+            {busy ? "Applying…" : "Apply update"}
           </button>
         </div>
       ) : null}
       {failure ? <ErrorLines error={failure.error} /> : null}
       <div className="apply-status" role="status" aria-live="polite" aria-atomic="true" aria-label={`Update status for ${skill.name}`}>
-        {check.phase === "checking" ? <p>Checking {skill.name} for updates…</p> : null}
-        {result && blocked ? <p>Update blocked. The installed copy is unchanged.</p> : null}
-        {result && incompatible ? (
-          <p>Update not compatible with {skill.engine === "claude" ? "Claude Code" : "Codex"}. The installed copy is unchanged.</p>
-        ) : null}
-        {result && available ? <p>Update available. New review {result.gate.result}.</p> : null}
-        {same ? <p>Up to date. The current review matches the installed one.</p> : null}
-        {applying ? <p>Applying the update to {skill.name}…</p> : null}
-        {outcome ? <p>{outcome.result.status === "unchanged" ? "Already current; nothing changed." : "Updated."}</p> : null}
+        {announcement ? <p>{announcement}</p> : null}
       </div>
     </div>
   );
@@ -205,14 +214,12 @@ function InstalledRow({ skill, children }: { skill: InstalledSkillDto; children:
 export function InstalledView({
   transport,
   projectOpen,
-  projectId = null,
-  writes,
+  confirmations,
   inventoryRevision,
 }: {
   transport: Transport;
   projectOpen: boolean;
-  projectId?: string | null;
-  writes: SkillWrites;
+  confirmations: SkillConfirmations;
   /** Bumped by the controller after a confirmed install or update; a bump re-reads the real inventory. */
   inventoryRevision: number;
 }) {
@@ -220,6 +227,8 @@ export function InstalledView({
   const [read, setRead] = useState(0);
   // A re-read keeps the rows (and their live status regions) mounted; only the first read replaces the view.
   const [reading, setReading] = useState(false);
+  const { observe } = confirmations;
+  const { project, generation } = confirmations.selection;
 
   useEffect(() => {
     let current = true;
@@ -228,6 +237,8 @@ export function InstalledView({
     transport.skillsInstalled().then(
       (value) => {
         if (!current) return;
+        // The owner sees the receipts first, so a confirmation built on a replaced one is void before this read renders.
+        if (project !== null) observe(project, generation, value);
         setReading(false);
         setLoad({ status: "ready", value });
       },
@@ -240,7 +251,7 @@ export function InstalledView({
     return () => {
       current = false;
     };
-  }, [transport, read, inventoryRevision]);
+  }, [transport, read, inventoryRevision, observe, project, generation]);
 
   const refresh = () => setRead((previous) => previous + 1);
 
@@ -302,8 +313,8 @@ export function InstalledView({
                 </span>
               </div>
               <code className="muted">{skill.location}</code>
-              {skill.scope === "project" && skill.managed && projectId ? (
-                <ManagedUpdate skill={skill} transport={transport} projectId={projectId} writes={writes} nameId={nameId} />
+              {skill.scope === "project" && skill.managed && project !== null ? (
+                <ManagedUpdate skill={skill} project={project} transport={transport} confirmations={confirmations} nameId={nameId} />
               ) : null}
                 </>
               )}
