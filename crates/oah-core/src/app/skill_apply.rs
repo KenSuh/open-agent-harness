@@ -99,31 +99,23 @@ pub fn apply_project_skill(
         },
     )?;
     let leaf = SkillLeaf::new(payload.name())?;
-    let mut binding = ReviewBinding {
+    let binding = ReviewBinding {
         repo: payload.source().repo().to_owned(),
         path: payload.source().path().to_owned(),
         review_id: payload.review().id.clone(),
         snapshot_id: payload.snapshot().id.clone(),
     };
 
-    if let Some(expected) = req.expected_review_id.as_deref() {
-        let previous = stored_binding(&store, expected, payload.name())?;
-        if previous.repo != binding.repo || previous.path != binding.path {
-            return Err(PublishError::SourceMismatch.into());
-        }
-        match root.installed(req.engine, &leaf) {
-            Ok(Some(installed)) if installed.binding.review_id == expected => {
-                if installed.binding != previous {
-                    return Err(PublishError::InvalidReceipt.into());
-                }
-                if previous.snapshot_id == binding.snapshot_id {
-                    binding = previous;
-                }
-            }
-            // On recovery the old tree may already be staged. The writer verifies it and the original intent.
-            Ok(_) | Err(PublishError::Recovery { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
+    let previous = req
+        .expected_review_id
+        .as_deref()
+        .map(|id| stored_binding(&store, id, payload.name()))
+        .transpose()?;
+    if previous
+        .as_ref()
+        .is_some_and(|previous| previous.repo != binding.repo || previous.path != binding.path)
+    {
+        return Err(PublishError::SourceMismatch.into());
     }
     let files = payload
         .files()
@@ -140,6 +132,19 @@ pub fn apply_project_skill(
     }
     ctx.cancel.check()?;
     refuse_home(ctx.env, &project.root)?;
+    if let Some(previous) = previous {
+        match root.installed(req.engine, &leaf) {
+            Ok(Some(installed))
+                if installed.binding.review_id == previous.review_id
+                    && installed.binding != previous =>
+            {
+                return Err(PublishError::InvalidReceipt.into());
+            }
+            // On recovery the old tree may already be staged. The writer verifies it and the original intent.
+            Ok(_) | Err(PublishError::Recovery { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let status = root.apply(
         req.engine,
         &leaf,

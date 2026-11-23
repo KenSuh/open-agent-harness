@@ -176,13 +176,18 @@ fn reviewed_install_and_update_publish_exact_snapshots_for_each_engine() {
         assert_eq!(unchanged.review_id, old.record.id);
 
         let update = fixture.request(engine, &new, Some(&old));
-        let updated = fixture.apply(&update).unwrap();
-        assert_eq!(updated.status, Status::Updated);
-        assert_eq!(updated.review_id, new.record.id);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| fixture.apply(&update));
+            let second = fixture.apply(&update);
+            (first.join().unwrap().unwrap(), second.unwrap())
+        });
+        assert!(matches!(
+            (first.status, second.status),
+            (Status::Updated, Status::Unchanged) | (Status::Unchanged, Status::Updated)
+        ));
+        assert_eq!(first.review_id, new.record.id);
+        assert_eq!(second.review_id, new.record.id);
         assert_installed(&destination, SKILL_B, COMMIT_B);
-        let retry = fixture.apply(&update).unwrap();
-        assert_eq!(retry.status, Status::Unchanged);
-        assert_eq!(retry.review_id, new.record.id);
     }
 
     let rows = fixture.inventory();

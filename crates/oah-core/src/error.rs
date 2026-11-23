@@ -169,6 +169,9 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         "OAH_SKILL_TRANSACTION_PENDING" | "OAH_SKILL_RECOVERY_REQUIRED" => {
             "Retry the same confirmed change to resume publication."
         }
+        "OAH_SKILL_MOVED_UNVERIFIED" => {
+            "Inspect the skill folder and .oah/project-skills-v1 before retrying."
+        }
         "OAH_SKILL_FS_IO" => "Check access to the project folder, then try again.",
         codes::SECTION_UNKNOWN => "Add the section id to sections.order in .oah/config.toml first.",
         codes::PRESET_UNAVAILABLE => {
@@ -391,6 +394,9 @@ impl Coded for ProjectSkillError {
                 Publish::Pending => "An earlier confirmed skill operation is still pending.",
                 Publish::Recovery { .. } => {
                     "OAH kept the previous skill under .oah/project-skills-v1."
+                }
+                Publish::MovedUnverified { .. } => {
+                    "OAH could not verify the skill directory after a move."
                 }
                 Publish::Io(_) => "OAH could not access the project skill files.",
             },
