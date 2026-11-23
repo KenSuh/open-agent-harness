@@ -11,9 +11,9 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::null_mut;
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileRenameInfo, GetDriveTypeW, GetVolumeInformationByHandleW,
-    SetFileInformationByHandle,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo, GetDriveTypeW,
+    GetVolumeInformationByHandleW, SetFileInformationByHandle,
 };
 
 type Result<T> = std::result::Result<T, PublishError>;
@@ -62,14 +62,19 @@ pub(super) fn qualify(file: &File) -> Result<()> {
     Ok(())
 }
 
-fn open_directory(path: &Path, extra_access: u32) -> Result<File> {
+fn open_directory(path: &Path, access: u32) -> Result<File> {
     let file = OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES | extra_access)
+        .access_mode(access)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
     plain(&file, true)?;
     Ok(file)
+}
+
+fn pin_directory(path: &Path) -> Result<File> {
+    // NTFS ignores metadata-only opens for sharing. List access makes the pin deny DELETE opens.
+    open_directory(path, FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
 }
 
 fn plain(file: &File, directory: bool) -> Result<()> {
@@ -99,8 +104,12 @@ pub(super) fn identity(file: &File) -> Result<ObjectId> {
     })
 }
 
+pub(super) fn inspect_directory_identity(path: &Path) -> Result<ObjectId> {
+    identity(&open_directory(path, FILE_READ_ATTRIBUTES)?)
+}
+
 pub(super) fn open_root(path: &Path) -> Result<File> {
-    open_directory(path, 0)
+    pin_directory(path)
 }
 pub(super) fn permissions(file: &File) -> Result<u32> {
     use std::os::windows::fs::MetadataExt;
@@ -111,7 +120,7 @@ pub(super) fn permissions(file: &File) -> Result<u32> {
         & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM))
 }
 pub(super) fn open_dir(dir: &Dir, name: &OsStr) -> Result<File> {
-    open_directory(&dir.path().join(name), 0)
+    pin_directory(&dir.path().join(name))
 }
 
 pub(super) fn check_named(_parent: &Dir, dir: &Dir) -> Result<()> {
@@ -174,7 +183,7 @@ pub(super) fn rename_new(
     to: &str,
     expected: &ObjectId,
 ) -> Result<()> {
-    let source = open_directory(&dir.path().join(name), DELETE)?;
+    let source = open_directory(&dir.path().join(name), FILE_READ_ATTRIBUTES | DELETE)?;
     if identity(&source)? != *expected {
         return Err(PublishError::Changed);
     }
@@ -287,7 +296,7 @@ pub(super) fn remove_file(_dir: &Dir, _name: &str, file: &File) -> Result<()> {
 }
 
 pub(super) fn remove_empty(dir: &Dir, name: &str, expected: &ObjectId) -> Result<()> {
-    let file = open_directory(&dir.path().join(name), DELETE)?;
+    let file = open_directory(&dir.path().join(name), FILE_READ_ATTRIBUTES | DELETE)?;
     if identity(&file)? != *expected {
         return Err(PublishError::Changed);
     }

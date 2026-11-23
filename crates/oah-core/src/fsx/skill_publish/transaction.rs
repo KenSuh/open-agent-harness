@@ -459,6 +459,8 @@ fn apply_locked(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{Fixture, binding, files};
+    #[cfg(windows)]
+    use super::super::tests::{assert_sharing_violation, hold_without_delete_sharing};
     use super::*;
     use std::fs;
 
@@ -596,23 +598,15 @@ mod tests {
         #[cfg(target_os = "macos")]
         change_flags("uchg");
         #[cfg(windows)]
-        let hold = {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            };
-            fs::OpenOptions::new()
-                .access_mode(FILE_READ_ATTRIBUTES)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-                .open(&next)
-                .unwrap()
-        };
+        let hold = hold_without_delete_sharing(&next);
         let failed = f.apply(2, Some(&old.binding.review_id));
         #[cfg(target_os = "macos")]
         change_flags("nouchg");
         #[cfg(windows)]
         drop(hold);
+        #[cfg(windows)]
+        assert_sharing_violation(failed);
+        #[cfg(target_os = "macos")]
         assert!(matches!(failed, Err(PublishError::Io(_))), "{failed:?}");
         assert_eq!(
             f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap(),

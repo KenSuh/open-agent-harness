@@ -48,7 +48,11 @@ impl Dir {
     }
 
     pub(super) fn outside_home_skills(&self, home: &Path) -> Result<()> {
-        let home_id = os::identity(&os::open_root(&home.canonicalize()?)?)?;
+        let home = home.canonicalize()?;
+        #[cfg(windows)]
+        let home_id = os::inspect_directory_identity(&home)?;
+        #[cfg(target_os = "macos")]
+        let home_id = os::identity(&os::open_root(&home)?)?;
         let mut branch: Vec<&OsStr> = Vec::new();
         let mut current = Some(self);
         while let Some(dir) = current {

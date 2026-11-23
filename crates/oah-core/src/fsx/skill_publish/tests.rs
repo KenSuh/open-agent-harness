@@ -377,21 +377,58 @@ fn a_replaced_selected_root_cannot_redirect_writes() {
 }
 
 #[cfg(windows)]
-#[test]
-fn an_open_without_delete_sharing_preserves_live_then_retry_updates() {
+pub(super) fn hold_without_delete_sharing(path: &Path) -> fs::File {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    let f = Fixture::new();
-    f.apply(1, None).unwrap();
-    let hold = fs::OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES)
+    fs::OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(f.live())
-        .unwrap();
-    assert!(f.apply(2, Some(&binding(1).review_id)).is_err());
+        .open(path)
+        .unwrap()
+}
+
+#[cfg(windows)]
+pub(super) fn assert_sharing_violation<T: fmt::Debug>(result: Result<T, PublishError>) {
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+    let Err(PublishError::Io(err)) = result else {
+        panic!("expected a native sharing violation, got {result:?}");
+    };
+    assert_eq!(
+        err.raw_os_error(),
+        Some(i32::try_from(ERROR_SHARING_VIOLATION).unwrap()),
+        "{err}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_pinned_ancestor_cannot_be_moved_until_released() {
+    let f = Fixture::new();
+    let project = f.path.join("ancestor/project");
+    fs::create_dir_all(&project).unwrap();
+    let root = &f.root.dir;
+    let ancestor = root.child("ancestor").unwrap();
+    let id = ancestor.id().clone();
+
+    let rename = || root.move_new("ancestor", root, "renamed", &id);
+    assert_sharing_violation(rename());
+    assert!(project.is_dir());
+
+    drop(ancestor);
+    rename().unwrap();
+    assert!(f.path.join("renamed/project").is_dir());
+}
+
+#[cfg(windows)]
+#[test]
+fn an_open_without_delete_sharing_preserves_live_then_retry_updates() {
+    let f = Fixture::new();
+    f.apply(1, None).unwrap();
+    let hold = hold_without_delete_sharing(&f.live());
+    assert_sharing_violation(f.apply(2, Some(&binding(1).review_id)));
     assert_eq!(
         fs::read(f.live().join("references/nested/note.txt")).unwrap(),
         [1, 0, 255]
