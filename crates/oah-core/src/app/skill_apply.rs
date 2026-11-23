@@ -3,7 +3,7 @@ use crate::config::{AgentId, ProjectConfig};
 use crate::dto::{ApplyProjectSkillDto, ApplyProjectSkillReq, ApplyProjectSkillStatus};
 use crate::error::{Error, ProjectSkillError};
 use crate::fsx::skill_publish::{Engine, PublishError, PublishStatus, ReviewBinding, SkillLeaf};
-use crate::paths::{self, Env};
+use crate::paths;
 use crate::review::delivery::{GitHubSkillSource, ReviewApproval, authorize};
 use crate::review::{Store, record::ReviewStatus};
 use std::io;
@@ -16,9 +16,8 @@ pub(super) fn agent_id(engine: Engine) -> AgentId {
     }
 }
 
-pub(super) fn refuse_home(env: &Env, root: &Path) -> Result<(), ProjectSkillError> {
-    let home = paths::user_home(env).map_err(|_| ProjectSkillError::HomeUnverified)?;
-    if same_directory(root, &home).map_err(|_| ProjectSkillError::HomeUnverified)? {
+pub(super) fn refuse_home(root: &Path, home: &Path) -> Result<(), ProjectSkillError> {
+    if same_directory(root, home).map_err(|_| ProjectSkillError::HomeUnverified)? {
         return Err(ProjectSkillError::HomeScope);
     }
     Ok(())
@@ -131,7 +130,8 @@ pub fn apply_project_skill(
         return Err(ProjectSkillError::ProjectChanged.into());
     }
     ctx.cancel.check()?;
-    refuse_home(ctx.env, &project.root)?;
+    let home = paths::user_home(ctx.env).map_err(|_| ProjectSkillError::HomeUnverified)?;
+    refuse_home(&project.root, &home)?;
     if let Some(previous) = previous {
         match root.installed(req.engine, &leaf) {
             Ok(Some(installed))

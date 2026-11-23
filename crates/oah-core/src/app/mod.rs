@@ -276,15 +276,21 @@ pub fn project_open(ctx: &Ctx<'_>, folder: &Path) -> Result<ProjectDto, Error> {
     } else {
         Cow::Owned(ctx.env.cwd().join(folder))
     };
-    let picked = ProjectRoot::open(&folder);
+    let home = paths::user_home(ctx.env).map_err(|_| ProjectSkillError::HomeUnverified);
+    // Check the picker's path before discovery can resolve a link or return an ancestor.
+    let picked = home
+        .as_deref()
+        .map_err(Clone::clone)
+        .and_then(|home| ProjectRoot::open(&folder, home).map_err(ProjectSkillError::from));
     let opened = project::open(ctx.env, &folder)?;
     let root = &opened.project.root;
-    let skill_root = skill_apply::refuse_home(ctx.env, root).and_then(|()| {
+    let skill_root = home.and_then(|home| {
+        skill_apply::refuse_home(root, &home)?;
         let picked = picked?;
         if folder.as_ref() == root {
             Ok(picked)
         } else {
-            Ok(ProjectRoot::open(root)?)
+            Ok(ProjectRoot::open(root, &home)?)
         }
     });
     let selected = ProjectSelection {
@@ -336,7 +342,7 @@ mod tests {
         let selection = |stamp, folder: &Path| ProjectSelection {
             stamp,
             opened: project::open(session.env(), folder).unwrap(),
-            skill_root: ProjectRoot::open(folder).map_err(ProjectSkillError::from),
+            skill_root: ProjectRoot::open(folder, &root).map_err(ProjectSkillError::from),
         };
         let held_b = session.publish_selection(selection(newer, &b));
         let returned = session.publish_selection(selection(older, &a));

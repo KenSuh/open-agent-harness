@@ -354,6 +354,106 @@ fn the_physical_home_cannot_be_selected_for_skill_writes() {
     junction::delete(&alias).unwrap();
 }
 
+#[test]
+fn the_session_home_and_reserved_subtrees_are_read_only_for_skill_apply() {
+    let fixture = Fixture::new();
+    assert_ne!(
+        paths::user_home(&Env::from_process().unwrap()).ok(),
+        Some(fixture.home.clone())
+    );
+    let old = fixture.review(REPO, &recorded(REPO, COMMIT_A, SKILL_A));
+    let new = fixture.review(REPO, &recorded(REPO, COMMIT_B, SKILL_B));
+    let protected = [
+        "",
+        ".claude",
+        ".agents",
+        ".oah",
+        ".claude/nested",
+        ".agents/nested",
+        ".oah/nested",
+    ]
+    .map(|relative| fixture.home.join(relative));
+    for folder in &protected {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("keep.txt"), b"existing bytes").unwrap();
+    }
+    let entries = |folder: &Path| {
+        fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before = protected.each_ref().map(|folder| entries(folder));
+
+    let mut install = fixture.request(Engine::Codex, &old, None);
+    let mut update = fixture.request(Engine::Codex, &new, Some(&old));
+    for folder in &protected {
+        let project = fixture.ctx(|ctx| app::project_open(ctx, folder)).unwrap();
+        install.project = project.id.clone();
+        update.project = project.id;
+        let code = if *folder == fixture.home {
+            "OAH_SKILL_HOME_SCOPE"
+        } else {
+            "OAH_SKILL_PATH_UNSAFE"
+        };
+        fixture.assert_refused(&install, code);
+        fixture.assert_refused(&update, code);
+    }
+
+    assert_eq!(protected.each_ref().map(|folder| entries(folder)), before);
+    for folder in &protected {
+        assert_eq!(
+            fs::read(folder.join("keep.txt")).unwrap(),
+            b"existing bytes"
+        );
+    }
+
+    let project = fixture
+        .ctx(|ctx| app::project_open(ctx, &fixture.project))
+        .unwrap();
+    install.project = project.id.clone();
+    update.project = project.id;
+    let destination = fixture.project.join(".agents/skills/tidy");
+    assert_eq!(fixture.apply(&install).unwrap().status, Status::Installed);
+    assert_installed(&destination, SKILL_A, COMMIT_A);
+    assert_eq!(fixture.apply(&update).unwrap().status, Status::Updated);
+    assert_installed(&destination, SKILL_B, COMMIT_B);
+}
+
+#[test]
+fn an_unverified_session_home_leaves_the_project_readable() {
+    let mut fixture = Fixture::new();
+    let mut env = fixture.session.env().clone();
+    let missing_home = fixture.home.join("missing");
+    env.set("HOME", &missing_home);
+    env.set("USERPROFILE", &missing_home);
+    env.set("OAH_HOME", fixture.project.with_file_name("state"));
+    fixture.session = Session::with_transport(env, fixture.transport.clone());
+    let skill = fixture.project.join(".agents/skills/untracked");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), SKILL_A).unwrap();
+
+    let project = fixture
+        .ctx(|ctx| app::project_open(ctx, &fixture.project))
+        .unwrap();
+    let rows = fixture.inventory();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "untracked");
+    assert_eq!(rows[0].scope, SkillScopeDto::Project);
+    assert!(rows[0].managed.is_none());
+
+    let review = fixture.review(REPO, &recorded(REPO, COMMIT_A, SKILL_A));
+    let mut install = fixture.request(Engine::Codex, &review, None);
+    install.project = project.id;
+    fixture.assert_refused(&install, "OAH_SKILL_HOME_UNVERIFIED");
+    assert_eq!(
+        fs::read(skill.join("SKILL.md")).unwrap(),
+        SKILL_A.as_bytes()
+    );
+    assert!(!fixture.project.join(".agents/skills/tidy").exists());
+    assert!(!fixture.project.join(".oah").exists());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn refreshing_a_replaced_path_never_adopts_the_replacement_as_its_write_target() {

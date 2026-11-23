@@ -275,7 +275,16 @@ pub async fn skills_installed(
     req: Empty,
     shell: State<'_, Shell>,
 ) -> Result<Vec<InstalledSkillDto>, ErrorDto> {
-    shell.call(|ctx| app::skills_installed(ctx, req))
+    let shell = Shell {
+        session: Arc::clone(&shell.session),
+    };
+    tauri::async_runtime::spawn_blocking(move || shell.call(|ctx| app::skills_installed(ctx, req)))
+        .await
+        .map_err(|_| ErrorDto {
+            code: "OAH_SKILL_INVENTORY_INTERRUPTED".to_owned(),
+            message: "The installed skills scan stopped before reporting its result.".to_owned(),
+            hint: Some("Refresh Installed to try again.".to_owned()),
+        })?
 }
 
 #[tauri::command]
