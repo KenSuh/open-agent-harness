@@ -524,17 +524,27 @@ fn apply_locked(
                 return Err(PublishError::InvalidPayload);
             }
             record.next.verify(&generation.dir.child("next")?)?;
-            match &record.previous {
-                Some(old) => {
-                    old.verify(&scope.live_tree()?.ok_or(PublishError::Changed)?)?;
-                    authorize_update(old, binding, expected)?;
-                    if old.same_bytes(files) {
-                        return Ok(PublishStatus::Unchanged);
+            match generation.record.previous {
+                Some(old) => match scope.live_tree()? {
+                    Some(live) => {
+                        old.verify(&live)?;
+                        authorize_update(&old, binding, expected)?;
+                        if old.same_bytes(files) {
+                            return Ok(PublishStatus::Unchanged);
+                        }
+                        Some(old)
                     }
+                    None if expected.is_some() => return Err(PublishError::Changed),
+                    None => {
+                        scope.require_vacancy(None)?;
+                        None
+                    }
+                },
+                None => {
+                    scope.require_vacancy(expected)?;
+                    None
                 }
-                None => scope.require_vacancy(expected)?,
             }
-            generation.record.previous
         }
         Phase::Unstaged { published, backup } => {
             if let Some(live) = scope.live_tree()? {
@@ -803,6 +813,30 @@ mod tests {
             fs::read(f.live().join("references/nested/note.txt")).unwrap(),
             [3, 0, 255]
         );
+    }
+
+    #[test]
+    fn a_new_install_can_follow_removal_after_a_verified_rollback() {
+        let (f, old) = rolled_back_update();
+        let pending = scope(&f).1.latest().unwrap().unwrap().dir.path().to_owned();
+        let receipt = pending.join("receipt.json");
+        let sealed = fs::read(&receipt).unwrap();
+
+        fs::remove_dir_all(f.live()).unwrap();
+        for review in [2, 3] {
+            assert!(matches!(
+                f.apply(review, Some(&old.binding.review_id)),
+                Err(PublishError::Changed)
+            ));
+        }
+        assert_eq!(f.apply(3, None).unwrap(), PublishStatus::Installed);
+
+        let live = f.root.installed(Engine::Codex, &f.leaf).unwrap().unwrap();
+        assert_eq!(live.binding, binding(3));
+        assert_eq!(fs::read(receipt).unwrap(), sealed);
+        for (path, data) in files(2) {
+            assert_eq!(fs::read(pending.join("next").join(path)).unwrap(), data);
+        }
     }
 
     #[test]
