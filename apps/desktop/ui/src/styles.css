@@ -495,6 +495,11 @@ select:disabled {
   align-items: center;
 }
 
+.section-card > label {
+  flex-direction: column;
+  align-items: stretch;
+}
+
 .section-card select {
   /* Disabled options still contribute to the select's intrinsic width. Let it shrink in the label. */
   min-width: 0;
