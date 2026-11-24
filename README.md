@@ -147,9 +147,9 @@ oah 1.1.0
    and **Write Code**, and Codex for **Code Review** and **Fix Issues**. The **Use a different agent than**
    checkboxes let you require two sections to use different agents.
 
-   ![OAH v1.0.0 Team Workflow shows Antigravity planning, OpenCode writing code, Codex reviewing and Claude Code fixing. Code Review requires a different agent from Write Code, and Rules are in sync.](docs/assets/readme-v1/team-workflow.png)
+   [![Team Workflow layout fix preview from the source build: Claude Code plans, OpenCode writes code, and Codex reviews and fixes. Rules are in sync.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
 
-   *The Write Code box on the Code Review card keeps implementation and review with different agents.*
+   *Team Workflow layout fix preview from the source build; unchanged v1.1.0 downloads do not include this fix.*
 
 3. **Check the project rules.** If **Rules** shows drift, choose **Sync now** to update the managed block in
    `AGENTS.md`. Review the changes in the worktree before committing them.
@@ -182,10 +182,14 @@ Use a separate working copy that Team Workflow has not configured for the source
    To install an eligible skill, open the destination project with **+ Open…**. Choose an installed, compatible
    agent and check the destination. Claude Code uses `.claude/skills/` and Codex uses `.agents/skills/` in the project.
    Acknowledge any warnings, then select **Confirm install**.
+
+   [![OAH v1.1.0 Explore screen reviewing the public Ponytail skill folder. The source is pinned to a commit, MIT license and review decision are shown, Codex targets the project's .agents/skills/ folder, and Confirm install is available.](docs/assets/readme-v1/explore-1.1.0.png)](docs/assets/readme-v1/explore-1.1.0.png)
 3. **Find installed copies and check for updates.** **Installed** shows copies in the open project and your user
    folders, with the engine, scope and path for each copy. **Refresh inventory** rereads those folders. For an eligible
    OAH-managed project copy, select **Check for update** to review the upstream revision. When a compatible new
    revision passes review, read the result, acknowledge any warnings and select **Apply update** to confirm.
+
+   [![OAH v1.1.0 Installed screen showing a Codex Project skill row, its project path, Refresh inventory, Check for update, and the confirmed Up to date result.](docs/assets/readme-v1/installed-1.1.0.png)](docs/assets/readme-v1/installed-1.1.0.png)
 
 For search by technology and toolkit management, use the [Python source CLI](#inspect-and-choose-skills-in-the-cli).
 

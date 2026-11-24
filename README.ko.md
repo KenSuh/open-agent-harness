@@ -143,9 +143,9 @@ oah 1.1.0
    **Code Review**와 **Fix Issues**에 Codex다. 카드의 **Use a different agent than**에서 다른 단계를 선택하면
    그 단계와 서로 다른 에이전트를 쓰도록 지정할 수 있다.
 
-   ![OAH v1.0.0의 Team Workflow 화면. Antigravity는 설계, OpenCode는 구현, Codex는 리뷰, Claude Code는 수정을 맡는다. 리뷰는 구현과 다른 에이전트를 쓰도록 지정했고 규칙 동기화가 완료됐다.](docs/assets/readme-v1/team-workflow.png)
+   [![Team Workflow 레이아웃 수정 미리보기(소스 빌드): Claude Code가 계획, OpenCode가 구현, Codex가 리뷰와 수정을 맡고 규칙 동기화가 완료됐다.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
 
-   *Code Review 카드에서 Write Code를 선택해 구현과 리뷰를 서로 다른 에이전트에 맡긴 예다.*
+   *Team Workflow 레이아웃 수정의 소스 빌드 미리보기다. 변경되지 않은 v1.1.0 다운로드에는 이 수정이 포함되지 않는다.*
 
 3. **프로젝트 규칙을 확인한다.** **Rules**에 동기화가 필요하다고 나오면 **Sync now**를 눌러 `AGENTS.md`의
    관리 대상 규칙을 갱신한다. 작업 폴더의 변경 사항을 살핀 뒤 커밋한다.
@@ -177,10 +177,14 @@ Team Workflow가 설정하지 않은 별도 작업 복사본에서 소스 CLI
 2. **검토하고 설치한다.** **Review**를 누르면 출처와 고정된 커밋, 라이선스, 검토 결과를 볼 수 있다. 설치 가능한
    스킬이면 **+ Open…**으로 설치할 프로젝트를 열고, 설치된 호환 에이전트를 골라 대상 경로를 확인한다. 프로젝트 안에서
    Claude Code는 `.claude/skills/`, Codex는 `.agents/skills/`를 쓴다. 경고가 있으면 읽고 확인한 뒤 **Confirm install**을 누른다.
+
+   [![OAH v1.1.0 Explore 화면에서 공개 Ponytail 스킬 폴더를 검토한다. 커밋에 고정된 출처, MIT 라이선스와 검토 결과가 보이고 Codex 설치 대상은 프로젝트의 .agents/skills/ 폴더이며 Confirm install을 누를 수 있다.](docs/assets/readme-v1/explore-1.1.0.png)](docs/assets/readme-v1/explore-1.1.0.png)
 3. **설치된 스킬과 갱신 여부를 확인한다.** **Installed**에는 열어 둔 프로젝트와 사용자 폴더의 스킬이 각각 에이전트,
    범위, 경로와 함께 표시된다. **Refresh inventory**는 폴더를 다시 읽는다. 갱신할 수 있는 OAH 관리 프로젝트 사본에서
    **Check for update**를 누르면 원본의 최신 버전을 검토한다. 호환되는 새 버전이 검토를 통과하면 결과를 살피고
    경고가 있으면 확인한 뒤 **Apply update**를 눌러 갱신을 확정한다.
+
+   [![OAH v1.1.0 Installed 화면에서 Codex Project 스킬 행과 프로젝트 경로, Refresh inventory, Check for update, 확인된 Up to date 결과를 보여 준다.](docs/assets/readme-v1/installed-1.1.0.png)](docs/assets/readme-v1/installed-1.1.0.png)
 
 기술별 스킬 검색과 툴킷 관리는 [Python 소스 CLI](#cli에서-스킬-확인하고-고르기)를 쓴다.
 
