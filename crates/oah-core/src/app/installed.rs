@@ -175,20 +175,19 @@ fn skill_folders(
 }
 
 fn skill_directory(path: &Path, project: Option<&Path>) -> Result<Option<PathBuf>, FsxError> {
-    let Some(resolved) = resolve(path)? else {
+    let resolved = match fs::canonicalize(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotADirectory => return Ok(None),
+        result => present(path, result)?,
+    };
+    let Some(resolved) = resolved else {
         return Ok(None);
     };
     if project.is_some_and(|root| !resolved.starts_with(root)) {
         return Ok(None);
     }
-    if !present(path, fs::symlink_metadata(&resolved))?.is_some_and(|meta| meta.is_dir()) {
-        return Err(FsxError::new(
-            FsxErrorKind::Io,
-            path,
-            "expected a local skills directory",
-        ));
-    }
-    Ok(Some(resolved))
+    Ok(present(path, fs::symlink_metadata(&resolved))?
+        .filter(fs::Metadata::is_dir)
+        .map(|_| resolved))
 }
 
 fn skill_metadata(path: &Path, project: Option<&Path>) -> Result<Option<fs::Metadata>, FsxError> {

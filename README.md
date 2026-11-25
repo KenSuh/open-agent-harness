@@ -185,16 +185,16 @@ Use a separate working copy that Team Workflow has not configured for the source
 
    [![OAH v1.1.0 Explore screen reviewing the public Ponytail skill folder. The source is pinned to a commit, MIT license and review decision are shown, Codex targets the project's .agents/skills/ folder, and Confirm install is available.](docs/assets/readme-v1/explore-1.1.0.png)](docs/assets/readme-v1/explore-1.1.0.png)
 3. **Find installed copies and check for updates.** **Installed** shows copies in the open project and your user
-   folders, with the engine, scope and path for each copy. Choose an agent to filter by its recognized locations or
-   **All** to see each location once. **Refresh inventory** rereads those folders. For an eligible OAH-managed
-   project copy, select **Check for update** from **All** or the owning agent's view to review the upstream
-   revision. When a compatible new revision passes review, read the result, acknowledge any warnings and
-   select **Apply update** to confirm.
+   folders, with the engine, scope and path for each copy. **Refresh inventory** rereads those folders. For an eligible
+   OAH-managed project copy, select **Check for update** to review the upstream revision. When a compatible new
+   revision passes review, read the result, acknowledge any warnings and select **Apply update** to confirm.
 
    [![OAH v1.1.0 Installed screen showing a Codex Project skill row, its project path, Refresh inventory, Check for update, and the confirmed Up to date result.](docs/assets/readme-v1/installed-1.1.0.png)](docs/assets/readme-v1/installed-1.1.0.png)
 
-The bundled native CLI also lists these local folders with `oah skills list` from the project directory.
-Use `--json` for the inventory fields, including `compatible_agents` when additional agents read a location.
+In the current source build, choose an agent in **Installed** to see its own skills followed by shared skills.
+Choose **All** to see each location once. The bundled native CLI in this build lists the expanded set of local
+skill folders when you run `oah skills list` from the project directory. Use `--json` to see the inventory fields,
+including `compatible_agents` when other agents read a location.
 
 For search by technology and toolkit management, use the [Python source CLI](#inspect-and-choose-skills-in-the-cli).
 

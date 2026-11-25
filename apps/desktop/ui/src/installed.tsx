@@ -258,6 +258,10 @@ export function InstalledView({
   });
   const all = { id: "all", label: "All", rows: inventory } as const;
   const selected = agentFilters.find(({ id }) => id === filter) ?? all;
+  const visibleRows = selected.id === "all" ? selected.rows : [
+    ...selected.rows.filter((skill) => skill.engine === selected.id),
+    ...selected.rows.filter((skill) => skill.engine !== selected.id),
+  ];
   if (load.status === "ready" && selected.id !== filter) setFilter(selected.id);
   const scope = projectOpen ? "this project or your user folders" : "your user folders";
 
@@ -317,13 +321,14 @@ export function InstalledView({
             </p>
           ) : (
             <ul className="installed-list" aria-label="Installed skills">
-              {selected.rows.map((skill) => (
+              {visibleRows.map((skill) => (
                 <InstalledRow key={JSON.stringify([skill.scope, skill.engine, skill.location])} skill={skill}>
                   {(nameId) => (
                     <>
                       <div className="installed-heading">
                         <strong id={nameId}>{skill.name}</strong>
                         <span className="muted">
+                          {selected.id !== "all" && selected.id !== skill.engine ? "Shared from " : ""}
                           {AGENT_LABELS[skill.engine]} · {skill.scope === "project" ? "Project" : "User"}
                         </span>
                       </div>

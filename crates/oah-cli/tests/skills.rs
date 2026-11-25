@@ -188,23 +188,32 @@ fn list_reports_project_and_user_copies_from_a_plain_working_folder() {
 }
 
 #[test]
-fn list_reports_a_blocked_skill_root_as_an_error() {
-    let home = tempfile::tempdir().unwrap();
-    let root = home.path().join(".agents");
-    fs::create_dir(&root).unwrap();
-    fs::write(root.join("skills"), b"not a directory").unwrap();
+fn list_keeps_valid_skills_when_an_optional_path_is_a_file() {
+    for file in [
+        "project/.opencode",
+        "project/.opencode/skills",
+        ".cursor",
+        ".cursor/skills",
+        ".config",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project");
+        fs::create_dir(&cwd).unwrap();
+        for skill in [".agents/skills/keep", ".gemini/config/skills/seen"] {
+            let folder = home.path().join(skill);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("SKILL.md"), b"# Skill").unwrap();
+        }
+        let blocked = home.path().join(file);
+        fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+        fs::write(blocked, b"regular file").unwrap();
 
-    let out = oah(home.path(), &["skills", "list", "--json"]);
-
-    assert_eq!(out.status.code(), Some(69));
-    let actual: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(actual["error"]["code"], "OAH_FILE_IO");
-    assert!(
-        actual["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("skills")
-    );
+        let out = oah_from(home.path(), &cwd, &["skills", "list", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{file}: {}", text(&out.stdout));
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+        let names: Vec<_> = rows.iter().map(|row| row["name"].as_str()).collect();
+        assert_eq!(names, [Some("keep"), Some("seen")], "{file}");
+    }
 }
 
 #[cfg(any(unix, windows))]
