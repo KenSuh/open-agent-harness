@@ -136,12 +136,22 @@ fn installed_summary(skills: &[InstalledSkillDto]) -> String {
             SkillScopeDto::User => "user",
         };
         shown.push_str(&format!(
-            "{} ({}, {})  {}\n",
+            "{} ({}, {})  {}",
             terminal_text(&skill.name),
             skill.engine.0.as_str(),
             scope,
             terminal_text(&skill.location),
         ));
+        if !skill.compatible_agents.is_empty() {
+            let agents = skill
+                .compatible_agents
+                .iter()
+                .map(|agent| agent.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            shown.push_str(&format!("  [also: {agents}]"));
+        }
+        shown.push('\n');
     }
     shown
 }

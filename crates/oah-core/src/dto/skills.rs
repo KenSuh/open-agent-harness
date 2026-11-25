@@ -13,6 +13,8 @@ pub enum SkillScopeDto {
 pub struct InstalledSkillDto {
     pub name: String,
     pub engine: AgentIdDto,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub compatible_agents: Vec<AgentIdDto>,
     pub scope: SkillScopeDto,
     pub location: String,
     #[serde(skip_serializing_if = "Option::is_none")]

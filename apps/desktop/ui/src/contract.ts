@@ -98,7 +98,8 @@ export interface ManagedSkillDto {
 
 export interface InstalledSkillDto {
   readonly name: string;
-  readonly engine: "claude" | "codex";
+  readonly engine: AgentId;
+  readonly compatible_agents?: readonly AgentId[];
   readonly scope: "project" | "user";
   readonly location: string;
   readonly managed?: ManagedSkillDto;

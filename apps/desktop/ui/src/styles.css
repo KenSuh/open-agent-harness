@@ -548,11 +548,39 @@ select:disabled {
   font-weight: 600;
 }
 
+.installed-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.installed-filters button {
+  border-color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  touch-action: manipulation;
+}
+
+.installed-filters button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.installed-filters button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
 .installed-list {
   list-style: none;
   margin: 0;
   padding: 0;
   overflow-wrap: anywhere;
+}
+
+.installed-list > .agent-card {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 3rem;
 }
 
 .review-form {

@@ -111,6 +111,137 @@ fn inventory_uses_only_user_locations_until_a_project_is_open() {
     assert_eq!(after_project[1], before_project[0]);
 }
 
+#[test]
+fn inventory_lists_each_standard_location_once_with_its_compatible_agents() {
+    use oah_core::config::AgentId::{
+        self, Antigravity, Claude, Codex, Copilot, Cursor, Gemini, Opencode,
+    };
+    use oah_core::dto::{AgentIdDto, SkillScopeDto};
+
+    let fixture = Fixture::new();
+    let project = fixture.folder("project");
+    let expected: &[(&str, SkillScopeDto, AgentId, &[AgentId])] = &[
+        (
+            "project/.claude",
+            SkillScopeDto::Project,
+            Claude,
+            &[Opencode, Copilot, Cursor],
+        ),
+        (
+            "project/.agents",
+            SkillScopeDto::Project,
+            Codex,
+            &[Opencode, Antigravity, Gemini, Copilot, Cursor],
+        ),
+        ("project/.opencode", SkillScopeDto::Project, Opencode, &[]),
+        ("project/.agent", SkillScopeDto::Project, Antigravity, &[]),
+        ("project/.gemini", SkillScopeDto::Project, Gemini, &[]),
+        ("project/.github", SkillScopeDto::Project, Copilot, &[]),
+        ("project/.cursor", SkillScopeDto::Project, Cursor, &[]),
+        ("project/.codex", SkillScopeDto::Project, Codex, &[Cursor]),
+        (".claude", SkillScopeDto::User, Claude, &[Opencode, Cursor]),
+        (
+            ".agents",
+            SkillScopeDto::User,
+            Codex,
+            &[Opencode, Gemini, Copilot, Cursor],
+        ),
+        (".codex", SkillScopeDto::User, Codex, &[Cursor]),
+        (".config/opencode", SkillScopeDto::User, Opencode, &[]),
+        (".gemini/config", SkillScopeDto::User, Antigravity, &[]),
+        (
+            ".gemini/antigravity-cli",
+            SkillScopeDto::User,
+            Antigravity,
+            &[],
+        ),
+        (".gemini/antigravity", SkillScopeDto::User, Antigravity, &[]),
+        (".gemini", SkillScopeDto::User, Gemini, &[Antigravity]),
+        (".copilot", SkillScopeDto::User, Copilot, &[]),
+        (".cursor", SkillScopeDto::User, Cursor, &[]),
+    ];
+    for &(root, _, _, _) in expected {
+        let folder = fixture.folder(&format!("{root}/skills/tidy"));
+        fs::write(folder.join("SKILL.md"), b"# Tidy").unwrap();
+    }
+    for outside_inventory in [
+        "other/.opencode/skills/tidy",
+        "project/.opencode/skills/container/nested",
+        "project/.opencode/skills/.hidden",
+        ".gemini/config/plugins/local/skills/tidy",
+    ] {
+        let folder = fixture.folder(outside_inventory);
+        fs::write(folder.join("SKILL.md"), b"# Outside the inventory").unwrap();
+    }
+
+    let rows = with_ctx(&fixture, |ctx| {
+        app::project_open(ctx, &project).unwrap();
+        app::skills_installed(ctx, Empty {}).unwrap()
+    });
+    assert_eq!(rows.len(), expected.len());
+    for &(root, scope, engine, compatible) in expected {
+        let mut parts = root.split('/').collect::<Vec<_>>();
+        parts.extend(["skills", "tidy"]);
+        let location = shown(&parts);
+        let row = rows
+            .iter()
+            .find(|row| row.location == location)
+            .unwrap_or_else(|| panic!("missing {location}"));
+        assert_eq!(row.name, "tidy");
+        assert_eq!((row.engine.0, row.scope), (engine, scope), "{location}");
+        assert_eq!(
+            row.compatible_agents,
+            compatible
+                .iter()
+                .copied()
+                .map(AgentIdDto)
+                .collect::<Vec<_>>(),
+            "{location}"
+        );
+        assert_eq!(row.managed, None, "{location}");
+    }
+}
+
+#[test]
+fn inventory_uses_an_absolute_xdg_config_home_for_opencode() {
+    use oah_core::config::AgentId;
+    use oah_core::dto::SkillScopeDto;
+
+    let fixture = Fixture::new();
+    let alternate = fixture.folder("config");
+    for relative in [
+        ".config/opencode/skills/default",
+        "config/opencode/skills/custom",
+    ] {
+        let folder = fixture.folder(relative);
+        fs::write(folder.join("SKILL.md"), b"# OpenCode skill").unwrap();
+    }
+    for (xdg, parts) in [
+        (
+            alternate.as_path(),
+            ["config", "opencode", "skills", "custom"],
+        ),
+        (
+            Path::new("config"),
+            [".config", "opencode", "skills", "default"],
+        ),
+        (Path::new(""), [".config", "opencode", "skills", "default"]),
+    ] {
+        let env = fixture.session.env().clone().with("XDG_CONFIG_HOME", xdg);
+        let session = Session::new(env);
+        let cancel = CancelToken::new();
+        let rows = app::skills_installed(&session.ctx(&cancel, &NoProgress), Empty {}).unwrap();
+        let [row] = rows.as_slice() else {
+            panic!("expected one OpenCode skill, got {rows:?}");
+        };
+        assert_eq!(
+            (row.engine.0, row.scope),
+            (AgentId::Opencode, SkillScopeDto::User)
+        );
+        assert_eq!(row.location, shown(&parts));
+    }
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn inventory_lists_linked_user_roots_and_entries_at_visible_paths() {
@@ -143,6 +274,7 @@ fn inventory_lists_linked_user_roots_and_entries_at_visible_paths() {
             InstalledSkillDto {
                 name: "alias".into(),
                 engine: AgentIdDto(AgentId::Claude),
+                compatible_agents: vec![AgentIdDto(AgentId::Opencode), AgentIdDto(AgentId::Cursor)],
                 scope: SkillScopeDto::User,
                 location: shown(&[".claude", "skills", "alias"]),
                 managed: None,
@@ -150,6 +282,14 @@ fn inventory_lists_linked_user_roots_and_entries_at_visible_paths() {
             InstalledSkillDto {
                 name: "shared".into(),
                 engine: AgentIdDto(AgentId::Codex),
+                compatible_agents: [
+                    AgentId::Opencode,
+                    AgentId::Gemini,
+                    AgentId::Copilot,
+                    AgentId::Cursor
+                ]
+                .map(AgentIdDto)
+                .to_vec(),
                 scope: SkillScopeDto::User,
                 location: shown(&[".agents", "skills", "shared"]),
                 managed: None,
@@ -204,6 +344,9 @@ fn inventory_lists_relative_project_links_and_skips_escaped_entries() {
             InstalledSkillDto {
                 name: "shared".into(),
                 engine: AgentIdDto(AgentId::Claude),
+                compatible_agents: [AgentId::Opencode, AgentId::Copilot, AgentId::Cursor]
+                    .map(AgentIdDto)
+                    .to_vec(),
                 scope: SkillScopeDto::Project,
                 location: shown(&["project", ".claude", "skills", "shared"]),
                 managed: None,
@@ -211,6 +354,15 @@ fn inventory_lists_relative_project_links_and_skips_escaped_entries() {
             InstalledSkillDto {
                 name: "shared".into(),
                 engine: AgentIdDto(AgentId::Codex),
+                compatible_agents: [
+                    AgentId::Opencode,
+                    AgentId::Antigravity,
+                    AgentId::Gemini,
+                    AgentId::Copilot,
+                    AgentId::Cursor
+                ]
+                .map(AgentIdDto)
+                .to_vec(),
                 scope: SkillScopeDto::Project,
                 location: shown(&["project", ".agents", "skills", "shared"]),
                 managed: None,
@@ -228,6 +380,7 @@ fn inventory_skips_escaped_project_roots_and_keeps_other_rows() {
     for (parent, name, outside, valid_project) in [
         ("project", ".claude", "project-other/skills", ".agents"),
         ("project/.agents", "skills", "project-other", ".claude"),
+        ("project", ".opencode", "project-other/skills", ".gemini"),
     ] {
         let fixture = Fixture::new();
         let project = fixture.folder("project");

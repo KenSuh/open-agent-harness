@@ -180,11 +180,15 @@ Team Workflow가 설정하지 않은 별도 작업 복사본에서 소스 CLI
 
    [![OAH v1.1.0 Explore 화면에서 공개 Ponytail 스킬 폴더를 검토한다. 커밋에 고정된 출처, MIT 라이선스와 검토 결과가 보이고 Codex 설치 대상은 프로젝트의 .agents/skills/ 폴더이며 Confirm install을 누를 수 있다.](docs/assets/readme-v1/explore-1.1.0.png)](docs/assets/readme-v1/explore-1.1.0.png)
 3. **설치된 스킬과 갱신 여부를 확인한다.** **Installed**에는 열어 둔 프로젝트와 사용자 폴더의 스킬이 각각 에이전트,
-   범위, 경로와 함께 표시된다. **Refresh inventory**는 폴더를 다시 읽는다. 갱신할 수 있는 OAH 관리 프로젝트 사본에서
-   **Check for update**를 누르면 원본의 최신 버전을 검토한다. 호환되는 새 버전이 검토를 통과하면 결과를 살피고
-   경고가 있으면 확인한 뒤 **Apply update**를 눌러 갱신을 확정한다.
+   범위, 경로와 함께 표시된다. 에이전트를 선택하면 해당 에이전트가 읽는 위치가 표시되고, **All**에서는 각 위치가
+   한 번씩 표시된다. **Refresh inventory**는 폴더를 다시 읽는다. **All** 또는 설치 대상 에이전트 화면에서 갱신할 수
+   있는 OAH 관리 프로젝트 사본의 **Check for update**를 누르면 원본의 최신 버전을 검토한다. 호환되는 새 버전이
+   검토를 통과하면 결과를 살피고 경고가 있으면 확인한 뒤 **Apply update**를 눌러 갱신을 확정한다.
 
    [![OAH v1.1.0 Installed 화면에서 Codex Project 스킬 행과 프로젝트 경로, Refresh inventory, Check for update, 확인된 Up to date 결과를 보여 준다.](docs/assets/readme-v1/installed-1.1.0.png)](docs/assets/readme-v1/installed-1.1.0.png)
+
+프로젝트 폴더에서 데스크톱 동봉 CLI의 `oah skills list`를 실행하면 같은 로컬 폴더가 표시된다.
+`--json`을 붙이면 해당 위치를 읽는 다른 에이전트가 있을 때 `compatible_agents` 필드도 표시된다.
 
 기술별 스킬 검색과 툴킷 관리는 [Python 소스 CLI](#cli에서-스킬-확인하고-고르기)를 쓴다.
 

@@ -190,10 +190,20 @@ fn reviewed_install_and_update_publish_exact_snapshots_for_each_engine() {
         assert_installed(&destination, SKILL_B, COMMIT_B);
     }
 
+    for alias in [".codex", ".opencode"] {
+        let folder = fixture.project.join(alias).join("skills/tidy");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("SKILL.md"), SKILL_B).unwrap();
+    }
     let rows = fixture.inventory();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 4);
     for row in rows {
         assert_eq!(row.scope, SkillScopeDto::Project);
+        let path = Path::new(&row.location);
+        if path.ends_with(".codex/skills/tidy") || path.ends_with(".opencode/skills/tidy") {
+            assert!(row.managed.is_none(), "{row:?}");
+            continue;
+        }
         let managed = row.managed.unwrap();
         assert_eq!(managed.review_id, new.record.id);
         assert_eq!(managed.snapshot_id, new.record.source.snapshot);

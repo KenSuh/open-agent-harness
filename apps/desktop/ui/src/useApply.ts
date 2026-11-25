@@ -4,6 +4,7 @@ import type { ApplyProjectSkillDto, ErrorDto, InstalledSkillDto, ProjectDto } fr
 import {
   acquisitionOf,
   checkResponse,
+  isManagedProjectSkill,
   requestFor,
   sameAcquisition,
   writeKey,
@@ -123,7 +124,7 @@ export function useSkillConfirmations(
       const changed = new Set<string>();
       const seen = new Set<string>();
       for (const row of rows) {
-        if (row.scope !== "project") continue;
+        if (!isManagedProjectSkill(row)) continue;
         const destination = writeKey(projectId, row.engine, row.name);
         if (seen.has(destination)) continue;
         seen.add(destination);

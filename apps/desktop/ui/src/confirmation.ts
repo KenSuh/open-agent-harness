@@ -148,12 +148,22 @@ export interface UpdateBasis {
   readonly acquired: { readonly acquisition: Acquisition; readonly revision: number };
 }
 
+export type ManagedProjectSkill = InstalledSkillDto & {
+  readonly scope: "project";
+  readonly engine: ProjectSkillEngine;
+  readonly managed: ManagedSkillDto;
+};
+
+export function isManagedProjectSkill(row: InstalledSkillDto): row is ManagedProjectSkill {
+  return row.scope === "project" && (row.engine === "claude" || row.engine === "codex") && row.managed !== undefined;
+}
+
 /** `null` unless the row is a managed project copy whose receipt is the one last observed at its folder. */
 export function updateBasis(selection: Selection, row: InstalledSkillDto, observed: Acquired | undefined): UpdateBasis | null {
-  const acquisition = acquisitionOf(row.managed);
-  if (row.scope !== "project" || acquisition === null || observed === undefined || !sameAcquisition(observed.acquisition, acquisition)) {
+  if (!isManagedProjectSkill(row) || !observed?.acquisition || !sameAcquisition(observed.acquisition, row.managed)) {
     return null;
   }
+  const { acquisition } = observed;
   const acquired = { acquisition, revision: observed.revision };
   return {
     key: JSON.stringify([selection.project, selection.generation, row.engine, row.name, acquiredKey(acquired)]),

@@ -155,6 +155,9 @@ fn list_reports_project_and_user_copies_from_a_plain_working_folder() {
     for path in [
         cwd.join(".claude/skills/tidy"),
         home.join(".agents/skills/tidy"),
+        home.join(".codex/skills/legacy"),
+        home.join(".config/opencode/skills/open"),
+        home.join(".gemini/config/skills/gravity"),
     ] {
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("SKILL.md"), [0xff]).unwrap();
@@ -167,10 +170,20 @@ fn list_reports_project_and_user_copies_from_a_plain_working_folder() {
     assert_eq!(
         actual,
         serde_json::json!([
-            {"name": "tidy", "engine": "claude", "scope": "project", "location": path(&["~", "project", ".claude", "skills", "tidy"])},
-            {"name": "tidy", "engine": "codex", "scope": "user", "location": path(&["~", ".agents", "skills", "tidy"])}
+            {"name": "tidy", "engine": "claude", "compatible_agents": ["opencode", "copilot", "cursor"], "scope": "project", "location": path(&["~", "project", ".claude", "skills", "tidy"])},
+            {"name": "tidy", "engine": "codex", "compatible_agents": ["opencode", "gemini", "copilot", "cursor"], "scope": "user", "location": path(&["~", ".agents", "skills", "tidy"])},
+            {"name": "legacy", "engine": "codex", "compatible_agents": ["cursor"], "scope": "user", "location": path(&["~", ".codex", "skills", "legacy"])},
+            {"name": "open", "engine": "opencode", "scope": "user", "location": path(&["~", ".config", "opencode", "skills", "open"])},
+            {"name": "gravity", "engine": "antigravity", "scope": "user", "location": path(&["~", ".gemini", "config", "skills", "gravity"])}
         ])
     );
+    let out = oah_from(&home, &cwd, &["skills", "list"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let summary = text(&out.stdout);
+    assert_eq!(summary.lines().count(), 5);
+    assert!(summary.contains("[also: opencode, copilot, cursor]"));
+    assert!(summary.contains("open (opencode, user)"));
+    assert!(summary.contains("gravity (antigravity, user)"));
     assert!(!home.join("oah").exists());
 }
 
@@ -217,8 +230,8 @@ fn list_uses_only_user_scope_when_the_working_folder_resolves_to_home() {
         assert_eq!(
             actual,
             serde_json::json!([
-                {"name": "tidy", "engine": "claude", "scope": "user", "location": path(".claude")},
-                {"name": "tidy", "engine": "codex", "scope": "user", "location": path(".agents")},
+                {"name": "tidy", "engine": "claude", "compatible_agents": ["opencode", "cursor"], "scope": "user", "location": path(".claude")},
+                {"name": "tidy", "engine": "codex", "compatible_agents": ["opencode", "gemini", "copilot", "cursor"], "scope": "user", "location": path(".agents")},
             ])
         );
     }

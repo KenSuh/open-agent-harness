@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import type { ErrorDto, InstalledSkillDto, ReviewResultDto } from "./contract";
-import { judgeUpdate, updateBasis, writeKey, type UpdateBasis, type UpdateVerdict } from "./confirmation";
+import type { AgentId, AgentStatusDto, ErrorDto, InstalledSkillDto, ReviewResultDto } from "./contract";
+import { isManagedProjectSkill, judgeUpdate, updateBasis, writeKey, type ManagedProjectSkill, type UpdateBasis, type UpdateVerdict } from "./confirmation";
 import { HEADLINE, Reason, SourceFacts, WarningList } from "./explore";
 import { reviewOnce } from "./reviewOnce";
 import { toErrorDto, type Transport } from "./transport/types";
@@ -16,6 +16,17 @@ type Check =
 
 const IDLE: Check = { phase: "idle" };
 
+const AGENT_LABELS: Record<AgentId, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  gemini: "Gemini CLI",
+  copilot: "Copilot CLI",
+  opencode: "OpenCode",
+  antigravity: "Antigravity",
+  cursor: "Cursor",
+};
+const AGENT_FILTERS = Object.entries(AGENT_LABELS) as [AgentId, string][];
+
 function ErrorLines({ error }: { error: ErrorDto }) {
   return (
     <div className="error-box" role="alert">
@@ -24,10 +35,6 @@ function ErrorLines({ error }: { error: ErrorDto }) {
       {error.hint ? <p className="muted">{error.hint}</p> : null}
     </div>
   );
-}
-
-function engineLabel(engine: InstalledSkillDto["engine"]): string {
-  return engine === "claude" ? "Claude Code" : "Codex";
 }
 
 function headline(result: ReviewResultDto): string {
@@ -53,7 +60,7 @@ function updateAnnouncement(
     case "blocked":
       return "Update blocked. The installed copy is unchanged.";
     case "incompatible":
-      return `Update not compatible with ${engineLabel(skill.engine)}. The installed copy is unchanged.`;
+      return `Update not compatible with ${AGENT_LABELS[skill.engine]}. The installed copy is unchanged.`;
     case "reviewed":
       return `New revision reviewed. ${headline(check.result)}.`;
   }
@@ -67,7 +74,7 @@ function ManagedUpdate({
   confirmations,
   nameId,
 }: {
-  skill: InstalledSkillDto;
+  skill: ManagedProjectSkill;
   project: string;
   transport: Transport;
   confirmations: SkillConfirmations;
@@ -141,7 +148,7 @@ function ManagedUpdate({
       {result && verdict?.kind === "incompatible" ? (
         <div className="review-result" aria-label="Update not compatible">
           <p>
-            This update cannot be applied: the new review is not compatible with {engineLabel(skill.engine)}, the agent this copy
+            This update cannot be applied: the new review is not compatible with {AGENT_LABELS[skill.engine]}, the agent this copy
             belongs to. The installed copy is unchanged.
           </p>
           <dl className="agent-facts">
@@ -200,17 +207,20 @@ function InstalledRow({ skill, children }: { skill: InstalledSkillDto; children:
 export function InstalledView({
   transport,
   confirmations,
+  agents,
   projectRevision,
   inventoryRevision,
 }: {
   transport: Transport;
   confirmations: SkillConfirmations;
+  agents: readonly AgentStatusDto[];
   projectRevision: number;
   /** Bumped by the controller after a confirmed install or update; a bump re-reads the real inventory. */
   inventoryRevision: number;
 }) {
   const [load, setLoad] = useState<Load<InstalledSkillDto[]>>({ status: "loading" });
   const [read, setRead] = useState(0);
+  const [filter, setFilter] = useState<AgentId | "all">("all");
   // A re-read keeps the rows (and their live status regions) mounted; only the first read replaces the view.
   const [reading, setReading] = useState(false);
   const { observe } = confirmations;
@@ -241,6 +251,15 @@ export function InstalledView({
   }, [transport, read, projectRevision, inventoryRevision, observe, project, generation]);
 
   const refresh = () => setRead((previous) => previous + 1);
+  const inventory = load.status === "ready" ? load.value : [];
+  const agentFilters = AGENT_FILTERS.flatMap(([id, label]) => {
+    const rows = inventory.filter((skill) => skill.engine === id || skill.compatible_agents?.includes(id));
+    return rows.length > 0 || agents.some((agent) => agent.id === id && agent.installed) ? [{ id, label, rows }] : [];
+  });
+  const all = { id: "all", label: "All", rows: inventory } as const;
+  const selected = agentFilters.find(({ id }) => id === filter) ?? all;
+  if (load.status === "ready" && selected.id !== filter) setFilter(selected.id);
+  const scope = projectOpen ? "this project or your user folders" : "your user folders";
 
   return (
     <div className="installed">
@@ -283,32 +302,43 @@ export function InstalledView({
           {load.error.hint ? <p>{load.error.hint}</p> : null}
         </div>
       ) : null}
-      {load.status === "ready" && (load.value.length === 0 ? (
-        <p className="empty" role="status">
-          {projectOpen ? "No skills installed in this project or your user folders." : "No skills installed in your user folders."}
-        </p>
-      ) : (
-        <ul className="installed-list" aria-label="Installed skills">
-          {load.value.map((skill) => (
-            <InstalledRow key={JSON.stringify([skill.scope, skill.engine, skill.location])} skill={skill}>
-              {(nameId) => (
-                <>
-              <div className="installed-heading">
-                <strong id={nameId}>{skill.name}</strong>
-                <span className="muted">
-                  {skill.engine === "claude" ? "Claude Code" : "Codex"} · {skill.scope === "project" ? "Project" : "User"}
-                </span>
-              </div>
-              <code className="muted">{skill.location}</code>
-              {skill.scope === "project" && skill.managed && project !== null ? (
-                <ManagedUpdate skill={skill} project={project} transport={transport} confirmations={confirmations} nameId={nameId} />
-              ) : null}
-                </>
-              )}
-            </InstalledRow>
-          ))}
-        </ul>
-      ))}
+      {load.status === "ready" ? (
+        <>
+          <div className="installed-filters" role="group" aria-label="Filter installed skills by agent">
+            {[all, ...agentFilters].map(({ id, label, rows }) => (
+              <button key={id} type="button" aria-pressed={selected.id === id} onClick={() => setFilter(id)}>
+                <span translate="no">{label}</span> {rows.length.toLocaleString()}
+              </button>
+            ))}
+          </div>
+          {selected.rows.length === 0 ? (
+            <p className="empty" role="status">
+              {selected.id === "all" ? `No skills installed in ${scope}.` : `No ${selected.label} skills found in ${scope}.`}
+            </p>
+          ) : (
+            <ul className="installed-list" aria-label="Installed skills">
+              {selected.rows.map((skill) => (
+                <InstalledRow key={JSON.stringify([skill.scope, skill.engine, skill.location])} skill={skill}>
+                  {(nameId) => (
+                    <>
+                      <div className="installed-heading">
+                        <strong id={nameId}>{skill.name}</strong>
+                        <span className="muted">
+                          {AGENT_LABELS[skill.engine]} · {skill.scope === "project" ? "Project" : "User"}
+                        </span>
+                      </div>
+                      <code className="muted">{skill.location}</code>
+                      {project !== null && (selected.id === "all" || selected.id === skill.engine) && isManagedProjectSkill(skill) ? (
+                        <ManagedUpdate skill={skill} project={project} transport={transport} confirmations={confirmations} nameId={nameId} />
+                      ) : null}
+                    </>
+                  )}
+                </InstalledRow>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : null}
     </div>
   );
 }

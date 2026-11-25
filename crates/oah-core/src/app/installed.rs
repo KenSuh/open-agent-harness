@@ -1,5 +1,6 @@
-use super::skill_apply::{agent_id, stored_binding};
+use super::skill_apply::stored_binding;
 use super::{Ctx, lock};
+use crate::config::AgentId::{self, Antigravity, Claude, Codex, Copilot, Cursor, Gemini, Opencode};
 use crate::dto::{
     AgentIdDto, Empty, InstalledSkillDto, ManagedSkillDto, SkillScopeDto, display_path,
 };
@@ -13,9 +14,36 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-// The full CLI's install targets (src/oah/toolkit/install.py), at each scope.
-const ENGINE_FOLDERS: [(Engine, &str); 2] =
-    [(Engine::Claude, ".claude"), (Engine::Codex, ".agents")];
+type SkillLocation = (&'static str, AgentId, &'static [AgentId]);
+
+const PROJECT_LOCATIONS: &[SkillLocation] = &[
+    (".claude", Claude, &[Opencode, Copilot, Cursor]),
+    (
+        ".agents",
+        Codex,
+        &[Opencode, Antigravity, Gemini, Copilot, Cursor],
+    ),
+    (".opencode", Opencode, &[]),
+    (".agent", Antigravity, &[]),
+    (".gemini", Gemini, &[]),
+    (".github", Copilot, &[]),
+    (".cursor", Cursor, &[]),
+    (".codex", Codex, &[Cursor]),
+];
+
+const DEFAULT_OPENCODE_CONFIG: &str = ".config/opencode";
+const USER_LOCATIONS: &[SkillLocation] = &[
+    (".claude", Claude, &[Opencode, Cursor]),
+    (".agents", Codex, &[Opencode, Gemini, Copilot, Cursor]),
+    (".codex", Codex, &[Cursor]),
+    (DEFAULT_OPENCODE_CONFIG, Opencode, &[]),
+    (".gemini/config", Antigravity, &[]),
+    (".gemini/antigravity-cli", Antigravity, &[]),
+    (".gemini/antigravity", Antigravity, &[]),
+    (".gemini", Gemini, &[Antigravity]),
+    (".copilot", Copilot, &[]),
+    (".cursor", Cursor, &[]),
+];
 
 /// Lists local project and user skills from directory entries and `SKILL.md` metadata.
 pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkillDto>, Error> {
@@ -26,6 +54,11 @@ pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkill
         )
     });
     let home = user_home(ctx.env)?;
+    let xdg_config_home = ctx
+        .env
+        .var("XDG_CONFIG_HOME")
+        .map(Path::new)
+        .filter(|path| path.is_absolute());
     let store = Store::new(&user_state_dir(ctx.env)?);
     let project_scope = if let Some((root, pin)) = &selected
         && let Some(boundary) = resolve(root)?
@@ -36,22 +69,45 @@ pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkill
             SkillScopeDto::Project,
             Some(boundary),
             pin.as_ref(),
+            PROJECT_LOCATIONS,
         ))
     } else {
         None
     };
     let mut skills = Vec::new();
-    let user_scope = (home.as_path(), SkillScopeDto::User, None, None);
-    for (base, scope, boundary, pin) in project_scope.into_iter().chain([user_scope]) {
-        for (engine, engine_dir) in ENGINE_FOLDERS {
-            for (name, folder) in skill_folders(base, engine_dir, boundary.as_deref())? {
+    let user_scope = (
+        home.as_path(),
+        SkillScopeDto::User,
+        None,
+        None,
+        USER_LOCATIONS,
+    );
+    for (base, scope, boundary, pin, locations) in project_scope.into_iter().chain([user_scope]) {
+        for &(relative, engine, compatible_agents) in locations {
+            let managed_target = pin.zip(match relative {
+                ".claude" => Some(Engine::Claude),
+                ".agents" => Some(Engine::Codex),
+                _ => None,
+            });
+            let (base, relative) = if let Some(xdg) = xdg_config_home
+                && relative == DEFAULT_OPENCODE_CONFIG
+            {
+                (xdg, "opencode")
+            } else {
+                (base, relative)
+            };
+            let mut config_dir = base.to_path_buf();
+            config_dir.extend(relative.split('/'));
+            for (name, folder) in skill_folders(&config_dir, boundary.as_deref())? {
                 skills.push(InstalledSkillDto {
                     name: name.to_string_lossy().into_owned(),
-                    engine: AgentIdDto(agent_id(engine)),
+                    engine: AgentIdDto(engine),
+                    compatible_agents: compatible_agents.iter().copied().map(AgentIdDto).collect(),
                     scope,
                     location: display_path(ctx.env, &folder),
-                    managed: pin
-                        .and_then(|root| managed_skill(&store, root, engine, name.to_str()?)),
+                    managed: managed_target.and_then(|(root, engine)| {
+                        managed_skill(&store, root, engine, name.to_str()?)
+                    }),
                 });
             }
         }
@@ -80,15 +136,13 @@ fn managed_skill(
 }
 
 fn skill_folders(
-    base: &Path,
-    engine_dir: &str,
+    config_dir: &Path,
     project: Option<&Path>,
 ) -> Result<Vec<(OsString, PathBuf)>, FsxError> {
-    let engine_dir = base.join(engine_dir);
-    if skill_directory(&engine_dir, project)?.is_none() {
+    if skill_directory(config_dir, project)?.is_none() {
         return Ok(Vec::new());
     }
-    let root = engine_dir.join("skills");
+    let root = config_dir.join("skills");
     let Some(resolved_root) = skill_directory(&root, project)? else {
         return Ok(Vec::new());
     };

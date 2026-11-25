@@ -259,6 +259,44 @@ describe("Installed update", () => {
     expect(document.body.textContent).not.toContain("hand-made");
   });
 
+  it("keeps an update on its owning folder while a read-only alias and agent filters are present", async () => {
+    const { t, setInventory } = await installedApp();
+    const codex = {
+      ...tidy,
+      engine: "codex",
+      compatible_agents: ["opencode", "antigravity", "gemini", "copilot", "cursor"],
+      location: `${sampleProject.root}/.agents/skills/tidy`,
+    } satisfies InstalledSkillDto;
+    const legacy = {
+      ...codex,
+      compatible_agents: ["cursor"],
+      location: `${sampleProject.root}/.codex/skills/tidy`,
+      managed: undefined,
+    } satisfies InstalledSkillDto;
+    setInventory([legacy, codex]);
+    await click(button("Refresh inventory"));
+
+    await click(button("OpenCode 1"));
+    expect(document.querySelector(".installed-list code")?.textContent).toBe(codex.location);
+    expect(byText("button", "Check for update")).toBeNull();
+    await click(button("Codex 2"));
+    expect(button("Check for update").closest("li")?.querySelector("code")?.textContent).toBe(codex.location);
+    await check(t, pass);
+
+    const pending = deferred<ApplyProjectSkillDto>();
+    t.override.applyProjectSkill = () => pending.promise;
+    await click(button("Apply update"));
+    expect(t.applyRequests).toEqual([
+      { project: sampleProject.id, engine: "codex", review_id: "rec-new", expected_review_id: "rec-old", acknowledge_warnings: false },
+    ]);
+
+    await click(button("Claude Code 0"));
+    await click(button("Refresh inventory"));
+    setInventory([legacy, { ...codex, managed: updatedRow.managed }]);
+    await emit(() => pending.resolve({ status: "updated", review_id: "rec-new" }));
+    expect(document.querySelector(".toast")?.textContent).toContain("Updated tidy");
+  });
+
   it("requires warning acknowledgement before applying", async () => {
     const { t } = await installedApp();
     await check(t, warn);
