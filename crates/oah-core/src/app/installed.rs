@@ -84,11 +84,12 @@ pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkill
     );
     for (base, scope, boundary, pin, locations) in project_scope.into_iter().chain([user_scope]) {
         for &(relative, engine, compatible_agents) in locations {
-            let managed_target = pin.zip(match relative {
+            let legacy_engine = match relative {
                 ".claude" => Some(Engine::Claude),
                 ".agents" => Some(Engine::Codex),
                 _ => None,
-            });
+            };
+            let managed_target = pin.zip(legacy_engine);
             let (base, relative) = if let Some(xdg) = xdg_config_home
                 && relative == DEFAULT_OPENCODE_CONFIG
             {
@@ -98,7 +99,8 @@ pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkill
             };
             let mut config_dir = base.to_path_buf();
             config_dir.extend(relative.split('/'));
-            for (name, folder) in skill_folders(&config_dir, boundary.as_deref())? {
+            let report_blocked = legacy_engine.is_some();
+            for (name, folder) in skill_folders(&config_dir, boundary.as_deref(), report_blocked)? {
                 skills.push(InstalledSkillDto {
                     name: name.to_string_lossy().into_owned(),
                     engine: AgentIdDto(engine),
@@ -138,12 +140,13 @@ fn managed_skill(
 fn skill_folders(
     config_dir: &Path,
     project: Option<&Path>,
+    report_blocked: bool,
 ) -> Result<Vec<(OsString, PathBuf)>, FsxError> {
-    if skill_directory(config_dir, project)?.is_none() {
+    if skill_directory(config_dir, project, report_blocked)?.is_none() {
         return Ok(Vec::new());
     }
     let root = config_dir.join("skills");
-    let Some(resolved_root) = skill_directory(&root, project)? else {
+    let Some(resolved_root) = skill_directory(&root, project, report_blocked)? else {
         return Ok(Vec::new());
     };
 
@@ -174,9 +177,15 @@ fn skill_folders(
     Ok(folders)
 }
 
-fn skill_directory(path: &Path, project: Option<&Path>) -> Result<Option<PathBuf>, FsxError> {
+fn skill_directory(
+    path: &Path,
+    project: Option<&Path>,
+    report_blocked: bool,
+) -> Result<Option<PathBuf>, FsxError> {
     let resolved = match fs::canonicalize(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotADirectory => return Ok(None),
+        Err(error) if !report_blocked && error.kind() == io::ErrorKind::NotADirectory => {
+            return Ok(None);
+        }
         result => present(path, result)?,
     };
     let Some(resolved) = resolved else {
@@ -185,9 +194,17 @@ fn skill_directory(path: &Path, project: Option<&Path>) -> Result<Option<PathBuf
     if project.is_some_and(|root| !resolved.starts_with(root)) {
         return Ok(None);
     }
-    Ok(present(path, fs::symlink_metadata(&resolved))?
-        .filter(fs::Metadata::is_dir)
-        .map(|_| resolved))
+    if present(path, fs::symlink_metadata(&resolved))?.is_some_and(|meta| meta.is_dir()) {
+        return Ok(Some(resolved));
+    }
+    if report_blocked {
+        return Err(FsxError::new(
+            FsxErrorKind::Io,
+            path,
+            "expected a local skills directory",
+        ));
+    }
+    Ok(None)
 }
 
 fn skill_metadata(path: &Path, project: Option<&Path>) -> Result<Option<fs::Metadata>, FsxError> {

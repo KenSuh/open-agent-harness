@@ -188,10 +188,41 @@ fn list_reports_project_and_user_copies_from_a_plain_working_folder() {
 }
 
 #[test]
+fn list_reports_a_blocked_skill_root_as_an_error() {
+    for file in [
+        ".agents/skills",
+        ".agents",
+        ".claude/skills",
+        ".claude",
+        "project/.agents/skills",
+        "project/.agents",
+        "project/.claude/skills",
+        "project/.claude",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project");
+        fs::create_dir(&cwd).unwrap();
+        let relative: std::path::PathBuf = file.split('/').collect();
+        let blocked = home.path().join(&relative);
+        fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+        fs::write(blocked, b"not a directory").unwrap();
+
+        let out = oah_from(home.path(), &cwd, &["skills", "list", "--json"]);
+
+        assert_eq!(out.status.code(), Some(69), "{file}: {}", text(&out.stdout));
+        let actual: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(actual["error"]["code"], "OAH_FILE_IO", "{file}");
+        let message = actual["error"]["message"].as_str().unwrap();
+        assert!(message.contains(relative.to_str().unwrap()), "{message}");
+    }
+}
+
+#[test]
 fn list_keeps_valid_skills_when_an_optional_path_is_a_file() {
     for file in [
         "project/.opencode",
         "project/.opencode/skills",
+        ".codex/skills",
         ".cursor",
         ".cursor/skills",
         ".config",
