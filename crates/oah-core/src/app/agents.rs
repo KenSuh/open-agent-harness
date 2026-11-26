@@ -6,8 +6,7 @@
 
 use super::{Ctx, lock};
 use crate::agents::{
-    AgentError, Check, Detection, Failure, Os, Probe, SignInCheck, Status, SystemProbe,
-    check_sign_in, detect,
+    AgentError, Check, Detection, Failure, Os, Probe, SignInCheck, SystemProbe, detect,
 };
 use crate::config::AgentId;
 use crate::dto::{AgentIdDto, AgentStatusDto, AgentsProbeReq, Empty};
@@ -60,11 +59,13 @@ impl AgentCache {
             current.found_at = next.found_at;
             if !compatible {
                 current.check.sign_in = SignInCheck::NotChecked;
+                current.check.opencode = None;
                 current.sign_in_stamp = None;
             }
         }
         if (newer_detection || compatible) && next.sign_in_stamp > current.sign_in_stamp {
             current.check.sign_in = next.check.sign_in;
+            current.check.opencode = next.check.opencode;
             current.sign_in_stamp = next.sign_in_stamp;
             current.last_sign_in_at = current.last_sign_in_at.max(next.last_sign_in_at);
         }
@@ -273,18 +274,18 @@ fn probe_one(
     req: &AgentsProbeReq,
     run: &ProbeRun<'_>,
 ) -> (Check, Option<Instant>) {
-    let detection = detect(id, probe, command);
-    let now = Instant::now();
-    let sign_in = if req.sign_in
-        && detection.status == Status::Ok
-        && (!req.focus || run.reserve_focus(id, now))
-    {
-        check_sign_in(id, probe, command, &detection)
-    } else {
-        SignInCheck::NotChecked
+    let mut check = Check {
+        detection: detect(id, probe, command),
+        sign_in: SignInCheck::NotChecked,
+        opencode: None,
     };
-    let signed_at = (sign_in != SignInCheck::NotChecked).then_some(now);
-    (Check { detection, sign_in }, signed_at)
+    let now = Instant::now();
+    let read_details =
+        req.sign_in && check.can_read_details() && (!req.focus || run.reserve_focus(id, now));
+    if read_details {
+        check.read_details(probe, command);
+    }
+    (check, read_details.then_some(now))
 }
 
 fn same_detection(left: &Detection, right: &Detection) -> bool {
@@ -301,5 +302,6 @@ fn stopped(id: AgentId) -> Check {
     Check {
         detection: Detection::failed(id, None, None, problem),
         sign_in: SignInCheck::NotChecked,
+        opencode: None,
     }
 }

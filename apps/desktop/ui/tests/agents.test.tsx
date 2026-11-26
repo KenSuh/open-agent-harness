@@ -141,6 +141,35 @@ describe("initial load", () => {
 });
 
 describe("read-only Agents view and navigation", () => {
+  it("shows OpenCode connections and its default model and opens Installed filtered to OpenCode", async () => {
+    const openCode: AgentStatusDto = {
+      ...copilotDocs,
+      id: "opencode",
+      name: "OpenCode",
+      opencode: { saved_connections: 4, default_model: "provider/model" },
+    };
+    const t = await loaded([openCode]);
+    t.override.skillsInstalled = async () => [
+      { name: "native-skill", engine: "opencode", scope: "user", location: "~/.config/opencode/skills/native-skill" },
+      { name: "shared-skill", engine: "claude", compatible_agents: ["opencode"], scope: "user", location: "~/.claude/skills/shared-skill" },
+      { name: "other-skill", engine: "codex", scope: "user", location: "~/.codex/skills/other-skill" },
+    ];
+    await click(rosterButton("OpenCode"));
+    const card = byText("h2", "OpenCode")?.closest("article");
+    expect(card?.querySelector(".agent-status")?.textContent).toBe("Connections found");
+    expect(card?.textContent).toContain("4 saved provider connections. Live sign-in is unverified.");
+    expect(card?.textContent).toMatch(/Default model\s*provider\/model/);
+    expect(card?.textContent).toMatch(/Set model\s*Model changes unverified/);
+    expect(t.calls).not.toContain("skills_installed");
+
+    await click(button("View installed skills"));
+    expect(button("OpenCode 2").getAttribute("aria-pressed")).toBe("true");
+    const skills = () => Array.from(document.querySelectorAll(".installed-list li")).map((row) => row.querySelector("strong")?.textContent);
+    expect(skills()).toEqual(["native-skill", "shared-skill"]);
+    await click(button("All 3"));
+    expect(skills()).toEqual(["native-skill", "shared-skill", "other-skill"]);
+  });
+
   it("opens one agent's detail from its rail row, marks it current, and goes back to all agents", async () => {
     await loaded();
     await click(rosterButton("Codex"));

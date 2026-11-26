@@ -50,6 +50,100 @@ fn row(rows: &[AgentStatusDto], id: AgentId) -> &AgentStatusDto {
     rows.iter().find(|row| row.id.0 == id).unwrap()
 }
 
+const OPENCODE_VERSION: &str = "/bin/opencode --version";
+const OPENCODE_AUTH: &str = "/bin/opencode auth list --format json --log-level error";
+const OPENCODE_MODEL: &str = "/bin/opencode api GET /api/model/default --log-level error";
+
+fn opencode(version: &str) -> FakeProbe {
+    FakeProbe::new(Os::Macos)
+        .program("opencode", "/bin/opencode")
+        .run(OPENCODE_VERSION, Some(0), version, "")
+}
+
+#[test]
+fn opencode_reports_connection_counts_and_the_default_model_without_provider_metadata() {
+    let session = session();
+    let machine = opencode("opencode v2.4.1")
+        .run(
+            OPENCODE_AUTH,
+            Some(0),
+            &serde_json::json!([
+                {"connections": [{"label": STATUS_SENTINEL}, {"id": STATUS_SENTINEL}]},
+                {"connections": [{"id": STATUS_SENTINEL}]}
+            ])
+            .to_string(),
+            STATUS_SENTINEL,
+        )
+        .run(
+            OPENCODE_MODEL,
+            Some(0),
+            &serde_json::json!({
+                "data": {
+                    "modelID": "a-model", "providerID": "a-provider", "headers": {"token": STATUS_SENTINEL}
+                }
+            })
+            .to_string(),
+            "",
+        );
+    let id = AgentId::Opencode;
+    let rows = probe(&session, req(&[id], true, false), &machine);
+    let open = row(&rows, id);
+    assert_eq!(open.status, Status::SignInUnknown);
+    assert_eq!(open.sign_in, SignInDto::Unknown);
+    let json = serde_json::to_string(&open).unwrap();
+    assert!(!json.contains(STATUS_SENTINEL));
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        report["opencode"],
+        serde_json::json!({"saved_connections": 3, "default_model": "a-provider/a-model"})
+    );
+    assert_eq!(
+        machine.ran(),
+        [OPENCODE_VERSION, OPENCODE_AUTH, OPENCODE_MODEL]
+    );
+
+    let version_only = opencode("opencode v2.4.1");
+    let focused = probe(&session, req(&[id], true, true), &version_only);
+    let cached = row(&focused, id);
+    assert_eq!(cached.opencode, open.opencode);
+    assert_eq!(version_only.ran(), [OPENCODE_VERSION]);
+}
+
+#[test]
+fn opencode_keeps_install_detection_when_status_calls_fail_and_skips_older_versions() {
+    let id = AgentId::Opencode;
+    let session = session();
+    let empty = opencode("opencode v2.4.1")
+        .run(OPENCODE_AUTH, Some(0), "[]", "")
+        .run_fails(OPENCODE_MODEL, RunError::TimedOut);
+    let rows = probe(&session, req(&[id], true, false), &empty);
+    let details = row(&rows, id).opencode.as_ref().unwrap();
+    assert_eq!(details.saved_connections, Some(0));
+    assert_eq!(details.default_model, None);
+
+    let failed = opencode("opencode v2.4.1")
+        .run(OPENCODE_AUTH, Some(0), "[{\"credentials\":[]}]", "")
+        .run(
+            OPENCODE_MODEL,
+            Some(1),
+            r#"{"data":{"modelID":"a-model","providerID":"a-provider"}}"#,
+            "",
+        );
+    let rows = probe(&session, req(&[id], true, false), &failed);
+    let open = row(&rows, id);
+    assert!(open.installed);
+    assert_eq!(open.sign_in, SignInDto::Unknown);
+    let details = open.opencode.as_ref().unwrap();
+    assert_eq!(details.saved_connections, None);
+    assert_eq!(details.default_model, None);
+
+    let legacy = opencode("opencode v1.2.3");
+    let rows = probe(&session, req(&[id], true, false), &legacy);
+    assert!(row(&rows, id).installed);
+    assert_eq!(row(&rows, id).opencode, None);
+    assert_eq!(legacy.ran(), [OPENCODE_VERSION]);
+}
+
 #[test]
 fn the_list_is_empty_before_the_first_probe_and_then_holds_each_probed_agent() {
     let session = session();

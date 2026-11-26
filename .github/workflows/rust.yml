@@ -311,6 +311,22 @@ jobs:
           for file in "$mnt"/OAH.app/Contents/MacOS/*; do [ "$(lipo -archs "$file")" = arm64 ]; done
           codesign --verify --deep --strict --verbose=2 "$mnt/OAH.app"
           node apps/desktop/scripts/smoke-start.mjs --app "$mnt/OAH.app/Contents/MacOS/oah-desktop"
+      - name: Install the Windows app and verify it starts
+        if: matrix.bundle == 'nsis'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem -LiteralPath 'installer-out' -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected one NSIS installer, found $($installers.Count)"
+          }
+          $destination = Join-Path $env:RUNNER_TEMP "oah-install-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $setup = Start-Process -FilePath $installers[0].FullName -ArgumentList '/S', "/D=$destination" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) {
+            throw "NSIS installation failed with exit code $($setup.ExitCode)"
+          }
+          node apps/desktop/scripts/smoke-start.mjs --app (Join-Path $destination 'oah-desktop.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: oah-installer-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_attempt }}

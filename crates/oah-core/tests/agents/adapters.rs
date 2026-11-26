@@ -13,7 +13,11 @@ const CLAUDE_VERSION: &str = "2.1.318 (Claude Code)\n";
 pub(crate) fn probed(id: AgentId, probe: &FakeProbe, command: Option<&[String]>) -> Check {
     let detection = detect(id, probe, command);
     let sign_in = check_sign_in(id, probe, command, &detection);
-    Check { detection, sign_in }
+    Check {
+        detection,
+        sign_in,
+        opencode: None,
+    }
 }
 
 fn claude(status_exit: Option<i32>, status_stdout: &str) -> FakeProbe {
@@ -148,6 +152,7 @@ fn an_unchecked_or_unknown_sign_in_of_a_usable_agent_is_sign_in_unknown() {
         let check = Check {
             detection: detection.clone(),
             sign_in,
+            opencode: None,
         };
         assert_eq!(check.status(), Status::SignInUnknown);
     }

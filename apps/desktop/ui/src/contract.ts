@@ -194,6 +194,7 @@ export interface AgentStatusDto {
   /** Where the program or bundle was found, home written as `~`. */
   source: string | null;
   sign_in: SignInState;
+  opencode?: { saved_connections: number | null; default_model: string | null };
   login_hint: { text: string; is_command: boolean };
   install_url: string;
   can_take_section: boolean;

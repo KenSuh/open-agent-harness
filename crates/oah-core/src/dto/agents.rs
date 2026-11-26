@@ -4,8 +4,8 @@
 //! a status command's text: a problem is a coded error whose message names only the command and the reason.
 
 use crate::agents::{
-    CapabilityName, CapabilityState, Check, Kind, Os, SignIn, SignInCheck, Status, facts,
-    installed, profile,
+    CapabilityName, CapabilityState, Check, Kind, OpenCodeDetails, Os, SignIn, SignInCheck, Status,
+    facts, installed, profile,
 };
 use crate::config::AgentId;
 use crate::error::{Error, ErrorDto};
@@ -87,6 +87,8 @@ pub struct AgentStatusDto {
     /// Where the program or bundle was found, with the home folder as `~`.
     pub source: Option<String>,
     pub sign_in: SignInDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opencode: Option<OpenCodeDetails>,
     pub login_hint: LoginHintDto,
     pub install_url: String,
     pub can_take_section: bool,
@@ -117,6 +119,7 @@ impl AgentStatusDto {
                 SignInCheck::Checked(SignIn::SignedOut { .. }) => SignInDto::SignedOut,
                 _ => SignInDto::Unknown,
             },
+            opencode: check.opencode.clone(),
             login_hint: LoginHintDto {
                 text: profile.login.text.to_string(),
                 is_command: profile.login.is_command,

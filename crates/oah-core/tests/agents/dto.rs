@@ -33,7 +33,11 @@ fn status(id: AgentId, probe: &FakeProbe) -> AgentStatusDto {
     let at = UNIX_EPOCH + Duration::from_secs(CHECKED);
     AgentStatusDto::new(
         Probe::env(probe),
-        &Check { detection, sign_in },
+        &Check {
+            detection,
+            sign_in,
+            opencode: None,
+        },
         probe.os(),
         at,
     )

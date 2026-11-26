@@ -27,6 +27,8 @@ pub fn run() {
         .manage(updates::PendingUpdate::default())
         .setup(|app| {
             let env = oah_core::paths::Env::from_process()?;
+            #[cfg(target_os = "macos")]
+            let env = macos_cli_env(env);
             let bundled = bundled::cli_source(&env);
             app.manage(commands::Shell::start(env, &bundled));
             Ok(())
@@ -66,6 +68,51 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("the OAH desktop app could not start");
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cli_env(env: oah_core::paths::Env) -> oah_core::paths::Env {
+    use std::path::PathBuf;
+
+    let mut search: Vec<_> = env
+        .var("PATH")
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .collect();
+    let user_folders = oah_core::paths::user_home(&env)
+        .into_iter()
+        .flat_map(|home| [home.join(".local/bin"), home.join(".opencode/bin")]);
+    let shared_folders = [
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    for folder in user_folders.chain(shared_folders) {
+        if !search.contains(&folder) {
+            search.push(folder);
+        }
+    }
+    match std::env::join_paths(search) {
+        Ok(path) => env.with("PATH", path),
+        Err(_) => env,
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn macos_cli_env_keeps_existing_search_order_and_adds_standard_install_paths() {
+    use oah_core::paths::Env;
+    use std::ffi::OsStr;
+
+    let env = Env::new("/")
+        .unwrap()
+        .with("HOME", "/oah-example-home")
+        .with("PATH", "/opt/homebrew/bin:/usr/bin:/bin");
+    assert_eq!(
+        macos_cli_env(env).var("PATH"),
+        Some(OsStr::new(
+            "/opt/homebrew/bin:/usr/bin:/bin:/oah-example-home/.local/bin:/oah-example-home/.opencode/bin:/usr/local/bin"
+        )),
+    );
 }
 
 /// A second launch hands over to the first instance, which brings its window to the front.

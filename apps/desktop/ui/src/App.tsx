@@ -1,6 +1,6 @@
 // 한국어: 레이아웃 A(타이틀 바 + 레일 + 본문 + 토스트) 최상위 화면. 이번 슬라이스에 없는 기능의 컨트롤은 만들지 않는다.
 import { useEffect, useState } from "react";
-import type { ErrorDto, ProjectDto, Theme } from "./contract";
+import type { AgentId, ErrorDto, ProjectDto, Theme } from "./contract";
 import type { Transport } from "./transport/types";
 import { AgentRoster, AgentsView } from "./agents";
 import { TeamWorkflow } from "./workflow";
@@ -13,7 +13,7 @@ import { useController, type Load, type RefreshTask, type Toast } from "./useCon
 type Page = "explore" | "installed" | "team-workflow";
 
 /** Where the main area is: one of the section pages, or the Agents view (all agents, or one agent's detail). */
-type View = { page: Page } | { page: "agents"; agent: string | null };
+type View = { page: Page; skillsAgent?: AgentId } | { page: "agents"; agent: string | null };
 
 const PAGES: ReadonlyArray<{ id: Page; label: string }> = [
   { id: "explore", label: "Explore" },
@@ -227,6 +227,7 @@ export function App({ transport }: { transport: Transport }) {
               onCancel={(id) => void agents.cancelCheck(id)}
               onShowAll={() => setView({ page: "agents", agent: null })}
               onReload={agents.reload}
+              onViewSkills={(agent) => setView({ page: "installed", skillsAgent: agent })}
             />
           ) : (
             <section className="page" aria-labelledby="page-title">
@@ -242,10 +243,11 @@ export function App({ transport }: { transport: Transport }) {
                 />
               ) : page === "installed" ? (
                 <InstalledView
-                  key={JSON.stringify([c.confirmations.selection.project, c.confirmations.selection.generation])}
+                  key={JSON.stringify([c.confirmations.selection.project, c.confirmations.selection.generation, view.skillsAgent])}
                   transport={transport}
                   confirmations={c.confirmations}
                   agents={agentRows}
+                  initialAgent={view.skillsAgent}
                   projectRevision={c.projectRevision}
                   inventoryRevision={c.inventoryRevision}
                 />

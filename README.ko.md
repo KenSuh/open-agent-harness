@@ -19,14 +19,14 @@
 
 **OAH 데스크톱에서 개발 에이전트 팀을 구성하세요.** 사용할 수 있는 에이전트를 확인하고 **Team Workflow**에서 단계별 역할을 배정하세요. **Explore**와 **Installed**에서는 팀에 필요한 스킬을 찾고 관리할 수 있습니다.
 
-**OAH 데스크톱 v1.2.0 다운로드**
+**OAH 데스크톱 v1.2.1 다운로드**
 
 <p>
-  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_aarch64.dmg"><img src="docs/assets/badge-download-macos.png" width="208" alt="macOS 13 이상 Apple Silicon Mac용 OAH 다운로드"></a>
-  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_x64-setup.exe"><img src="docs/assets/badge-download-windows.png" width="208" alt="Windows 11 x64용 OAH 다운로드"></a>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/OAH_1.2.1_aarch64.dmg"><img src="docs/assets/badge-download-macos.png" width="208" alt="macOS 13 이상 Apple Silicon Mac용 OAH 다운로드"></a>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/OAH_1.2.1_x64-setup.exe"><img src="docs/assets/badge-download-windows.png" width="208" alt="Windows 11 x64용 OAH 다운로드"></a>
 </p>
 
-[데스크톱 설치](#데스크톱-앱) · [스킬 관리](#데스크톱에서-스킬-찾기-설치-갱신) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.2.0) · [체크섬](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/SHA256SUMS) · [소스 CLI](#소스-cli)
+[데스크톱 설치](#데스크톱-앱) · [스킬 관리](#데스크톱에서-스킬-찾기-설치-갱신) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.2.1) · [체크섬](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/SHA256SUMS) · [소스 CLI](#소스-cli)
 
 [![OAH 데스크톱 Team Workflow에서 계획, 구현, 리뷰, 수정 역할을 설정하는 화면.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
 
@@ -112,7 +112,7 @@ AI에게 평소 말로 요청한다. `oah init`이 설치한 규칙과 각 명�
 ### 데스크톱 앱
 
 DMG는 macOS 13 이상을 실행하는 Apple Silicon Mac용이다. NSIS 설치 파일은 Windows 11 x64용이다.
-[v1.2.0 다운로드](#open-agent-harness-oah)에서 설치 파일과 `SHA256SUMS`를 받는다. macOS에서는 `shasum -a 256`,
+[v1.2.1 다운로드](#open-agent-harness-oah)에서 설치 파일과 `SHA256SUMS`를 받는다. macOS에서는 `shasum -a 256`,
 PowerShell에서는 `Get-FileHash -Algorithm SHA256`으로 받은 파일을 검사한다. 체크섬이 일치하면 파일을 연다.
 
 - **macOS.** DMG를 열고 OAH를 응용 프로그램 폴더로 옮긴다. 앱은 임시 서명만 적용했고 Apple 공증은 받지 않아
@@ -120,26 +120,26 @@ PowerShell에서는 `Get-FileHash -Algorithm SHA256`으로 받은 파일을 검�
 - **Windows.** 설치 파일을 실행한다. 서명되지 않은 설치 파일이므로 Microsoft Defender SmartScreen이 경고할 수 있고,
   조직 정책에 따라 설치가 제한될 수 있다.
 
-이전 버전을 사용 중이라면 v1.2.0을 한 번 설치해 앱 내 업데이트를 시작한다. 왼쪽 아래의 **Check for app updates**로
-직접 확인할 수도 있다. OAH는 배포 서명을 검증한 뒤 새 버전을 설치한다.
+앱 내 업데이트는 v1.2.0부터 지원한다. 왼쪽 아래의 **Check for app updates**로 직접 확인할 수 있으며,
+OAH는 배포 서명을 검증한 뒤 새 버전을 설치한다. 이전 버전을 사용 중이라면 위에서 최신 설치 파일을 받는다.
 
 ### 소스 CLI
 
 프로젝트 초기 설정, 스킬, 전체 작업 흐름에는 소스 CLI를 쓴다. Git과 Python 3.11 이상이 필요하다.
 설치 프로그램은 필요한 도구를 확인하고 빠진 도구를 설치하기 전에 묻는다.
 
-- **macOS.** [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/install.sh)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `bash ./install.sh`를 실행한다. [macOS CLI 설치 안내](docs/ko/install-macos.md)
-- **Windows.** [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/install.ps1)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `powershell -ExecutionPolicy Bypass -File .\install.ps1`을 실행한다. [Windows CLI 설치 안내](docs/ko/install-windows.md)
+- **macOS.** [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/install.sh)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `bash ./install.sh`를 실행한다. [macOS CLI 설치 안내](docs/ko/install-macos.md)
+- **Windows.** [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/install.ps1)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `powershell -ExecutionPolicy Bypass -File .\install.ps1`을 실행한다. [Windows CLI 설치 안내](docs/ko/install-windows.md)
 
-[macOS용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/open-agent-harness-v1.2.0.tar.gz)
-또는 [Windows용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/open-agent-harness-v1.2.0.zip)을
+[macOS용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/open-agent-harness-v1.2.1.tar.gz)
+또는 [Windows용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/open-agent-harness-v1.2.1.zip)을
 검증해서 풀고 `install/` 안의 해당 설치 프로그램을 실행해도 된다. `--dry-run`(Windows에서는 `-DryRun`)을 붙이면 진행 단계를 미리 볼 수 있다.
 
 그다음 새 터미널을 열어 버전을 확인한다.
 
 ```console
 $ oah --version
-oah 1.2.0
+oah 1.2.1
 ```
 
 ## 처음 실행하기
@@ -152,6 +152,9 @@ oah 1.2.0
    ![OAH v1.0.0의 Agents 화면. 일곱 에이전트 중 OpenCode가 선택돼 있다. OpenCode는 설치돼 있고, 로그인 상태는 알 수 없으며, 작업 단계를 맡을 수 있다.](docs/assets/readme-v1/agents.png)
 
    *에이전트 카드를 열면 로그인 방법과 작업 단계를 맡을 수 있는지 확인할 수 있다.*
+
+   v1.2.1의 **OpenCode** 카드에는 OpenCode가 제공하는 저장된 연결과 기본 모델이 표시된다.
+   **View installed skills**를 누르면 **Installed**에서 OpenCode 스킬을 볼 수 있다.
 
 2. **저장소를 열고 역할을 배정한다.** **+ Open…** 버튼으로 Git 작업 폴더를 고른 뒤 **Team Workflow**를 연다.
    준비 상태를 확인하고 카드마다 **Agent**를 고른다. 기본값은 **Plan & Clarify**와 **Write Code**에 Claude Code,
@@ -240,7 +243,7 @@ oah skills install ponytail --project --target codex
 `oah skills update --project --check`로 갱신할 내용을 확인하고 `oah skills update --project`로 프로젝트가 추적하는
 OAH 툴킷 사본을 갱신한다. 설치 대상은 `claude`, `codex`, `both`다. [툴킷 명령](docs/ko/toolkit.md#명령)
 
-v1.2.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스트 프로필이 없다. `oah skills select --needs FILE --review REVIEW_ID`에
+v1.2.1에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스트 프로필이 없다. `oah skills select --needs FILE --review REVIEW_ID`에
 쓰는 파일을 `oah skills find --task`로 만들려면 해당 프로필이 필요하다.
 [관리형 전달 요구 사항](docs/ko/skills-and-capabilities.md#필수-관리-전달)
 

@@ -4,6 +4,7 @@
 
 use super::adapters::{adapter, profile};
 use super::detection::{Detection, SignIn, Status};
+use super::opencode::{self, OpenCodeDetails};
 use super::probe::Probe;
 use super::problem::AgentError;
 use super::system::Configured;
@@ -24,9 +25,23 @@ pub enum SignInCheck {
 pub struct Check {
     pub detection: Detection,
     pub sign_in: SignInCheck,
+    pub opencode: Option<OpenCodeDetails>,
 }
 
 impl Check {
+    pub(crate) fn can_read_details(&self) -> bool {
+        self.detection.status == Status::Ok || opencode::supports(&self.detection)
+    }
+
+    pub(crate) fn read_details(&mut self, probe: &dyn Probe, command: Option<&[String]>) {
+        let id = self.detection.agent;
+        if opencode::supports(&self.detection) {
+            self.opencode = Some(with_command(id, probe, command, opencode::read));
+        } else {
+            self.sign_in = check_sign_in(id, probe, command, &self.detection);
+        }
+    }
+
     /// The status shown for the agent: the detection's, refined by the sign-in check of a usable detection.
     pub fn status(&self) -> Status {
         match (self.detection.status, &self.sign_in) {

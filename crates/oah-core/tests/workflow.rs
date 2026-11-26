@@ -119,6 +119,7 @@ fn agent(id: AgentId, installed: bool, sign_in: SignInDto) -> AgentStatusDto {
         version: None,
         source: None,
         sign_in,
+        opencode: None,
         login_hint: LoginHintDto {
             text: format!("{id} login"),
             is_command: true,

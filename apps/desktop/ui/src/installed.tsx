@@ -209,19 +209,21 @@ export function InstalledView({
   transport,
   confirmations,
   agents,
+  initialAgent,
   projectRevision,
   inventoryRevision,
 }: {
   transport: Transport;
   confirmations: SkillConfirmations;
   agents: readonly AgentStatusDto[];
+  initialAgent?: AgentId;
   projectRevision: number;
   /** Bumped by the controller after a confirmed install or update; a bump re-reads the real inventory. */
   inventoryRevision: number;
 }) {
   const [load, setLoad] = useState<Load<InstalledSkillDto[]>>({ status: "loading" });
   const [read, setRead] = useState(0);
-  const [filter, setFilter] = useState<AgentId | "all">("all");
+  const [filter, setFilter] = useState<AgentId | "all">(initialAgent ?? "all");
   const [managementNotice, setManagementNotice] = useState<{ generation: number; text: string } | null>(null);
   // A re-read keeps the rows (and their live status regions) mounted; only the first read replaces the view.
   const [reading, setReading] = useState(false);

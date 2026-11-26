@@ -90,6 +90,14 @@ fn line(agent: &AgentStatusDto) -> String {
     if !found.is_empty() {
         text.push_str(&format!(" ({})", found.join(", ")));
     }
+    if let Some(details) = &agent.opencode {
+        if let Some(count) = details.saved_connections {
+            text.push_str(&format!("; saved provider connections: {count}"));
+        }
+        if let Some(model) = &details.default_model {
+            text.push_str(&format!("; default model: {model}"));
+        }
+    }
     match (agent.status, &agent.problem) {
         (_, Some(problem)) => text.push_str(&format!("; {}: {}", problem.code, problem.message)),
         (Status::Missing, None) => text.push_str(&format!("; install: {}", agent.install_url)),
