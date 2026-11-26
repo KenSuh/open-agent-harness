@@ -8,3 +8,5 @@ private-term docs/ko/install-macos.md ^KenSuh$ # the owner approved the reposito
 private-term docs/ko/install-windows.md ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
 private-term install/install.ps1 ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
 private-term install/install.sh ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
+private-term apps/desktop/src-tauri/tauri.conf.json ^KenSuh$ # the public repository's app update endpoint
+private-term apps/desktop/scripts/prepare-updates.mjs ^KenSuh$ # the public repository's update asset URLs
