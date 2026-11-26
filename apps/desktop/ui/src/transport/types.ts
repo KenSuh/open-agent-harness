@@ -44,6 +44,8 @@ export type Unlisten = () => void;
 /** One method per M1-S1, M1-S2, M1-S3 (start_review) and M2-S1 command of CONTRACTS C15, plus the three global events. */
 export interface Transport {
   appInfo(): Promise<AppInfoDto>;
+  checkAppUpdate(): Promise<{ readonly version: string } | null>;
+  installAppUpdate(version: string): Promise<void>;
   projectOpenDialog(): Promise<ProjectDto | null>;
   projectCurrent(): Promise<ProjectDto | null>;
   startRefresh(onEvent: (event: TaskEvent<RefreshDto>) => void): Promise<TaskId>;

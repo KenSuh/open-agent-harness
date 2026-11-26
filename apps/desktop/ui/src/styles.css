@@ -86,7 +86,7 @@ select:disabled {
 .app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
 }
 
 .titlebar {
@@ -123,6 +123,7 @@ select:disabled {
 .body {
   display: flex;
   flex: 1;
+  min-height: 0;
 }
 
 .rail-column {
@@ -130,15 +131,50 @@ select:disabled {
   flex-direction: column;
   gap: 12px;
   width: 200px;
+  flex-shrink: 0;
   padding: 12px 8px;
   background: var(--surface);
   border-right: 1px solid var(--border);
+}
+
+.rail-column .roster {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .rail {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.app-updates {
+  flex-shrink: 0;
+  display: grid;
+  gap: 6px;
+  margin-top: auto;
+  padding: 10px 4px 0;
+  border-top: 1px solid var(--border);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.app-updates [role="status"]:empty {
+  margin-bottom: -6px;
+}
+
+.app-updates button {
+  min-height: 32px;
+}
+
+.install-app-update {
+  color: var(--accent-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.app-update-error {
+  color: var(--danger);
 }
 
 .rail-item {
@@ -153,6 +189,8 @@ select:disabled {
 
 .content {
   flex: 1;
+  min-width: 0;
+  overflow: auto;
   padding: 16px 24px;
   display: flex;
   flex-direction: column;

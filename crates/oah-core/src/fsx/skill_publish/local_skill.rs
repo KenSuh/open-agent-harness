@@ -58,7 +58,7 @@ impl LocalSkill {
             .ok_or(PublishError::Changed)?;
         archive.with_lock(|| {
             super::transaction::ignore_private_state(&archive)?;
-            let id = format!("{:016x}", RandomState::new().hash_one(&self.identity.index));
+            let id = format!("{:016x}", RandomState::new().hash_one(self.identity.index));
             let destination = archive.create_dir(&id)?;
             let path = destination.path().join(&self.leaf.0);
             if let Err(error) =

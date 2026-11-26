@@ -15,12 +15,22 @@
 
 <p align="center"><strong>English</strong> · <a href="README.ko.md">한국어</a></p>
 
-# open-agent-harness (`oah`)
+# Open Agent Harness (`oah`)
 
-**v1.1.0 downloads** · [macOS DMG](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_aarch64.dmg) · [Windows installer](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/OAH\_1.1.0_x64-setup.exe) · [SHA256SUMS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/SHA256SUMS) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.1.0)
+**Set up your AI coding team in OAH Desktop.** See which agents are available, assign each stage in **Team Workflow**, and use **Explore** and **Installed** to find and manage the skills your team uses.
 
-The macOS app has an ad hoc signature and no Apple notarization. The Windows installer is unsigned.
-[Desktop installation and signing](#desktop-app) · [First run](#first-run) · [Skill guide](#find-install-and-update-skills-in-desktop) · [Source CLI](#source-cli) · [Skills CLI](#inspect-and-choose-skills-in-the-cli) · [Documentation](#documentation)
+| Download OAH Desktop v1.2.0 | Requirements |
+| --- | --- |
+| [Download for macOS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_aarch64.dmg) | macOS 13 or later on Apple silicon |
+| [Download for Windows](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_x64-setup.exe) | Windows 11 x64 |
+
+[Install the desktop app](#desktop-app) · [Manage skills](#find-install-and-update-skills-in-desktop) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.2.0) · [Checksums](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/SHA256SUMS) · [Source CLI](#source-cli)
+
+[![OAH Desktop Team Workflow with the planning, coding, review, and fix roles visible.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
+
+- **Assign roles.** Choose an available agent for each stage and sync the project's rules from **Team Workflow**.
+- **Manage skills by agent.** In **Installed**, filter by agent, register GitHub sources for existing skills, and confirm shared removal with the affected agents listed.
+- **Update OAH from the app.** When a new version is available, use **Install and restart** in the lower-left sidebar.
 
 ## Purpose: a harness that keeps adapting
 
@@ -102,7 +112,7 @@ The guided design conversation in the figure is planned for a later release.
 ### Desktop app
 
 The DMG supports Apple silicon Macs running macOS 13 or later. The NSIS installer supports Windows 11 x64.
-Get the installer and `SHA256SUMS` from the [v1.1.0 downloads](#open-agent-harness-oah). Check the downloaded
+Get the installer and `SHA256SUMS` from the [v1.2.0 downloads](#open-agent-harness-oah). Check the downloaded
 file with `shasum -a 256` on macOS or `Get-FileHash -Algorithm SHA256` in PowerShell. Open it only after the
 digest matches the corresponding entry.
 
@@ -112,23 +122,26 @@ digest matches the corresponding entry.
 - **Windows.** Run the installer. The installer is unsigned, so Microsoft Defender SmartScreen may warn and
   your organization’s policy may restrict installation.
 
+To enable in-app updates on an older installation, install v1.2.0 once. Use **Check for app updates** in the lower-left
+sidebar to check manually. OAH verifies the release signature before it installs an update.
+
 ### Source CLI
 
 Use the source CLI for project setup, skills and the full task loop. It needs Git and Python 3.11 or later.
 The installers check prerequisites and ask before installing missing tools.
 
-- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
-- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
+- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
+- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
 
-You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/open-agent-harness-v1.1.0.tar.gz)
-or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.1.0/open-agent-harness-v1.1.0.zip),
+You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/open-agent-harness-v1.2.0.tar.gz)
+or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/open-agent-harness-v1.2.0.zip),
 then run the corresponding installer under `install/`. Add `--dry-run` (`-DryRun` on Windows) to preview the steps.
 
 Then open a new terminal and check the version.
 
 ```console
 $ oah --version
-oah 1.1.0
+oah 1.2.0
 ```
 
 ## First run
@@ -146,10 +159,6 @@ oah 1.1.0
    Check readiness and choose an **Agent** on each card. The defaults are Claude Code for **Plan & Clarify**
    and **Write Code**, and Codex for **Code Review** and **Fix Issues**. The **Use a different agent than**
    checkboxes let you require two sections to use different agents.
-
-   [![Team Workflow layout fix preview from the source build: Claude Code plans, OpenCode writes code, and Codex reviews and fixes. Rules are in sync.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
-
-   *Team Workflow layout fix preview from the source build; unchanged v1.1.0 downloads do not include this fix.*
 
 3. **Check the project rules.** If **Rules** shows drift, choose **Sync now** to update the managed block in
    `AGENTS.md`. Review the changes in the worktree before committing them.
@@ -185,16 +194,19 @@ Use a separate working copy that Team Workflow has not configured for the source
 
    [![OAH v1.1.0 Explore screen reviewing the public Ponytail skill folder. The source is pinned to a commit, MIT license and review decision are shown, Codex targets the project's .agents/skills/ folder, and Confirm install is available.](docs/assets/readme-v1/explore-1.1.0.png)](docs/assets/readme-v1/explore-1.1.0.png)
 3. **Find installed copies and check for updates.** **Installed** shows copies in the open project and your user
-   folders, with the engine, scope and path for each copy. **Refresh inventory** rereads those folders. For an eligible
+   folders, with the agent, scope and path for each copy. Choose an agent to see its own skills and shared skills.
+   **Refresh inventory** rereads those folders. For an eligible
    OAH-managed project copy, select **Check for update** to review the upstream revision. When a compatible new
    revision passes review, read the result, acknowledge any warnings and select **Apply update** to confirm.
 
    [![OAH v1.1.0 Installed screen showing a Codex Project skill row, its project path, Refresh inventory, Check for update, and the confirmed Up to date result.](docs/assets/readme-v1/installed-1.1.0.png)](docs/assets/readme-v1/installed-1.1.0.png)
 
-In the current source build, choose an agent in **Installed** to see its own skills followed by shared skills.
-Choose **All** to see each location once. The bundled native CLI in this build lists the expanded set of local
-skill folders when you run `oah skills list` from the project directory. Use `--json` to see the inventory fields,
-including `compatible_agents` when other agents read a location.
+4. **Register or remove an existing skill.** In **Installed**, open **Manage…** next to the skill. Use **Register Git source**
+   to review a GitHub folder or `SKILL.md` link. A Claude Code or Codex project copy that matches the reviewed files
+   can use **Check for update**. Use **Remove…** to check the folder and its agents before moving it to a recovery location.
+
+The bundled native CLI lists local skill folders with `oah skills list`. Use `--json` to include
+`compatible_agents` when other agents use a location. See [Installed skill management](docs/skills-and-capabilities.md#manage-a-skill-already-installed-on-your-computer).
 
 For search by technology and toolkit management, use the [Python source CLI](#inspect-and-choose-skills-in-the-cli).
 
@@ -230,7 +242,7 @@ oah skills install ponytail --project --target codex
 Use `oah skills update --project --check` to check for updates and `oah skills update --project` to apply updates
 to OAH toolkit copies tracked in that project. The install targets are `claude`, `codex` and `both`. [Toolkit commands](docs/toolkit.md#commands)
 
-v1.1.0 ships with no qualified host profile for managed worker delivery. `oah skills find --task` needs
+v1.2.0 ships with no qualified host profile for managed worker delivery. `oah skills find --task` needs
 that profile to create the needs file used by `oah skills select --needs FILE --review REVIEW_ID`.
 [Managed delivery requirements](docs/skills-and-capabilities.md#required-managed-delivery)
 

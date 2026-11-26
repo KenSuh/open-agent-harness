@@ -39,6 +39,8 @@ async function call<T>(command: string, req: object = {}, extra: object = {}): P
 export function createTauriTransport(): Transport {
   return {
     appInfo: () => call<AppInfoDto>("app_info"),
+    checkAppUpdate: () => call<{ readonly version: string } | null>("check_app_update"),
+    installAppUpdate: (version) => call<void>("install_app_update", { version }),
     projectOpenDialog: () => call<ProjectDto | null>("project_open_dialog"),
     projectCurrent: () => call<ProjectDto | null>("project_current"),
     startRefresh(onEvent) {

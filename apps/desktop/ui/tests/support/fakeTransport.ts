@@ -117,6 +117,12 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       fake.calls.push("app_info");
       return fake.override.appInfo ? fake.override.appInfo() : sampleAppInfo;
     },
+    async checkAppUpdate() {
+      return fake.override.checkAppUpdate?.() ?? null;
+    },
+    async installAppUpdate(version) {
+      await fake.override.installAppUpdate?.(version);
+    },
     async projectOpenDialog() {
       fake.calls.push("project_open_dialog");
       return fake.override.projectOpenDialog ? fake.override.projectOpenDialog() : sampleProject;

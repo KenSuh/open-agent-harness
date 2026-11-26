@@ -8,6 +8,7 @@
 mod bundled;
 mod commands;
 mod install_links;
+mod updates;
 
 use tauri::Manager;
 
@@ -22,6 +23,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(install_links::plugin())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::PendingUpdate::default())
         .setup(|app| {
             let env = oah_core::paths::Env::from_process()?;
             let bundled = bundled::cli_source(&env);
@@ -37,6 +40,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            updates::check_app_update,
+            updates::install_app_update,
             commands::project_open_dialog,
             commands::project_current,
             commands::start_refresh,

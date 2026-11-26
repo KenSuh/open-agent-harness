@@ -6,6 +6,7 @@ import { AgentRoster, AgentsView } from "./agents";
 import { TeamWorkflow } from "./workflow";
 import { ExploreView } from "./explore";
 import { InstalledView } from "./installed";
+import { AppUpdates } from "./appUpdates";
 import { useReview } from "./useReview";
 import { useController, type Load, type RefreshTask, type Toast } from "./useController";
 
@@ -182,6 +183,7 @@ export function App({ transport }: { transport: Transport }) {
             onOpen={(agent) => setView({ page: "agents", agent })}
             onReload={agents.reload}
           />
+          <AppUpdates transport={transport} />
         </div>
 
         <main className="content">

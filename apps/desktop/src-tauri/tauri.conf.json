@@ -36,6 +36,15 @@
       "freezePrototype": true
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1NTEzMTEzNzAzRDZDOTAKUldTUWJEMXdFekZSNVkxQ0VkeVU3QXFWUXRiT1l4MEMxQmVlKzR6a0ZvMzFTeFBZUExlVnEvUjkK",
+      "requireSignedVersion": true,
+      "endpoints": [
+        "https://github.com/KenSuh/open-agent-harness/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
