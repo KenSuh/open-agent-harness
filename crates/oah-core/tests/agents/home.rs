@@ -47,6 +47,7 @@ fn probing_every_agent_changes_no_byte_and_keeps_no_status_text() {
             agents: None,
             sign_in: true,
             focus: false,
+            opencode_details: None,
         },
     );
     assert_eq!(
@@ -164,6 +165,7 @@ fn failing_and_unidentified_programs_are_errors_that_change_no_byte() {
             agents: None,
             sign_in: true,
             focus: false,
+            opencode_details: None,
         },
     );
     assert_eq!(

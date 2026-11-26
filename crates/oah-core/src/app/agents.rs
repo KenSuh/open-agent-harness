@@ -6,7 +6,7 @@
 
 use super::{Ctx, lock};
 use crate::agents::{
-    AgentError, Check, Detection, Failure, Os, Probe, SignInCheck, SystemProbe, detect,
+    AgentError, Check, Detection, Failure, Os, Probe, SignInCheck, Status, SystemProbe, detect,
 };
 use crate::config::AgentId;
 use crate::dto::{AgentIdDto, AgentStatusDto, AgentsProbeReq, Empty};
@@ -124,10 +124,11 @@ pub fn sign_in_due(last: Option<Instant>, now: Instant) -> bool {
 pub fn agents_probe_key(req: &AgentsProbeReq) -> TaskKey {
     let agents: Vec<&str> = requested(req).iter().map(|id| id.as_str()).collect();
     let subject = format!(
-        "{};sign_in={};focus={}",
+        "{};sign_in={};focus={};opencode_details={}",
         agents.join(","),
         req.sign_in,
-        req.focus
+        req.focus,
+        !req.focus && req.opencode_details == Some(true)
     );
     TaskKey::exclusive(AGENTS_PROBE, subject)
 }
@@ -153,6 +154,7 @@ pub(crate) fn reprobe_held(ctx: &Ctx<'_>, probe: &dyn Probe) -> Result<(), Error
         agents: Some(held),
         sign_in: true,
         focus: false,
+        opencode_details: None,
     };
     agents_probe_with(ctx, req, probe).map(drop)
 }
@@ -280,8 +282,13 @@ fn probe_one(
         opencode: None,
     };
     let now = Instant::now();
-    let read_details =
-        req.sign_in && check.can_read_details() && (!req.focus || run.reserve_focus(id, now));
+    let read_details = if id == AgentId::Opencode {
+        !req.focus && req.opencode_details == Some(true) && check.supports_opencode_details()
+    } else {
+        req.sign_in
+            && check.detection.status == Status::Ok
+            && (!req.focus || run.reserve_focus(id, now))
+    };
     if read_details {
         check.read_details(probe, command);
     }

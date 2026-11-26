@@ -77,6 +77,7 @@ fn the_probe_request_and_the_changed_event_match_their_samples() {
         agents: Some(ids.clone()),
         sign_in: true,
         focus: false,
+        opencode_details: None,
     };
     let text = std::fs::read_to_string(sample("probe-request")).unwrap();
     assert_eq!(serde_json::from_str::<AgentsProbeReq>(&text).unwrap(), req);

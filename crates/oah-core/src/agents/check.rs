@@ -29,13 +29,13 @@ pub struct Check {
 }
 
 impl Check {
-    pub(crate) fn can_read_details(&self) -> bool {
-        self.detection.status == Status::Ok || opencode::supports(&self.detection)
+    pub(crate) fn supports_opencode_details(&self) -> bool {
+        opencode::supports(&self.detection)
     }
 
     pub(crate) fn read_details(&mut self, probe: &dyn Probe, command: Option<&[String]>) {
         let id = self.detection.agent;
-        if opencode::supports(&self.detection) {
+        if self.supports_opencode_details() {
             self.opencode = Some(with_command(id, probe, command, opencode::read));
         } else {
             self.sign_in = check_sign_in(id, probe, command, &self.detection);

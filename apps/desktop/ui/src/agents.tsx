@@ -54,6 +54,7 @@ const OPENCODE_STATUS: Partial<Record<keyof Capabilities, string>> = {
 function capabilityLabel(agent: AgentStatusDto, key: keyof Capabilities): string {
   const state = agent.capabilities[key];
   if (agent.id !== "opencode" || !agent.installed || state !== "unknown") return CAPABILITY_LABEL[state];
+  if (agent.opencode && !agent.opencode.checked && (key === "model_read" || key === "sign_in")) return "On request";
   if (key === "model_read" && agent.opencode?.default_model) return "Default model read";
   if (key === "sign_in" && agent.opencode?.saved_connections != null) return "Saved connections checked";
   return OPENCODE_STATUS[key] ?? CAPABILITY_LABEL[state];
@@ -213,9 +214,10 @@ function signInText(agent: AgentStatusDto): string {
   const saved = agent.opencode?.saved_connections;
   if (saved === 0) return "No saved provider connections. OpenCode can also use local models or credentials from the environment.";
   if (saved != null) return `${saved} saved provider ${saved === 1 ? "connection" : "connections"}. Live sign-in is unverified.`;
-  if (agent.id === "opencode" && agent.installed) {
+  if (agent.opencode?.checked) {
     return "Saved provider connections could not be read. Use /connect in OpenCode to check.";
   }
+  if (agent.opencode) return "Check OpenCode details to see saved provider connections.";
   if (agent.status === "sign-in-unknown") return `OAH cannot check sign-in for ${agent.name}.`;
   if (!agent.installed) return "Not checked: the agent is not installed.";
   switch (agent.sign_in) {
@@ -228,7 +230,12 @@ function signInText(agent: AgentStatusDto): string {
   }
 }
 
-function AgentDetail({ agent, onViewSkills }: { agent: AgentStatusDto; onViewSkills: (id: AgentId) => void }) {
+function AgentDetail({ agent, checking, onCheckOpenCode, onViewSkills }: {
+  agent: AgentStatusDto;
+  checking: boolean;
+  onCheckOpenCode: () => void;
+  onViewSkills: (id: AgentId) => void;
+}) {
   const saved = agent.opencode?.saved_connections;
   const statusLabel = saved == null ? STATUS_LABEL[agent.status] : saved > 0 ? "Connections found" : "No saved connections";
   return (
@@ -244,10 +251,12 @@ function AgentDetail({ agent, onViewSkills }: { agent: AgentStatusDto; onViewSki
         <dd>{agent.login_hint.is_command ? <code>{agent.login_hint.text}</code> : agent.login_hint.text}</dd>
         <dt>Version</dt>
         <dd>{agent.version ?? "—"}</dd>
-        {agent.opencode?.default_model ? (
+        {agent.opencode?.checked ? (
           <>
             <dt>Default model</dt>
-            <dd><code>{agent.opencode.default_model}</code></dd>
+            <dd>{agent.opencode.default_model
+              ? <code>{agent.opencode.default_model}</code>
+              : "OpenCode did not report a default model."}</dd>
           </>
         ) : null}
         <dt>Found at</dt>
@@ -256,7 +265,7 @@ function AgentDetail({ agent, onViewSkills }: { agent: AgentStatusDto; onViewSki
         <dd>{agent.kind === "ide" ? "App (IDE)" : "Command-line tool"}</dd>
         <dt>Can take a section</dt>
         <dd>{agent.can_take_section ? "Yes" : "No (skills and rules only)"}</dd>
-        <dt>Checked</dt>
+        <dt>{agent.opencode ? "Installation checked" : "Checked"}</dt>
         <dd>
           <time dateTime={agent.checked_at}>{agent.checked_at}</time>
         </dd>
@@ -280,6 +289,14 @@ function AgentDetail({ agent, onViewSkills }: { agent: AgentStatusDto; onViewSki
           </>
         )}
       </dl>
+      {agent.opencode ? (
+        <>
+          <button type="button" onClick={onCheckOpenCode} disabled={checking} aria-describedby="opencode-check-help">
+            Check OpenCode details
+          </button>
+          <p id="opencode-check-help" className="muted">This check may start OpenCode’s background service.</p>
+        </>
+      ) : null}
       {agent.problem ? (
         <div className="agent-problem">
           <strong>{agent.problem.code}</strong>
@@ -323,13 +340,14 @@ export interface AgentsViewProps {
   checking: boolean;
   selected: string | null;
   onRescan: () => void;
+  onCheckOpenCode: () => void;
   onCancel: (id: string) => void;
   onShowAll: () => void;
   onReload: () => void;
   onViewSkills: (id: AgentId) => void;
 }
 
-export function AgentsView({ agents, check, checking, selected, onRescan, onCancel, onShowAll, onReload, onViewSkills }: AgentsViewProps) {
+export function AgentsView({ agents, check, checking, selected, onRescan, onCheckOpenCode, onCancel, onShowAll, onReload, onViewSkills }: AgentsViewProps) {
   const ownCheckRunning = check?.state === "running";
   const list = agents.status === "ready" ? agents.value : [];
   const shown = selected === null ? list : list.filter((agent) => agent.id === selected);
@@ -342,8 +360,7 @@ export function AgentsView({ agents, check, checking, selected, onRescan, onCanc
         </button>
       </div>
       <p className="muted">
-        Read-only. OAH checks installed agents and reports the connection details each agent provides.
-        Coming back to this window checks again.
+        OAH detects installed agents and checks sign-in where supported. OpenCode details are checked on request.
       </p>
       {check && ownCheckRunning ? <CheckBar check={check} onCancel={onCancel} /> : null}
       {agents.status === "loading" ? <p className="agents-note">Loading agents…</p> : null}
@@ -369,7 +386,8 @@ export function AgentsView({ agents, check, checking, selected, onRescan, onCanc
         <p className="agents-note">This agent has not been checked.</p>
       ) : null}
       {shown.map((agent) => (
-        <AgentDetail key={agent.id} agent={agent} onViewSkills={onViewSkills} />
+        <AgentDetail key={agent.id} agent={agent} checking={ownCheckRunning}
+          onCheckOpenCode={onCheckOpenCode} onViewSkills={onViewSkills} />
       ))}
     </section>
   );

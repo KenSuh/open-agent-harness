@@ -55,6 +55,7 @@ fn show(session: &Session) -> Result<WorkflowDto, Error> {
         agents: None,
         sign_in: true,
         focus: false,
+        opencode_details: None,
     };
     app::agents_probe(&ctx, req)?;
     app::sections_show(&ctx, Empty {})

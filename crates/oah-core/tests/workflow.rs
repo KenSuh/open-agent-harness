@@ -858,6 +858,7 @@ fn a_project_switch_refuses_late_workflow_requests_even_for_identical_legacy_byt
             ]),
             sign_in: false,
             focus: false,
+            opencode_details: None,
         },
         &probe,
     )
@@ -992,6 +993,7 @@ fn probe_ready_session(ctx: &app::Ctx<'_>) {
             ]),
             sign_in: false,
             focus: false,
+            opencode_details: None,
         },
         &probe,
     )

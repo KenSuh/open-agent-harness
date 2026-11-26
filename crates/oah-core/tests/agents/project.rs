@@ -84,6 +84,7 @@ fn app_probing_ignores_the_open_projects_configured_commands() {
         agents: None,
         sign_in: true,
         focus: false,
+        opencode_details: None,
     };
     let rows =
         app::agents_probe_with(&session.ctx(&cancel, &NoProgress), all, &machine_and_node).unwrap();
@@ -123,6 +124,7 @@ fn app_probing_ignores_the_open_projects_configured_commands() {
         agents: None,
         sign_in: true,
         focus: true,
+        opencode_details: None,
     };
     let node_only = claude_through_node();
     let focus_rows =

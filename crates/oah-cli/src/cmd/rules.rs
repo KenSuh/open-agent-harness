@@ -79,6 +79,7 @@ fn open(ctx: &app::Ctx<'_>) -> Result<(), Error> {
         agents: None,
         sign_in: false,
         focus: false,
+        opencode_details: None,
     };
     app::agents_probe(ctx, req).map(drop)
 }

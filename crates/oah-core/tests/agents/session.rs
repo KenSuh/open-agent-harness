@@ -21,6 +21,7 @@ pub(crate) fn req(agents: &[AgentId], sign_in: bool, focus: bool) -> AgentsProbe
         agents,
         sign_in,
         focus,
+        opencode_details: None,
     }
 }
 
@@ -61,6 +62,36 @@ fn opencode(version: &str) -> FakeProbe {
 }
 
 #[test]
+fn opencode_probes_only_installation_during_focus_rescan_and_default_doctor() {
+    let id = AgentId::Opencode;
+    let session = session();
+    for (focus, opencode_details) in [(true, None), (false, None), (true, Some(true))] {
+        let machine = opencode("opencode v2.4.1");
+        let request = AgentsProbeReq {
+            opencode_details,
+            ..req(&[id], true, focus)
+        };
+        let rows = probe(&session, request, &machine);
+        let open = row(&rows, id);
+        assert!(open.installed);
+        assert!(!open.opencode.as_ref().unwrap().checked);
+        assert_eq!(machine.ran(), [OPENCODE_VERSION]);
+    }
+    let machine = opencode("opencode v2.4.1");
+    let cancel = CancelToken::new();
+    let doctor = app::doctor_with(&session.ctx(&cancel, &NoProgress), &machine).unwrap();
+    assert!(!row(&doctor.agents, id).opencode.as_ref().unwrap().checked);
+    assert_eq!(machine.ran(), [OPENCODE_VERSION]);
+}
+
+fn opencode_request() -> AgentsProbeReq {
+    AgentsProbeReq {
+        opencode_details: Some(true),
+        ..req(&[AgentId::Opencode], false, false)
+    }
+}
+
+#[test]
 fn opencode_reports_connection_counts_and_the_default_model_without_provider_metadata() {
     let session = session();
     let machine = opencode("opencode v2.4.1")
@@ -86,7 +117,7 @@ fn opencode_reports_connection_counts_and_the_default_model_without_provider_met
             "",
         );
     let id = AgentId::Opencode;
-    let rows = probe(&session, req(&[id], true, false), &machine);
+    let rows = probe(&session, opencode_request(), &machine);
     let open = row(&rows, id);
     assert_eq!(open.status, Status::SignInUnknown);
     assert_eq!(open.sign_in, SignInDto::Unknown);
@@ -95,7 +126,7 @@ fn opencode_reports_connection_counts_and_the_default_model_without_provider_met
     let report: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
         report["opencode"],
-        serde_json::json!({"saved_connections": 3, "default_model": "a-provider/a-model"})
+        serde_json::json!({"checked": true, "saved_connections": 3, "default_model": "a-provider/a-model"})
     );
     assert_eq!(
         machine.ran(),
@@ -116,7 +147,7 @@ fn opencode_keeps_install_detection_when_status_calls_fail_and_skips_older_versi
     let empty = opencode("opencode v2.4.1")
         .run(OPENCODE_AUTH, Some(0), "[]", "")
         .run_fails(OPENCODE_MODEL, RunError::TimedOut);
-    let rows = probe(&session, req(&[id], true, false), &empty);
+    let rows = probe(&session, opencode_request(), &empty);
     let details = row(&rows, id).opencode.as_ref().unwrap();
     assert_eq!(details.saved_connections, Some(0));
     assert_eq!(details.default_model, None);
@@ -129,16 +160,17 @@ fn opencode_keeps_install_detection_when_status_calls_fail_and_skips_older_versi
             r#"{"data":{"modelID":"a-model","providerID":"a-provider"}}"#,
             "",
         );
-    let rows = probe(&session, req(&[id], true, false), &failed);
+    let rows = probe(&session, opencode_request(), &failed);
     let open = row(&rows, id);
     assert!(open.installed);
     assert_eq!(open.sign_in, SignInDto::Unknown);
     let details = open.opencode.as_ref().unwrap();
+    assert!(details.checked);
     assert_eq!(details.saved_connections, None);
     assert_eq!(details.default_model, None);
 
     let legacy = opencode("opencode v1.2.3");
-    let rows = probe(&session, req(&[id], true, false), &legacy);
+    let rows = probe(&session, opencode_request(), &legacy);
     assert!(row(&rows, id).installed);
     assert_eq!(row(&rows, id).opencode, None);
     assert_eq!(legacy.ran(), [OPENCODE_VERSION]);
@@ -255,6 +287,7 @@ fn one_agents_failure_never_fails_the_others() {
             agents: None,
             sign_in: true,
             focus: false,
+            opencode_details: None,
         },
         &probe_all,
     );

@@ -24,17 +24,24 @@ pub fn command() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Use [agents.<id>] command overrides from this project's .oah/config.toml instead of installed machine lookups"),
         )
+        .arg(
+            Arg::new("opencode-details")
+                .long("opencode-details")
+                .action(ArgAction::SetTrue)
+                .help("Read OpenCode provider connections and the default model (may start its background service)"),
+        )
 }
 
 pub fn run(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
     let use_project_commands = matches.get_flag("use-project-commands");
+    let opencode_details = matches.get_flag("opencode-details");
     let env = match Env::from_process() {
         Ok(env) => env,
         Err(error) => return refuse(&fallback_env(), &Error::from(error), json),
     };
     let session = Session::new(env);
-    match doctor(&session, use_project_commands) {
+    match doctor(&session, use_project_commands, opencode_details) {
         Ok(doctor) => {
             print(&doctor.agents, json);
             ExitCode::from(u8::try_from(doctor.exit).unwrap_or(super::REFUSED))
@@ -46,16 +53,16 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
 /// The probe of the app, with the project at the invocation folder open when it can be, so its stages
 /// apply; `[agents.<id>] command` overrides apply only when `use_project_commands` is explicitly set.
 /// A folder that cannot be opened leaves the built-in defaults.
-fn doctor(session: &Session, use_project_commands: bool) -> Result<Doctor, Error> {
+fn doctor(
+    session: &Session,
+    use_project_commands: bool,
+    opencode_details: bool,
+) -> Result<Doctor, Error> {
     let cancel = CancelToken::new();
     let ctx = session.ctx(&cancel, &NoProgress);
     let folder = session.env().cwd().to_path_buf();
     let _ = app::project_open(&ctx, &folder);
-    if use_project_commands {
-        app::doctor_project_commands(&ctx)
-    } else {
-        app::doctor(&ctx)
-    }
+    app::doctor_with_options(&ctx, use_project_commands, opencode_details)
 }
 
 /// An environment for showing an error when the process's own cannot be read: no home, so paths stay whole.
@@ -91,6 +98,11 @@ fn line(agent: &AgentStatusDto) -> String {
         text.push_str(&format!(" ({})", found.join(", ")));
     }
     if let Some(details) = &agent.opencode {
+        if !details.checked {
+            text.push_str(
+                "; use --opencode-details to check saved connections and the default model",
+            );
+        }
         if let Some(count) = details.saved_connections {
             text.push_str(&format!("; saved provider connections: {count}"));
         }

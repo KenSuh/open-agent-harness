@@ -205,9 +205,9 @@ export function useAgents(transport: Transport, notify: Notify) {
     };
   }, [waitingSinceChange, transport, reload, showError]);
 
-  const rescan = useCallback(async () => {
+  const rescan = useCallback(async (req: AgentsProbeReq = RESCAN_PROBE) => {
     if (checkRunning.current) return; // one rescan from this window at a time
-    await follow(RESCAN_PROBE, "rescan");
+    await follow(req, "rescan");
   }, [follow]);
 
   const cancelCheck = useCallback(
@@ -222,5 +222,8 @@ export function useAgents(transport: Transport, notify: Notify) {
   );
 
   const checking = check?.state === "running" || waitingSinceChange !== null;
-  return { agents, check, checking, reload, rescan, cancelCheck };
+  return {
+    agents, check, checking, reload, rescan, cancelCheck,
+    checkOpenCodeDetails: () => rescan({ agents: ["opencode"], opencode_details: true }),
+  };
 }

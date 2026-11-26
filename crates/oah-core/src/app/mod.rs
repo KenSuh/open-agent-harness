@@ -27,7 +27,8 @@ pub use agents::{
 };
 pub use cli_copy::{CliCopy, cli_copy};
 pub use doctor::{
-    Doctor, doctor, doctor_exit, doctor_project_commands, doctor_project_commands_with, doctor_with,
+    Doctor, doctor, doctor_exit, doctor_project_commands, doctor_project_commands_with,
+    doctor_with, doctor_with_options,
 };
 pub use installed::skills_installed;
 pub use installed_management::{

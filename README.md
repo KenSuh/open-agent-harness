@@ -158,8 +158,9 @@ oah 1.2.1
 
    *Open an agent card to find its sign-in instructions and check whether it can take a section.*
 
-   In v1.2.1, the **OpenCode** card shows saved provider connections and the default model when OpenCode
-   reports them. Use **View installed skills** to open its skills in **Installed**.
+   In v1.2.1, select **Check OpenCode details** on the **OpenCode** card to see saved provider connections
+   and the default model when available. The check may start OpenCode’s background service.
+   Choose **View installed skills** to open its skills in **Installed**.
 
 2. **Open a repository and assign roles.** Use **+ Open…** to choose a Git worktree, then open **Team Workflow**.
    Check readiness and choose an **Agent** on each card. The defaults are Claude Code for **Plan & Clarify**

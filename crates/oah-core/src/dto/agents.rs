@@ -43,6 +43,8 @@ pub struct AgentsProbeReq {
     /// The window regained focus: sign-in is checked again only for an agent whose last check is 60 seconds old
     /// or older. A rescan leaves it `false`.
     pub focus: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opencode_details: Option<bool>,
 }
 
 /// The sign-in state shown for an agent.
@@ -119,7 +121,11 @@ impl AgentStatusDto {
                 SignInCheck::Checked(SignIn::SignedOut { .. }) => SignInDto::SignedOut,
                 _ => SignInDto::Unknown,
             },
-            opencode: check.opencode.clone(),
+            opencode: check.opencode.clone().or_else(|| {
+                check
+                    .supports_opencode_details()
+                    .then(OpenCodeDetails::default)
+            }),
             login_hint: LoginHintDto {
                 text: profile.login.text.to_string(),
                 is_command: profile.login.is_command,

@@ -224,6 +224,7 @@ export function App({ transport }: { transport: Transport }) {
               checking={agents.checking}
               selected={view.agent}
               onRescan={() => void agents.rescan()}
+              onCheckOpenCode={() => void agents.checkOpenCodeDetails()}
               onCancel={(id) => void agents.cancelCheck(id)}
               onShowAll={() => setView({ page: "agents", agent: null })}
               onReload={agents.reload}

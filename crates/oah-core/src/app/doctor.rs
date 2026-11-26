@@ -30,7 +30,7 @@ pub fn doctor(ctx: &Ctx<'_>) -> Result<Doctor, Error> {
 
 /// `oah doctor` through `probe`, using installed-machine provider lookups only.
 pub fn doctor_with(ctx: &Ctx<'_>, probe: &dyn Probe) -> Result<Doctor, Error> {
-    run_doctor(ctx, probe, false)
+    run_doctor(ctx, probe, false, false)
 }
 
 /// `oah doctor --use-project-commands` on this machine, applying the open project's
@@ -42,13 +42,27 @@ pub fn doctor_project_commands(ctx: &Ctx<'_>) -> Result<Doctor, Error> {
 /// `oah doctor --use-project-commands` through `probe`, applying the open project's
 /// `[agents.<id>] command` overrides.
 pub fn doctor_project_commands_with(ctx: &Ctx<'_>, probe: &dyn Probe) -> Result<Doctor, Error> {
-    run_doctor(ctx, probe, true)
+    run_doctor(ctx, probe, true, false)
+}
+
+pub fn doctor_with_options(
+    ctx: &Ctx<'_>,
+    use_project_commands: bool,
+    opencode_details: bool,
+) -> Result<Doctor, Error> {
+    run_doctor(
+        ctx,
+        &SystemProbe::new(ctx.env),
+        use_project_commands,
+        opencode_details,
+    )
 }
 
 fn run_doctor(
     ctx: &Ctx<'_>,
     probe: &dyn Probe,
     use_project_commands: bool,
+    opencode_details: bool,
 ) -> Result<Doctor, Error> {
     ctx.cancel.check()?;
     let config = project_config(ctx);
@@ -56,6 +70,7 @@ fn run_doctor(
         agents: None,
         sign_in: true,
         focus: false,
+        opencode_details: opencode_details.then_some(true),
     };
     let agents = if use_project_commands {
         let commands = configured_commands(config.as_ref());

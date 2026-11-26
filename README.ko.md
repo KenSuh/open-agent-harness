@@ -153,7 +153,8 @@ oah 1.2.1
 
    *에이전트 카드를 열면 로그인 방법과 작업 단계를 맡을 수 있는지 확인할 수 있다.*
 
-   v1.2.1의 **OpenCode** 카드에는 OpenCode가 제공하는 저장된 연결과 기본 모델이 표시된다.
+   v1.2.1에서는 **OpenCode** 카드의 **Check OpenCode details**를 눌러 저장된 연결과 기본 모델을 확인한다.
+   OpenCode가 기본 모델을 제공하면 표시하며, 이 조회는 OpenCode 백그라운드 서비스를 시작할 수 있다.
    **View installed skills**를 누르면 **Installed**에서 OpenCode 스킬을 볼 수 있다.
 
 2. **저장소를 열고 역할을 배정한다.** **+ Open…** 버튼으로 Git 작업 폴더를 고른 뒤 **Team Workflow**를 연다.

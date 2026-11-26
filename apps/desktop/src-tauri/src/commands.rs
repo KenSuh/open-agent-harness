@@ -202,6 +202,7 @@ pub fn focus_probe_req() -> AgentsProbeReq {
         agents: None,
         sign_in: true,
         focus: true,
+        opencode_details: None,
     }
 }
 
@@ -637,6 +638,7 @@ mod tests {
             agents: None,
             sign_in: true,
             focus: false,
+            opencode_details: None,
         };
         let (changed, events) = probe(&shell, req, &machine);
 
@@ -713,6 +715,7 @@ mod tests {
             agents: None,
             sign_in: true,
             focus: false,
+            opencode_details: None,
         };
         probe(&shell, rescan, &machine);
         assert_eq!(
@@ -737,6 +740,7 @@ mod tests {
             agents: None,
             sign_in: true,
             focus: false,
+            opencode_details: None,
         };
         let (_events, listener) = recorder();
         let beside = started(shell.begin_agents_probe(&rescan, listener));
@@ -787,6 +791,7 @@ mod tests {
             agents: Some(vec![AgentIdDto(AgentId::Codex)]),
             sign_in: false,
             focus: false,
+            opencode_details: None,
         };
         probe(&shell, req, &machine);
         assert_eq!(

@@ -194,7 +194,7 @@ export interface AgentStatusDto {
   /** Where the program or bundle was found, home written as `~`. */
   source: string | null;
   sign_in: SignInState;
-  opencode?: { saved_connections: number | null; default_model: string | null };
+  opencode?: { checked: boolean; saved_connections: number | null; default_model: string | null };
   login_hint: { text: string; is_command: boolean };
   install_url: string;
   can_take_section: boolean;
@@ -210,6 +210,7 @@ export interface AgentsProbeReq {
   agents?: AgentId[];
   sign_in?: boolean;
   focus?: boolean;
+  opencode_details?: boolean;
 }
 
 /** The `agents-changed` event payload (C4). */

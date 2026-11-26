@@ -141,12 +141,12 @@ describe("initial load", () => {
 });
 
 describe("read-only Agents view and navigation", () => {
-  it("shows OpenCode connections and its default model and opens Installed filtered to OpenCode", async () => {
+  it("checks OpenCode details on request and opens Installed filtered to OpenCode", async () => {
     const openCode: AgentStatusDto = {
       ...copilotDocs,
       id: "opencode",
       name: "OpenCode",
-      opencode: { saved_connections: 4, default_model: "provider/model" },
+      opencode: { checked: false, saved_connections: null, default_model: null },
     };
     const t = await loaded([openCode]);
     t.override.skillsInstalled = async () => [
@@ -156,6 +156,16 @@ describe("read-only Agents view and navigation", () => {
     ];
     await click(rosterButton("OpenCode"));
     const card = byText("h2", "OpenCode")?.closest("article");
+    expect(card?.textContent).toContain("This check may start OpenCode’s background service.");
+    expect(card?.textContent).toMatch(/Read model\s*On request/);
+    expect(t.probeRequests).toEqual([{ sign_in: true, focus: true }]);
+
+    await click(button("Check OpenCode details"));
+    expect(button("Check OpenCode details").disabled).toBe(true);
+    expect(t.probeRequests.at(-1)).toEqual({ agents: ["opencode"], opencode_details: true });
+    t.agents = [{ ...openCode, opencode: { checked: true, saved_connections: 4, default_model: "provider/model" } }];
+    await emit(() => t.emitProbe({ event: "done", data: t.agents }));
+
     expect(card?.querySelector(".agent-status")?.textContent).toBe("Connections found");
     expect(card?.textContent).toContain("4 saved provider connections. Live sign-in is unverified.");
     expect(card?.textContent).toMatch(/Default model\s*provider\/model/);
