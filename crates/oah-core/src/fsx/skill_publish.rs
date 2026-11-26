@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", windows))]
 mod inventory;
+mod local_skill;
+pub use local_skill::LocalSkill;
 #[cfg(any(target_os = "macos", windows))]
 mod native;
 #[cfg(target_os = "macos")]
@@ -117,6 +119,7 @@ pub enum PublishError {
     Changed,
     StaleRevision,
     SourceMismatch,
+    SharedConfirmationRequired,
     Busy,
     Pending,
     Recovery { path: PathBuf, cause: Box<Self> },
@@ -135,6 +138,7 @@ impl PublishError {
             Self::Changed => "OAH_SKILL_ACQUISITION_CHANGED",
             Self::StaleRevision => "OAH_SKILL_REVISION_STALE",
             Self::SourceMismatch => "OAH_SKILL_SOURCE_MISMATCH",
+            Self::SharedConfirmationRequired => "OAH_SKILL_SHARED_CONFIRMATION_REQUIRED",
             Self::Busy => "OAH_SKILL_WRITER_BUSY",
             Self::Pending => "OAH_SKILL_TRANSACTION_PENDING",
             Self::Recovery { .. } => "OAH_SKILL_RECOVERY_REQUIRED",
@@ -232,6 +236,17 @@ impl ProjectRoot {
             transaction::apply(dir, engine, leaf, binding, files, expected_review_id)
         })
     }
+
+    pub fn adopt_existing(
+        &self,
+        engine: Engine,
+        leaf: &SkillLeaf,
+        local: &LocalSkill,
+        binding: &ReviewBinding,
+        files: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), PublishError> {
+        self.with_project(|dir| transaction::adopt(dir, engine, leaf, local, binding, files))
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -250,6 +265,17 @@ impl ProjectRoot {
         _: &BTreeMap<String, Vec<u8>>,
         _: Option<&str>,
     ) -> Result<PublishStatus, PublishError> {
+        Err(PublishError::Unsupported)
+    }
+
+    pub fn adopt_existing(
+        &self,
+        _: Engine,
+        _: &SkillLeaf,
+        _: &LocalSkill,
+        _: &ReviewBinding,
+        _: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), PublishError> {
         Err(PublishError::Unsupported)
     }
 }

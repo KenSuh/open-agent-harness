@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { AgentId, AgentStatusDto, ErrorDto, InstalledSkillDto, ReviewResultDto } from "./contract";
 import { isManagedProjectSkill, judgeUpdate, updateBasis, writeKey, type ManagedProjectSkill, type UpdateBasis, type UpdateVerdict } from "./confirmation";
 import { HEADLINE, Reason, SourceFacts, WarningList } from "./explore";
+import { InstalledSkillActions } from "./installedManagement";
 import { reviewOnce } from "./reviewOnce";
 import { toErrorDto, type Transport } from "./transport/types";
 import type { Load } from "./useController";
@@ -221,6 +222,7 @@ export function InstalledView({
   const [load, setLoad] = useState<Load<InstalledSkillDto[]>>({ status: "loading" });
   const [read, setRead] = useState(0);
   const [filter, setFilter] = useState<AgentId | "all">("all");
+  const [managementNotice, setManagementNotice] = useState<{ generation: number; text: string } | null>(null);
   // A re-read keeps the rows (and their live status regions) mounted; only the first read replaces the view.
   const [reading, setReading] = useState(false);
   const { observe } = confirmations;
@@ -277,6 +279,7 @@ export function InstalledView({
           Refresh inventory
         </button>
       </div>
+      {managementNotice?.generation === generation ? <p className="muted" role="status">{managementNotice.text}</p> : null}
       <details className="agent-card installed-help">
         <summary>Manage skills with the source CLI</summary>
         <p>
@@ -336,6 +339,18 @@ export function InstalledView({
                       {project !== null && (selected.id === "all" || selected.id === skill.engine) && isManagedProjectSkill(skill) ? (
                         <ManagedUpdate skill={skill} project={project} transport={transport} confirmations={confirmations} nameId={nameId} />
                       ) : null}
+                      <InstalledSkillActions key={generation} target={{ project, location: skill.location }}
+                        name={skill.name} transport={transport} labels={AGENT_LABELS}
+                        onRegistered={(source) => {
+                          setManagementNotice({ generation, text: source.updates_in_oah
+                            ? `Git source registered for ${skill.name}. You can now check for updates.`
+                            : `Git source registered for ${skill.name}.` });
+                          refresh();
+                        }}
+                        onRemoved={(archive) => {
+                          setManagementNotice({ generation, text: `Removed ${skill.name}. Recover it from ${archive}.` });
+                          refresh();
+                        }} />
                     </>
                   )}
                 </InstalledRow>

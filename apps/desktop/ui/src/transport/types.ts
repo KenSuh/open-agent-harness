@@ -7,6 +7,12 @@ import type {
   ErrorDto,
   BannerDto,
   InstalledSkillDto,
+  InstalledSkillManagementDto,
+  InstalledSkillTarget,
+  LinkedSkillSourceDto,
+  RegisterSkillSourceReq,
+  RemoveInstalledSkillReq,
+  RemovedSkillDto,
   NoticeDto,
   PresetApplyReq,
   ProjectDto,
@@ -49,6 +55,9 @@ export interface Transport {
   startAgentsProbe(req: AgentsProbeReq, onEvent: (event: TaskEvent<AgentStatusDto[]>) => void): Promise<TaskId>;
   startReview(req: StartReviewReq, onEvent: (event: TaskEvent<ReviewResultDto>) => void): Promise<TaskId>;
   skillsInstalled(): Promise<InstalledSkillDto[]>;
+  inspectInstalledSkill(req: InstalledSkillTarget): Promise<InstalledSkillManagementDto>;
+  registerSkillSource(req: RegisterSkillSourceReq): Promise<LinkedSkillSourceDto>;
+  removeInstalledSkill(req: RemoveInstalledSkillReq): Promise<RemovedSkillDto>;
   applyProjectSkill(req: ApplyProjectSkillReq): Promise<ApplyProjectSkillDto>;
   sectionsShow(req: WorkflowProjectReq): Promise<WorkflowDto>;
   stagesSet(req: WorkflowProjectReq<StagesSetReq>): Promise<StagesSetDto>;

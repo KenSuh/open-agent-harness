@@ -3,7 +3,8 @@
 use oah_core::app::{self, Session};
 use oah_core::dto::{
     ApplyProjectSkillDto, ApplyProjectSkillReq, ApplyProjectSkillStatus as Status, Empty,
-    InstalledSkillDto, ReviewOutcomeDto, ReviewReq, ReviewSpecDto, SkillScopeDto,
+    InstalledSkillDto, InstalledSkillTarget, RegisterSkillSourceReq, RemoveInstalledSkillReq,
+    ReviewOutcomeDto, ReviewReq, ReviewSpecDto, SkillScopeDto,
 };
 use oah_core::fsx::skill_publish::Engine;
 use oah_core::net::RecordingTransport;
@@ -156,6 +157,256 @@ fn assert_installed(folder: &Path, body: &str, commit: &str) {
         fs::read(folder.join("notes/source.txt")).unwrap(),
         commit.as_bytes()
     );
+}
+
+fn existing_skill(folder: &Path, body: &str, source: &str) {
+    fs::create_dir_all(folder.join("notes")).unwrap();
+    fs::write(folder.join("SKILL.md"), body).unwrap();
+    fs::write(folder.join("notes/source.txt"), source).unwrap();
+}
+
+impl Fixture {
+    fn target(&self, folder: &Path) -> InstalledSkillTarget {
+        let location = self.ctx(|ctx| oah_core::dto::display_path(ctx.env, folder));
+        assert!(self.inventory().iter().any(|row| row.location == location));
+        InstalledSkillTarget {
+            project: Some(self.id.clone()),
+            location,
+        }
+    }
+}
+
+#[test]
+fn a_git_source_adopts_matching_project_files_and_uses_the_existing_update_flow() {
+    let fixture = Fixture::new();
+    let local = fixture.project.join(".agents/skills/tidy");
+    existing_skill(&local, SKILL_A, COMMIT_A);
+    let target = fixture.target(&local);
+    let preview = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap();
+    assert!(preview.source.is_none());
+    let old = fixture.review(REPO, &recorded(REPO, COMMIT_A, SKILL_A));
+    let registered = fixture
+        .ctx(|ctx| {
+            app::register_skill_source(
+                ctx,
+                &RegisterSkillSourceReq {
+                    target: target.clone(),
+                    revision: preview.revision,
+                    review_id: old.record.id.clone(),
+                    acknowledge_warnings: false,
+                },
+            )
+        })
+        .unwrap();
+    assert!(registered.updates_in_oah);
+    assert_eq!(
+        (&*registered.repo, &*registered.path, &*registered.commit),
+        (REPO, SKILL_PATH, COMMIT_A)
+    );
+    assert_installed(&local, SKILL_A, COMMIT_A);
+    let source = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap()
+        .source;
+    assert_eq!(source, Some(registered));
+    assert_eq!(
+        fixture.inventory()[0].managed.as_ref().unwrap().review_id,
+        old.record.id
+    );
+
+    let new = fixture.review(REPO, &recorded(REPO, COMMIT_B, SKILL_B));
+    assert_eq!(
+        fixture
+            .apply(&fixture.request(Engine::Codex, &new, Some(&old)))
+            .unwrap()
+            .status,
+        Status::Updated
+    );
+    assert_installed(&local, SKILL_B, COMMIT_B);
+}
+
+#[test]
+fn different_local_bytes_keep_the_review_as_a_source_without_replacing_files() {
+    let fixture = Fixture::new();
+    let local = fixture.project.join(".claude/skills/tidy");
+    existing_skill(&local, SKILL_B, "local content");
+    let target = fixture.target(&local);
+    let preview = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap();
+    let review = fixture.review(REPO, &recorded(REPO, COMMIT_A, SKILL_A));
+    let registered = fixture
+        .ctx(|ctx| {
+            app::register_skill_source(
+                ctx,
+                &RegisterSkillSourceReq {
+                    target: target.clone(),
+                    revision: preview.revision,
+                    review_id: review.record.id,
+                    acknowledge_warnings: false,
+                },
+            )
+        })
+        .unwrap();
+    assert!(!registered.updates_in_oah);
+    assert!(fixture.inventory()[0].managed.is_none());
+    assert_installed(&local, SKILL_B, "local content");
+
+    let reopened =
+        Session::with_transport(fixture.session.env().clone(), fixture.transport.clone());
+    let cancel = CancelToken::new();
+    let ctx = reopened.ctx(&cancel, &NoProgress);
+    app::project_open(&ctx, &fixture.project).unwrap();
+    assert_eq!(
+        app::inspect_installed_skill(&ctx, &target).unwrap().source,
+        Some(registered)
+    );
+}
+
+#[test]
+fn confirmed_shared_removal_archives_one_directory_and_preserves_an_independent_copy() {
+    use oah_core::config::AgentId;
+    let fixture = Fixture::new();
+    let local = fixture.project.join(".agents/skills/tidy");
+    let independent = fixture.home.join(".config/opencode/skills/tidy");
+    existing_skill(&local, SKILL_A, COMMIT_A);
+    existing_skill(&independent, SKILL_B, COMMIT_B);
+    let target = fixture.target(&local);
+    let preview = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap();
+    for agent in [AgentId::Codex, AgentId::Opencode, AgentId::Antigravity] {
+        assert!(preview.agents.iter().any(|id| id.0 == agent));
+    }
+    let mut remove = RemoveInstalledSkillReq {
+        target,
+        revision: preview.revision,
+        confirm_shared: false,
+    };
+    assert_eq!(
+        fixture
+            .ctx(|ctx| app::remove_installed_skill(ctx, &remove))
+            .unwrap_err()
+            .code(),
+        "OAH_SKILL_SHARED_CONFIRMATION_REQUIRED"
+    );
+    assert_installed(&local, SKILL_A, COMMIT_A);
+    remove.confirm_shared = true;
+    let result = fixture
+        .ctx(|ctx| app::remove_installed_skill(ctx, &remove))
+        .unwrap();
+    assert!(!local.exists());
+    assert_installed(Path::new(&result.archive), SKILL_A, COMMIT_A);
+    assert_installed(&independent, SKILL_B, COMMIT_B);
+    assert_eq!(fixture.inventory().len(), 1);
+}
+
+#[test]
+fn stale_removal_confirmation_cannot_remove_a_replacement() {
+    let fixture = Fixture::new();
+    let local = fixture.project.join(".agents/skills/tidy");
+    existing_skill(&local, SKILL_A, COMMIT_A);
+    let target = fixture.target(&local);
+    let preview = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap();
+    fs::rename(&local, fixture.project.join("first")).unwrap();
+    existing_skill(&local, SKILL_B, COMMIT_B);
+    let error = fixture
+        .ctx(|ctx| {
+            app::remove_installed_skill(
+                ctx,
+                &RemoveInstalledSkillReq {
+                    target,
+                    revision: preview.revision,
+                    confirm_shared: true,
+                },
+            )
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "OAH_SKILL_REVISION_STALE");
+    assert_installed(&local, SKILL_B, COMMIT_B);
+}
+
+#[test]
+fn a_removed_managed_skill_can_be_installed_again_without_overwriting_the_archive() {
+    let fixture = Fixture::new();
+    let review = fixture.review(REPO, &recorded(REPO, COMMIT_A, SKILL_A));
+    let install = fixture.request(Engine::Claude, &review, None);
+    fixture.apply(&install).unwrap();
+    let local = fixture.project.join(".claude/skills/tidy");
+    let target = fixture.target(&local);
+    let preview = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap();
+    let removed = fixture
+        .ctx(|ctx| {
+            app::remove_installed_skill(
+                ctx,
+                &RemoveInstalledSkillReq {
+                    target,
+                    revision: preview.revision,
+                    confirm_shared: true,
+                },
+            )
+        })
+        .unwrap();
+    assert!(!local.exists());
+    assert_eq!(fixture.apply(&install).unwrap().status, Status::Installed);
+    assert_installed(&local, SKILL_A, COMMIT_A);
+    assert_installed(Path::new(&removed.archive), SKILL_A, COMMIT_A);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_shared_alias_uses_the_discovered_physical_skill_folder() {
+    use oah_core::config::AgentId;
+    let fixture = Fixture::new();
+    let physical = fixture.project.join(".opencode/skills/tidy");
+    existing_skill(&physical, SKILL_A, COMMIT_A);
+    let alias = fixture.project.join(".claude/skills/tidy");
+    fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&physical, &alias).unwrap();
+    let target = fixture.target(&alias);
+    let preview = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap();
+    assert_eq!(preview.location, fixture.target(&physical).location);
+    assert!(preview.agents.iter().any(|id| id.0 == AgentId::Claude));
+    assert!(preview.agents.iter().any(|id| id.0 == AgentId::Opencode));
+    fixture
+        .ctx(|ctx| {
+            app::remove_installed_skill(
+                ctx,
+                &RemoveInstalledSkillReq {
+                    target,
+                    revision: preview.revision,
+                    confirm_shared: true,
+                },
+            )
+        })
+        .unwrap();
+    assert!(!physical.exists());
+    assert!(fixture.inventory().is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_to_an_external_tool_folder_is_not_a_removal_target() {
+    let fixture = Fixture::new();
+    let external = fixture.home.join("manager-cache/tidy");
+    existing_skill(&external, SKILL_A, COMMIT_A);
+    let link = fixture.home.join(".config/opencode/skills/tidy");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&external, &link).unwrap();
+    let target = fixture.target(&link);
+    let error = fixture
+        .ctx(|ctx| app::inspect_installed_skill(ctx, &target))
+        .unwrap_err();
+    assert_eq!(error.code(), "OAH_SKILL_PATH_UNSAFE");
+    assert_installed(&external, SKILL_A, COMMIT_A);
 }
 
 #[test]

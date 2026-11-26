@@ -268,6 +268,16 @@ because the cache also keeps plugins you turned off and old versions. What it co
 Codex's plugin cache is not used until you turn the setting on, and even then oah cannot tell whether Codex has that
 plugin enabled.
 
+### Manage a skill already installed on your computer
+
+In the desktop app, open **Installed → Manage → Register Git source**. Paste a link to a GitHub skill
+folder or its `SKILL.md`. Review the default branch and confirm the repository, folder, and pinned commit.
+A project copy in `.claude/skills` or `.agents/skills` that matches the reviewed files can use **Check for update**.
+Other standalone copies can keep the reviewed source as a reference.
+
+Choose **Remove…** to see the folder and the agents it serves. **Remove for all agents** moves the shared
+folder to the recovery path shown in Installed. Copies at other paths are managed from their own rows.
+
 ## Skills for a task and its subtasks
 
 Each `oah call` also works out the task's skill needs for its dispatch stage. Without a design, that is one need

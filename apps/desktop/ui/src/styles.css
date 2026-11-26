@@ -599,7 +599,12 @@ select:disabled {
   gap: 8px;
 }
 
-.review-form input {
+.skill-remove {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.review-form input:not([type="checkbox"]) {
   flex: 1 1 260px;
   min-width: 0;
   font: inherit;

@@ -102,6 +102,19 @@ fn file_receipt(file: &File, bytes: &[u8]) -> Result<InstalledFile> {
 
 impl Acquisition {
     pub(super) fn stage(root: &Dir, binding: &ReviewBinding, payload: &Payload) -> Result<Self> {
+        Self::from_payload(root, binding, payload, true)
+    }
+
+    pub(super) fn capture(root: &Dir, binding: &ReviewBinding, payload: &Payload) -> Result<Self> {
+        Self::from_payload(root, binding, payload, false)
+    }
+
+    fn from_payload(
+        root: &Dir,
+        binding: &ReviewBinding,
+        payload: &Payload,
+        staging: bool,
+    ) -> Result<Self> {
         let mut acquisition = Self {
             binding: binding.clone(),
             directory: root.id().clone(),
@@ -113,8 +126,12 @@ impl Acquisition {
             let dir = if parent.is_empty() {
                 root.clone()
             } else {
-                let (ancestor, name) = split(parent);
-                let dir = descend(root, ancestor)?.create_dir(name)?;
+                let dir = if staging {
+                    let (ancestor, name) = split(parent);
+                    descend(root, ancestor)?.create_dir(name)?
+                } else {
+                    descend(root, parent)?
+                };
                 acquisition.directories.insert(
                     parent.to_owned(),
                     InstalledDirectory {
@@ -127,7 +144,11 @@ impl Acquisition {
             for name in entries {
                 let path = relative(parent, name);
                 if let Some(bytes) = payload.get(&path) {
-                    let file = dir.write_new(name, bytes)?;
+                    let file = if staging {
+                        dir.write_new(name, bytes)?
+                    } else {
+                        dir.regular(name, FileAccess::Read)?
+                    };
                     acquisition.files.insert(path, file_receipt(&file, bytes)?);
                 }
             }

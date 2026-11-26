@@ -54,6 +54,9 @@ pub fn run() {
             commands::rules_sync,
             commands::start_review,
             commands::skills_installed,
+            commands::inspect_installed_skill,
+            commands::register_skill_source,
+            commands::remove_installed_skill,
             commands::apply_project_skill,
         ])
         .run(tauri::generate_context!())

@@ -1,10 +1,50 @@
 import { afterEach, expect, it } from "vitest";
 import { App } from "../src/App";
-import type { InstalledSkillDto } from "../src/contract";
+import type { InstalledSkillDto, RemoveInstalledSkillReq } from "../src/contract";
 import { button, click, emit, mount, unmount } from "./support/dom";
 import { createFakeTransport, deferred, sampleAgents, sampleProject } from "./support/fakeTransport";
 
 afterEach(unmount);
+
+it("asks before removing a shared path and keeps a separately installed copy visible", async () => {
+  const transport = createFakeTransport();
+  const location = "~/.agents/skills/tidy";
+  const independent = "~/.config/opencode/skills/tidy";
+  const requests: RemoveInstalledSkillReq[] = [];
+  let skills: InstalledSkillDto[] = [
+    { name: "tidy", engine: "codex", compatible_agents: ["opencode", "antigravity"], scope: "user", location },
+    { name: "tidy", engine: "opencode", scope: "user", location: independent },
+  ];
+  transport.override.skillsInstalled = async () => skills;
+  transport.override.inspectInstalledSkill = async (target) => ({
+    location: target.location, revision: "shared-preview", agents: ["codex", "opencode", "antigravity"], source: null,
+  });
+  transport.override.removeInstalledSkill = async (request) => {
+    requests.push(request);
+    skills = skills.filter((skill) => skill.location !== request.target.location);
+    return { archive: "~/.agents/skills/.oah-removed-skills/backup/tidy" };
+  };
+
+  await mount(<App transport={transport} />);
+  await click(button("Installed"));
+  await click(button("Manage…"));
+  await click(button("Remove…"));
+  const confirmation = document.querySelector('[aria-label="Confirm skill removal"]');
+  expect(confirmation?.textContent).toContain("Remove this shared skill for all its agents?");
+  expect(confirmation?.textContent).toContain("Codex, OpenCode, Antigravity");
+  expect(confirmation?.textContent).toContain(location);
+  expect(document.activeElement).toBe(button("Cancel"));
+  await click(button("Cancel"));
+  expect(requests).toEqual([]);
+
+  await click(button("Remove…"));
+  await click(button("Remove for all agents"));
+  expect(requests).toEqual([{ target: { project: null, location }, revision: "shared-preview", confirm_shared: true }]);
+  const rows = document.querySelector(".installed-list");
+  expect(rows?.textContent).toContain(independent);
+  expect(rows?.textContent).not.toContain(location);
+  expect(document.querySelector(".installed")?.textContent).toContain("Recover it from");
+});
 
 it("reloads the local inventory and renders skill names as text", async () => {
   const transport = createFakeTransport();

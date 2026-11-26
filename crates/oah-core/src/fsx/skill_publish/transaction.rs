@@ -1,8 +1,8 @@
 use super::inventory::{Payload, validate};
 use super::native::{Dir, FileAccess};
 use super::{
-    Acquisition, Engine, Fingerprint, ObjectId, PublishError, PublishStatus, ReviewBinding,
-    SkillLeaf, os,
+    Acquisition, Engine, Fingerprint, LocalSkill, ObjectId, PublishError, PublishStatus,
+    ReviewBinding, SkillLeaf, os,
 };
 use crate::review::identity::portable_component_key;
 use serde::{Deserialize, Serialize};
@@ -153,6 +153,18 @@ impl Scope {
         let draft = format!("build-{:016x}", RandomState::new().hash_one(number));
         let dir = self.slot.create_dir(&draft)?;
         let next = Acquisition::stage(&dir.create_dir("next")?, binding, files)?;
+        self.seal(&draft, dir, number, previous, next, false)
+    }
+
+    fn seal(
+        &self,
+        draft: &str,
+        dir: Dir,
+        number: u64,
+        previous: Option<Acquisition>,
+        next: Acquisition,
+        published: bool,
+    ) -> Result<Generation> {
         let record = Record {
             version: 2,
             number,
@@ -170,10 +182,13 @@ impl Scope {
             return Err(PublishError::InvalidReceipt);
         }
         dir.write_new("receipt.json", &bytes)?;
+        if published {
+            dir.write_new(&format!("published-{}", sealed.sha256), &[])?;
+        }
         let id = dir.id().clone();
         drop(dir);
         self.slot
-            .move_new(&draft, &self.slot, &generation_name(number), &id)?;
+            .move_new(draft, &self.slot, &generation_name(number), &id)?;
         self.latest()?
             .filter(|generation| generation.record == sealed.record)
             .ok_or(PublishError::InvalidReceipt)
@@ -460,7 +475,7 @@ pub(super) fn installed(
     }
 }
 
-fn ignore_private_state(state: &Dir) -> Result<()> {
+pub(super) fn ignore_private_state(state: &Dir) -> Result<()> {
     const RULE: &[u8] = b"*\n";
     if !state.contains(".gitignore")? {
         state.write_new(".gitignore", RULE)?;
@@ -475,6 +490,61 @@ fn ignore_private_state(state: &Dir) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(super) fn adopt(
+    root: &Dir,
+    engine: Engine,
+    leaf: &SkillLeaf,
+    local: &LocalSkill,
+    binding: &ReviewBinding,
+    files: &Payload,
+) -> Result<()> {
+    validate(binding, files)?;
+    let state = below(root, &[".oah", "project-skills-v1"], true)?.ok_or(PublishError::Changed)?;
+    state.with_lock(|| {
+        ignore_private_state(&state)?;
+        let scope = Scope::open(root, &state, engine, leaf, true)?.ok_or(PublishError::Changed)?;
+        let live = scope.live_tree()?.ok_or(PublishError::StaleRevision)?;
+        if *live.id() != local.identity {
+            return Err(PublishError::StaleRevision);
+        }
+        let number = if let Some(generation) = scope.latest()? {
+            let record = &generation.record;
+            if record.next.directory == *live.id() {
+                record.next.verify(&live)?;
+                return if record.next.matches(binding, files)
+                    && matches!(
+                        generation.phase,
+                        Phase::Unstaged {
+                            published: true,
+                            ..
+                        }
+                    ) {
+                    Ok(())
+                } else {
+                    Err(PublishError::Occupied)
+                };
+            }
+            match generation.phase {
+                Phase::Unstaged { published, backup } => {
+                    generation.verify_vacant_history(published, backup)?;
+                }
+                Phase::Pending { .. } => return Err(PublishError::Pending),
+            }
+            record
+                .number
+                .checked_add(1)
+                .ok_or(PublishError::InvalidReceipt)?
+        } else {
+            1
+        };
+        let acquisition = Acquisition::capture(&live, binding, files)?;
+        let draft = format!("build-{:016x}", RandomState::new().hash_one(number));
+        let dir = scope.slot.create_dir(&draft)?;
+        scope.seal(&draft, dir, number, None, acquisition, true)?;
+        Ok(())
+    })
 }
 
 pub(super) fn apply(

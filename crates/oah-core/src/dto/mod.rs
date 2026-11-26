@@ -35,7 +35,8 @@ pub use review::{
 };
 pub use skills::{
     ApplyProjectSkillDto, ApplyProjectSkillReq, ApplyProjectSkillStatus, InstalledSkillDto,
-    ManagedSkillDto, SkillScopeDto,
+    InstalledSkillManagementDto, InstalledSkillTarget, LinkedSkillSourceDto, ManagedSkillDto,
+    RegisterSkillSourceReq, RemoveInstalledSkillReq, RemovedSkillDto, SkillScopeDto,
 };
 pub use task::{Progress, TaskCancelReq, TaskEvent, TaskId, TaskSnapshotDto, TaskState};
 pub use workflow::{

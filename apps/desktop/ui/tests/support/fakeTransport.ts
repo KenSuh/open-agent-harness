@@ -129,6 +129,21 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       fake.calls.push("skills_installed");
       return fake.override.skillsInstalled ? fake.override.skillsInstalled() : [];
     },
+    async inspectInstalledSkill(req) {
+      fake.calls.push("inspect_installed_skill");
+      if (!fake.override.inspectInstalledSkill) throw new Error("No skill management fixture");
+      return fake.override.inspectInstalledSkill(req);
+    },
+    async registerSkillSource(req) {
+      fake.calls.push("register_skill_source");
+      if (!fake.override.registerSkillSource) throw new Error("No source registration fixture");
+      return fake.override.registerSkillSource(req);
+    },
+    async removeInstalledSkill(req) {
+      fake.calls.push("remove_installed_skill");
+      if (!fake.override.removeInstalledSkill) throw new Error("No removal fixture");
+      return fake.override.removeInstalledSkill(req);
+    },
     async startRefresh(onEvent) {
       fake.calls.push("start_refresh");
       refreshSink = onEvent;

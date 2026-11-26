@@ -16,9 +16,10 @@ use oah_core::app::{self, Ctx, Session};
 use oah_core::dto::{
     AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, ApplyProjectSkillDto,
     ApplyProjectSkillReq, ApplyProjectSkillStatus, BannerDto, Empty, InstalledSkillDto,
-    PresetApplyReq, ProjectDto, RefreshDto, ReviewOutcomeDto, ReviewReq, RulesStateDto,
-    RulesSyncDto, SettingsDto, SettingsSetReq, StagesSetDto, StagesSetReq, TaskCancelReq,
-    TaskSnapshotDto, WorkflowDto, WorkflowProjectReq,
+    InstalledSkillManagementDto, InstalledSkillTarget, LinkedSkillSourceDto, PresetApplyReq,
+    ProjectDto, RefreshDto, RegisterSkillSourceReq, RemoveInstalledSkillReq, RemovedSkillDto,
+    ReviewOutcomeDto, ReviewReq, RulesStateDto, RulesSyncDto, SettingsDto, SettingsSetReq,
+    StagesSetDto, StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto, WorkflowProjectReq,
 };
 use oah_core::error::codes;
 use oah_core::paths::Env;
@@ -285,6 +286,46 @@ pub async fn skills_installed(
             message: "The installed skills scan stopped before reporting its result.".to_owned(),
             hint: Some("Refresh Installed to try again.".to_owned()),
         })?
+}
+
+async fn manage_skill<R: Send + 'static>(
+    shell: State<'_, Shell>,
+    operation: impl FnOnce(&Ctx<'_>) -> Result<R, Error> + Send + 'static,
+) -> Result<R, ErrorDto> {
+    let shell = Shell {
+        session: Arc::clone(&shell.session),
+    };
+    tauri::async_runtime::spawn_blocking(move || shell.call(operation))
+        .await
+        .map_err(|_| ErrorDto {
+            code: "OAH_SKILL_MANAGEMENT_INTERRUPTED".to_owned(),
+            message: "The skill operation stopped before reporting its result.".to_owned(),
+            hint: Some("Refresh Installed to check the skill's current state.".to_owned()),
+        })?
+}
+
+#[tauri::command]
+pub async fn inspect_installed_skill(
+    req: InstalledSkillTarget,
+    shell: State<'_, Shell>,
+) -> Result<InstalledSkillManagementDto, ErrorDto> {
+    manage_skill(shell, move |ctx| app::inspect_installed_skill(ctx, &req)).await
+}
+
+#[tauri::command]
+pub async fn register_skill_source(
+    req: RegisterSkillSourceReq,
+    shell: State<'_, Shell>,
+) -> Result<LinkedSkillSourceDto, ErrorDto> {
+    manage_skill(shell, move |ctx| app::register_skill_source(ctx, &req)).await
+}
+
+#[tauri::command]
+pub async fn remove_installed_skill(
+    req: RemoveInstalledSkillReq,
+    shell: State<'_, Shell>,
+) -> Result<RemovedSkillDto, ErrorDto> {
+    manage_skill(shell, move |ctx| app::remove_installed_skill(ctx, &req)).await
 }
 
 #[tauri::command]

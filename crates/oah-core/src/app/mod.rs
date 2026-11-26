@@ -10,6 +10,7 @@ mod agents;
 mod cli_copy;
 mod doctor;
 mod installed;
+mod installed_management;
 mod refresh;
 mod review;
 mod settings;
@@ -29,6 +30,9 @@ pub use doctor::{
     Doctor, doctor, doctor_exit, doctor_project_commands, doctor_project_commands_with, doctor_with,
 };
 pub use installed::skills_installed;
+pub use installed_management::{
+    inspect_installed_skill, register_skill_source, remove_installed_skill,
+};
 pub use refresh::{REFRESH, refresh, refresh_key};
 pub use review::{REVIEW, ReviewFailed, review, review_key};
 pub use settings::{settings_get, settings_set};

@@ -1,5 +1,5 @@
 use super::skill_apply::stored_binding;
-use super::{Ctx, lock};
+use super::{Ctx, ProjectSelection, lock};
 use crate::config::AgentId::{self, Antigravity, Claude, Codex, Copilot, Cursor, Gemini, Opencode};
 use crate::dto::{
     AgentIdDto, Empty, InstalledSkillDto, ManagedSkillDto, SkillScopeDto, display_path,
@@ -47,12 +47,22 @@ const USER_LOCATIONS: &[SkillLocation] = &[
 
 /// Lists local project and user skills from directory entries and `SKILL.md` metadata.
 pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkillDto>, Error> {
-    let selected = lock(&ctx.session.project).held.as_ref().map(|held| {
-        (
-            held.opened.project.root.clone(),
-            held.skill_root.as_ref().ok().cloned(),
-        )
-    });
+    let slot = lock(&ctx.session.project);
+    Ok(scan(ctx, slot.held.as_ref())?
+        .into_iter()
+        .map(|skill| skill.dto)
+        .collect())
+}
+
+pub(super) struct InstalledLocation {
+    pub folder: PathBuf,
+    pub dto: InstalledSkillDto,
+}
+
+pub(super) fn scan(
+    ctx: &Ctx<'_>,
+    selected: Option<&ProjectSelection>,
+) -> Result<Vec<InstalledLocation>, Error> {
     let home = user_home(ctx.env)?;
     let xdg_config_home = ctx
         .env
@@ -60,7 +70,8 @@ pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkill
         .map(Path::new)
         .filter(|path| path.is_absolute());
     let store = Store::new(&user_state_dir(ctx.env)?);
-    let project_scope = if let Some((root, pin)) = &selected
+    let project = selected.map(|held| (&held.opened.project.root, held.skill_root.as_ref().ok()));
+    let project_scope = if let Some((root, pin)) = project
         && let Some(boundary) = resolve(root)?
         && resolve(&home)?.as_ref() != Some(&boundary)
     {
@@ -68,7 +79,7 @@ pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkill
             root.as_path(),
             SkillScopeDto::Project,
             Some(boundary),
-            pin.as_ref(),
+            pin,
             PROJECT_LOCATIONS,
         ))
     } else {
@@ -101,15 +112,22 @@ pub fn skills_installed(ctx: &Ctx<'_>, _req: Empty) -> Result<Vec<InstalledSkill
             config_dir.extend(relative.split('/'));
             let report_blocked = legacy_engine.is_some();
             for (name, folder) in skill_folders(&config_dir, boundary.as_deref(), report_blocked)? {
-                skills.push(InstalledSkillDto {
-                    name: name.to_string_lossy().into_owned(),
-                    engine: AgentIdDto(engine),
-                    compatible_agents: compatible_agents.iter().copied().map(AgentIdDto).collect(),
-                    scope,
-                    location: display_path(ctx.env, &folder),
-                    managed: managed_target.and_then(|(root, engine)| {
-                        managed_skill(&store, root, engine, name.to_str()?)
-                    }),
+                skills.push(InstalledLocation {
+                    dto: InstalledSkillDto {
+                        name: name.to_string_lossy().into_owned(),
+                        engine: AgentIdDto(engine),
+                        compatible_agents: compatible_agents
+                            .iter()
+                            .copied()
+                            .map(AgentIdDto)
+                            .collect(),
+                        scope,
+                        location: display_path(ctx.env, &folder),
+                        managed: managed_target.and_then(|(root, engine)| {
+                            managed_skill(&store, root, engine, name.to_str()?)
+                        }),
+                    },
+                    folder,
                 });
             }
         }
@@ -237,7 +255,7 @@ fn is_link_loop(error: &io::Error) -> bool {
     }
 }
 
-fn resolve(path: &Path) -> Result<Option<PathBuf>, FsxError> {
+pub(super) fn resolve(path: &Path) -> Result<Option<PathBuf>, FsxError> {
     present(path, fs::canonicalize(path))
 }
 

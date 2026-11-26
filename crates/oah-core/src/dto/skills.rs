@@ -31,6 +31,51 @@ pub struct ManagedSkillDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct InstalledSkillTarget {
+    pub project: Option<String>,
+    pub location: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkedSkillSourceDto {
+    pub repo: String,
+    pub path: String,
+    pub commit: String,
+    pub updates_in_oah: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledSkillManagementDto {
+    pub revision: String,
+    pub location: String,
+    pub agents: Vec<AgentIdDto>,
+    pub source: Option<LinkedSkillSourceDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterSkillSourceReq {
+    pub target: InstalledSkillTarget,
+    pub revision: String,
+    pub review_id: String,
+    pub acknowledge_warnings: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveInstalledSkillReq {
+    pub target: InstalledSkillTarget,
+    pub revision: String,
+    pub confirm_shared: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemovedSkillDto {
+    pub archive: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApplyProjectSkillReq {
     pub project: String,
     pub engine: Engine,

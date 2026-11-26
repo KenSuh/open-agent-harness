@@ -2,7 +2,7 @@
 import { act } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../src/App";
-import type { ApplyProjectSkillDto, InstalledSkillDto, ProjectDto, ReviewResultDto } from "../src/contract";
+import type { ApplyProjectSkillDto, InstalledSkillDto, LinkedSkillSourceDto, ProjectDto, RegisterSkillSourceReq, ReviewResultDto } from "../src/contract";
 import { button, byText, click, emit, flush, mount, unmount } from "./support/dom";
 import { createFakeTransport, deferred, sampleAgents, sampleProject, type FakeTransport } from "./support/fakeTransport";
 
@@ -64,6 +64,48 @@ async function exploreApp(opts: { project?: ProjectDto | null; agents?: ReturnTy
 
 const panel = () => document.querySelector('[aria-label="Install in project"]');
 const alertText = () => document.querySelector('[role="alert"]')?.textContent ?? "";
+
+it("registers a pasted GitHub SKILL.md link only after showing the reviewed source", async () => {
+  const t = createFakeTransport({ project: sampleProject });
+  const location = `${sampleProject.root}/.agents/skills/tidy`;
+  const requests: RegisterSkillSourceReq[] = [];
+  let source: LinkedSkillSourceDto | null = null;
+  t.override.skillsInstalled = async () => [{
+    scope: "project", engine: "codex", name: "tidy", location,
+    ...(source ? { managed: { review_id: record.id, snapshot_id: record.source.snapshot, repo: source.repo, path: source.path } } : {}),
+  }];
+  t.override.inspectInstalledSkill = async () => ({ revision: "source-preview", location, agents: ["codex"], source });
+  t.override.registerSkillSource = async (request) => {
+    requests.push(request);
+    source = { repo: "example/skills", path: "skills/tidy", commit: record.source.commit, updates_in_oah: true };
+    return source;
+  };
+
+  await mount(<App transport={t} />);
+  await click(button("Installed"));
+  await click(button("Manage…"));
+  await click(button("Register Git source"));
+  const input = document.querySelector<HTMLInputElement>('.installed input[aria-invalid]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "https://github.com/example/skills/blob/main/skills/tidy/SKILL.md");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await click(button("Review source"));
+  expect(t.reviewRequests).toEqual([{ spec: { repo: "example/skills", path: "skills/tidy" } }]);
+  await emit(() => t.emitReview({ event: "done", data: warn }));
+  const reviewed = document.querySelector('[aria-label="Reviewed GitHub source"]');
+  expect(reviewed?.textContent).toContain(record.source.commit);
+  expect(button("Register Git source").disabled).toBe(true);
+  expect(requests).toHaveLength(0);
+  await click(reviewed!.querySelector<HTMLInputElement>('input[type="checkbox"]')!);
+  await click(button("Register Git source"));
+  expect(requests).toEqual([{
+    target: { project: sampleProject.id, location }, revision: "source-preview",
+    review_id: record.id, acknowledge_warnings: true,
+  }]);
+  expect(document.querySelector(".installed")?.textContent).toContain("Git source registered for tidy");
+  expect(button("Check for update")).toBeDefined();
+});
 
 describe("Explore install", () => {
   it("writes nothing on a review result alone and shows destination before confirmation", async () => {

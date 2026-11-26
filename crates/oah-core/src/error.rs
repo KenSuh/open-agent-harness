@@ -390,13 +390,19 @@ impl Coded for ProjectSkillError {
                 Publish::Changed => "The project destination or installed skill changed on disk.",
                 Publish::StaleRevision => "The expected skill revision is no longer installed.",
                 Publish::SourceMismatch => "The new review must match the original GitHub source.",
+                Publish::SharedConfirmationRequired => {
+                    "Confirm removal for every agent that shares this skill folder."
+                }
                 Publish::Busy => "Another OAH operation is writing project skills.",
                 Publish::Pending => "An earlier confirmed skill operation is still pending.",
                 Publish::Recovery { .. } => {
                     "OAH kept the previous skill under .oah/project-skills-v1."
                 }
-                Publish::MovedUnverified { .. } => {
-                    "OAH could not verify the skill directory after a move."
+                Publish::MovedUnverified { path } => {
+                    return format!(
+                        "OAH could not verify the skill directory after a move. Inspect {}.",
+                        path.display()
+                    );
                 }
                 Publish::Io(_) => "OAH could not access the project skill files.",
             },

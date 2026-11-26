@@ -105,6 +105,42 @@ export interface InstalledSkillDto {
   readonly managed?: ManagedSkillDto;
 }
 
+export interface InstalledSkillTarget {
+  project: string | null;
+  location: string;
+}
+
+export interface LinkedSkillSourceDto {
+  repo: string;
+  path: string;
+  commit: string;
+  updates_in_oah: boolean;
+}
+
+export interface InstalledSkillManagementDto {
+  revision: string;
+  location: string;
+  agents: AgentId[];
+  source: LinkedSkillSourceDto | null;
+}
+
+export interface RegisterSkillSourceReq {
+  target: InstalledSkillTarget;
+  revision: string;
+  review_id: string;
+  acknowledge_warnings: boolean;
+}
+
+export interface RemoveInstalledSkillReq {
+  target: InstalledSkillTarget;
+  revision: string;
+  confirm_shared: boolean;
+}
+
+export interface RemovedSkillDto {
+  archive: string;
+}
+
 export type ProjectSkillEngine = "claude" | "codex";
 
 /** `apply_project_skill`'s request: the project handle (never a path), the engine and the immutable review IDs. */
