@@ -167,11 +167,15 @@ fn existing_skill(folder: &Path, body: &str, source: &str) {
 
 impl Fixture {
     fn target(&self, folder: &Path) -> InstalledSkillTarget {
-        let location = self.ctx(|ctx| oah_core::dto::display_path(ctx.env, folder));
-        assert!(self.inventory().iter().any(|row| row.location == location));
+        let expected = self.ctx(|ctx| oah_core::dto::display_path(ctx.env, folder));
+        let row = self
+            .inventory()
+            .into_iter()
+            .find(|row| Path::new(&row.location) == Path::new(&expected))
+            .unwrap_or_else(|| panic!("skill missing from inventory: {}", folder.display()));
         InstalledSkillTarget {
             project: Some(self.id.clone()),
-            location,
+            location: row.location,
         }
     }
 }
