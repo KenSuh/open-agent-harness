@@ -19,6 +19,7 @@ SRC = REPO / "src" / "oah"
 PAGES = ("concepts", "troubleshooting", "upgrade", "keys", "how-it-works", "commands")
 EXAMPLE = REPO / "examples" / "hello-oah"
 CODE = re.compile(r"\bOAH_[A-Z0-9]+(?:_[A-Z0-9]+)*\b")
+INSTALLER_FILENAME = re.compile(r"\bOAH_[0-9]+\.[0-9]+\.[0-9]+_(?:aarch64\.dmg|x64-setup\.exe)\b")
 # Environment variables and code prefixes that docs may name; they are not diagnostics.
 NOT_DIAGNOSTICS = {"OAH_STATE_DIR", "OAH_WORKER", "OAH_RUN_ID", "OAH_TASK", "OAH_UNLAZY_DIR", "OAH_NODE"}
 FIXED_CAP = re.compile(
@@ -53,7 +54,7 @@ def read(path: pathlib.Path) -> str:
 
 
 def codes_in(text: str) -> set[str]:
-    return set(CODE.findall(text)) - NOT_DIAGNOSTICS
+    return set(CODE.findall(INSTALLER_FILENAME.sub(" ", text))) - NOT_DIAGNOSTICS
 
 
 def source_text(src_root: pathlib.Path) -> str:
