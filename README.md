@@ -19,10 +19,12 @@
 
 **Set up your AI coding team in OAH Desktop.** See which agents are available, assign each stage in **Team Workflow**, and use **Explore** and **Installed** to find and manage the skills your team uses.
 
-| Download OAH Desktop v1.2.0 | Requirements |
-| --- | --- |
-| [Download for macOS](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_aarch64.dmg) | macOS 13 or later on Apple silicon |
-| [Download for Windows](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_x64-setup.exe) | Windows 11 x64 |
+**Download OAH Desktop v1.2.0**
+
+<p>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_aarch64.dmg"><img src="docs/assets/download-macos.png" width="208" alt="Download OAH for macOS 13 or later on Apple silicon"></a>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_x64-setup.exe"><img src="docs/assets/download-windows.png" width="208" alt="Download OAH for Windows 11 x64"></a>
+</p>
 
 [Install the desktop app](#desktop-app) · [Manage skills](#find-install-and-update-skills-in-desktop) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.2.0) · [Checksums](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/SHA256SUMS) · [Source CLI](#source-cli)
 

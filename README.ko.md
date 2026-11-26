@@ -19,10 +19,12 @@
 
 **OAH 데스크톱에서 개발 에이전트 팀을 구성하세요.** 사용할 수 있는 에이전트를 확인하고 **Team Workflow**에서 단계별 역할을 배정하세요. **Explore**와 **Installed**에서는 팀에 필요한 스킬을 찾고 관리할 수 있습니다.
 
-| OAH 데스크톱 v1.2.0 다운로드 | 지원 환경 |
-| --- | --- |
-| [macOS용 다운로드](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_aarch64.dmg) | macOS 13 이상, Apple Silicon |
-| [Windows용 다운로드](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_x64-setup.exe) | Windows 11 x64 |
+**OAH 데스크톱 v1.2.0 다운로드**
+
+<p>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_aarch64.dmg"><img src="docs/assets/download-macos.png" width="208" alt="macOS 13 이상 Apple Silicon Mac용 OAH 다운로드"></a>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/OAH_1.2.0_x64-setup.exe"><img src="docs/assets/download-windows.png" width="208" alt="Windows 11 x64용 OAH 다운로드"></a>
+</p>
 
 [데스크톱 설치](#데스크톱-앱) · [스킬 관리](#데스크톱에서-스킬-찾기-설치-갱신) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.2.0) · [체크섬](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.0/SHA256SUMS) · [소스 CLI](#소스-cli)
 
