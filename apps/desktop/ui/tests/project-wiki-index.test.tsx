@@ -52,7 +52,7 @@ describe("Local Wiki Index controls", () => {
     await openIndex();
     expect(document.querySelector(".wiki-index-state")?.textContent).toContain("No local index has been built yet.");
     expect(document.querySelector(".wiki-index-state")?.textContent).toContain("committed snapshot 0123456789ab, 12 notes");
-    expect(buttons()).toEqual(["Local Wiki Index", "Check Tools", "Build Index", "Search"]);
+    expect(buttons()).toEqual(["Local Wiki Index", "Check Tools", "Build Index", "Local Tools Setup", "Search"]);
     expect(document.querySelector(".wiki-index input")?.getAttribute("type")).toBe("search");
   });
 
@@ -152,5 +152,61 @@ describe("Local Wiki Index controls", () => {
     expect(document.body.textContent).not.toContain("late");
     expect(t.wikiIndexRequests).toHaveLength(before);
     await flush();
+  });
+
+  it("keeps Local Tools Setup collapsed, reads device settings only when opened and has no credential field", async () => {
+    const t = await openIndex();
+    expect(t.calls).not.toContain("settings_get");
+    t.override.settingsGet = async () => ({ automation_level: "x", ui: { theme: "auto", quick_start_dismissed: false }, wiki_index: { gbrain: "/opt/gbrain", bun_entry: "", ollama_port: 11500 } });
+    await click(button("Local Tools Setup"));
+    expect(t.calls.filter((c) => c === "settings_get")).toHaveLength(1);
+    const values = Array.from(document.querySelectorAll<HTMLInputElement>(".wiki-index-setup-form input")).map((i) => i.value);
+    expect(values).toEqual(["/opt/gbrain", "", "11500"]);
+    const text = document.querySelector(".wiki-index-setup-form")!.textContent!;
+    expect(text).toContain("OAH's user settings");
+    expect(text).toContain("127.0.0.1");
+    expect(text).toContain("trusted Bun executable");
+    expect(document.querySelector(".wiki-index-setup-form input[type=password]")).toBeNull();
+  });
+
+  it("saves the three device settings without running anything, and refuses a bad port", async () => {
+    const t = await openIndex();
+    const saved: unknown[] = [];
+    t.override.settingsGet = async () => ({ automation_level: "x", ui: { theme: "auto", quick_start_dismissed: false } });
+    t.override.settingsSet = async (edits) => {
+      saved.push(edits);
+      return { automation_level: "x", ui: { theme: "auto", quick_start_dismissed: false }, wiki_index: { gbrain: "/opt/bun", bun_entry: "/opt/g/cli.ts", ollama_port: 11500 } };
+    };
+    await click(button("Local Tools Setup"));
+    const [gbrain, bun, port] = Array.from(document.querySelectorAll<HTMLInputElement>(".wiki-index-setup-form input")) as [HTMLInputElement, HTMLInputElement, HTMLInputElement];
+    expect(port.value).toBe("11434");
+    const type = async (input: HTMLInputElement, value: string) =>
+      act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    await type(port, "99999");
+    await click(button("Save Local Tools"));
+    expect(saved).toHaveLength(0);
+    expect(document.querySelector(".wiki-index-setup-form")!.textContent).toContain("port from 1 to 65535");
+    await type(gbrain, " /opt/bun ");
+    await type(bun, "/opt/g/cli.ts");
+    await type(port, "11500");
+    await click(button("Save Local Tools"));
+    expect(saved).toEqual([[
+      { key: "wiki_index.gbrain", value: "/opt/bun" },
+      { key: "wiki_index.bun_entry", value: "/opt/g/cli.ts" },
+      { key: "wiki_index.ollama_port", value: 11500 },
+    ]]);
+    expect(document.querySelector(".wiki-index-setup-form")!.textContent).toContain("Saved. Nothing was run.");
+    // Saving starts no index task.
+    expect(t.wikiIndexRequests.map((r) => r.input.action)).toEqual(["status"]);
+  });
+
+  it("asks its own running build to stop when the project changes", async () => {
+    const t = await openIndex();
+    await click(button("Build Index"));
+    await emit(() => setProject("p2"));
+    expect(t.calls).toContain("task_cancel:wiki-index-2");
   });
 });

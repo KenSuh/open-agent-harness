@@ -77,6 +77,8 @@ export type Theme = "auto" | "light" | "dark";
 export interface SettingsDto {
   automation_level: string;
   ui: { theme: Theme; quick_start_dismissed: boolean };
+  /** Device choices for the local wiki index tools; absent in an older core. Keys: `wiki_index.gbrain`, `.bun_entry`, `.ollama_port`. */
+  wiki_index?: { gbrain: string; bun_entry: string; ollama_port: number };
 }
 
 export interface SettingsEdit {

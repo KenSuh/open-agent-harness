@@ -1,6 +1,6 @@
 // 한국어: 로컬 Wiki 색인 컨트롤 — 접힌 채 시작해 눌렀을 때만 저장된 상태를 읽고, 도구 확인·색인 만들기·검색을 명시 실행으로만 보낸다.
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { ErrorDto, Progress, TaskEvent, WikiIndexAction, WikiIndexInput, WikiIndexReply } from "./contract";
+import type { ErrorDto, Progress, SettingsDto, TaskEvent, WikiIndexAction, WikiIndexInput, WikiIndexReply } from "./contract";
 import { toErrorDto, type Transport } from "./transport/types";
 
 const STATE_TEXT: Record<string, string> = {
@@ -34,6 +34,148 @@ export function nextStepFor(code: string | undefined): string | null {
 function isToolProblem(code: string | undefined): boolean {
   const name = (code ?? "").replace(/^OAH_WIKI_INDEX_/, "");
   return TOOL_CODES.includes(name);
+}
+
+const DEFAULT_PORT = 11434;
+type Device = { gbrain: string; bun_entry: string; port: string };
+
+function deviceOf(settings: SettingsDto): Device {
+  const w = settings.wiki_index;
+  return { gbrain: w?.gbrain ?? "", bun_entry: w?.bun_entry ?? "", port: String(w?.ollama_port ?? DEFAULT_PORT) };
+}
+
+const ABSOLUTE = /^(\/|[A-Za-z]:[\\/]|\\\\)/;
+
+/** The reason a device form cannot be saved, or null. The core checks everything again. */
+export function deviceProblem(form: Device): string | null {
+  const port = form.port.trim();
+  if (port !== "" && !(/^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535)) {
+    return "Enter an Ollama port from 1 to 65535, or leave it blank for 11434.";
+  }
+  if (form.bun_entry.trim() !== "" && !ABSOLUTE.test(form.bun_entry.trim())) {
+    return "The Bun entry must be an absolute path to gbrain's cli.ts, or blank.";
+  }
+  return null;
+}
+
+/**
+ * Device choices for the local tools, read and saved through the existing settings commands. Saving only stores the
+ * choices; it runs nothing. It holds no key or credential.
+ */
+function LocalToolsSetup({ transport }: { transport: Transport }) {
+  const uid = useId();
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState<Device | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const seq = useRef(0);
+  useEffect(
+    () => () => {
+      seq.current += 1;
+    },
+    [],
+  );
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (!next || form) return;
+    const mine = ++seq.current;
+    setLoading(true);
+    setMessage(null);
+    transport.settingsGet().then(
+      (settings) => {
+        if (seq.current !== mine) return;
+        setForm(deviceOf(settings));
+        setLoading(false);
+      },
+      (error) => {
+        if (seq.current !== mine) return;
+        const e = toErrorDto(error);
+        setMessage({ ok: false, text: `${e.code}: ${e.message}` });
+        setLoading(false);
+      },
+    );
+  };
+
+  const save = async () => {
+    if (!form || saving) return;
+    const problem = deviceProblem(form);
+    if (problem) {
+      setMessage({ ok: false, text: problem });
+      return;
+    }
+    const mine = ++seq.current;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const port = form.port.trim() === "" ? DEFAULT_PORT : Number(form.port);
+      const saved = await transport.settingsSet([
+        { key: "wiki_index.gbrain", value: form.gbrain.trim() },
+        { key: "wiki_index.bun_entry", value: form.bun_entry.trim() },
+        { key: "wiki_index.ollama_port", value: port },
+      ]);
+      if (seq.current !== mine) return;
+      setForm(deviceOf(saved));
+      setMessage({ ok: true, text: "Saved. Nothing was run. Choose Check Tools to test these choices." });
+    } catch (error) {
+      if (seq.current !== mine) return;
+      const e = toErrorDto(error);
+      setMessage({ ok: false, text: `${e.code}: ${e.message}` });
+    } finally {
+      if (seq.current === mine) setSaving(false);
+    }
+  };
+
+  const bodyId = `${uid}-setup`;
+  const set = (patch: Partial<Device>) => {
+    setForm((f) => (f ? { ...f, ...patch } : f));
+    setMessage(null);
+  };
+  return (
+    <div className="wiki-index-setup">
+      <button type="button" aria-expanded={open} aria-controls={bodyId} onClick={toggle}>
+        Local Tools Setup
+      </button>
+      {open ? (
+        <form
+          id={bodyId}
+          className="wiki-index-setup-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <p className="muted">
+            These device choices are stored in OAH's user settings, not in the project. Ollama stays at 127.0.0.1; only its
+            port can change. Saving runs nothing.
+          </p>
+          {loading || !form ? (
+            loading ? <p className="muted">Reading the saved choices…</p> : null
+          ) : (
+            <>
+              <label htmlFor={`${uid}-gbrain`}>gbrain command</label>
+              <input id={`${uid}-gbrain`} type="text" autoComplete="off" spellCheck={false} value={form.gbrain} onChange={(e) => set({ gbrain: e.target.value })} />
+              <p className="muted" id={`${uid}-gbrain-help`}>Leave blank to find gbrain on your PATH.</p>
+              <label htmlFor={`${uid}-bun`}>Bun entry (optional)</label>
+              <input id={`${uid}-bun`} type="text" autoComplete="off" spellCheck={false} aria-describedby={`${uid}-bun-help`} value={form.bun_entry} onChange={(e) => set({ bun_entry: e.target.value })} />
+              <p className="muted" id={`${uid}-bun-help`}>
+                An absolute path to gbrain's cli.ts. It takes effect only when the gbrain command above is a trusted Bun
+                executable. Leave blank to run the command directly.
+              </p>
+              <label htmlFor={`${uid}-port`}>Ollama port</label>
+              <input id={`${uid}-port`} type="text" inputMode="numeric" autoComplete="off" value={form.port} onChange={(e) => set({ port: e.target.value })} />
+              <div className="wiki-index-actions">
+                <button type="submit" aria-disabled={saving}>Save Local Tools</button>
+              </div>
+            </>
+          )}
+          <div role={message && !message.ok ? "alert" : "status"}>{message ? <p>{message.text}</p> : null}</div>
+        </form>
+      ) : null}
+    </div>
+  );
 }
 
 type Run = { action: WikiIndexAction; id: string | null; progress: Progress | null; cancelling: boolean };
@@ -90,13 +232,18 @@ export function ProjectWikiIndex({
   const [cancelError, setCancelError] = useState<ErrorDto | null>(null);
   const seq = useRef(0);
   const running = useRef(false);
+  const active = useRef<{ action: WikiIndexAction; id: string | null } | null>(null);
 
-  // Answers that arrive after the project changed or the section went away belong to no run.
+  // Answers that arrive after the project changed or the section went away belong to no run. This section's own
+  // check or build is asked to stop; a build can be continued later.
   useEffect(
     () => () => {
       seq.current += 1;
+      const task = active.current;
+      active.current = null;
+      if (task?.id && (task.action === "probe" || task.action === "build")) void transport.taskCancel(task.id).catch(() => undefined);
     },
-    [],
+    [transport],
   );
 
   const start = useCallback(
@@ -104,6 +251,7 @@ export function ProjectWikiIndex({
       if (running.current) return;
       running.current = true;
       const mine = ++seq.current;
+      active.current = { action: input.action, id: null };
       let settled = false;
       setRun({ action: input.action, id: null, progress: null, cancelling: false });
       setCancelError(null);
@@ -113,6 +261,7 @@ export function ProjectWikiIndex({
         if (settled || seq.current !== mine) return;
         settled = true;
         running.current = false;
+        active.current = null;
         setRun(null);
         apply();
       };
@@ -156,7 +305,13 @@ export function ProjectWikiIndex({
       };
       try {
         const id = await transport.startWikiIndex({ project_id: projectId, input }, onEvent);
-        if (!settled && seq.current === mine) setRun((r) => (r ? { ...r, id } : r));
+        if (!settled && seq.current === mine) {
+          if (active.current) active.current.id = id;
+          setRun((r) => (r ? { ...r, id } : r));
+        } else if (!settled && (input.action === "probe" || input.action === "build")) {
+          // The section went away before the task id came back; stop the task it started.
+          void transport.taskCancel(id).catch(() => undefined);
+        }
       } catch (error) {
         finish(() => setOutcome({ action: input.action, kind: "error", error: toErrorDto(error) }));
       }
@@ -251,6 +406,7 @@ export function ProjectWikiIndex({
               </div>
             ) : null}
           </div>
+          <LocalToolsSetup transport={transport} />
           <form
             className="wiki-index-search"
             role="search"

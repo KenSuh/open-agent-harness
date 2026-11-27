@@ -1129,6 +1129,36 @@ code {
   padding: 4px 8px;
 }
 
+.wiki-index-setup,
+.wiki-index-setup-form {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wiki-index-setup {
+  justify-items: start;
+}
+
+.wiki-index-setup-form {
+  justify-items: stretch;
+  width: 100%;
+}
+
+.wiki-index-setup-form p {
+  margin: 0;
+}
+
+.wiki-index-setup-form input[type="text"] {
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+}
+
 .wiki-index-results ul {
   display: grid;
   gap: 8px;
