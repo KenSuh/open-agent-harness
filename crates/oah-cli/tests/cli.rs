@@ -15,7 +15,7 @@ fn oah(args: &[impl AsRef<OsStr>]) -> std::process::Output {
 fn version_flag_prints_the_version() {
     let out = oah(&["--version"]);
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), "oah 1.2.1");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), "oah 1.3.0");
 }
 
 #[test]

@@ -19,14 +19,14 @@
 
 **Set up your AI coding team in OAH Desktop.** See which agents are available, assign each stage in **Team Workflow**, and use **Explore** and **Installed** to find and manage the skills your team uses.
 
-**Download OAH Desktop v1.2.1**
+**Download OAH Desktop v1.3.0**
 
 <p>
-  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/OAH_1.2.1_aarch64.dmg"><img src="docs/assets/badge-download-macos.png" width="208" alt="Download OAH for macOS 13 or later on Apple silicon"></a>
-  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/OAH_1.2.1_x64-setup.exe"><img src="docs/assets/badge-download-windows.png" width="208" alt="Download OAH for Windows 11 x64"></a>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.3.0/OAH_1.3.0_aarch64.dmg"><img src="docs/assets/badge-download-macos.png" width="208" alt="Download OAH for macOS 13 or later on Apple silicon"></a>
+  <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.3.0/OAH_1.3.0_x64-setup.exe"><img src="docs/assets/badge-download-windows.png" width="208" alt="Download OAH for Windows 11 x64"></a>
 </p>
 
-[Install the desktop app](#desktop-app) · [Manage skills](#find-install-and-update-skills-in-desktop) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.2.1) · [Checksums](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/SHA256SUMS) · [Source CLI](#source-cli)
+[Install the desktop app](#desktop-app) · [Project tools](#configure-project-tools) · [Manage skills](#find-install-and-update-skills-in-desktop) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.3.0) · [Checksums](https://github.com/KenSuh/open-agent-harness/releases/download/v1.3.0/SHA256SUMS) · [Source CLI](#source-cli)
 
 [![OAH Desktop Team Workflow with the planning, coding, review, and fix roles visible.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
 
@@ -114,7 +114,7 @@ The guided design conversation in the figure is planned for a later release.
 ### Desktop app
 
 The DMG supports Apple silicon Macs running macOS 13 or later. The NSIS installer supports Windows 11 x64.
-Get the installer and `SHA256SUMS` from the [v1.2.1 downloads](#open-agent-harness-oah). Check the downloaded
+Get the installer and `SHA256SUMS` from the [v1.3.0 downloads](#open-agent-harness-oah). Check the downloaded
 file with `shasum -a 256` on macOS or `Get-FileHash -Algorithm SHA256` in PowerShell. Open it only after the
 digest matches the corresponding entry.
 
@@ -133,18 +133,18 @@ download the current installer above.
 Use the source CLI for project setup, skills and the full task loop. It needs Git and Python 3.11 or later.
 The installers check prerequisites and ask before installing missing tools.
 
-- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
-- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
+- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.3.0/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
+- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.3.0/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
 
-You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/open-agent-harness-v1.2.1.tar.gz)
-or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.2.1/open-agent-harness-v1.2.1.zip),
+You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.3.0/open-agent-harness-v1.3.0.tar.gz)
+or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.3.0/open-agent-harness-v1.3.0.zip),
 then run the corresponding installer under `install/`. Add `--dry-run` (`-DryRun` on Windows) to preview the steps.
 
 Then open a new terminal and check the version.
 
 ```console
 $ oah --version
-oah 1.2.1
+oah 1.3.0
 ```
 
 ## First run
@@ -158,7 +158,7 @@ oah 1.2.1
 
    *Open an agent card to find its sign-in instructions and check whether it can take a section.*
 
-   In v1.2.1, select **Check OpenCode details** on the **OpenCode** card to see saved provider connections
+   Select **Check OpenCode details** on the **OpenCode** card to see saved provider connections
    and the default model when available. The check may start OpenCode’s background service.
    Choose **View installed skills** to open its skills in **Installed**.
 
@@ -174,6 +174,18 @@ oah 1.2.1
 
 The desktop app uses `~/.oah` on macOS or `%USERPROFILE%\.oah` on Windows. It writes `settings.toml`
 and places its helper in `bin/`. These bundled commands work with the desktop configuration.
+
+### Configure project tools
+
+Open a Git worktree, then go to **Team Workflow → Project Tools**.
+
+- **Project Wiki.** Set up a new wiki or point OAH to existing Markdown notes. Use text search or build a
+  local semantic index with gbrain and Ollama when both are installed and configured.
+- **Impact Map.** Build a map of the committed project and query affected files and checks. OAH can read a
+  Graphify graph when its provenance matches the current checkout.
+- **Jev.** Turn on optional Impact Map result ordering for this project. Review what is sent and approve it
+  on this device. Store a key in macOS Keychain or Windows Credential Manager and manage approval from the
+  same panel. [Key and approval settings](docs/keys.md#a-key-alone-never-turns-the-re-ranker-on)
 
 ### Alternative: initialize a separate project with the source CLI
 
@@ -249,7 +261,7 @@ oah skills install ponytail --project --target codex
 Use `oah skills update --project --check` to check for updates and `oah skills update --project` to apply updates
 to OAH toolkit copies tracked in that project. The install targets are `claude`, `codex` and `both`. [Toolkit commands](docs/toolkit.md#commands)
 
-v1.2.1 ships with no qualified host profile for managed worker delivery. `oah skills find --task` needs
+v1.3.0 ships with no qualified host profile for managed worker delivery. `oah skills find --task` needs
 that profile to create the needs file used by `oah skills select --needs FILE --review REVIEW_ID`.
 [Managed delivery requirements](docs/skills-and-capabilities.md#required-managed-delivery)
 
