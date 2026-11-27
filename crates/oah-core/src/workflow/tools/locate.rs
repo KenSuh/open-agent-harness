@@ -5,8 +5,9 @@
 //! what that entry is. A Git folder is read further only when it is qualified:
 //!
 //! - a real `.git` folder with `HEAD`, `objects` and `refs` and no `commondir` (an ordinary work tree), or
-//! - a `.git` file whose folder points back at this same `.git` file through its own `gitdir` file and sits in
-//!   `worktrees` of the common folder its `commondir` names (a linked work tree, checked from both ends).
+//! - a `.git` file naming `<main>/.git/worktrees/<leaf>` on the project's own disk, reached through real folders
+//!   only, whose `gitdir` names this same `.git` file and whose `commondir` names that `.git` (a standard local
+//!   linked work tree, checked from both ends). The shape is decided from the text before the path is touched.
 //!
 //! Everything else (a link, a submodule, a separate Git folder, a broken pointer) is [`Git::Unqualified`]: the
 //! card says the state is unknown and nothing behind the pointer is read. Environment overrides such as
@@ -19,7 +20,7 @@ use crate::fsx::open_regular;
 use crate::paths::{self, Env};
 use crate::project::ProjectError;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 /// The most of a `.git` file, `gitdir`, `commondir` or `HEAD` that is read.
 pub(super) const POINTER_LIMIT: u64 = 4096;
@@ -109,22 +110,99 @@ pub(super) fn git_at(root: &Path) -> Option<Git> {
     })
 }
 
-/// A linked work tree, accepted only when both ends agree: the `.git` file names a folder, that folder's `gitdir`
-/// names this `.git` file, and the folder is `<common>/worktrees/<name>` of the repository its `commondir` names.
+/// `path` with `.` dropped and `..` applied by name only; `None` when it is not absolute or `..` leaves its root.
+fn lexical(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    let mut depth = 0usize;
+    for part in path.components() {
+        match part {
+            Component::Prefix(_) | Component::RootDir => out.push(part.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth = depth.checked_sub(1)?;
+                out.pop();
+            }
+            Component::Normal(name) => {
+                depth += 1;
+                out.push(name);
+            }
+        }
+    }
+    out.has_root().then_some(out)
+}
+
+/// Whether two absolute paths name the same entry by their text alone (letter case aside on Windows).
+fn same_path(left: &Path, right: &Path) -> bool {
+    if cfg!(windows) {
+        let text = |path: &Path| path.to_string_lossy().replace('/', "\\").to_lowercase();
+        text(left) == text(right)
+    } else {
+        left == right
+    }
+}
+
+/// Whether `path` is on the same local disk as the project `root`. On Windows that means a plain drive path with
+/// the root's own drive letter, so a network share, a device path or another (possibly mapped) drive is never
+/// touched on the word of a `.git` file. Elsewhere every absolute path qualifies.
+fn same_disk(root: &Path, path: &Path) -> bool {
+    if !cfg!(windows) {
+        return true;
+    }
+    let drive = |path: &Path| match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) => Some(letter.to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    drive(path).is_some() && drive(path) == drive(root)
+}
+
+/// The folder a linked work tree's `.git` file names, decided from the text alone, before anything at that path
+/// is touched: an absolute path (or one relative to `root`) of the shape `<main>/.git/worktrees/<leaf>` on the
+/// project's own disk. Anything else is not a standard local linked work tree.
+fn admin_shape(root: &Path, pointer: &str) -> Option<PathBuf> {
+    let named = lexical(&resolve(root, pointer.strip_prefix("gitdir:")?.trim())?)?;
+    if !same_disk(root, &named) {
+        return None;
+    }
+    let mut names = named.components().rev();
+    let shaped = matches!(names.next()?, Component::Normal(_))
+        && names.next()?.as_os_str() == "worktrees"
+        && names.next()?.as_os_str() == ".git"
+        && matches!(names.next()?, Component::Normal(_));
+    shaped.then_some(named)
+}
+
+/// Whether every folder from the filesystem root down to `path` is a real folder: no link or reparse entry on
+/// the way, so the path's text is where it really is.
+fn real_folders(path: &Path) -> bool {
+    let mut walked = PathBuf::new();
+    path.components().all(|part| {
+        walked.push(part.as_os_str());
+        !matches!(part, Component::Normal(_)) || is(&walked, Entry::Directory)
+    })
+}
+
+/// A linked work tree, accepted only when both ends agree. The `.git` file must name a standard local folder
+/// (`admin_shape`) reached through real folders only; that folder's `gitdir` must name this `.git` file and its
+/// `commondir` the `.git` two levels up, both by their text, so no path taken from these files is opened unless
+/// it is that same repository; and the repository must be complete.
 fn linked(root: &Path, dot_git: &Path) -> Option<Git> {
-    let pointer = short_text(dot_git)?;
-    let named = resolve(root, pointer.strip_prefix("gitdir:")?.trim())?;
-    if !is(&named, Entry::Directory) {
+    let git_dir = admin_shape(root, &short_text(dot_git)?)?;
+    if !real_folders(&git_dir) {
         return None;
     }
-    let git_dir = paths::canonical_folder(&named).ok()?;
-    let back = resolve(&git_dir, &short_text(&git_dir.join("gitdir"))?)?;
-    if back.file_name()? != ".git" || paths::canonical_folder(back.parent()?).ok()? != root {
+    let back = lexical(&resolve(&git_dir, &short_text(&git_dir.join("gitdir"))?)?)?;
+    if !same_path(&back, dot_git) {
         return None;
     }
-    let common = resolve(&git_dir, &short_text(&git_dir.join("commondir"))?)?;
-    let common_dir = paths::canonical_folder(&common).ok()?;
-    if git_dir.parent()? != common_dir.join("worktrees") || !is_repository(&common_dir) {
+    let common_dir = git_dir.parent()?.parent()?.to_path_buf();
+    let common = lexical(&resolve(
+        &git_dir,
+        &short_text(&git_dir.join("commondir"))?,
+    )?)?;
+    if !same_path(&common, &common_dir) || !is_repository(&common_dir) {
         return None;
     }
     Some(Git::WorkTree {
@@ -304,6 +382,58 @@ mod tests {
         symlink(&admin, &alias).unwrap();
         fs::write(tree.join(".git"), format!("gitdir: {}\n", alias.display())).unwrap();
         assert_eq!(git_at(&tree), Some(Git::Unqualified(UNVERIFIED_POINTER)));
+    }
+
+    /// The `.git` file's text alone decides whether its target is looked at.
+    #[test]
+    fn a_pointer_is_qualified_by_its_text_before_its_target_is_touched() {
+        let root = if cfg!(windows) {
+            Path::new(r"C:\work\tree")
+        } else {
+            Path::new("/work/tree")
+        };
+        let at = |text: &str| admin_shape(root, text);
+        let main = if cfg!(windows) {
+            r"C:\work\main"
+        } else {
+            "/work/main"
+        };
+        let admin = Path::new(main).join(".git").join("worktrees").join("tree");
+        assert_eq!(
+            at(&format!("gitdir: {}", admin.display())),
+            Some(admin.clone())
+        );
+        assert_eq!(
+            at("gitdir: ../main/.git/worktrees/tree"),
+            Some(admin.clone())
+        );
+        assert_eq!(
+            at(&format!("gitdir: {}/x/../.git/./worktrees/tree", main)),
+            Some(admin)
+        );
+        for text in [
+            "",
+            "gitdir:",
+            "something else",
+            "gitdir: ../main/.git",
+            "gitdir: ../main/.git/modules/tree",
+            "gitdir: ../main/repo.git/worktrees/tree",
+            "gitdir: ../main/.git/worktrees/tree/deeper",
+            "gitdir: ../../../../.git/worktrees/tree",
+            "gitdir: /.git/worktrees/tree",
+        ] {
+            assert_eq!(at(text), None, "{text:?}");
+        }
+        #[cfg(windows)]
+        for text in [
+            r"gitdir: \\server\share\main\.git\worktrees\tree",
+            r"gitdir: \\?\C:\work\main\.git\worktrees\tree",
+            r"gitdir: \\.\pipe\main\.git\worktrees\tree",
+            r"gitdir: Z:\work\main\.git\worktrees\tree",
+            "gitdir: //server/share/main/.git/worktrees/tree",
+        ] {
+            assert_eq!(at(text), None, "{text:?}");
+        }
     }
 
     #[test]
