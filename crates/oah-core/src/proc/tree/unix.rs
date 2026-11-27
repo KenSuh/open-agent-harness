@@ -50,6 +50,10 @@ impl Tree {
         self.child.stderr.take()
     }
 
+    pub(super) fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
     /// Whether the program itself has ended. It is not waited for here, so its group id stays its own.
     pub(super) fn exited(&mut self) -> io::Result<bool> {
         let look = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;

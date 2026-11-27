@@ -201,3 +201,7 @@ mod tests {
         assert_eq!(replace_home("x", "/"), "x");
     }
 }
+mod optional_tools;
+pub use optional_tools::{
+    JevInput, JevReply, JevResult, WikiIndexInput, WikiIndexReply, WikiIndexResult,
+};

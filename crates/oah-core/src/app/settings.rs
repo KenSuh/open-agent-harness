@@ -56,6 +56,7 @@ fn to_edit(file: &Path, edit: &SettingEdit) -> Result<Edit, ConfigError> {
 fn settings_dto(values: &SettingsValues) -> SettingsDto {
     SettingsDto {
         automation_level: values.automation_level.clone(),
+        wiki_index: values.wiki_index.clone(),
         ui: UiDto {
             theme: values.ui.theme.clone(),
             quick_start_dismissed: values.ui.quick_start_dismissed,

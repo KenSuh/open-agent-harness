@@ -48,6 +48,7 @@ pub enum CliState {
 pub struct SettingsDto {
     pub automation_level: String,
     pub ui: UiDto,
+    pub wiki_index: crate::config::WikiIndexDevice,
 }
 
 /// `[ui]` of `settings.toml`.

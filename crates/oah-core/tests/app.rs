@@ -690,6 +690,7 @@ fn settings_set_changes_only_the_ui_keys_and_records_its_write() {
     .unwrap();
     let expected = SettingsDto {
         automation_level: String::from("recommend-only"),
+        wiki_index: Default::default(),
         ui: UiDto {
             theme: String::from("dark"),
             quick_start_dismissed: true,

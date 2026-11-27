@@ -48,7 +48,7 @@ pub use save::{
 };
 pub use settings::{
     AUTOMATION_LEVELS, AutoloadSettings, HistorySettings, SETTINGS_TABLES, SettingsValues, THEMES,
-    UiSettings, UserSettings, save_settings,
+    UiSettings, UserSettings, WikiIndexDevice, save_settings,
 };
 pub use tools::{
     DEFAULT_GRAPH_FILE, DEFAULT_WIKI_DIR, GraphifyTool, ImpactTool, JEV_PROVIDER, JevTool,

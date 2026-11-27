@@ -67,6 +67,8 @@ pub fn run() {
             commands::wiki::start_project_wiki_apply,
             commands::wiki::project_wiki_search,
             commands::impact_map::start_impact_map,
+            commands::optional_tools::project_jev_action,
+            commands::optional_tools::start_wiki_index,
             commands::start_review,
             commands::skills_installed,
             commands::inspect_installed_skill,

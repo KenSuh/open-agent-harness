@@ -15,10 +15,10 @@ and a newline on standard output (the shape is `oah.project_tools_impact.Outcome
 
 `status` is read only. `refresh` builds the first map and afterwards updates it; a map that is already fresh is left
 untouched (performed is "none"). Both always run in app-selected mode: the folder is untrusted, git is pinned and
-hardened, and nothing reaches the network. The groups `jev` and `wiki-index` are reserved for later releases and are
-refused as usage errors until then.
+hardened, and nothing reaches the network.
 
-The runner reads nothing from standard input and takes no options from the environment. A caller that needs a
+The Impact Map action reads nothing from standard input. Jev and wiki-index take bounded input on a pipe.
+A caller that needs a
 wall-clock limit ends the process tree: the store is replaced atomically and its lock is released by the system.
 On POSIX a TERM (or HUP) signal is the orderly stop: the run unwinds at once, the git call in progress ends its
 child's process tree (`oah.engines.proc.run_command` does that for any interrupted caller), no answer is printed
@@ -31,19 +31,23 @@ import json
 import pathlib
 import signal
 import sys
-from typing import Iterator, Sequence
+from types import FrameType
+from typing import Any, Callable, Iterator, Sequence
 
 import oah
 from oah import project_tools_impact as impact
 
 EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_INTERNAL = 0, 1, 69, 70
-GROUPS = {"impact": ("status", "refresh")}
-RESERVED_GROUPS = ("jev", "wiki-index")
+GROUPS = {
+    "impact": ("status", "refresh"),
+    "jev": ("status", "prepare", "enable", "disable", "key-state", "store-key", "delete-key", "prepare-test", "test"),
+    "wiki-index": ("status", "probe", "build", "search"),
+}
 OPTIONS = ("--root", "--git")
 OUTPUT_LIMIT = 1 << 18  # bytes of one answer
 STOP_SIGNALS = ("SIGTERM", "SIGHUP")  # how a caller ends a run on POSIX
-USAGE = ("usage: oah-project-tools --version | impact <status|refresh> --root <absolute folder> "
-         "[--git <absolute git executable>]")
+USAGE = ("usage: oah-project-tools --version | <impact|jev|wiki-index> <action> --root <absolute folder> "
+         "[--git <absolute git executable> (impact only)]")
 
 
 class _Usage(Exception):
@@ -54,18 +58,16 @@ def _parse(args: Sequence[str]) -> tuple[str, str, dict[str, str]]:
     if not args:
         raise _Usage("no action was given")
     group = args[0]
-    if group in RESERVED_GROUPS:
-        raise _Usage(f"the {group} group is reserved and not available in this build")
     if group not in GROUPS:
-        raise _Usage(f"unknown group {group!r}")
+        raise _Usage("unknown group")
     if len(args) < 2 or args[1] not in GROUPS[group]:
         raise _Usage(f"{group} needs one of: {', '.join(GROUPS[group])}")
     options: dict[str, str] = {}
     rest = list(args[2:])
     while rest:
         name = rest.pop(0)
-        if name not in OPTIONS:
-            raise _Usage(f"unknown option {name!r}")
+        if name not in OPTIONS or (name == "--git" and group != "impact"):
+            raise _Usage("unknown option for this group")
         if name in options:
             raise _Usage(f"{name} was given twice")
         if not rest:
@@ -86,7 +88,7 @@ def _bundle_problem() -> str | None:
     return None if source.is_file() else f"this build is incomplete: {source} is missing"
 
 
-def _emit(document: dict) -> None:
+def _emit(document: dict[str, Any]) -> None:
     text = json.dumps(document, ensure_ascii=True, separators=(",", ":"))
     if len(text) > OUTPUT_LIMIT:
         text = json.dumps(impact.failure(document.get("action"), "", "OAH_PROJECT_TOOLS_INTERNAL",
@@ -104,6 +106,26 @@ def _write(text: str) -> None:
     sys.stdout.flush()
 
 
+def _extension(group: str, action: str, root: str) -> int:
+    from oah import project_tools_extensions as extensions
+
+    folder = pathlib.Path(root)
+    operate = extensions.run_jev if group == "jev" else extensions.run_wiki_index
+    try:
+        if not folder.is_absolute() or not folder.is_dir():
+            raise ValueError("project must be an absolute directory")
+        answer = operate(action, folder, sys.stdin.buffer)
+        result = EXIT_OK if answer["ok"] else EXIT_REFUSED
+    except ValueError:
+        answer = {"ok": False}
+        result = EXIT_USAGE
+    except Exception:
+        answer = {"ok": False}
+        result = EXIT_INTERNAL
+    _emit({"schema": 1, "version": oah.__version__, "tool": group, "action": action, "root": root, "result": answer})
+    return result
+
+
 @contextlib.contextmanager
 def _stoppable() -> Iterator[None]:
     """While a run is in progress a stop signal raises SystemExit in the main thread, so every pending call
@@ -115,7 +137,7 @@ def _stoppable() -> Iterator[None]:
             signal.signal(other, signal.SIG_IGN)
         raise SystemExit(128 + number)
 
-    previous: dict[int, object] = {}
+    previous: dict[int, int | Callable[[int, FrameType | None], Any] | None] = {}
     try:
         for number in numbers:
             previous[number] = signal.signal(number, stop)
@@ -137,12 +159,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write(USAGE + "\n")
         return EXIT_OK
     try:
-        _group, action, options = _parse(args)
+        group, action, options = _parse(args)
     except _Usage as exc:
         _emit(impact.failure(None, "", "OAH_PROJECT_TOOLS_USAGE", f"{exc}; {USAGE}", tool=None).to_json())
         return EXIT_USAGE
     root = options["--root"]
     with _stoppable():
+        if group != "impact":
+            return _extension(group, action, root)
         try:
             problem = _bundle_problem()
             if problem:

@@ -59,6 +59,36 @@ mod unix {
     }
 
     #[test]
+    fn input_over_a_pipe_arrives_in_full_and_a_stalled_writer_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = TreeRun {
+            program: Path::new("/bin/cat"),
+            args: &[],
+            env: &[],
+            cwd: dir.path(),
+            deadline: Duration::from_secs(10),
+            stdout_limit: 65_536,
+            stderr_limit: 256,
+            grace: GRACE,
+        };
+        let data = vec![b'x'; 60_000];
+        let cancel = CancelToken::new();
+        let output = run_tree_input(&read, &cancel, &data).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, data);
+        let stalled = TreeRun {
+            program: Path::new("/bin/sleep"),
+            args: &[OsStr::new("60")],
+            deadline: Duration::from_millis(200),
+            ..read
+        };
+        assert!(matches!(
+            run_tree_input(&stalled, &cancel, &vec![b'x'; 262_144]),
+            Err(TreeError::Timeout)
+        ));
+    }
+
+    #[test]
     fn the_child_sees_only_the_given_environment_and_runs_in_the_given_folder() {
         let dir = tempfile::tempdir().unwrap();
         let folder = fs::canonicalize(dir.path()).unwrap();

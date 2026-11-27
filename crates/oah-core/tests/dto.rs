@@ -110,6 +110,7 @@ fn settings_samples() {
         "settings",
         &SettingsDto {
             automation_level: String::from("auto-safe"),
+            wiki_index: Default::default(),
             ui: UiDto {
                 theme: String::from("dark"),
                 quick_start_dismissed: true,

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import unittest
+from typing import Any, Mapping
 from unittest import mock
 
 from oah import __version__
@@ -39,7 +40,7 @@ def child_env(**extra: str) -> dict[str, str]:
     return env
 
 
-def run_source(*args: str) -> subprocess.CompletedProcess:
+def run_source(*args: str) -> subprocess.CompletedProcess[bytes]:
     """The runner as a real child process, from this checkout's sources."""
     return subprocess.run([sys.executable, "-m", "oah.project_tools_runner", *args], capture_output=True,
                           env=child_env(), timeout=180)
@@ -99,7 +100,7 @@ def stopped_by_term(test: unittest.TestCase, argv: list[str], env: dict[str, str
     return runner.returncode, out, seconds
 
 
-def document(done: subprocess.CompletedProcess) -> dict:
+def document(done: subprocess.CompletedProcess[bytes]) -> dict[str, Any]:
     """The one JSON line a run printed; anything else on standard output fails the test."""
     assert done.stdout.isascii() and done.stdout.endswith(b"\n") and done.stdout.count(b"\n") == 1, done.stdout
     return json.loads(done.stdout)
@@ -130,7 +131,7 @@ class ContractTest(unittest.TestCase):
     def test_wrong_arguments_exit_1_with_a_usage_document(self):
         root = str(make_tmp_dir(self))
         for args in ([], ["impact"], ["impact", "build", "--root", root], ["status", "--root", root],
-                     ["jev", "status", "--root", root], ["wiki-index", "refresh", "--root", root],
+                     ["jev", "status", "--root", root, "--git", "git"], ["wiki-index", "refresh", "--root", root],
                      ["impact", "status"], ["impact", "status", "--root"], ["impact", "status", "--root", root, "x"],
                      ["impact", "status", "--root", root, "--root", root], ["impact", "status", "--root", root, "--json"],
                      ["--version", "extra"]):
@@ -190,7 +191,7 @@ class ContractTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def call(self, *args: str) -> tuple[int, dict]:
+    def call(self, *args: str) -> tuple[int, dict[str, Any]]:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = runner.main(list(args))
@@ -239,16 +240,58 @@ class MainTest(unittest.TestCase):
 class BinaryTest(unittest.TestCase):
     """The standalone sidecar itself. It must not need this checkout, PYTHONPATH or an installed Python."""
 
-    def run_binary(self, *args: str, **extra: str) -> subprocess.CompletedProcess:
+    def run_binary(self, *args: str, input: bytes | None = None,
+                   overrides: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
         env = {name: value for name, value in os.environ.items() if not name.upper().startswith("PYTHON")}
         env.pop("OAH_STATE_DIR", None)
-        env.update(extra)
-        return subprocess.run([BINARY, *args], capture_output=True, env=env, cwd=make_tmp_dir(self), timeout=300)
+        env.update(overrides or {})
+        assert BINARY is not None
+        return subprocess.run([BINARY, *args], input=input, capture_output=True, env=env, cwd=make_tmp_dir(self),
+                              timeout=300)
 
     def test_version_is_the_package_version(self):
         done = self.run_binary("--version")
         self.assertEqual((done.returncode, done.stdout.replace(b"\r\n", b"\n")),
                          (0, f"oah-project-tools {__version__}\n".encode()))
+
+    def test_jev_approval_uses_the_pipe_and_device_state_without_a_key(self):
+        repo = make_git_repo(self)
+        home = make_tmp_dir(self)
+        git_commit(repo, BASE)
+
+        def act(action: str, data: bytes | None = None):
+            result = self.run_binary("jev", action, "--root", str(repo), input=data, overrides={"OAH_HOME": str(home)})
+            self.assertEqual(result.stderr, b"")
+            answer = document(result)
+            self.assertEqual((answer["schema"], answer["action"], answer["root"]), (1, action, str(repo)))
+            return result.returncode, answer["result"]
+
+        code, preview = act("prepare")
+        self.assertEqual((code, preview["status"], preview["destination"]["kind"]), (0, "ready", "official"))
+        token = preview["token"].encode("ascii")
+        self.assertNotIn("project", preview)
+        self.assertNotIn("key_name", preview["destination"])
+        self.assertEqual(act("enable", b"not-the-decision")[:1], (69,))
+        self.assertEqual(act("status")[1]["consent"], "none")
+        self.assertEqual(act("enable", token), (0, {"ok": True, "status": "enabled"}))
+        self.assertEqual(act("status")[1]["scopes"], [{"scope": "impact", "state": "granted"}])
+        self.assertEqual(act("disable"), (0, {"ok": True, "status": "disabled"}))
+        self.assertEqual(act("status")[1]["consent"], "disabled")
+        self.assertEqual(act("test", b"not-an-ack"), (69, {"ok": False, "status": "ack-required"}))
+
+    def test_wiki_index_can_search_the_selected_folder_without_local_tools(self):
+        repo = make_git_repo(self)
+        home = make_tmp_dir(self)
+        git_commit(repo, {"handbook/install.md": "# Install\n\nThe sample command is quartz-migrate.\n",
+                          "docs/wiki/other.md": "# Other\n\nquartz-migrate\n"})
+        request = {"wiki_dir": "handbook", "exclude": [], "model": "",
+                   "device": {"gbrain": "", "bun_entry": "", "ollama_port": 11434},
+                   "query": "quartz-migrate"}
+        done = self.run_binary("wiki-index", "search", "--root", str(repo),
+                               input=json.dumps(request).encode(), overrides={"OAH_HOME": str(home)})
+        answer = document(done)["result"]
+        self.assertEqual((done.returncode, answer["mode"], answer["state"]), (0, "text", "not_built"), done.stderr)
+        self.assertEqual([row["file"] for row in answer["results"]], ["handbook/install.md"])
 
     def test_the_map_identity_equals_the_python_source(self):
         repo = make_tmp_dir(self) / "프로젝트"
@@ -262,7 +305,9 @@ class BinaryTest(unittest.TestCase):
         source = mapstore.build(repo, env={"OAH_STATE_DIR": str(make_tmp_dir(self) / "state")})
         self.assertEqual((built["map"]["tool"], built["map"]["manifest"], built["map"]["result"]),
                          (source.tool_digest, source.manifest_digest, source.result_digest))
-        self.assertEqual(mapstore.status(repo, env={})[0].action, "fresh", "the source CLI accepts the sidecar's map")
+        checked, _ = mapstore.status(repo, env={})
+        assert checked is not None
+        self.assertEqual(checked.action, "fresh", "the source CLI accepts the sidecar's map")
         seen = document(self.run_binary("impact", "status", "--root", str(repo)))
         self.assertEqual((seen["state"], seen["performed"]), ("fresh", "none"))
         (repo / "src" / "app.py").write_text("from lib import util\nprint(util.VALUE)\n", encoding="utf-8")
@@ -276,6 +321,7 @@ class BinaryTest(unittest.TestCase):
         unpack = make_tmp_dir(self)
         env = {name: value for name, value in os.environ.items() if not name.upper().startswith("PYTHON")}
         env.pop("OAH_STATE_DIR", None)
+        assert BINARY is not None
         code, out, seconds = stopped_by_term(self, [BINARY], dict(env, TMPDIR=str(unpack)))
         self.assertEqual((code, out), (128 + signal.SIGTERM, b""))
         self.assertLess(seconds, 10)
@@ -297,9 +343,9 @@ class BinaryTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "config", "core.fsmonitor", tool.as_posix()], check=True, env=git_env())
         variables = {"PYTHONPATH": str(inject), "PYTHONSTARTUP": str(inject / "startup.py"), "PYTHONINSPECT": "",
                      "PYTHONHOME": str(inject)}
-        version = self.run_binary("--version", **variables)
+        version = self.run_binary("--version", overrides=variables)
         self.assertEqual(version.stdout.replace(b"\r\n", b"\n"), f"oah-project-tools {__version__}\n".encode())
-        done = self.run_binary("impact", "refresh", "--root", str(repo), **variables)
+        done = self.run_binary("impact", "refresh", "--root", str(repo), overrides=variables)
         self.assertEqual((done.returncode, document(done)["performed"]), (0, "built"), done.stderr)
         self.assertFalse(marker.exists(), "an injected module or the repository's program ran")
 

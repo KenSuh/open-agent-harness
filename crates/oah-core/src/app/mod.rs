@@ -12,6 +12,7 @@ mod doctor;
 mod impact_map;
 mod installed;
 mod installed_management;
+mod optional_tools;
 mod refresh;
 mod review;
 mod settings;
@@ -41,6 +42,7 @@ pub use installed::skills_installed;
 pub use installed_management::{
     inspect_installed_skill, register_skill_source, remove_installed_skill,
 };
+pub use optional_tools::{project_jev_action, project_wiki_index, wiki_index_key};
 pub use refresh::{REFRESH, refresh, refresh_key};
 pub use review::{REVIEW, ReviewFailed, review, review_key};
 pub use settings::{settings_get, settings_set};

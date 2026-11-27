@@ -30,6 +30,7 @@ use oah_core::tasks::CancelToken;
 use os::Source;
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -81,6 +82,14 @@ pub(super) enum Ready {
 /// The child sees exactly `run.env`, no standard input and `run.cwd` as its folder. A program that has ended
 /// wins over a cancellation or a deadline noticed in the same look: its complete output is the answer.
 pub(crate) fn run_tree(run: &TreeRun<'_>, cancel: &CancelToken) -> Result<Output, TreeError> {
+    run_tree_input(run, cancel, &[])
+}
+
+pub(crate) fn run_tree_input(
+    run: &TreeRun<'_>,
+    cancel: &CancelToken,
+    input: &[u8],
+) -> Result<Output, TreeError> {
     if !run.program.is_absolute() {
         return Err(TreeError::NotAbsolute);
     }
@@ -91,19 +100,53 @@ pub(crate) fn run_tree(run: &TreeRun<'_>, cancel: &CancelToken) -> Result<Output
         .env_clear()
         .envs(run.env.iter().map(|(name, value)| (name, value)))
         .current_dir(run.cwd)
-        .stdin(Stdio::null())
+        .stdin(if input.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut tree = os::Tree::spawn(&mut command).map_err(TreeError::Spawn)?;
     let mut stdout = Pipe::new(tree.take_stdout(), run.stdout_limit);
     let mut stderr = Pipe::new(tree.take_stderr(), run.stderr_limit);
-    match watch(&mut tree, &mut stdout, &mut stderr, deadline, cancel) {
+    std::thread::scope(|scope| {
+        let writer = tree
+            .take_stdin()
+            .map(|mut pipe| scope.spawn(move || pipe.write_all(input)));
+        let output = finish_run(tree, run, &mut stdout, &mut stderr, deadline, cancel)?;
+        if let Some(writer) = writer {
+            match writer.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error))
+                    if error.kind() == io::ErrorKind::BrokenPipe && !output.status.success() => {}
+                Ok(Err(error)) => return Err(TreeError::Wait(error)),
+                Err(_) => {
+                    return Err(TreeError::Wait(io::Error::other(
+                        "the input writer stopped",
+                    )));
+                }
+            }
+        }
+        Ok(output)
+    })
+}
+
+fn finish_run(
+    mut tree: os::Tree,
+    run: &TreeRun<'_>,
+    stdout: &mut Pipe<impl Source>,
+    stderr: &mut Pipe<impl Source>,
+    deadline: Instant,
+    cancel: &CancelToken,
+) -> Result<Output, TreeError> {
+    match watch(&mut tree, stdout, stderr, deadline, cancel) {
         Ok(()) => {
             let status = tree.finish().map_err(TreeError::Wait)?;
             Ok(Output {
                 status,
-                stdout: stdout.bytes,
-                stderr: stderr.bytes,
+                stdout: std::mem::take(&mut stdout.bytes),
+                stderr: std::mem::take(&mut stderr.bytes),
             })
         }
         Err(error) => {

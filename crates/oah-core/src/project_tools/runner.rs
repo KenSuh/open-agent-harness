@@ -27,6 +27,8 @@
 //! either a complete map or none; [`RunnerError::Cancelled`] and [`RunnerError::TimedOut`] say when that is
 //! possible. Nothing is remembered here, so the next status asks the tool again and reports what is there.
 
+mod extensions;
+
 use crate::app::Ctx;
 use crate::error::Coded;
 use crate::paths::Env;
@@ -447,24 +449,7 @@ impl ProjectTools {
         };
 
         step(0);
-        before_start(cancel)?;
-        let version = [OsStr::new("--version")];
-        let printed = self
-            .start(
-                folder,
-                &vars,
-                &version,
-                self.deadlines.version,
-                VERSION_LIMIT,
-                cancel,
-            )
-            .map_err(|error| RunnerError::from_run(error, false))?;
-        let expected = format!("{RUNNER_NAME} {}", crate::VERSION);
-        if !printed.status.success()
-            || String::from_utf8_lossy(&printed.stdout).trim_end() != expected
-        {
-            return Err(RunnerError::Version);
-        }
+        self.check_version(folder, &vars, cancel)?;
 
         step(1);
         before_start(cancel)?;

@@ -3,5 +3,10 @@
   "ui": {
     "theme": "dark",
     "quick_start_dismissed": true
+  },
+  "wiki_index": {
+    "gbrain": "",
+    "bun_entry": "",
+    "ollama_port": 11434
   }
 }

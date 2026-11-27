@@ -6,10 +6,11 @@ use super::project::merge_top;
 use super::save::{Edit, SaveOutcome, check_owned, publish, reread, with_bom};
 use super::value::{Table, Value};
 use crate::fsx::LockOptions;
+use serde::Serialize;
 use std::path::Path;
 
 /// The top-level tables of `settings.toml` that OAH writes.
-pub const SETTINGS_TABLES: [&str; 4] = ["automation", "autoload", "history", "ui"];
+pub const SETTINGS_TABLES: [&str; 5] = ["automation", "autoload", "history", "ui", "wiki_index"];
 
 /// The automation levels of `[automation] level`.
 pub const AUTOMATION_LEVELS: [&str; 2] = ["auto-safe", "recommend-only"];
@@ -39,6 +40,23 @@ pub struct HistorySettings {
     pub retention_days: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WikiIndexDevice {
+    pub gbrain: String,
+    pub bun_entry: String,
+    pub ollama_port: u16,
+}
+
+impl Default for WikiIndexDevice {
+    fn default() -> Self {
+        Self {
+            gbrain: String::new(),
+            bun_entry: String::new(),
+            ollama_port: 11434,
+        }
+    }
+}
+
 /// The user preferences 1.0 reads in this slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsValues {
@@ -46,6 +64,7 @@ pub struct SettingsValues {
     pub autoload: AutoloadSettings,
     pub history: HistorySettings,
     pub ui: UiSettings,
+    pub wiki_index: WikiIndexDevice,
 }
 
 /// `OAH_HOME/settings.toml` as read. Other tables in the file are kept and not read here.
@@ -74,6 +93,14 @@ fn defaults(table: &str) -> Table {
         "ui" => {
             out.insert("theme", Value::from("auto"));
             out.insert("quick_start_dismissed", Value::from(false));
+        }
+        "wiki_index" => {
+            out.insert("gbrain", Value::from(""));
+            out.insert("bun_entry", Value::from(""));
+            out.insert(
+                "ollama_port",
+                Value::from(i64::from(WikiIndexDevice::default().ollama_port)),
+            );
         }
         _ => {}
     }
@@ -134,6 +161,13 @@ fn interpret(file: &ConfigFile) -> Result<(SettingsValues, Vec<Notice>), ConfigE
         &mut notices,
     )?;
     let ui = merge_top(where_, values, "ui", &defaults("ui"), &mut notices)?;
+    let wiki_index = merge_top(
+        where_,
+        values,
+        "wiki_index",
+        &defaults("wiki_index"),
+        &mut notices,
+    )?;
     let theme = ui
         .get("theme")
         .and_then(Value::as_str)
@@ -190,9 +224,52 @@ fn interpret(file: &ConfigFile) -> Result<(SettingsValues, Vec<Notice>), ConfigE
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             },
+            wiki_index: wiki_index_device(where_, &wiki_index)?,
         },
         notices,
     ))
+}
+
+fn wiki_index_device(where_: &str, values: &Table) -> Result<WikiIndexDevice, ConfigError> {
+    let fail = |message: &str| ConfigError::invalid(format!("{where_}: {message}"));
+    let read_path = |key| {
+        let value = values.get(key).and_then(Value::as_str).unwrap_or_default();
+        if !value.is_empty()
+            && (!Path::new(value).is_absolute()
+                || value.len() > 4096
+                || value.chars().any(char::is_control))
+        {
+            return Err(fail(
+                "gbrain and its Bun entry must be absolute local paths",
+            ));
+        }
+        Ok(value.to_owned())
+    };
+    let gbrain = read_path("gbrain")?;
+    let bun_entry = read_path("bun_entry")?;
+    if !bun_entry.is_empty()
+        && (!Path::new(&gbrain)
+            .file_stem()
+            .is_some_and(|name| name.eq_ignore_ascii_case("bun"))
+            || !Path::new(&bun_entry)
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("cli.ts")))
+    {
+        return Err(fail(
+            "a gbrain Bun entry requires the Bun executable and an absolute path to cli.ts",
+        ));
+    }
+    let port = values
+        .get("ollama_port")
+        .and_then(Value::as_integer)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| fail("wiki_index.ollama_port must be between 1 and 65535"))?;
+    Ok(WikiIndexDevice {
+        gbrain,
+        bun_entry,
+        ollama_port: port,
+    })
 }
 
 /// Saves `edits` to the settings file `snapshot` was read from, with the same guarantees as a project save:
