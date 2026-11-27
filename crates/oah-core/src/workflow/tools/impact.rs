@@ -158,14 +158,10 @@ fn tracked(git_dir: &Path) -> Tracked {
     Tracked::None
 }
 
-/// The map file of this checkout, when one exists: `<state>/impact/maps/<sha256 of the root path>.json`, where
-/// `<state>` is the source CLI's state folder (`<common dir>/oah` unless `OAH_STATE_DIR` is set) and the root
-/// path is the resolved one, as the source CLI's `root.resolve()` writes it. Only its presence as a regular file
-/// is checked.
 fn map_file(root: &Path, state: &Path, common_dir: &Path) -> Option<ToolPathDto> {
     let root = paths::canonical_folder(root).ok()?;
     let root = root.to_str()?;
-    let key: String = Sha256::digest(root.as_bytes())
+    let key: String = Sha256::digest(root.as_bytes())[..8]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();

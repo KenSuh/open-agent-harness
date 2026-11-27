@@ -247,9 +247,8 @@ fn a_committed_repository_is_ready_and_an_existing_map_file_is_named_without_a_f
         "a packed branch is still a commit"
     );
 
-    // Where the source CLI stores this checkout's map: <common dir>/oah/impact/maps/<sha256 of the root>.json.
     let opened = fixture.session.project().unwrap();
-    let key: String = Sha256::digest(opened.project.root.to_str().unwrap().as_bytes())
+    let key: String = Sha256::digest(opened.project.root.to_str().unwrap().as_bytes())[..8]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
