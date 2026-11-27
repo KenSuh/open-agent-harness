@@ -350,7 +350,7 @@ class StatusTest(IndexCase):
         self.assertEqual((result["ok"], result["state"], result["reasons"], result["active"], result["pending"]),
                          (True, "not_built", [], None, None))
         self.assertEqual(result["source"], {
-            "commit": self.head, "wiki_dir": "docs/wiki", "files": 4, "skipped": SKIPPED,
+            "commit": self.head, "wiki_dir": "docs/wiki", "exclude": [], "files": 4, "skipped": SKIPPED,
             "bytes": sum(len(FILES[path]) for path in SELECTED),
             "manifest_digest": result["source"]["manifest_digest"]})
         self.assertEqual(result["state_dir"], str(self.index_dir()))
@@ -422,6 +422,148 @@ class StatusTest(IndexCase):
         self.assertEqual((self.calls(), self.state_root.exists()), ([], False))
 
 
+class ExcludeTest(IndexCase):
+    """The globs below the wiki folder that a selection leaves out."""
+
+    LEFT_OUT = {"wiki_dir": "docs/wiki", "exclude": ["decisions/**"]}
+
+    def test_a_glob_is_matched_against_the_whole_path_below_the_wiki_folder(self):
+        notes = [path[len("docs/wiki/"):] for path in SELECTED]
+        cases = {
+            ("decisions/**",): [POSTGRES_NOTE, QUEUE_NOTE],
+            ("decisions",): [POSTGRES_NOTE, QUEUE_NOTE],
+            ("decisions/",): [POSTGRES_NOTE, QUEUE_NOTE],
+            ("decisions/*",): [POSTGRES_NOTE, QUEUE_NOTE],  # the note, and the folder 2026 with all below it
+            ("decisions/*.md",): [POSTGRES_NOTE],
+            ("decisions/**/*.md",): [POSTGRES_NOTE, QUEUE_NOTE],
+            ("**/0002-queue.md",): [QUEUE_NOTE],
+            ("**/retry-policy.md",): [RETRY_NOTE],  # ** may stand for no folder at all
+            ("decisions/20??/q[0-9]",): [QUEUE_NOTE],
+            ("decisions/20??/q[!0-9]",): [],
+            ("*.md",): [RETRY_NOTE],  # * stays inside one name
+            ("**/*.md",): SELECTED,
+            ("**",): SELECTED,
+            ("결정/**",): [CACHE_NOTE],
+            ("Decisions/**",): [],  # the case of a name counts
+            ("retry-policy",): [],  # a whole name, not the beginning of one
+            ("retry**",): [RETRY_NOTE],  # ** inside a name is one *
+            ("0001-use-postgres.md",): [],  # a path starts at the wiki folder, not where the name happens to be
+            ("decisions/0001-use-postgres.md", "결정/캐시-정책.md"): [POSTGRES_NOTE, CACHE_NOTE],
+        }
+        for globs, expected in cases.items():
+            with self.subTest(globs=globs):
+                exclude = wiki_index._exclusions(list(globs))
+                left_out = ["docs/wiki/" + note for note in notes if wiki_index._excluded(note.split("/"), exclude)]
+                self.assertEqual(sorted(left_out), sorted(expected))
+        self.assertEqual(wiki_index._exclusions(["", "drafts/", "drafts", "a/**", ""]), ("drafts", "a/**"))
+        self.assertEqual(wiki_index._exclusions(None), ())
+        self.assertFalse(wiki_index._excluded(["a" * 200], ("*a" * 60 + "*b",)))
+
+    def test_a_value_that_is_not_a_glob_below_the_wiki_folder_is_refused_not_ignored(self):
+        for bad in ("/etc/**", "../**", "a/../b", "./a", "a//b", "a\\b", "~/notes", "C:/notes/**", "notes:old/**",
+                    "a/ ", "a./b", "con/**", "a/NUL.md", "a\x01b", "a<b", 'a"b', "a|b", "x" * 513):
+            with self.subTest(glob=bad):
+                with self.assertRaises(wiki_index.Refusal) as caught:
+                    wiki_index._exclusions(["drafts/**", bad])
+                self.assertEqual(caught.exception.code, wiki_index.CODE_SELECTION)
+        with self.assertRaises(wiki_index.Refusal) as caught:
+            wiki_index._exclusions([f"folder-{number}/**" for number in range(101)])
+        self.assertEqual(caught.exception.code, wiki_index.CODE_SELECTION)
+        self.assertEqual(len(wiki_index._exclusions([f"folder-{number}/**" for number in range(100)])), 100)
+        for shape in ("drafts/**", [7], {"drafts/**": True}, 7, [None]):
+            with self.subTest(shape=shape):
+                with self.assertRaises(wiki_index.Refusal) as caught:
+                    wiki_index._exclusions(shape)
+                self.assertEqual(caught.exception.code, wiki_index.CODE_USAGE)
+        selection = {"wiki_dir": "docs/wiki", "exclude": ["drafts/**", "../secret/**"]}
+        answers = (self.status(selection=selection), self.build(selection=selection),
+                   self.search("ledger", selection=selection),
+                   wiki_index.text_search(self.repo, "ledger", selection=selection))
+        self.assertEqual([(answer["ok"], answer["code"]) for answer in answers],
+                         [(False, wiki_index.CODE_SELECTION)] * 4)
+        self.assertEqual((self.calls(), self.state_root.exists()), ([], False))
+
+    def test_an_index_holds_only_the_notes_the_selection_keeps(self):
+        built = self.build(selection=self.LEFT_OUT)
+        self.assertEqual((built["ok"], built["state"]), (True, "ready"), built)
+        source, active = built["source"], built["active"]
+        self.assertEqual((source["files"], source["skipped"]["excluded"], source["exclude"], active["files"],
+                          active["exclude"]), (2, 2, ["decisions/**"], 2, ["decisions/**"]))
+        manifest = self.manifest()
+        self.assertEqual(([entry["path"] for entry in manifest["entries"]], manifest["source"]["exclude"]),
+                         ([RETRY_NOTE, CACHE_NOTE], ["decisions/**"]))
+        self.assertEqual(len(list((self.generation() / "mirror").glob("*.md"))), 2)
+        found = self.search("ledger postgres retry", selection=self.LEFT_OUT)
+        self.assertEqual((found["mode"], {row["path"] for row in found["results"]}, found["dropped"]),
+                         ("semantic", {RETRY_NOTE}, 0))
+        text = wiki_index.search(self.repo, "ledger", selection=self.LEFT_OUT, state_root=self.state_root)
+        self.assertEqual((text["mode"], text["results"]), ("text", []))
+        self.assertEqual(wiki_index.text_search(self.repo, "ledger", selection=self.LEFT_OUT)["notes"], 2)
+        self.assertEqual(wiki_index.text_search(self.repo, "ledger")["notes"], 4)
+        as_object = wiki_index.Selection("docs/wiki", ("decisions/",))
+        self.assertEqual(self.status(selection=as_object)["state"], "ready")
+
+    def test_exclusions_that_change_after_a_build_hold_at_once_and_make_the_index_stale(self):
+        self.assertTrue(self.build()["ok"])
+        stale = self.status(selection=self.LEFT_OUT)
+        self.assertEqual((stale["state"], stale["reasons"], stale["source"]["exclude"], stale["active"]["exclude"]),
+                         ("stale", ["selection_changed"], ["decisions/**"], []))
+        found = self.search("ledger postgres retry", selection=self.LEFT_OUT)
+        self.assertEqual((found["mode"], found["index"]["reasons"], {row["path"] for row in found["results"]}),
+                         ("semantic", ["selection_changed"], {RETRY_NOTE}))
+        self.assertGreaterEqual(found["dropped"], 2, "the notes left out now were not held back")
+        same = self.status(selection={"wiki_dir": "docs/wiki", "exclude": ["drafts/**"]})
+        self.assertEqual((same["state"], same["reasons"]), ("ready", []), "a glob that leaves out no note")
+        again = self.build(selection=self.LEFT_OUT)
+        self.assertEqual((again["changed"], again["state"], again["active"]["files"]), (True, "ready", 2))
+        back = self.status()
+        self.assertEqual((back["state"], back["reasons"]), ("stale", ["selection_changed"]))
+        git_commit(self.repo, {RETRY_NOTE: FILES[RETRY_NOTE] + b"\nOne more line.\n"}, "edit")
+        self.assertEqual(self.status(selection=self.LEFT_OUT)["reasons"], ["content_changed"])
+
+    def test_an_index_of_another_wiki_folder_does_not_answer(self):
+        self.assertTrue(self.build()["ok"])
+        found = self.search("outside", selection={"wiki_dir": "docs/other"})
+        self.assertEqual((found["mode"], found["fallback"]["code"], found["index"]["reasons"]),
+                         ("text", wiki_index.CODE_NOT_BUILT, ["selection_changed"]))
+        self.assertEqual([row["path"] for row in found["results"]], ["docs/other/outside.md"])
+
+
+class SummaryTest(IndexCase):
+    def summary(self, folder: object = None) -> dict:
+        def refuse(*_args: object, **_options: object) -> None:
+            raise AssertionError("summary started a program")
+
+        with mock.patch.multiple(wiki_index, run_command=refuse, repo_info=refuse, git_argv=refuse):
+            return wiki_index.summary(self.repo if folder is None else folder, state_root=self.state_root)
+
+    def test_summary_reads_the_two_records_and_starts_nothing(self):
+        self.assertEqual(self.summary(), {
+            "schema": 1, "ok": True, "action": "summary", "state": "not_built", "reasons": [],
+            "worktree": os.path.realpath(self.repo), "active": None, "pending": None,
+            "state_dir": str(self.index_dir())})
+        self.assertFalse(self.state_root.exists(), "summary created the state folder")
+        self.control(fail=["embed"])
+        stopped = self.build()
+        waiting = self.summary()
+        self.assertEqual((waiting["state"], waiting["active"], waiting["pending"]),
+                         ("incomplete", None, stopped["pending"]))
+        self.control()
+        built = self.build()
+        calls, requests, files = len(self.calls()), list(self.ollama.requests), tree(self.state_root)
+        inside_it = self.summary(self.repo / "docs" / "wiki")
+        self.assertEqual((inside_it["state"], inside_it["active"], inside_it["pending"], inside_it["state_dir"],
+                          inside_it["worktree"]),
+                         ("built", built["active"], None, built["state_dir"], built["worktree"]))
+        self.assertEqual((len(self.calls()), self.ollama.requests, tree(self.state_root)), (calls, requests, files))
+        (self.index_dir() / "current.json").write_text("{ not json", encoding="utf-8")
+        damaged = self.summary()
+        self.assertEqual((damaged["state"], damaged["reasons"], damaged["active"]),
+                         ("not_built", ["state_unreadable"], None))
+        outside = wiki_index.summary(pathlib.Path(self.repo.anchor), state_root=self.state_root)
+        self.assertEqual((outside["ok"], outside["code"]), (False, wiki_index.CODE_NOT_A_REPO))
+
+
 class BuildTest(IndexCase):
     def test_build_mirrors_the_verified_blobs_and_records_the_index(self):
         result = self.build()
@@ -436,7 +578,7 @@ class BuildTest(IndexCase):
         self.assertEqual(sorted(path.name for path in mirror.iterdir() if path.name != ".git"),
                          sorted(f"{entry['id']}.md" for entry in manifest["entries"]))
         self.assertEqual(manifest["source"], {"worktree": os.path.realpath(self.repo), "commit": self.head,
-                                              "wiki_dir": "docs/wiki", "object_format": "sha1"})
+                                              "wiki_dir": "docs/wiki", "exclude": [], "object_format": "sha1"})
         active = result["active"]
         self.assertEqual((active["commit"], active["files"], active["pages"], active["chunks"], active["unindexed"]),
                          (self.head, 4, 4, 12, {"count": 0, "paths": []}))
@@ -1005,6 +1147,11 @@ class BridgeTest(IndexCase):
         self.assertEqual((code, result["ok"], result["state"], result["source"]["files"]), (0, True, "not_built", 4))
         code, result = self.ask(dict(base, action="build", tools=self.tools))
         self.assertEqual((code, result["ok"], result["state"]), (0, True, "ready"), result)
+        code, result = self.ask(dict(base, action="summary"))
+        self.assertEqual((code, result["state"], result["active"]["files"]), (0, "built", 4))
+        code, result = self.ask({"action": "text_search", "worktree": str(self.repo), "query": "durable queue",
+                                 "selection": {"wiki_dir": "docs/wiki", "exclude": ["decisions/**"]}})
+        self.assertEqual((code, result["notes"], result["results"]), (0, 2, []))
         code, result = self.ask(dict(base, action="search", tools=self.tools, query="ledger joins", limit=1))
         self.assertEqual((code, result["mode"], result["results"][0]["path"]), (0, "semantic", POSTGRES_NOTE))
         code, result = self.ask({"action": "text_search", "worktree": str(self.repo), "query": "durable queue"})

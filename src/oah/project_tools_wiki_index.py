@@ -8,6 +8,15 @@ log_archive_* and index_archive_* files, files that are not .md, symbolic links 
 is itself hidden or inside such a folder is refused. The list is bounded (Limits) and every blob is checked against
 its Git object id before it is mirrored.
 
+What a selection leaves out. Selection.exclude lists globs below the wiki folder, such as drafts/** (the value of
+[project_tools.wiki_index] exclude in .oah/config.toml, which the caller passes; this module does not read that
+table). A glob is matched, case-sensitively, against a note's whole path below the wiki folder: * ? and [...] stay
+inside one name, ** as a whole name stands for any number of folders, and a glob that matches a folder leaves out
+everything below it (drafts, drafts/ and drafts/** say the same). A glob must be portable by the rule of that file:
+relative, written with /, without a . or .. part, a drive or a scheme, in names Windows can hold. One that is not is
+refused, never ignored. The exclusions hold for the snapshot, for the text search, and for the results of an index
+that was built before they changed.
+
 Where it writes. Nothing in the repository. Each worktree has one folder in the per-user state folder:
 
     <OAH_HOME or ~/.oah>/state/wiki-index/<id>/        id = worktree_id(canonical worktree root)
@@ -29,9 +38,11 @@ literal loopback address and from a model that server already has. This module n
 pulls or deletes anything, and it refuses a model the server marks as remote. It does not confine the tool's own
 network use with an operating-system sandbox; it gives the tool no credential and no address but the loopback one.
 
-Calls. status() only reads (Git objects and the files above): it sends no request, runs no tool and creates no
-file, folder or lock, so it is safe when a project is merely opened. probe(), build() and search() are explicit
-actions. Every call returns a JSON-ready dict with "schema" and "ok"; an expected stop is data,
+Calls. summary() reads current.json and pending.json and nothing else: it starts no Git, sends no request, runs no
+tool and creates nothing, so it is the call for a surface that is merely opened; it cannot tell a current index
+from a stale one. status() tells, and for that it also reads Git objects; it still sends no request, runs no tool
+and creates no file, folder or lock. probe(), build() and search() are explicit actions. Every call returns a
+JSON-ready dict with "schema" and "ok"; an expected stop is data,
 {"ok": false, "code": "OAH_WIKI_INDEX_...", "message": ...}, never an exception. search() answers from the index
 when it can and otherwise from text_search() over the working tree, and says why in "fallback". A search result
 names the note's repository-relative path, its title, the nearest heading and the 1-based line (for a result of the
@@ -41,11 +52,14 @@ tool's own number: compare it only with the other scores of the same answer.
 
 Without importing Python: "python -m oah.project_tools_wiki_index" reads one JSON request {"action": ..., ...} on
 standard input and writes one JSON result on standard output (exit 0 when "ok", 1 when refused, 2 for a bad request;
-3 with a traceback on standard error and nothing on standard output for a defect of this module).
+3 with a traceback on standard error and nothing on standard output for a defect of this module). A request is
+trusted like program arguments: its caller makes "tools" and "state_root" itself and never copies them from a file
+of the project or from a page.
 """
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import hashlib
 import http.client
 import ipaddress
@@ -76,7 +90,7 @@ from oah.wiki.markdown import FenceTracker, strip_eol
 from oah.wiki.notes import frontmatter_span, parse_frontmatter
 
 __all__ = ["Limits", "LocalTools", "Selection", "Timeouts", "build", "handle", "main", "probe", "search", "status",
-           "text_search", "user_state_root", "worktree_id"]
+           "summary", "text_search", "user_state_root", "worktree_id"]
 
 SCHEMA = 1
 RULE = 1  # the selection rule below; a change makes every existing index stale
@@ -109,6 +123,10 @@ CODE_BUSY = "OAH_WIKI_INDEX_BUSY"
 CODE_STATE = "OAH_WIKI_INDEX_STATE"
 
 _SKIP_FOLDERS = {"raw": "raw", "templates": "template", "archive": "archive", "archives": "archive"}
+_MAX_EXCLUDES = 100
+_MAX_GLOB_BYTES = 512
+_RESERVED_NAMES = frozenset(("CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)),
+                             *(f"LPT{n}" for n in range(1, 10))))
 _NAVIGATION = ("index.md", "log.md")
 _ARCHIVE_PREFIXES = (ARCHIVE_PREFIX, "index_archive_")
 _REGULAR_MODES = ("100644", "100755")
@@ -180,9 +198,10 @@ class Timeouts:
 
 @dataclass(frozen=True)
 class Selection:
-    """The wiki folder to index, as a repository-relative POSIX path."""
+    """The wiki folder to index, as a repository-relative POSIX path, and the globs below it that are left out."""
 
     wiki_dir: str
+    exclude: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -220,6 +239,7 @@ class _Snapshot:
     digest: str
     total_bytes: int
     skipped: dict
+    exclude: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -333,37 +353,51 @@ def _place(worktree: os.PathLike | str, state_root: os.PathLike | str | None,
         raise Refusal(CODE_USAGE, "worktree must be the project folder's path")
     info = repo_info(pathlib.Path(worktree))
     root = pathlib.Path(os.path.realpath(info.root))
-    index_dir, problem = None, None
-    try:
-        if stateless:
-            base = None
-        elif state_root is None:
-            base = user_state_root(env)
-        else:
-            if not isinstance(state_root, (str, os.PathLike)) or not os.fspath(state_root):
-                raise Refusal(CODE_USAGE, "state_root must be an absolute folder path")
-            base = pathlib.Path(state_root)
-            if not base.is_absolute():
-                raise Refusal(CODE_USAGE, "state_root must be an absolute folder path")
-        if base is not None:
-            index_dir = base / STATE_FOLDER / worktree_id(root)
-    except Refusal as exc:
-        if exc.code == CODE_USAGE:
-            raise
-        problem = exc
+    index_dir, problem = (None, None) if stateless else _index_folder(root, state_root, env)
     return _Place(root, pathlib.Path(os.path.realpath(info.common_dir)), info.head, index_dir, problem)
 
 
+def _index_folder(root: pathlib.Path, state_root: os.PathLike | str | None,
+                  env: Mapping[str, str] | None) -> tuple[pathlib.Path | None, Refusal | None]:
+    """(the index folder of the worktree with this canonical root, None), or (None, why the per-user state folder
+    is unknown)."""
+    if state_root is None:
+        try:
+            base = user_state_root(env)
+        except Refusal as exc:
+            return None, exc
+    else:
+        if not isinstance(state_root, (str, os.PathLike)) or not os.fspath(state_root):
+            raise Refusal(CODE_USAGE, "state_root must be an absolute folder path")
+        base = pathlib.Path(state_root)
+        if not base.is_absolute():
+            raise Refusal(CODE_USAGE, "state_root must be an absolute folder path")
+    return base / STATE_FOLDER / worktree_id(root), None
+
+
+def _top_folder(start: os.PathLike | str) -> pathlib.Path:
+    """The canonical top folder of the project start lies in, found without starting Git: the nearest folder at or
+    above start that has a .git entry, which is the folder Git names for a checkout and for a linked worktree."""
+    current = pathlib.Path(os.path.abspath(start))
+    while not os.path.lexists(current / ".git"):
+        if current.parent == current:
+            raise Refusal(CODE_NOT_A_REPO, f"{os.fspath(start)} is not inside a Git project. Open the project "
+                          "folder.")
+        current = current.parent
+    return pathlib.Path(os.path.realpath(current))
+
+
 def _selection(place: _Place, selection: object) -> Selection:
+    exclude: object = None
     if selection is None:
         directory = WikiSettings.from_mapping(load_config(place.root).section("wiki", WIKI_DEFAULTS)).dir
     elif isinstance(selection, Selection):
-        directory = selection.wiki_dir
+        directory, exclude = selection.wiki_dir, selection.exclude
     elif isinstance(selection, Mapping):
-        unknown = sorted(set(selection) - {"wiki_dir"})
+        unknown = sorted(set(selection) - {"wiki_dir", "exclude"})
         if unknown:
-            raise Refusal(CODE_USAGE, f"unknown selection key {unknown[0]}; the only key is wiki_dir")
-        directory = selection.get("wiki_dir")
+            raise Refusal(CODE_USAGE, f"unknown selection key {unknown[0]}; the keys are wiki_dir and exclude")
+        directory, exclude = selection.get("wiki_dir"), selection.get("exclude")
     else:
         raise Refusal(CODE_USAGE, 'selection must be an object such as {"wiki_dir": "docs/wiki"}')
     if not isinstance(directory, str):
@@ -381,7 +415,94 @@ def _selection(place: _Place, selection: object) -> Selection:
     if any(part.casefold() in _SKIP_FOLDERS for part in parts):
         raise Refusal(CODE_SELECTION, f"{directory!r} is in a raw, templates or archive folder, and that material "
                       "is never indexed or searched. Select the wiki folder itself.")
-    return Selection("/".join(parts))
+    return Selection("/".join(parts), _exclusions(exclude))
+
+
+def _exclusions(value: object) -> tuple[str, ...]:
+    """The globs of a selection in the order given, each once and without its closing /; an empty string names
+    nothing and is dropped. A value that is not a glob below the wiki folder is refused, so that nothing a project
+    meant to leave out is read because its glob was not understood."""
+    if value is None:
+        return ()
+    if (isinstance(value, (str, bytes)) or not isinstance(value, Sequence)
+            or not all(isinstance(item, str) for item in value)):
+        raise Refusal(CODE_USAGE, 'selection.exclude must be a list of globs such as ["drafts/**"]')
+    globs: dict[str, None] = {}
+    for item in value:
+        if not item:
+            continue
+        problem = _glob_problem(item)
+        if problem is not None:
+            raise Refusal(CODE_SELECTION, f"selection.exclude has {item[:80]!r}, which is not a glob below the wiki "
+                          f"folder: {problem}. Write it with / and without a drive, such as drafts/**.")
+        globs[item.removesuffix("/")] = None
+    if len(globs) > _MAX_EXCLUDES:
+        raise Refusal(CODE_SELECTION, f"selection.exclude has {len(globs)} globs and at most {_MAX_EXCLUDES} are "
+                      "taken. Leave out whole folders, such as drafts/**, instead of single notes.")
+    return tuple(globs)
+
+
+def _glob_problem(text: str) -> str | None:
+    """Why text is not a portable glob below the wiki folder, or None when it is one. The rule is the one
+    .oah/config.toml has for its globs; one closing / is accepted."""
+    if len(text.encode("utf-8", "surrogatepass")) > _MAX_GLOB_BYTES:
+        return f"it is longer than {_MAX_GLOB_BYTES} bytes"
+    if "\\" in text:
+        return "it uses a backslash"
+    if text.startswith("/"):
+        return "it is an absolute path"
+    if text.startswith("~"):
+        return "it starts with ~"
+    if ":" in text:
+        return "it names a drive, a scheme or a stream"
+    if any(char < " " or char == "\x7f" for char in text):
+        return "it has a control character"
+    if any(char in '<>"|' for char in text):
+        return "it has a character Windows does not allow in names"
+    for part in text.removesuffix("/").split("/"):
+        if not part:
+            return "it has an empty name between two /"
+        if part in (".", ".."):
+            return "it has a . or .. part"
+        if part.endswith((".", " ")):
+            return "a name in it ends with a dot or a space"
+        stem = part.split(".")[0]
+        if stem.isascii() and stem.upper() in _RESERVED_NAMES:
+            return "it uses a name Windows reserves"
+    return None
+
+
+def _excluded(parts: Sequence[str], exclude: Sequence[str]) -> bool:
+    """Whether a path below the wiki folder is left out: a glob matches it, or a folder it lies in. A glob is
+    followed name by name through every reading of its ** at once, so the work is bounded by the two lengths."""
+    for glob in exclude:
+        names = glob.split("/")
+        reached = _spread(names, {0})
+        for part in parts:
+            moved = set()
+            for at in reached:
+                if at == len(names):
+                    continue
+                if names[at] == "**":
+                    moved.add(at)
+                elif fnmatch.fnmatchcase(part, names[at]):
+                    moved.add(at + 1)
+            reached = _spread(names, moved)
+            if len(names) in reached:
+                return True
+            if not reached:
+                break
+    return False
+
+
+def _spread(names: Sequence[str], reached: set[int]) -> set[int]:
+    """A ** may stand for no folder at all: the place after one is reached as soon as the ** is."""
+    out = set(reached)
+    for at in reached:
+        while at < len(names) and names[at] == "**":
+            at += 1
+            out.add(at)
+    return out
 
 
 def _unsafe_name(part: str) -> bool:
@@ -511,6 +632,8 @@ def _snapshot(place: _Place, commit: str, selection: Selection, limits: Limits, 
             skip("unsafe_name")
         elif (reason := _skip_reason(parts)) is not None:
             skip(reason)
+        elif _excluded(parts, selection.exclude):
+            skip("excluded")
         elif len(name.encode("utf-8")) > limits.max_path_bytes:
             skip("path_too_long")
         elif int(size) == 0:
@@ -527,12 +650,12 @@ def _snapshot(place: _Place, commit: str, selection: Selection, limits: Limits, 
                       f"{limits.max_total_bytes} bytes. Select a smaller wiki folder, or use text search.")
     if not entries:
         raise Refusal(CODE_NO_NOTES, f"{selection.wiki_dir} has no note to index at {commit[:12]} (only navigation, "
-                      "archive, raw, hidden or non-Markdown files). Add a note and commit it.")
+                      "archive, raw, hidden, excluded or non-Markdown files). Add a note and commit it.")
     digest = hashlib.sha256(f"oah-wiki-index {RULE}\n{selection.wiki_dir}\n".encode("utf-8"))
     for entry in entries:
         digest.update(f"{entry.oid} {entry.path}\n".encode("utf-8"))
     return _Snapshot(commit, selection.wiki_dir, "sha256" if len(commit) == 64 else "sha1", tuple(entries),
-                     digest.hexdigest(), total, dict(sorted(skipped.items())))
+                     digest.hexdigest(), total, dict(sorted(skipped.items())), selection.exclude)
 
 
 def _read_blobs(place: _Place, snapshot: _Snapshot, timeouts: Timeouts) -> Iterator[tuple[_Entry, bytes]]:
@@ -594,8 +717,8 @@ def _local_tools(value: object) -> LocalTools | None:
         raise Refusal(CODE_USAGE, "tools must be an object with gbrain, ollama_url and embedding_model")
     dimensions = value.embedding_dimensions
     if (not value.gbrain or len(value.gbrain) > 16
-            or not all(isinstance(part, str) and part and len(part) <= 1024 and not _unsafe_name(part.replace("\\", "/"))
-                       for part in value.gbrain)
+            or not all(isinstance(part, str) and part and len(part) <= 1024
+                       and not _unsafe_name(part.replace("\\", "/")) for part in value.gbrain)
             or not isinstance(value.ollama_url, str) or not isinstance(value.embedding_model, str)
             or not (dimensions is None or (isinstance(dimensions, int) and not isinstance(dimensions, bool)
                                            and 1 <= dimensions <= 65536))):
@@ -916,13 +1039,21 @@ def _generation_name(record: Mapping) -> bool:
 
 
 def _view(record: Mapping | None, keys: Sequence[str]) -> dict | None:
-    return None if record is None else {key: record.get(key) for key in keys}
+    if record is None:
+        return None
+    return {key: _stored_exclude(record) if key == "exclude" else record.get(key) for key in keys}
 
 
-_ACTIVE_KEYS = ("generation", "commit", "wiki_dir", "manifest_digest", "files", "bytes", "pages", "chunks",
-                "unindexed", "model", "ollama_url", "tool", "built_at")
-_PENDING_KEYS = ("generation", "commit", "wiki_dir", "manifest_digest", "files", "phase", "done", "started_at",
-                 "updated_at", "attempts", "error")
+def _stored_exclude(record: Mapping) -> list[str]:
+    """The globs a record was made with; a record from before there were any has none."""
+    value = record.get("exclude")
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+_ACTIVE_KEYS = ("generation", "commit", "wiki_dir", "exclude", "manifest_digest", "files", "bytes", "pages",
+                "chunks", "unindexed", "model", "ollama_url", "tool", "built_at")
+_PENDING_KEYS = ("generation", "commit", "wiki_dir", "exclude", "manifest_digest", "files", "phase", "done",
+                 "started_at", "updated_at", "attempts", "error")
 
 
 def _freshness(active: Mapping | None, pending: Mapping | None, snapshot: _Snapshot | Refusal,
@@ -936,7 +1067,9 @@ def _freshness(active: Mapping | None, pending: Mapping | None, snapshot: _Snaps
     elif snapshot.wiki_dir != active.get("wiki_dir"):
         reasons.append("selection_changed")
     elif snapshot.digest != active.get("manifest_digest") or active.get("rule") != RULE:
-        reasons.append("content_changed")
+        # Other notes are selected: because the globs differ, or else because the notes themselves do.
+        reasons.append("selection_changed" if list(snapshot.exclude) != _stored_exclude(active)
+                       else "content_changed")
     if tools is not None:
         model = active["model"]
         try:
@@ -952,8 +1085,9 @@ def _freshness(active: Mapping | None, pending: Mapping | None, snapshot: _Snaps
 def _source_view(snapshot: _Snapshot | Refusal) -> dict:
     if isinstance(snapshot, Refusal):
         return {"error": {"code": snapshot.code, "message": snapshot.message}}
-    return {"commit": snapshot.commit, "wiki_dir": snapshot.wiki_dir, "manifest_digest": snapshot.digest,
-            "files": len(snapshot.entries), "bytes": snapshot.total_bytes, "skipped": snapshot.skipped}
+    return {"commit": snapshot.commit, "wiki_dir": snapshot.wiki_dir, "exclude": list(snapshot.exclude),
+            "manifest_digest": snapshot.digest, "files": len(snapshot.entries), "bytes": snapshot.total_bytes,
+            "skipped": snapshot.skipped}
 
 
 def _describe(place: _Place, selection: Selection, tools: LocalTools | None, limits: Limits,
@@ -990,6 +1124,30 @@ def status(worktree: os.PathLike | str, *, selection: object = None, tools: obje
                 **_describe(place, _selection(place, selection), _local_tools(tools), limits, timeouts)}
     except _EXPECTED as exc:
         return _refused("status", exc)
+
+
+def summary(worktree: os.PathLike | str, *, state_root: os.PathLike | str | None = None,
+            env: Mapping[str, str] | None = None) -> dict:
+    """What the state folder holds for the project worktree lies in: "state" is not_built, incomplete or built,
+    with the same "active" and "pending" records as status(). Reads current.json and pending.json and nothing
+    else: no Git is started, no request sent, no tool run, nothing created. So "built" covers a current index and
+    a stale one alike; status() tells them apart."""
+    try:
+        if not isinstance(worktree, (str, os.PathLike)) or not os.fspath(worktree):
+            raise Refusal(CODE_USAGE, "worktree must be the project folder's path")
+        root = _top_folder(worktree)
+        index_dir, problem = _index_folder(root, state_root, env)
+        if index_dir is None:
+            raise problem or Refusal(CODE_STATE, "the per-user index folder is unknown")
+        active, pending = _load_state(index_dir)
+        state = "built" if active is not None else "incomplete" if pending is not None else "not_built"
+        unreadable = active is None and os.path.lexists(index_dir / "current.json")
+        return {"schema": SCHEMA, "ok": True, "action": "summary", "state": state,
+                "reasons": ["state_unreadable"] if unreadable else [], "worktree": str(root),
+                "active": _view(active, _ACTIVE_KEYS), "pending": _view(pending, _PENDING_KEYS),
+                "state_dir": str(index_dir)}
+    except _EXPECTED as exc:
+        return _refused("summary", exc)
 
 
 def probe(worktree: os.PathLike | str, tools: object, *, state_root: os.PathLike | str | None = None,
@@ -1073,7 +1231,7 @@ def _phase_mirror(place: _Place, snapshot: _Snapshot, run: _Run) -> dict:
     head = _mirror_git(run, "rev-parse", "HEAD").stdout.strip()
     manifest = {"schema": SCHEMA, "rule": RULE, "digest": snapshot.digest, "salt": salt, "mirror_commit": head,
                 "source": {"worktree": str(place.root), "commit": snapshot.commit, "wiki_dir": snapshot.wiki_dir,
-                           "object_format": snapshot.object_format},
+                           "exclude": list(snapshot.exclude), "object_format": snapshot.object_format},
                 "entries": entries}
     write_json_atomic(gen.manifest, manifest)
     return manifest
@@ -1257,8 +1415,9 @@ def _build_locked(place: _Place, index_dir: pathlib.Path, generations: pathlib.P
         record = {"schema": SCHEMA, "generation": gen.name, "fingerprint": fingerprint, "started_at": _now(),
                   "attempts": 0}
     _private(gen.tmp)
-    record.update(commit=snapshot.commit, wiki_dir=snapshot.wiki_dir, manifest_digest=snapshot.digest,
-                  files=len(snapshot.entries), attempts=int(record.get("attempts") or 0) + 1, error=None)
+    record.update(commit=snapshot.commit, wiki_dir=snapshot.wiki_dir, exclude=list(snapshot.exclude),
+                  manifest_digest=snapshot.digest, files=len(snapshot.entries),
+                  attempts=int(record.get("attempts") or 0) + 1, error=None)
     run = _Run(command, base, gen, timeouts)
 
     def note(phase: str) -> None:
@@ -1297,8 +1456,9 @@ def _build_locked(place: _Place, index_dir: pathlib.Path, generations: pathlib.P
     write_json_atomic(index_dir / "current.json", {
         "schema": SCHEMA, "rule": RULE, "generation": gen.name, "fingerprint": fingerprint,
         "worktree": str(place.root), "commit": snapshot.commit, "wiki_dir": snapshot.wiki_dir,
-        "manifest_digest": snapshot.digest, "files": len(snapshot.entries), "bytes": snapshot.total_bytes,
-        "pages": pages, "chunks": chunks, "unindexed": unindexed, "ollama_url": base, "built_at": _now(),
+        "exclude": list(snapshot.exclude), "manifest_digest": snapshot.digest, "files": len(snapshot.entries),
+        "bytes": snapshot.total_bytes, "pages": pages, "chunks": chunks, "unindexed": unindexed,
+        "ollama_url": base, "built_at": _now(),
         "model": {"name": model.name, "resolved": model.resolved, "digest": model.digest,
                   "dimensions": model.dimensions},
         "tool": {"command": list(command), "version": version}})
@@ -1479,10 +1639,10 @@ def _working_notes(place: _Place, selection: Selection, limits: Limits) -> tuple
             if _is_link(info) or _unsafe_name(child.name):
                 continue
             if stat.S_ISDIR(info.st_mode):
-                if _skip_reason((*name, "note.md")) is None:
+                if _skip_reason((*name, "note.md")) is None and not _excluded(name, selection.exclude):
                     folders.append((name, pathlib.Path(child.path)))
             elif (stat.S_ISREG(info.st_mode) and _skip_reason(name) is None
-                  and 0 < info.st_size <= limits.max_file_bytes):
+                  and not _excluded(name, selection.exclude) and 0 < info.st_size <= limits.max_file_bytes):
                 if len(found) >= limits.max_files:
                     return found, True
                 found.append(("/".join((selection.wiki_dir, *name)), pathlib.Path(child.path)))
@@ -1577,8 +1737,8 @@ def _stored_model(active: Mapping, tools: LocalTools) -> Mapping:
     return stored
 
 
-def _index_hits(place: _Place, tools: LocalTools | None, query: str, count: int, limits: Limits,
-                timeouts: Timeouts) -> dict:
+def _index_hits(place: _Place, tools: LocalTools | None, selection: Selection, query: str, count: int,
+                limits: Limits, timeouts: Timeouts) -> dict:
     """Results from the last good index, or a Refusal that says why it cannot answer now."""
     if tools is None:
         raise Refusal(CODE_TOOL_NOT_CONFIGURED, "no local search tools are configured on this machine, so the "
@@ -1594,6 +1754,9 @@ def _index_hits(place: _Place, tools: LocalTools | None, query: str, count: int,
                           "continue; until then the notes are searched as text.")
         raise Refusal(CODE_NOT_BUILT, "the wiki index has not been built. Build it to search by meaning; until "
                       "then the notes are searched as text.")
+    if active.get("wiki_dir") != selection.wiki_dir:
+        raise Refusal(CODE_NOT_BUILT, f"the wiki index was built for {active.get('wiki_dir')} and the wiki folder "
+                      f"is now {selection.wiki_dir}. Build it again; until then the notes are searched as text.")
     _stored_model(active, tools)
     served = _ollama_model(base, tools.embedding_model, timeouts)
     generations = _private(place.index_dir / "generations")
@@ -1609,7 +1772,7 @@ def _index_hits(place: _Place, tools: LocalTools | None, query: str, count: int,
                               "was built. Build the index again; until then the notes are searched as text.")
             gen = _Generation(generations / active["generation"])
             _private(gen.tmp)
-            return _answer(place, _Run(command, base, gen, timeouts), active, query, count, limits)
+            return _answer(place, _Run(command, base, gen, timeouts), active, selection, query, count, limits)
     except LockTimeout:
         raise Refusal(CODE_BUSY, "another search is using the wiki index. Retry in a moment.") from None
 
@@ -1620,7 +1783,8 @@ _MATCH = {"exact_title_match": "strong", "high_vector_match": "strong", "keyword
           "weak_semantic": "weak"}
 
 
-def _answer(place: _Place, run: _Run, active: Mapping, query: str, count: int, limits: Limits) -> dict:
+def _answer(place: _Place, run: _Run, active: Mapping, selection: Selection, query: str, count: int,
+            limits: Limits) -> dict:
     gen = run.gen
     manifest = _record(gen.manifest)
     entries = manifest.get("entries") if isinstance(manifest, dict) else None
@@ -1644,6 +1808,7 @@ def _answer(place: _Place, run: _Run, active: Mapping, query: str, count: int, l
     seen: set[tuple[str, int]] = set()
     dropped = 0
     terms = _query_terms(query)
+    prefix = selection.wiki_dir + "/"
     for row in rows:
         slug = row.get("slug") if isinstance(row, Mapping) else None
         entry = by_id.get(slug.rsplit("/", 1)[-1]) if isinstance(slug, str) else None
@@ -1651,6 +1816,9 @@ def _answer(place: _Place, run: _Run, active: Mapping, query: str, count: int, l
             dropped += 1  # a page this index cannot tie to one note is never guessed at
             continue
         path = entry["path"]
+        if not path.startswith(prefix) or _excluded(path[len(prefix):].split("/"), selection.exclude):
+            dropped += 1  # the index is older than the selection: a note that is left out now is not shown
+            continue
         if path not in notes:
             try:
                 content = (gen.mirror / f"{entry['id']}.md").read_bytes()
@@ -1715,7 +1883,7 @@ def search(worktree: os.PathLike | str, query: str, *, tools: object = None, sel
                      "pending": False, "unindexed": None}
         try:
             return {**answer, "mode": "semantic", "fallback": None, "index": index,
-                    **_index_hits(place, local, text, count, limits, timeouts)}
+                    **_index_hits(place, local, chosen, text, count, limits, timeouts)}
         except _EXPECTED as exc:
             why = _as_refusal(exc)
         answer.update(fallback={"code": why.code, "message": why.message}, index=index)
@@ -1730,6 +1898,7 @@ def search(worktree: os.PathLike | str, query: str, *, tools: object = None, sel
 # ---- one JSON request in, one JSON result out ----
 
 _REQUEST_KEYS = {
+    "summary": ("state_root",),
     "status": ("selection", "tools", "state_root"),
     "probe": ("tools", "state_root"),
     "build": ("tools", "selection", "commit", "rebuild", "state_root"),
@@ -1740,8 +1909,8 @@ _MAX_REQUEST_BYTES = 1_048_576
 
 
 def handle(request: object) -> dict:
-    """Answer one request object: {"action": one of status, probe, build, search, text_search, "worktree": ..., and
-    that action's keyword arguments}."""
+    """Answer one request object: {"action": one of summary, status, probe, build, search, text_search,
+    "worktree": ..., and that action's keyword arguments}."""
     action = request.get("action") if isinstance(request, Mapping) else None
     if action not in _REQUEST_KEYS:
         return _refused(str(action), Refusal(CODE_USAGE, "the request must be a JSON object whose action is one of "
@@ -1752,6 +1921,8 @@ def handle(request: object) -> dict:
         return _refused(action, Refusal(CODE_USAGE, f"unknown key {unknown[0]} for {action}" if unknown
                                         else "worktree must be the project folder's path"))
     options = {key: request[key] for key in _REQUEST_KEYS[action] if key in request}
+    if action == "summary":
+        return summary(worktree, **options)
     if action == "status":
         return status(worktree, **options)
     if action == "probe":
