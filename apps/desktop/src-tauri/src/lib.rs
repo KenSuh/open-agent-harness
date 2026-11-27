@@ -59,6 +59,7 @@ pub fn run() {
             commands::workflow_status,
             commands::rules_check,
             commands::rules_sync,
+            commands::project_tools_status,
             commands::start_review,
             commands::skills_installed,
             commands::inspect_installed_skill,

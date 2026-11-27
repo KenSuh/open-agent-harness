@@ -6,6 +6,7 @@ import type {
   ApplyProjectSkillReq,
   NoticeDto,
   ProjectDto,
+  ProjectToolsDto,
   RefreshDto,
   ReviewResultDto,
   SettingsDto,
@@ -31,6 +32,7 @@ import agentsChanged from "../../../../../crates/oah-core/tests/dto_samples/agen
 import probeRequest from "../../../../../crates/oah-core/tests/dto_samples/agents/probe-request.json";
 import workflowLegacy from "../../../../../crates/oah-core/tests/dto_samples/workflow/sections_show_legacy.json";
 import stagesUpgraded from "../../../../../crates/oah-core/tests/dto_samples/workflow/stages_set_upgraded.json";
+import projectTools from "../../../../../crates/oah-core/tests/dto_samples/workflow/project_tools_status.json";
 
 /** The shared Team Workflow samples (crates/oah-core/tests/dto_samples/workflow), byte-compared by core's own test. */
 export const sampleWorkflow = {
@@ -47,6 +49,9 @@ export const sampleAgents = {
   changed: agentsChanged as AgentsChangedDto,
   probeRequest: probeRequest as AgentsProbeReq,
 };
+
+/** The shared project tool cards (same folder), byte-compared by core's own test. */
+export const sampleProjectTools = projectTools as ProjectToolsDto;
 
 export const sampleAppInfo = appInfo as AppInfoDto;
 export const sampleProject = project as ProjectDto;
@@ -253,6 +258,13 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       fake.calls.push("rules_sync");
       fake.workflowRequests.push(req);
       return fake.override.rulesSync ? fake.override.rulesSync(req) : { synced: true, written: [], error: null };
+    },
+    async projectToolsStatus(req) {
+      fake.calls.push("project_tools_status");
+      // Like core: the answer names the project the request named.
+      return fake.override.projectToolsStatus
+        ? fake.override.projectToolsStatus(req)
+        : { ...sampleProjectTools, project_id: req.project_id };
     },
     emitProbe: (event) => probeSink?.(event),
     emitAgentsChanged: (change) => agentsSink?.(change),

@@ -13,6 +13,7 @@ import type {
   RemovedSkillDto,
   NoticeDto,
   ProjectDto,
+  ProjectToolsDto,
   RefreshDto,
   ReviewResultDto,
   RulesStateDto,
@@ -76,6 +77,7 @@ export function createTauriTransport(): Transport {
     workflowStatus: () => call<BannerDto>("workflow_status"),
     rulesCheck: () => call<RulesStateDto>("rules_check"),
     rulesSync: (req) => call<RulesSyncDto>("rules_sync", req),
+    projectToolsStatus: (req) => call<ProjectToolsDto>("project_tools_status", req),
     onNotice: (handler) => listen<NoticeDto>("notice", (event) => handler(event.payload)),
     onScanChanged: (handler) =>
       listen<ScanChanged>("scan-changed", (event) => handler(event.payload)),

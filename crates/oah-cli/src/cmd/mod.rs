@@ -1,6 +1,7 @@
-// 하위 명령 모음: doctor·sections·rules·skills 와 옛 hook 답을 두고, 핵심 오류를 C5 모양(--json 이면 표준 출력의 JSON, 아니면 한 줄)으로 알린다.
+// 하위 명령 모음: doctor·sections·rules·project-tools·skills 와 옛 hook 답을 두고, 핵심 오류를 C5 모양(--json 이면 표준 출력의 JSON, 아니면 한 줄)으로 알린다.
 pub mod doctor;
 pub mod hook;
+pub mod project_tools;
 pub mod rules;
 pub mod sections;
 pub mod skills;

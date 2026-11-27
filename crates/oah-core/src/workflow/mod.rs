@@ -21,6 +21,7 @@
 mod ops;
 pub mod presets;
 pub mod status;
+mod tools;
 
 pub use ops::{
     preset_apply, rules_check, rules_check_at, rules_sync, rules_sync_at, rules_sync_for_project,
@@ -28,6 +29,7 @@ pub use ops::{
 };
 pub use presets::{PRESETS, Preset};
 pub use status::{independence_breaks, status};
+pub use tools::{project_tools_status, tools_status_at};
 
 use crate::error::{Coded, codes};
 use crate::fsx::FsxErrorKind;

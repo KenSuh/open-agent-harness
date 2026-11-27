@@ -42,8 +42,9 @@ pub use task::{Progress, TaskCancelReq, TaskEvent, TaskId, TaskSnapshotDto, Task
 pub use workflow::{
     AdvancedDto, AgentOptionDto, BannerAgentDto, BannerDto, BannerPairDto, BannerSectionDto,
     ConfigFormatDto, DriftDto, IndependenceReq, PlannedWriteDto, PresetApplyReq, PresetDto,
-    PresetStageDto, RulesStateDto, RulesSyncDto, RulesWriteDto, SectionDto, StageChangeReq,
-    StagesSetDto, StagesSetReq, WorkflowDto, WorkflowProjectReq,
+    PresetStageDto, ProjectToolDto, ProjectToolIdDto, ProjectToolsDto, RulesStateDto, RulesSyncDto,
+    RulesWriteDto, SectionDto, StageChangeReq, StagesSetDto, StagesSetReq, ToolPathBaseDto,
+    ToolPathDto, WorkflowDto, WorkflowProjectReq,
 };
 
 use crate::paths::{Env, canonical_folder, user_home};

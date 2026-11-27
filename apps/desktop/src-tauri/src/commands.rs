@@ -2,8 +2,8 @@
 //! The M1-S1, M1-S2 and M2-S1 commands of CONTRACTS C15, exactly: `app_info`, `project_open_dialog`,
 //! `project_current`, `start_refresh`, `task_cancel`, `tasks_list`, `settings_get`, `settings_set`, `agents_list`,
 //! `start_agents_probe`, `sections_show`, `stages_set`, `preset_apply`, `workflow_status`, `rules_check` and
-//! `rules_sync`, `start_review`, `skills_installed` and `apply_project_skill`. Each takes one argument named `req`;
-//! the `start_*` commands also take the task channel
+//! `rules_sync`, `project_tools_status`, `start_review`, `skills_installed` and `apply_project_skill`. Each
+//! takes one argument named `req`; the `start_*` commands also take the task channel
 //! `on_event` (JS key `onEvent`, CONTRACTS C4). A command body converts arguments, makes one `oah-core` call and
 //! converts the result. The shell's own part is transport only: the native folder picker, the task channel, the
 //! blocking thread a task runs on, the `scan-changed` and `agents-changed` events, and starting the agents probe
@@ -17,9 +17,10 @@ use oah_core::dto::{
     AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, ApplyProjectSkillDto,
     ApplyProjectSkillReq, ApplyProjectSkillStatus, BannerDto, Empty, InstalledSkillDto,
     InstalledSkillManagementDto, InstalledSkillTarget, LinkedSkillSourceDto, PresetApplyReq,
-    ProjectDto, RefreshDto, RegisterSkillSourceReq, RemoveInstalledSkillReq, RemovedSkillDto,
-    ReviewOutcomeDto, ReviewReq, RulesStateDto, RulesSyncDto, SettingsDto, SettingsSetReq,
-    StagesSetDto, StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto, WorkflowProjectReq,
+    ProjectDto, ProjectToolsDto, RefreshDto, RegisterSkillSourceReq, RemoveInstalledSkillReq,
+    RemovedSkillDto, ReviewOutcomeDto, ReviewReq, RulesStateDto, RulesSyncDto, SettingsDto,
+    SettingsSetReq, StagesSetDto, StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto,
+    WorkflowProjectReq,
 };
 use oah_core::error::codes;
 use oah_core::paths::Env;
@@ -497,9 +498,82 @@ pub fn rules_sync(
     shell.call(|ctx| app::rules_sync_for_project(ctx, req))
 }
 
+/// The Project Wiki, Impact Map and Jev cards of the open project (read). The request names the project the
+/// window shows; the answer names the project it is about.
+#[tauri::command]
+pub fn project_tools_status(
+    req: WorkflowProjectReq,
+    shell: State<'_, Shell>,
+) -> Result<ProjectToolsDto, ErrorDto> {
+    shell.call(|ctx| app::project_tools_status(ctx, req))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real `project_tools_status` handler, called with Tauri's own managed state, answers from the same session
+    /// the other commands change: it follows a project swap, refuses the previous project's id, and returns exactly
+    /// what core returns for that session.
+    #[test]
+    fn the_project_tools_handler_reads_the_shells_session() {
+        let base = oah_core::paths::canonical_folder(&std::env::temp_dir())
+            .unwrap()
+            .join(format!("oah-tools-handler-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (first, second) = (base.join("first"), base.join("second"));
+        std::fs::create_dir_all(first.join("docs").join("wiki")).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let mut env = Env::new(&base).unwrap();
+        if let Some(path) = std::env::var_os("PATH") {
+            env.set("PATH", path);
+        }
+        for name in ["SystemRoot", "windir", "ComSpec", "PATHEXT"] {
+            if let Some(value) = std::env::var_os(name) {
+                env.set(name, value);
+            }
+        }
+        env.set(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, &base);
+        env.set("GIT_CEILING_DIRECTORIES", &base);
+        let app = tauri::test::mock_app();
+        app.manage(Shell {
+            session: Arc::new(Session::new(env)),
+        });
+        let open = |folder: &Path| {
+            app.state::<Shell>()
+                .call(|ctx| app::project_open(ctx, folder))
+                .unwrap()
+                .id
+        };
+        let req = |id: &str| WorkflowProjectReq {
+            project_id: id.to_string(),
+            input: Empty {},
+        };
+        let state_of = |tools: &ProjectToolsDto| tools.tools[0].state.clone();
+
+        let none = project_tools_status(req("any"), app.state::<Shell>()).unwrap_err();
+        assert_eq!(none.code, codes::PROJECT_NOT_OPEN);
+        let first_id = open(&first);
+        let shown = project_tools_status(req(&first_id), app.state::<Shell>()).unwrap();
+        assert_eq!(shown.project_id, first_id);
+        assert_eq!(state_of(&shown), "found");
+        let core = app
+            .state::<Shell>()
+            .call(|ctx| app::project_tools_status(ctx, req(&first_id)))
+            .unwrap();
+        assert_eq!(
+            shown, core,
+            "the handler and core answer alike for one session"
+        );
+
+        let second_id = open(&second);
+        let late = project_tools_status(req(&first_id), app.state::<Shell>()).unwrap_err();
+        assert_eq!(late.code, codes::PROJECT_CHANGED);
+        let now = project_tools_status(req(&second_id), app.state::<Shell>()).unwrap();
+        assert_eq!(now.project_id, second_id);
+        assert_eq!(state_of(&now), "none");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn scan_changed_is_the_c4_payload() {

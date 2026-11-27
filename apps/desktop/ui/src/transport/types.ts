@@ -16,6 +16,7 @@ import type {
   NoticeDto,
   PresetApplyReq,
   ProjectDto,
+  ProjectToolsDto,
   RefreshDto,
   RulesStateDto,
   ReviewResultDto,
@@ -67,6 +68,7 @@ export interface Transport {
   workflowStatus(): Promise<BannerDto>;
   rulesCheck(): Promise<RulesStateDto>;
   rulesSync(req: WorkflowProjectReq): Promise<RulesSyncDto>;
+  projectToolsStatus(req: WorkflowProjectReq): Promise<ProjectToolsDto>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
   onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;

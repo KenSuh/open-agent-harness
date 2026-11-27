@@ -352,6 +352,35 @@ export interface RulesSyncDto {
   error: ErrorDto | null;
 }
 
+/** One project tool card of `project_tools_status` (core `dto::workflow`). The UI shows the text as core wrote it. */
+export type ProjectToolId = "wiki" | "impact-map" | "jev";
+export type ToolPathBase = "project" | "git-common-dir" | "state-dir";
+
+export interface ToolPathDto {
+  label: string;
+  /** Relative to `base`, written with `/`; never a full path. */
+  path: string;
+  base: ToolPathBase;
+}
+
+export interface ProjectToolDto {
+  id: ProjectToolId;
+  name: string;
+  /** A stable kebab word such as `found`, `no-commit` or `off`; the text fields carry the meaning. */
+  state: string;
+  status: string;
+  reason: string | null;
+  next_step: string;
+  paths: ToolPathDto[];
+  notes: string[];
+}
+
+export interface ProjectToolsDto {
+  /** The project the cards are about; an answer for another project is dropped. */
+  project_id: string;
+  tools: ProjectToolDto[];
+}
+
 /** M1-S3 Explore review shapes (core `review`; EXPLORE-PRODUCTION-BRIEF, Independent desktop contract). */
 export interface ReviewSpec {
   repo: string;

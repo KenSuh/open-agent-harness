@@ -1,4 +1,4 @@
-// 한국어: 팀 작업 흐름 화면 — 섹션 카드·에이전트 선택·단일 배너·프리셋·업그레이드 확인·규칙 동기 상태·고급 보기. 판단은 모두 core 응답을 그대로 쓴다.
+// 한국어: 팀 작업 흐름 화면 — 섹션 카드·에이전트 선택·단일 배너·프리셋·업그레이드 확인·규칙 동기 상태·고급 보기와 프로젝트 도구(위키·영향 지도·Jev) 상태 카드. 판단은 모두 core 응답을 그대로 쓴다.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentId,
@@ -6,10 +6,13 @@ import type {
   BannerDto,
   ErrorDto,
   PresetApplyReq,
+  ProjectToolDto,
+  ProjectToolsDto,
   RulesStateDto,
   SectionDto,
   StagesSetDto,
   StagesSetReq,
+  ToolPathBase,
   WorkflowDto,
 } from "./contract";
 import { toErrorDto, type Transport } from "./transport/types";
@@ -169,7 +172,7 @@ function UpgradePrompt({ text, onAccept, onCancel }: { text: string; onAccept: (
   );
 }
 
-export function TeamWorkflow({ transport, projectId }: { transport: Transport; projectId: string }) {
+function Assignments({ transport, projectId }: { transport: Transport; projectId: string }) {
   const [page, setPage] = useState<PageLoad>({ status: "loading" });
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -355,5 +358,149 @@ export function TeamWorkflow({ transport, projectId }: { transport: Transport; p
         <pre aria-label="Rules block">{view.advanced.block ?? "(no managed block yet)"}</pre>
       </details>
     </div>
+  );
+}
+
+/** What the cards hold: the last answer for this project, whether a check runs, and why the last one failed. */
+type ToolsLoad = { value: ProjectToolsDto | null; checking: boolean; error: ErrorDto | null };
+
+const TOOL_PATH_BASE: Record<ToolPathBase, string> = {
+  project: "in the project",
+  "git-common-dir": "in the Git folder",
+  "state-dir": "in the OAH state folder",
+};
+
+/** One card, top to bottom: the tool's name, what was found, why when it is a problem, then the next step. */
+function ToolCard({ tool }: { tool: ProjectToolDto }) {
+  const titleId = `project-tool-${tool.id}`;
+  return (
+    <article className="tool-card" aria-labelledby={titleId} data-tool={tool.id} data-state={tool.state}>
+      <h3 id={titleId}>{tool.name}</h3>
+      <p className="tool-status">{tool.status}</p>
+      {tool.reason ? <p className="tool-reason">{tool.reason}</p> : null}
+      <p className="tool-next">
+        <strong>Next step:</strong> {tool.next_step}
+      </p>
+      {tool.paths.length > 0 ? (
+        <ul className="tool-paths">
+          {tool.paths.map((path) => (
+            <li key={`${path.base}:${path.path}`}>
+              {path.label}: <code translate="no">{path.path}</code> <span className="muted">({TOOL_PATH_BASE[path.base]})</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {tool.notes.length > 0 ? (
+        <ul className="tool-notes">
+          {tool.notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      ) : null}
+    </article>
+  );
+}
+
+/**
+ * The Project Wiki, Impact Map and Jev cards. Reading them changes and starts nothing, so the only control is
+ * Check Again; a step this app cannot do yet is described in the card's text and has no button.
+ */
+function ProjectTools({ transport, projectId }: { transport: Transport; projectId: string }) {
+  const [tools, setTools] = useState<ToolsLoad>({ value: null, checking: true, error: null });
+  const [announcement, setAnnouncement] = useState("");
+  const reads = useRef(0);
+
+  const check = useCallback(
+    async (announce: boolean) => {
+      const read = ++reads.current;
+      setTools((previous) => ({ ...previous, checking: true, error: null }));
+      try {
+        const value = await transport.projectToolsStatus({ project_id: projectId, input: {} });
+        if (read !== reads.current) return;
+        if (value.project_id !== projectId) {
+          // An answer about another project is never shown under this one.
+          setTools({
+            value: null,
+            checking: false,
+            error: {
+              code: "UI_PROJECT_CHANGED",
+              message: "The answer was for another project, so it is not shown.",
+              hint: "Choose Check Again.",
+            },
+          });
+          return;
+        }
+        setTools({ value, checking: false, error: null });
+        if (announce) {
+          setAnnouncement(`Checked again. ${value.tools.map((tool) => `${tool.name}: ${tool.status}`).join(" ")}`);
+        }
+      } catch (raw) {
+        if (read !== reads.current) return;
+        setTools({ value: null, checking: false, error: toErrorDto(raw) });
+        setAnnouncement("");
+      }
+    },
+    [transport, projectId],
+  );
+
+  useEffect(() => {
+    void check(false);
+    return () => {
+      // An answer that arrives after the project changed or the page closed is dropped.
+      reads.current += 1;
+    };
+  }, [check]);
+
+  return (
+    <section className="project-tools" aria-labelledby="project-tools-title">
+      <div className="project-tools-head">
+        <h2 id="project-tools-title">Project Tools</h2>
+        {/* aria-disabled keeps keyboard focus on the button while a check runs. */}
+        <button
+          type="button"
+          aria-disabled={tools.checking}
+          onClick={() => {
+            if (!tools.checking) void check(true);
+          }}
+        >
+          Check Again
+        </button>
+      </div>
+      <p className="muted">
+        What this project has for its wiki, impact map and Jev. Checking only reads the project: it changes nothing
+        and starts nothing.
+      </p>
+      <p className="visually-hidden" role="status">
+        {announcement}
+      </p>
+      {tools.error ? (
+        <div className="error-box" role="alert">
+          <strong>The project tools could not be checked.</strong>
+          <p>
+            {tools.error.code}: {tools.error.message}
+            {tools.error.hint ? <span> {tools.error.hint}</span> : null}
+          </p>
+        </div>
+      ) : null}
+      {tools.value ? (
+        <div className="tool-cards" aria-busy={tools.checking}>
+          {tools.value.tools.map((tool) => (
+            <ToolCard key={tool.id} tool={tool} />
+          ))}
+        </div>
+      ) : tools.checking ? (
+        <p className="muted">Checking the project tools…</p>
+      ) : null}
+    </section>
+  );
+}
+
+/** The Team Workflow page of one project: who does which section, then what the project has for its tools. */
+export function TeamWorkflow({ transport, projectId }: { transport: Transport; projectId: string }) {
+  return (
+    <>
+      <Assignments transport={transport} projectId={projectId} />
+      <ProjectTools transport={transport} projectId={projectId} />
+    </>
   );
 }

@@ -1,0 +1,46 @@
+{
+  "project_id": "65d80d2c48b3d23b",
+  "tools": [
+    {
+      "id": "wiki",
+      "name": "Project Wiki",
+      "state": "found",
+      "status": "The project settings point to the wiki folder docs/wiki.",
+      "reason": null,
+      "next_step": "No action needed. Indexing and search from this app are not available yet.",
+      "paths": [
+        {
+          "label": "Wiki folder",
+          "path": "docs/wiki",
+          "base": "project"
+        }
+      ],
+      "notes": [
+        "Not in this folder: wiki-guide.md, templates. A wiki works without them; adding them from this app is not available yet."
+      ]
+    },
+    {
+      "id": "impact-map",
+      "name": "Impact Map",
+      "state": "no-git",
+      "status": "This folder is not a Git repository.",
+      "reason": null,
+      "next_step": "An Impact Map needs a Git repository with at least one commit. Run git init here and make the first commit. Then check again. OAH does not run Git for you.",
+      "paths": [],
+      "notes": []
+    },
+    {
+      "id": "jev",
+      "name": "Jev",
+      "state": "on",
+      "status": "Jev is turned on in this project's settings (provider: typesafe).",
+      "reason": null,
+      "next_step": "No action needed. A connection test from this app is not available yet.",
+      "paths": [],
+      "notes": [
+        "This is the project setting only. OAH did not look for a key or contact TypeSafe.",
+        "Re-ordering Impact Map results is switched off (rerank under [impact])."
+      ]
+    }
+  ]
+}

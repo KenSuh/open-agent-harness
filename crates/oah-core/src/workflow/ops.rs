@@ -41,7 +41,7 @@ fn config_path(root: &Path) -> PathBuf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigPathPhase {
+pub(super) enum ConfigPathPhase {
     BeforeWrite,
     AfterWrite,
 }
@@ -140,7 +140,10 @@ fn map_config_read_error(error: FsxError, phase: ConfigPathPhase) -> Error {
 
 /// Validates `.oah` and `.oah/config.toml` only (leaving unused lock/backup sidecars untouched) and reads
 /// `.oah/config.toml` without following leaf links.
-fn read_config_source(root: &Path, phase: ConfigPathPhase) -> Result<ProjectConfig, Error> {
+pub(super) fn read_config_source(
+    root: &Path,
+    phase: ConfigPathPhase,
+) -> Result<ProjectConfig, Error> {
     let path = config_path(root);
     let dir_exists = check_config_dir(root, phase)?;
     let bytes = if dir_exists {

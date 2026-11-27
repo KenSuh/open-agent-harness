@@ -2,7 +2,8 @@
 //! Team Workflow shapes (M2-S1, CONTRACTS C12, C15): `sections_show` returns [`WorkflowDto`], `workflow_status`
 //! returns [`BannerDto`], `stages_set` takes [`StagesSetReq`] and `preset_apply` takes [`PresetApplyReq`], both
 //! returning [`StagesSetDto`]; `rules_check` returns [`RulesStateDto`] and `rules_sync` [`RulesSyncDto`]. Paths
-//! here are fixed project-relative names such as `AGENTS.md`, never full paths.
+//! here are fixed project-relative names such as `AGENTS.md`, never full paths. `project_tools_status` returns
+//! [`ProjectToolsDto`]: the Project Wiki, Impact Map and Jev cards, read without changing or starting anything.
 
 use super::{AgentIdDto, Empty, LoginHintDto, NoticeDto, SignInDto};
 use crate::error::ErrorDto;
@@ -220,6 +221,59 @@ pub struct StagesSetDto {
     pub sync_error: Option<ErrorDto>,
     pub actions: Vec<String>,
     pub workflow: WorkflowDto,
+}
+
+/// A project tool the Team Workflow page shows a card for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectToolIdDto {
+    Wiki,
+    ImpactMap,
+    Jev,
+}
+
+/// What a [`ToolPathDto`] path is relative to. No card carries a full path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolPathBaseDto {
+    /// The project root.
+    Project,
+    /// The repository's common Git folder, shared by its worktrees.
+    GitCommonDir,
+    /// The state folder `OAH_STATE_DIR` names.
+    StateDir,
+}
+
+/// One path a card names, written with `/` and relative to `base`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolPathDto {
+    pub label: String,
+    pub path: String,
+    pub base: ToolPathBaseDto,
+}
+
+/// One project tool card: its name, what was found as text, and the one next step. `state` is a stable kebab
+/// word for tests and scripts (`workflow::tools` lists each tool's words); a person reads `status`, `reason`
+/// and `next_step`, which the UI and the CLI show as they are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectToolDto {
+    pub id: ProjectToolIdDto,
+    pub name: String,
+    pub state: String,
+    pub status: String,
+    /// Why, when the status is a problem; `null` otherwise.
+    pub reason: Option<String>,
+    pub next_step: String,
+    pub paths: Vec<ToolPathDto>,
+    pub notes: Vec<String>,
+}
+
+/// `project_tools_status`: the three cards of the project `project_id` names. A caller that has moved to another
+/// project meanwhile compares `project_id` and drops the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectToolsDto {
+    pub project_id: String,
+    pub tools: Vec<ProjectToolDto>,
 }
 
 /// One file a `rules_sync` wrote or tried.

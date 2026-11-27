@@ -18,8 +18,8 @@ mod skill_apply;
 pub mod sync;
 
 pub use crate::workflow::{
-    preset_apply, rules_check, rules_sync, rules_sync_for_project, sections_show,
-    sections_show_for_project, stages_set, workflow_status,
+    preset_apply, project_tools_status, rules_check, rules_sync, rules_sync_for_project,
+    sections_show, sections_show_for_project, stages_set, workflow_status,
 };
 pub use agents::{
     AGENTS_PROBE, SIGN_IN_INTERVAL, agents_list, agents_probe, agents_probe_key, agents_probe_with,

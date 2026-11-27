@@ -1,12 +1,12 @@
-// oah 명령줄 진입점: clap 으로 인자를 읽어 --version, doctor, sections, rules, skills, 옛 hook 답을 핵심 작업에 넘기고 종료 코드를 정한다.
+// oah 명령줄 진입점: clap 으로 인자를 읽어 --version, doctor, sections, rules, project-tools, skills, 옛 hook 답을 핵심 작업에 넘기고 종료 코드를 정한다.
 mod cmd;
 
 use clap::{Arg, ArgAction, Command};
 use std::process::ExitCode;
 
 /// The command line (CONTRACTS C5, C15): `oah --version`, `oah doctor [--json]`, `oah sections show [--json]`,
-/// `oah rules check|sync [--json]`, `oah skills review --github OWNER/REPO --path FOLDER [--json]` and the hidden
-/// legacy `oah hook`.
+/// `oah rules check|sync [--json]`, `oah project-tools status [--json]`,
+/// `oah skills review --github OWNER/REPO --path FOLDER [--json]` and the hidden legacy `oah hook`.
 fn cli() -> Command {
     Command::new("oah")
         .about("Open Agent Harness")
@@ -22,6 +22,7 @@ fn cli() -> Command {
         .subcommand(cmd::doctor::command())
         .subcommand(cmd::sections::command())
         .subcommand(cmd::rules::command())
+        .subcommand(cmd::project_tools::command())
         .subcommand(cmd::skills::command())
         .subcommand(cmd::hook::command())
 }
@@ -38,6 +39,7 @@ fn main() -> ExitCode {
         Some(("doctor", matches)) => cmd::doctor::run(matches),
         Some(("sections", matches)) => cmd::sections::run(matches),
         Some(("rules", matches)) => cmd::rules::run(matches),
+        Some(("project-tools", matches)) => cmd::project_tools::run(matches),
         Some(("skills", matches)) => cmd::skills::run(matches),
         Some(("hook", matches)) => cmd::hook::run(matches),
         _ => {
