@@ -80,6 +80,16 @@ pub struct WriteReceipt {
 }
 
 impl WriteReceipt {
+    /// The receipt of a write whose publisher already read `bytes` back from `path` through its own handles.
+    #[cfg(any(target_os = "macos", windows))]
+    pub(crate) fn verified(path: &Path, bytes: &[u8]) -> Self {
+        WriteReceipt {
+            path: path.to_path_buf(),
+            fingerprint: Fingerprint::of(bytes),
+            len: bytes.len() as u64,
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

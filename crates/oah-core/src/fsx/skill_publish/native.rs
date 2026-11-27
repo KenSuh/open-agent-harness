@@ -2,9 +2,11 @@ use super::{ObjectId, PublishError, os};
 use crate::review::identity::portable_component_key;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, TryLockError};
-use std::io::Write;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type Result<T> = std::result::Result<T, PublishError>;
 
@@ -14,6 +16,15 @@ pub(super) enum FileAccess {
     Create,
     Lock,
     Remove,
+}
+
+/// One try at the writer lock of a file, in the protocol of `fsx::FileLock`.
+pub(super) enum LockAttempt {
+    Held(File),
+    Busy,
+    /// The lock file was replaced between opening and locking; try again at once.
+    #[cfg_attr(windows, expect(dead_code))]
+    Retry,
 }
 
 #[derive(Debug, Clone)]
@@ -322,5 +333,553 @@ impl Dir {
         self.check()?;
         os::remove_empty(self, name, expected)?;
         self.sync()
+    }
+}
+
+/// How long an open retries while another process has the file open in a way that excludes this one.
+const SHARING_WAIT: Duration = Duration::from_secs(2);
+const SHARING_POLL: Duration = Duration::from_millis(50);
+
+fn leaf(name: &str) -> Result<()> {
+    if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\', '\0']) {
+        return Err(PublishError::UnsafePath);
+    }
+    Ok(())
+}
+
+fn retry_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    let deadline = Instant::now() + SHARING_WAIT;
+    loop {
+        match operation() {
+            Err(PublishError::Busy) if Instant::now() < deadline => {
+                std::thread::sleep(SHARING_POLL);
+            }
+            other => return other,
+        }
+    }
+}
+
+fn read_all(file: &mut File) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// A regular file read through a handle of a [`BoundFolder`], with the bytes that handle gave.
+#[derive(Debug)]
+pub struct BoundFile {
+    file: File,
+    bytes: Vec<u8>,
+}
+
+impl BoundFile {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// The writer lock of one file in a [`BoundFolder`]: the lock file and protocol of `fsx::FileLock`, taken through
+/// the pinned folder instead of a path.
+#[derive(Debug)]
+pub struct BoundLock {
+    dir: Dir,
+    name: String,
+    file: Option<File>,
+}
+
+impl BoundLock {
+    /// Releases the lock and removes the lock file.
+    pub fn release(mut self) -> Result<()> {
+        match self.file.take() {
+            Some(file) => os::unlock(&self.dir, &self.name, file),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for BoundLock {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = os::unlock(&self.dir, &self.name, file);
+        }
+    }
+}
+
+/// One folder directly inside a selected root, with every folder from the volume root down held open.
+///
+/// Reads, the lock and both ways of publishing a file go through those handles: no step resolves the folder's
+/// path again, so swapping the root, an ancestor or the folder for a link after it was opened cannot move a
+/// write somewhere else. The root must be an absolute path without links on a volume [`ProjectRoot`]
+/// accepts (`Unsupported` otherwise).
+///
+/// [`ProjectRoot`]: super::ProjectRoot
+#[derive(Debug)]
+pub struct BoundFolder {
+    root: Dir,
+    name: String,
+    dir: Option<Dir>,
+    created: Option<ObjectId>,
+}
+
+impl BoundFolder {
+    /// Pins `root` and, when it is there, its folder `name`. Writes nothing.
+    pub fn open(root: &Path, name: &str) -> Result<Self> {
+        leaf(name)?;
+        let root = Dir::open(root)?;
+        let dir = root.directory(name, false)?;
+        Ok(Self {
+            root,
+            name: name.to_owned(),
+            dir,
+            created: None,
+        })
+    }
+
+    /// Checks that every pinned name still names the folder that was opened.
+    pub fn check(&self) -> Result<()> {
+        self.dir.as_ref().unwrap_or(&self.root).check()
+    }
+
+    /// Makes the folder when it is absent. `true` when this call made it.
+    pub fn create(&mut self) -> Result<bool> {
+        if self.dir.is_some() {
+            return Ok(false);
+        }
+        self.root.check()?;
+        let made = if self.root.contains(&self.name)? {
+            false
+        } else {
+            match os::mkdir_shared(&self.root, &self.name) {
+                Ok(()) => true,
+                Err(PublishError::Occupied) => false,
+                Err(err) => return Err(err),
+            }
+        };
+        self.root.sync()?;
+        let dir = self.root.child(&self.name)?;
+        if made {
+            self.created = Some(dir.id().clone());
+        }
+        self.dir = Some(dir);
+        Ok(made)
+    }
+
+    /// Removes the folder again when this value made it and it is still empty. Release its lock first.
+    pub fn discard(&mut self) -> Result<()> {
+        let Some(id) = self.created.take() else {
+            return Ok(());
+        };
+        self.dir = None;
+        self.root.remove_empty(&self.name, &id)
+    }
+
+    /// Reads the regular file `name`; `None` when the folder or the file is absent.
+    pub fn read(&self, name: &str) -> Result<Option<BoundFile>> {
+        self.open_file(name, false)
+    }
+
+    /// [`BoundFolder::read`] for a file that [`BoundFolder::replace`] will replace. On Windows no other process can
+    /// write the file in place or replace it with a classic rename while the returned value lives.
+    pub fn hold(&self, name: &str) -> Result<Option<BoundFile>> {
+        self.open_file(name, true)
+    }
+
+    fn open_file(&self, name: &str, hold: bool) -> Result<Option<BoundFile>> {
+        leaf(name)?;
+        let Some(dir) = &self.dir else {
+            self.root.check()?;
+            return Ok(None);
+        };
+        dir.check()?;
+        if !dir.contains(name)? {
+            return Ok(None);
+        }
+        let mut file = match retry_busy(|| os::open_file(dir, name, hold)) {
+            Ok(file) => file,
+            Err(PublishError::Io(err)) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        if os::identity(&file)?.volume != dir.id().volume {
+            return Err(PublishError::Unsupported);
+        }
+        let bytes = read_all(&mut file)?;
+        Ok(Some(BoundFile { file, bytes }))
+    }
+
+    /// Takes the writer lock `name` (for `config.toml` that is `config.toml.lock`), waiting at most `wait`.
+    /// `Busy` when another writer held it for the whole wait.
+    pub fn lock(&self, name: &str, wait: Duration, poll: Duration) -> Result<BoundLock> {
+        leaf(name)?;
+        let dir = self.dir.as_ref().ok_or(PublishError::Changed)?;
+        let deadline = Instant::now() + wait;
+        loop {
+            dir.check()?;
+            match os::try_lock(dir, name)? {
+                LockAttempt::Held(file) => {
+                    return Ok(BoundLock {
+                        dir: dir.clone(),
+                        name: name.to_owned(),
+                        file: Some(file),
+                    });
+                }
+                LockAttempt::Retry if Instant::now() < deadline => {}
+                LockAttempt::Busy if Instant::now() < deadline => std::thread::sleep(poll),
+                LockAttempt::Retry | LockAttempt::Busy => return Err(PublishError::Busy),
+            }
+        }
+    }
+
+    /// Writes `data` to a new sibling, flushes it and gives it the vacant name `name` without replacing
+    /// anything: `Occupied` when the name is taken, and then nothing is left behind.
+    pub fn publish_new(&self, name: &str, data: &[u8]) -> Result<()> {
+        leaf(name)?;
+        let dir = self.dir.as_ref().ok_or(PublishError::Changed)?;
+        dir.check()?;
+        if dir.contains(name)? {
+            return Err(PublishError::Occupied);
+        }
+        let (staged, file) = stage(dir, name, data)?;
+        if let Err(err) = os::install_file(dir, &staged, &file, name) {
+            let _ = os::remove_file(dir, &staged, &file);
+            return Err(err);
+        }
+        let id = os::identity(&file)?;
+        drop(file);
+        dir.sync()?;
+        verify(dir, name, &id, data)
+    }
+
+    /// Replaces `name` with `data` in one atomic step, only while it is still the file `before` was read from with
+    /// the same bytes. A reader finds the old file or the new one, never a missing name, also when the process
+    /// stops half-way; at worst a staged sibling `.<name>.<pid>.<n>.tmp` is left.
+    ///
+    /// `Changed` when another program replaced or edited the file since; the name then holds what that program
+    /// left. `MovedUnverified` names an entry to inspect when the step could not be checked afterwards.
+    ///
+    /// Limit (Windows): the name is compared with `before` immediately before the rename, not in the same step,
+    /// so another program's own atomic rename or delete of the name in that instant is replaced unseen. Classic
+    /// renames and writes in place are refused by Windows while `before` is open.
+    pub fn replace(&self, name: &str, before: BoundFile, data: &[u8]) -> Result<()> {
+        leaf(name)?;
+        let dir = self.dir.as_ref().ok_or(PublishError::Changed)?;
+        dir.check()?;
+        let BoundFile {
+            file: mut old,
+            bytes: expected,
+        } = before;
+        let (staged, new) = stage(dir, name, data)?;
+        let id = match os::identity(&new) {
+            Ok(id) => id,
+            Err(err) => {
+                let _ = os::remove_file(dir, &staged, &new);
+                return Err(err);
+            }
+        };
+        let aside = match os::exchange_file(dir, &staged, &new, name, &old) {
+            Ok(aside) => aside,
+            Err(err) => {
+                let _ = os::remove_file(dir, &staged, &new);
+                return Err(err);
+            }
+        };
+        if aside {
+            // The replaced file now sits under the staged name. Without a deny-write open (macOS) an edit in
+            // place could have landed just before the exchange, so its bytes are compared once more.
+            if !read_all(&mut old).is_ok_and(|bytes| bytes == expected) {
+                os::revert_file(dir, &staged, &new, name, &old)?;
+                let _ = os::remove_file(dir, &staged, &new);
+                return Err(PublishError::Changed);
+            }
+            if os::remove_file(dir, &staged, &old).is_err() {
+                return Err(PublishError::MovedUnverified {
+                    path: dir.path().join(staged),
+                });
+            }
+        }
+        // On Windows a reader cannot open the name while this handle, which may delete, is open.
+        drop((new, old));
+        dir.sync()?;
+        verify(dir, name, &id, data)
+    }
+}
+
+/// Creates a uniquely named sibling of `name` holding `data`, flushed to disk.
+fn stage(dir: &Dir, name: &str, data: &[u8]) -> Result<(String, File)> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..16 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.subsec_nanos());
+        let staged = format!(
+            ".{name}.{}.{nanos:08x}{:04x}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed) & 0xffff
+        );
+        let mut file = match os::stage(dir, &staged) {
+            Ok(file) => file,
+            Err(PublishError::Occupied) => continue,
+            Err(err) => return Err(err),
+        };
+        let written = file
+            .write_all(data)
+            .and_then(|()| file.sync_all())
+            .map_err(PublishError::from)
+            .and_then(|()| match os::identity(&file)?.volume == dir.id().volume {
+                true => Ok(()),
+                false => Err(PublishError::Unsupported),
+            });
+        if let Err(err) = written {
+            let _ = os::remove_file(dir, &staged, &file);
+            return Err(err);
+        }
+        return Ok((staged, file));
+    }
+    Err(PublishError::Occupied)
+}
+
+/// Reads `name` back through the folder: it must be the file with identity `id` and hold `data`.
+fn verify(dir: &Dir, name: &str, id: &ObjectId, data: &[u8]) -> Result<()> {
+    let read = || -> Result<bool> {
+        let mut file = retry_busy(|| os::open_file(dir, name, false))?;
+        Ok(os::identity(&file)? == *id && read_all(&mut file)? == data)
+    };
+    if !matches!(read(), Ok(true)) || dir.check().is_err() {
+        return Err(PublishError::MovedUnverified {
+            path: dir.path().join(name),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    use std::fs;
+
+    const NAME: &str = "config.toml";
+
+    struct Project {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+    }
+
+    fn project(config: Option<&[u8]>) -> Project {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = PathBuf::from(
+            root.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_owned(),
+        );
+        if let Some(bytes) = config {
+            fs::create_dir(root.join(".oah")).unwrap();
+            fs::write(root.join(".oah").join(NAME), bytes).unwrap();
+        }
+        Project { _dir: dir, root }
+    }
+
+    fn entries(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_held_file_is_replaced_in_one_step_and_read_back() {
+        let project = project(Some(b"old"));
+        let oah = project.root.join(".oah");
+        let folder = BoundFolder::open(&project.root, ".oah").unwrap();
+        let before = folder.hold(NAME).unwrap().unwrap();
+        assert_eq!(before.bytes(), b"old");
+        folder.replace(NAME, before, b"new bytes").unwrap();
+        assert_eq!(fs::read(oah.join(NAME)).unwrap(), b"new bytes");
+        assert_eq!(entries(&oah), [NAME], "a staged or replaced file was left");
+        assert_eq!(folder.read(NAME).unwrap().unwrap().bytes(), b"new bytes");
+        assert!(folder.read("absent.toml").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_file_another_program_replaced_since_the_read_is_left_as_that_program_wrote_it() {
+        let project = project(Some(b"old"));
+        let oah = project.root.join(".oah");
+        let folder = BoundFolder::open(&project.root, ".oah").unwrap();
+        let before = folder.hold(NAME).unwrap().unwrap();
+        // An editor saves the way editors do: a new file renamed over the name.
+        fs::write(oah.join("editor.tmp"), b"external edit").unwrap();
+        fs::rename(oah.join("editor.tmp"), oah.join(NAME)).unwrap();
+        let error = folder.replace(NAME, before, b"ours").unwrap_err();
+        assert!(matches!(error, PublishError::Changed), "{error}");
+        assert_eq!(fs::read(oah.join(NAME)).unwrap(), b"external edit");
+        assert_eq!(entries(&oah), [NAME]);
+        // The file removed since the read is refused the same way and nothing is created.
+        let before = folder.hold(NAME).unwrap().unwrap();
+        fs::remove_file(oah.join(NAME)).unwrap();
+        let error = folder.replace(NAME, before, b"ours").unwrap_err();
+        assert!(matches!(error, PublishError::Changed), "{error}");
+        assert!(entries(&oah).is_empty());
+    }
+
+    // Windows refuses a write in place while the file is held, so only macOS can reach this path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_edit_in_place_since_the_read_is_found_after_the_swap_and_put_back() {
+        let project = project(Some(b"old"));
+        let oah = project.root.join(".oah");
+        let folder = BoundFolder::open(&project.root, ".oah").unwrap();
+        let before = folder.hold(NAME).unwrap().unwrap();
+        fs::write(oah.join(NAME), b"edited in place").unwrap();
+        let error = folder.replace(NAME, before, b"ours").unwrap_err();
+        assert!(matches!(error, PublishError::Changed), "{error}");
+        assert_eq!(fs::read(oah.join(NAME)).unwrap(), b"edited in place");
+        assert_eq!(entries(&oah), [NAME]);
+    }
+
+    #[test]
+    fn a_new_file_never_replaces_an_entry_and_the_folder_it_made_can_be_discarded() {
+        let project = project(None);
+        let oah = project.root.join(".oah");
+        let mut folder = BoundFolder::open(&project.root, ".oah").unwrap();
+        assert!(folder.read(NAME).unwrap().is_none());
+        assert!(matches!(
+            folder.publish_new(NAME, b"x"),
+            Err(PublishError::Changed)
+        ));
+        assert!(!oah.exists(), "reading or a refused write made the folder");
+        assert!(folder.create().unwrap());
+        assert!(!folder.create().unwrap());
+        folder.publish_new(NAME, b"first").unwrap();
+        let error = folder.publish_new(NAME, b"second").unwrap_err();
+        assert!(matches!(error, PublishError::Occupied), "{error}");
+        assert_eq!(fs::read(oah.join(NAME)).unwrap(), b"first");
+        assert_eq!(entries(&oah), [NAME]);
+        // A folder that holds a file is not removed; an empty one this value made is.
+        assert!(folder.discard().is_err());
+        assert_eq!(fs::read(oah.join(NAME)).unwrap(), b"first");
+
+        let empty = self::project(None);
+        let mut folder = BoundFolder::open(&empty.root, ".oah").unwrap();
+        assert!(folder.create().unwrap());
+        folder.discard().unwrap();
+        assert!(!empty.root.join(".oah").exists());
+        // A folder that was already there is never removed.
+        let kept = self::project(Some(b"keep"));
+        let mut folder = BoundFolder::open(&kept.root, ".oah").unwrap();
+        assert!(!folder.create().unwrap());
+        folder.discard().unwrap();
+        assert_eq!(
+            fs::read(kept.root.join(".oah").join(NAME)).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn the_lock_is_the_lock_of_the_path_based_writers() {
+        use crate::fsx::{FileLock, LockOptions};
+        let project = project(Some(b"old"));
+        let oah = project.root.join(".oah");
+        let folder = BoundFolder::open(&project.root, ".oah").unwrap();
+        let (wait, poll) = (Duration::from_millis(150), Duration::from_millis(10));
+        let quick = LockOptions { wait, poll };
+        let held = folder.lock("config.toml.lock", wait, poll).unwrap();
+        assert!(oah.join("config.toml.lock").exists());
+        assert_eq!(
+            FileLock::acquire(&oah.join(NAME), quick)
+                .unwrap_err()
+                .code(),
+            "OAH_FILE_BUSY"
+        );
+        let second = folder.lock("config.toml.lock", wait, poll).unwrap_err();
+        assert!(matches!(second, PublishError::Busy), "{second}");
+        held.release().unwrap();
+        assert_eq!(entries(&oah), [NAME], "the lock file was left");
+        let path_lock = FileLock::acquire(&oah.join(NAME), quick).unwrap();
+        let busy = folder.lock("config.toml.lock", wait, poll).unwrap_err();
+        assert!(matches!(busy, PublishError::Busy), "{busy}");
+        path_lock.release().unwrap();
+        drop(folder.lock("config.toml.lock", wait, poll).unwrap());
+        assert_eq!(entries(&oah), [NAME]);
+    }
+
+    // On Windows the open handles refuse the renames these swaps start with, so they cannot be staged there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_swapped_for_a_link_after_it_was_opened_stops_every_step() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join(NAME), b"outside").unwrap();
+        let stopped = |folder: &BoundFolder, before: BoundFile| {
+            let (wait, poll) = (Duration::from_millis(50), Duration::from_millis(10));
+            assert!(folder.read(NAME).is_err());
+            assert!(folder.hold(NAME).is_err());
+            assert!(folder.lock("config.toml.lock", wait, poll).is_err());
+            assert!(
+                folder
+                    .publish_new("config.toml.v0.4.bak", b"backup")
+                    .is_err()
+            );
+            assert!(folder.replace(NAME, before, b"ours").is_err());
+            assert!(folder.check().is_err());
+            assert_eq!(fs::read(outside.path().join(NAME)).unwrap(), b"outside");
+            assert_eq!(
+                entries(outside.path()),
+                [NAME],
+                "something was written outside"
+            );
+        };
+
+        // 1. .oah moves away and a link to another folder takes its name.
+        let first = project(Some(b"old"));
+        let folder = BoundFolder::open(&first.root, ".oah").unwrap();
+        let before = folder.hold(NAME).unwrap().unwrap();
+        fs::rename(first.root.join(".oah"), first.root.join("moved")).unwrap();
+        symlink(outside.path(), first.root.join(".oah")).unwrap();
+        stopped(&folder, before);
+        assert_eq!(
+            fs::read(first.root.join("moved").join(NAME)).unwrap(),
+            b"old"
+        );
+        assert_eq!(entries(&first.root.join("moved")), [NAME]);
+
+        // 2. The project root itself moves away and a link takes its name.
+        let parent = tempfile::tempdir().unwrap();
+        let parent = parent.path().canonicalize().unwrap();
+        let root = parent.join("project");
+        fs::create_dir_all(root.join(".oah")).unwrap();
+        fs::write(root.join(".oah").join(NAME), b"old").unwrap();
+        let mut folder = BoundFolder::open(&root, ".oah").unwrap();
+        let before = folder.hold(NAME).unwrap().unwrap();
+        fs::rename(&root, parent.join("moved")).unwrap();
+        symlink(outside.path(), &root).unwrap();
+        stopped(&folder, before);
+        assert!(folder.create().is_ok_and(|made| !made));
+        assert_eq!(
+            fs::read(parent.join("moved/.oah").join(NAME)).unwrap(),
+            b"old"
+        );
+
+        // 3. A root whose path already has a link in it is not opened at all.
+        let alias = parent.join("alias");
+        symlink(parent.join("moved"), &alias).unwrap();
+        assert!(matches!(
+            BoundFolder::open(&alias, ".oah"),
+            Err(PublishError::UnsafePath)
+        ));
+        // 4. Names that are not one plain entry are refused.
+        let plain = BoundFolder::open(&parent.join("moved"), ".oah").unwrap();
+        for name in ["", ".", "..", "a/b", "a\\b"] {
+            assert!(
+                matches!(plain.read(name), Err(PublishError::UnsafePath)),
+                "{name:?}"
+            );
+            assert!(matches!(
+                BoundFolder::open(&parent, name),
+                Err(PublishError::UnsafePath)
+            ));
+        }
     }
 }

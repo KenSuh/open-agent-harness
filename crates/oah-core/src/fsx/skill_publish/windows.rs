@@ -1,4 +1,4 @@
-use super::native::{Dir, FileAccess};
+use super::native::{Dir, FileAccess, LockAttempt};
 use super::{ObjectId, PublishError};
 use std::ffi::{OsStr, c_void};
 use std::fs::{self, File, OpenOptions};
@@ -183,13 +183,32 @@ pub(super) fn rename_new(
     if identity(&source)? != *expected {
         return Err(PublishError::Changed);
     }
+    rename_handle(&source, &dest.path().join(to), 0)
+}
+
+/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS`: one atomic step gives the name to
+/// the renamed file; handles already open on the replaced file stay valid.
+const REPLACE_ATOMICALLY: u32 = 0x1 | 0x2;
+
+/// Renames the entry open as `source` (with DELETE access) to the absolute `path`. With `flags` 0 it never
+/// replaces an entry. The path is always absolute: this call resolves a bare name against the process's current
+/// folder, not the folder of the file.
+fn rename_handle(source: &File, path: &Path, flags: u32) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::FileRenameInfoEx;
+    if !path.is_absolute() {
+        return Err(PublishError::UnsafePath);
+    }
+    let class = if flags == 0 {
+        FileRenameInfo
+    } else {
+        FileRenameInfoEx
+    };
     let mut info = RenameBuffer {
-        flags: 0,
+        flags,
         root: null_mut(),
         length: 0,
         name: [0; 32768],
     };
-    let path = dest.path().join(to);
     let units: Vec<_> = path.as_os_str().encode_wide().collect();
     if units.contains(&0) || units.len() >= info.name.len() {
         return Err(PublishError::UnsafePath);
@@ -204,7 +223,7 @@ pub(super) fn rename_new(
     let ok = unsafe {
         SetFileInformationByHandle(
             source.as_raw_handle(),
-            FileRenameInfo,
+            class,
             (&raw const info).cast(),
             size,
         )
@@ -298,4 +317,159 @@ pub(super) fn remove_empty(dir: &Dir, name: &str, expected: &ObjectId) -> Result
     }
     plain_payload(&file)?;
     delete_on_close(&file)
+}
+
+pub(super) fn mkdir_shared(dir: &Dir, name: &str) -> Result<()> {
+    mkdir(dir, name)
+}
+
+/// A sharing or lock violation clears by itself when the other process closes the file.
+fn busy(err: PublishError) -> PublishError {
+    match err {
+        PublishError::Io(err) if matches!(err.raw_os_error(), Some(32 | 33)) => PublishError::Busy,
+        other => other,
+    }
+}
+
+/// Creates the new regular file `name` for a staged write, open so that it can be renamed through its handle.
+pub(super) fn stage(dir: &Dir, name: &str) -> Result<File> {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir.path().join(name))?;
+    plain(&file, false)?;
+    Ok(file)
+}
+
+/// Opens the regular file `name` for reading. With `hold` the handle is the one a replacement is checked against:
+/// while it is open no process can write the file in place or replace it with a classic rename, and the atomic
+/// rename of [`exchange_file`] still can.
+pub(super) fn open_file(dir: &Dir, name: &str, hold: bool) -> Result<File> {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_SHARE_DELETE};
+    if !hold {
+        return regular(dir, name, FileAccess::Read).map_err(busy);
+    }
+    let file = OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir.path().join(name))
+        .map_err(|err| busy(err.into()))?;
+    plain(&file, false)?;
+    Ok(file)
+}
+
+pub(super) fn try_lock(dir: &Dir, name: &str) -> Result<LockAttempt> {
+    use std::os::windows::fs::MetadataExt;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    let path = dir.path().join(name);
+    // The lock is an exclusive open that Windows deletes on close, so an entry that is not a plain file is
+    // refused before it is opened that way.
+    match fs::symlink_metadata(&path) {
+        Ok(meta)
+            if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 =>
+        {
+            return Err(PublishError::UnsafePath);
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    let opened = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path);
+    match opened {
+        Ok(file) => {
+            plain(&file, false)?;
+            Ok(LockAttempt::Held(file))
+        }
+        // 32: another writer holds it. 5: the file its holder just closed is still "delete pending".
+        Err(err) if matches!(err.raw_os_error(), Some(5 | 32)) => Ok(LockAttempt::Busy),
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub(super) fn unlock(_dir: &Dir, _name: &str, file: File) -> Result<()> {
+    drop(file);
+    Ok(())
+}
+
+/// Gives the staged `file` the vacant name `name`; never replaces an entry.
+pub(super) fn install_file(dir: &Dir, _staged: &str, file: &File, name: &str) -> Result<()> {
+    rename_handle(file, &dir.path().join(name), 0)
+}
+
+fn links(file: &File) -> Result<u64> {
+    Ok(winapi_util::file::information(file)?.number_of_links())
+}
+
+/// Gives the name `name`, which must still be the file `old` was opened from, to the staged `new` file in one atomic
+/// rename: a reader finds the old file or the new one, never a missing name, also when this process stops
+/// half-way. `false`: the old file is not moved aside, the rename removed its name.
+///
+/// `old` comes from [`open_file`] with `hold`, so its bytes cannot have changed, and a classic rename onto the name is
+/// refused while it is open. Another program's own atomic rename or delete is not, so the name is compared with
+/// `old` immediately before the rename and `old` must have lost its name after it.
+pub(super) fn exchange_file(
+    dir: &Dir,
+    _staged: &str,
+    new: &File,
+    name: &str,
+    old: &File,
+) -> Result<bool> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+    let target = dir.path().join(name);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let current = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&target)
+            .map_err(|_| PublishError::Changed)?;
+        if plain(&current, false).is_err()
+            || identity(&current)? != identity(old)?
+            || links(old)? != 1
+        {
+            return Err(PublishError::Changed);
+        }
+        drop(current);
+        match rename_handle(new, &target, REPLACE_ATOMICALLY).map_err(busy) {
+            Ok(()) => break,
+            // A reader that does not share deletion has the file open; it closes in a moment.
+            Err(PublishError::Busy) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    if links(old)? != 0 {
+        return Err(PublishError::MovedUnverified { path: target });
+    }
+    Ok(false)
+}
+
+/// Never reached on Windows: [`exchange_file`] does not move the old file aside, so there is nothing to undo.
+pub(super) fn revert_file(
+    dir: &Dir,
+    _staged: &str,
+    _new: &File,
+    name: &str,
+    _old: &File,
+) -> Result<()> {
+    Err(PublishError::MovedUnverified {
+        path: dir.path().join(name),
+    })
 }

@@ -23,6 +23,8 @@ mod local_skill;
 pub use local_skill::LocalSkill;
 #[cfg(any(target_os = "macos", windows))]
 mod native;
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use native::{BoundFile, BoundFolder};
 #[cfg(target_os = "macos")]
 #[path = "skill_publish/macos.rs"]
 mod os;

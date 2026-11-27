@@ -1,9 +1,9 @@
-use super::native::{Dir, FileAccess};
+use super::native::{Dir, FileAccess, LockAttempt};
 use super::{ObjectId, PublishError};
 use rustix::fs::{self as rx, AtFlags, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -168,4 +168,143 @@ pub(super) fn remove_empty(dir: &Dir, name: &str, expected: &ObjectId) -> Result
     }
     plain_payload(&file)?;
     rx::unlinkat(dir.file(), name, AtFlags::REMOVEDIR).map_err(native)
+}
+
+pub(super) fn mkdir_shared(dir: &Dir, name: &str) -> Result<()> {
+    // The process umask applies, as it does to a folder the standard library makes.
+    rx::mkdirat(dir.file(), name, Mode::from_raw_mode(0o777)).map_err(native)
+}
+
+/// Creates the new regular file `name` for a staged write, with the permissions a plain create gives.
+pub(super) fn stage(dir: &Dir, name: &str) -> Result<File> {
+    let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rx::openat(dir.file(), name, flags, Mode::from_raw_mode(0o666))
+        .map(File::from)
+        .map_err(native)
+}
+
+pub(super) fn open_file(dir: &Dir, name: &str, _hold: bool) -> Result<File> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    for _ in 0..8 {
+        let file = File::from(rx::openat(dir.file(), name, flags, Mode::empty()).map_err(native)?);
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(PublishError::UnsafePath);
+        }
+        match meta.nlink() {
+            1 => return Ok(file),
+            // Replaced between the open and this look: the name now has its successor, so open that.
+            0 => {}
+            _ => return Err(PublishError::UnsafePath),
+        }
+    }
+    Err(PublishError::Busy)
+}
+
+/// Whether `name` in `dir` is, without following a link, the open `file`.
+fn is_entry(dir: &Dir, name: &str, file: &File) -> Result<bool> {
+    let held = file.metadata()?;
+    match rx::statat(dir.file(), name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            Ok(stat.st_ino == held.ino() && u64::from(stat.st_dev.cast_unsigned()) == held.dev())
+        }
+        Err(Errno::NOENT) => Ok(false),
+        Err(err) => Err(native(err)),
+    }
+}
+
+pub(super) fn try_lock(dir: &Dir, name: &str) -> Result<LockAttempt> {
+    let flags =
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let file = match rx::openat(dir.file(), name, flags, Mode::from_raw_mode(0o666)) {
+        Ok(file) => File::from(file),
+        // The holder removed the lock file between the lookup and the open of this create-or-open.
+        Err(Errno::NOENT) => return Ok(LockAttempt::Retry),
+        Err(err) => return Err(native(err)),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(PublishError::UnsafePath);
+    }
+    match file.try_lock() {
+        // A releasing holder removes the name before unlocking, so only a lock on the file the name still has
+        // counts.
+        Ok(()) if is_entry(dir, name, &file)? => Ok(LockAttempt::Held(file)),
+        Ok(()) => Ok(LockAttempt::Retry),
+        Err(TryLockError::WouldBlock) => Ok(LockAttempt::Busy),
+        Err(TryLockError::Error(err)) => Err(err.into()),
+    }
+}
+
+pub(super) fn unlock(dir: &Dir, name: &str, file: File) -> Result<()> {
+    let removed = match is_entry(dir, name, &file) {
+        Ok(true) => rx::unlinkat(dir.file(), name, AtFlags::empty()).map_err(native),
+        Ok(false) => Ok(()),
+        Err(err) => Err(err),
+    };
+    drop(file);
+    removed
+}
+
+/// Gives the staged `file` the vacant name `name`; never replaces an entry.
+pub(super) fn install_file(dir: &Dir, staged: &str, file: &File, name: &str) -> Result<()> {
+    if !is_entry(dir, staged, file)? {
+        return Err(PublishError::Changed);
+    }
+    rx::renameat_with(dir.file(), staged, dir.file(), name, RenameFlags::NOREPLACE)
+        .map_err(native)?;
+    if !is_entry(dir, name, file).is_ok_and(|same| same) {
+        return Err(PublishError::MovedUnverified {
+            path: dir.path().join(name),
+        });
+    }
+    Ok(())
+}
+
+/// Swaps the staged `new` file with the entry `name`, which must be `old`, in one atomic step. `true`: afterwards
+/// `name` is `new` and the staged name is `old`, for the caller to check and remove. When another entry had taken `name` just before the swap, it is swapped back.
+pub(super) fn exchange_file(
+    dir: &Dir,
+    staged: &str,
+    new: &File,
+    name: &str,
+    old: &File,
+) -> Result<bool> {
+    if !is_entry(dir, staged, new)? || !is_entry(dir, name, old)? {
+        return Err(PublishError::Changed);
+    }
+    let swap = || {
+        rx::renameat_with(dir.file(), staged, dir.file(), name, RenameFlags::EXCHANGE)
+            .map_err(native)
+    };
+    swap()?;
+    let landed = |entry: &str, file: &File| is_entry(dir, entry, file).is_ok_and(|same| same);
+    if landed(name, new) && landed(staged, old) {
+        return Ok(true);
+    }
+    if landed(name, new) && swap().is_ok() && landed(staged, new) {
+        return Err(PublishError::Changed);
+    }
+    Err(PublishError::MovedUnverified {
+        path: dir.path().join(staged),
+    })
+}
+
+/// Undoes [`exchange_file`] while both entries are still the ones it left.
+pub(super) fn revert_file(
+    dir: &Dir,
+    staged: &str,
+    new: &File,
+    name: &str,
+    old: &File,
+) -> Result<()> {
+    let unverified = || PublishError::MovedUnverified {
+        path: dir.path().join(staged),
+    };
+    if !is_entry(dir, name, new).is_ok_and(|same| same)
+        || !is_entry(dir, staged, old).is_ok_and(|same| same)
+    {
+        return Err(unverified());
+    }
+    rx::renameat_with(dir.file(), staged, dir.file(), name, RenameFlags::EXCHANGE)
+        .map_err(|_| unverified())
 }
