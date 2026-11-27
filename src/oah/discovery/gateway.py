@@ -21,7 +21,7 @@ P = ParamSpec("P")
 
 def reachable(operation: str, *, managed: bool = False, discovery: bool = False, task_advice: bool = False,
               config: Mapping[str, preparation.Json] | None = None, env: Mapping[str, str] | None = None,
-              keychain: Keychain | None = None) -> bool:
+              keychain: Keychain | None = None, root: pathlib.Path | None = None, approval=None) -> bool:
     from oah import rerank, skillpack
 
     if operation in skillpack.TASKLESS or managed or discovery:
@@ -33,7 +33,7 @@ def reachable(operation: str, *, managed: bool = False, discovery: bool = False,
             or settings.get("send_task_text") is not True:
         return False
     provider, _key, _status = rerank._gate(config, brief_disabled=False, env=env, keychain=keychain, providers=None,
-                                           scopes=("judgement", "judgement-task-text"))
+                                           scopes=("judgement", "judgement-task-text"), root=root, approval=approval)
     return provider is not None and callable(getattr(provider, "judge", None))
 
 

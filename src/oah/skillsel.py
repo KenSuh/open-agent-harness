@@ -683,12 +683,14 @@ def home_of(env: Mapping[str, str]) -> pathlib.Path:
 
 def rerank_skills(selection: Selection, *, config: Mapping, query: str, brief_disabled: bool = False,
                   env: Mapping[str, str] | None = None, keychain=None, providers=None,
-                  state_dir: pathlib.Path | None = None, admitted=None) -> tuple[Selection, str]:
+                  state_dir: pathlib.Path | None = None, admitted=None, root: pathlib.Path | None = None,
+                  approval=None) -> tuple[Selection, str]:
     """The selection in the re-ranker's order, and `used` or `unused(<reason>)`.
 
     The re-ranker may only re-order: a result that is not the same set of skills keeps the rule order and
     reports `unused(error:dropped)`. Only skill ids and their reasons are sent to an enabled provider. With
-    `state_dir`, the re-ranker's breaker there applies (`oah.rerank.circuit`)."""
+    `state_dir`, the re-ranker's breaker there applies (`oah.rerank.circuit`). `root` names the project whose
+    device approval applies (`oah.rerank.admit`)."""
     from oah import rerank
 
     if admitted is not None:
@@ -702,7 +704,8 @@ def rerank_skills(selection: Selection, *, config: Mapping, query: str, brief_di
     candidates = [rerank.Candidate(skill.id, "; ".join(skill.reasons)) for skill in selection.skills]
     try:
         result = rerank.rerank("skills", candidates, config=config, query=query, brief_disabled=brief_disabled,
-                               env=env, keychain=keychain, providers=providers, state_dir=state_dir)
+                               env=env, keychain=keychain, providers=providers, state_dir=state_dir, root=root,
+                               approval=approval)
     except rerank.ProviderError as exc:
         return selection, f"unused(error:{exc.code})"
     if admitted is not None:
@@ -733,4 +736,4 @@ def choose(root: pathlib.Path, *, kind: str, stage: str, risk: str, scope: Seque
     config = load_config(root).section("rerank", rerank.DEFAULTS)
     return rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
                          brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
-                         state_dir=state_dir, admitted=admitted)
+                         state_dir=state_dir, admitted=admitted, root=root)

@@ -613,7 +613,7 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         judged = rerank.judge_model({"stage": stage, "tier": tier, "axes": axes.to_json()},
                                     [(pair.model, pair.effort) for pair in candidates.pairs],
                                     config=source.section("rerank", rerank.DEFAULTS), brief_disabled=brief_disabled,
-                                    env=env, keychain=keychain, state_dir=state_dir)
+                                    env=env, keychain=keychain, state_dir=state_dir, root=root)
     except Exception as exc:  # a plugin failure must never block a launch
         return record(f"unused(error: {type(exc).__name__})")
     choice["provider"] = judged.provider
@@ -1614,7 +1614,7 @@ def _admit_skills(request, holder, task_design, *, root: pathlib.Path, state_dir
             except (ImportError, AttributeError, ConfigError):
                 config = None
         active = gateway.reachable(value.operation.kind, managed=needed, discovery=bool(answerable),
-                                   task_advice=task_advice, config=config, env=env, keychain=keychain)
+                                   task_advice=task_advice, config=config, env=env, keychain=keychain, root=root)
         if expected is not True and not active and not managed_task:
             return None
         if expected is False:
@@ -1784,7 +1784,7 @@ def _skill_fit_advisor(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
                                                .encode("utf-8")).hexdigest()
         request = judge.Request("skill-fit", "skill-fit/v1", tuple(fields), tuple(options), input_ref=input_ref)
         result = judge.judge(request, config=config, policy=policy, sources=sources, brief_disabled=brief_disabled,
-                              env=env, keychain=keychain, state_dir=state_dir, admitted=admitted)
+                              env=env, keychain=keychain, state_dir=state_dir, admitted=admitted, root=root)
         if not result.status.startswith("used"):
             return unapplied(result.status)
         applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, request=request,
@@ -1821,7 +1821,8 @@ def _capability_advice(*, root: pathlib.Path, state_dir: pathlib.Path, env: Mapp
 
     def ask(request, input_ref: str):
         result = judge.judge(request, config=config, policy=policy, sources=sources, brief_disabled=brief_disabled,
-                             env=env, keychain=keychain, state_dir=state_dir, task_view=task_view, admitted=admitted)
+                             env=env, keychain=keychain, state_dir=state_dir, task_view=task_view, admitted=admitted,
+                             root=root)
         if not result.status.startswith("used"):
             return result, None
         return result, judge.apply(result, current_input_ref=input_ref, config=config, sources=sources,
@@ -2437,7 +2438,7 @@ def judge_difficulty(axes: routing.Axes, *, section: str | None, request_text: s
         try:
             work = (rerank.request_work(request_text, scope) if section is None
                     else rerank.intent_work(section, scope))
-            advice = rerank.advise_difficulty(dict(axes.to_json(), tier=rule_tier), work, config=config,
+            advice = rerank.advise_difficulty(dict(axes.to_json(), tier=rule_tier), work, config=config, root=root,
                                               brief_disabled=brief_disabled, env=env, keychain=keychain,
                                               state_dir=state_dir, record_notice=inputs is None,
                                               notify=inputs.notice if inputs is not None else None)
@@ -2589,7 +2590,8 @@ def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, b
     check(selection.to_record())
     config = _CORRECTION_INPUTS.get().config.section("rerank", rerank.DEFAULTS)
     return skillsel.rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
-                                 brief_disabled=brief_disabled, env=env, keychain=keychain, admitted=admitted)
+                                 brief_disabled=brief_disabled, env=env, keychain=keychain, admitted=admitted,
+                                 root=root)
 
 
 @boundaries.entry("admission")

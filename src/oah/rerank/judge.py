@@ -41,7 +41,7 @@ from typing import Callable, Mapping, Sequence
 
 from oah import secrets
 from oah.capabilities import CLASSES as CAPABILITY_CLASSES
-from oah.rerank import USED, _call, _gate, circuit, unused
+from oah.rerank import USED, Approval, _call, admit, bounded, circuit, unused
 from oah.rerank.base import BAD_RESPONSE, JudgeReply, Provider, ProviderError
 from oah.rerank.judgement_policy import DEFAULTS, settings as judgement_settings
 from oah.rerank.typesafe import DEFAULT_MODEL, PROBABILITY_SUM_TOLERANCE, SCORE_TOLERANCE
@@ -722,12 +722,13 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
           env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
           providers: Mapping[str, Provider] | None = None, state_dir: pathlib.Path | None = None,
           budget: Budget | None = None, notify: Callable[[str], None] | None = None,
-          task_view: TaskView | None = None, admitted=None) -> Judgement:
+          task_view: TaskView | None = None, admitted=None, root: pathlib.Path | None = None,
+          approval: Approval | None = None) -> Judgement:
     """One advisory outcome for a closed purpose, or `unused(<reason>)` with nothing sent.
 
     With `sources` (and `view` for design text, `task_view` for task text) every slice is read again from its
-    verified origin before sending."""
-    provider = key = None
+    verified origin before sending. `root` names the project whose device approval applies (`oah.rerank.admit`)."""
+    provider = key = admission = sending = None
     try:
         if not _admitted(request.rubric, admitted):
             return Judgement(unused("admission"), request.purpose, None)
@@ -772,11 +773,14 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         if any(_flagged(item) for item in strings):
             return Judgement(unused("secret"), request.purpose, None)
         breaker = circuit.Breaker(state_dir, circuit.limits(config))
-        provider, key, status = _gate(
+        admission = admit(
             config, brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
             scopes=("judgement", *(("judgement-design-text",) if has_design else ()),
-                    *(("judgement-task-text",) if has_task else ())))
-        env = keychain = providers = None
+                    *(("judgement-task-text",) if has_task else ())), root=root, approval=approval)
+        provider, key, status = admission[:3]
+        # The request reads this table: an approved use keeps the approval's bounds. The identity keeps `config`.
+        sending = bounded(config) if admission.consented else config
+        admission = env = keychain = providers = approval = None
         if provider is None:
             return Judgement(status, request.purpose, None)
         if not callable(getattr(provider, "judge", None)):
@@ -817,10 +821,10 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
             from oah.discovery import gateway
 
             raw, status = _call(lambda: gateway.send(admitted, "skill-judge", key_id,
-                lambda: provider.judge(state, questions, key=key, config=config),
+                lambda: provider.judge(state, questions, key=key, config=sending),
                 state=state_dir if state_dir is not None else getattr(sources, "state_dir", None)))
         else:
-            raw, status = _call(lambda: provider.judge(state, questions, key=key, config=config))
+            raw, status = _call(lambda: provider.judge(state, questions, key=key, config=sending))
         if status == USED and isinstance(RUBRICS[request.rubric], OptionNoulRubric) and isinstance(raw, Mapping) \
                 and set(raw) < set(questions):
             status = unused("error:dropped")  # the reply leaves a candidate out: no rank from a partial answer
@@ -838,7 +842,7 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         judgement_cache.save(state_dir, key_id, result.to_record(), _utc_now())
         return result
     finally:
-        del provider, key
+        del provider, key, admission, sending, approval
 
 
 def _probability(value: object) -> float:

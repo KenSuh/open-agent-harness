@@ -424,7 +424,7 @@ def _stage_advisor(store, view, snapshot):
             sort_keys=True).encode("utf-8")).hexdigest()
         request = judge.Request("design-stage", "design-stage/v1", tuple(fields), tuple(options), input_ref=input_ref)
         result = judge.judge(request, config=config, policy=policy, sources=sources, view=view, env=os.environ,
-                             state_dir=store.state, budget=judge.Budget(1), admitted=admitted)
+                             state_dir=store.state, budget=judge.Budget(1), admitted=admitted, root=store.root)
         if not result.status.startswith("used"):
             return {"status": result.status, "applied": False, "choice": None, "reason": None}
         applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, view=view,

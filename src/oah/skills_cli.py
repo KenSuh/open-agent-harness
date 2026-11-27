@@ -531,7 +531,7 @@ def _search_advisor(info: RepoInfo, state: pathlib.Path, admitted):
                                                .encode("utf-8")).hexdigest()
         req = judge.Request("search-path", "skill-search/v1", tuple(fields), tuple(keys), input_ref=input_ref)
         result = judge.judge(req, config=config, policy=policy, sources=sources, env=os.environ, state_dir=state,
-                             admitted=admitted)
+                             admitted=admitted, root=info.root)
         if not result.status.startswith("used"):
             return {"status": result.status, "applied": False, "choice": None, "reason": None}
         applied = judge.apply(result, current_input_ref=input_ref, config=config, sources=sources, request=req,

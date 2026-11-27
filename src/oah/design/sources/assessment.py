@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TYPE_CHECKING
 
@@ -127,7 +128,8 @@ def _view(record: Mapping[str, Any], applied: judge.Applied, digest: str) -> dic
 
 def assess(sources: Sources, proposals: Sequence[Proposal], *, reader: Callable[[str, str], DesignView],
            config: Mapping[str, Any], env: Mapping[str, str] | None = None, keychain=None,
-           providers: Mapping[str, Provider] | None = None) -> list[Proposal]:
+           providers: Mapping[str, Provider] | None = None, root: pathlib.Path | None = None) -> list[Proposal]:
+    """`root` names the project `config` was read from, for its device approval (`oah.rerank.admit`)."""
     rows = []
     budget = judge.Budget(8)
     for index, proposal in enumerate(proposals):
@@ -137,7 +139,7 @@ def assess(sources: Sources, proposals: Sequence[Proposal], *, reader: Callable[
             continue
         try:
             rows.append(_assess_one(sources, proposal, reader=reader, config=config, budget=budget,
-                                    env=env, keychain=keychain, providers=providers))
+                                    env=env, keychain=keychain, providers=providers, root=root))
         except ViewUnavailable:
             rows.append(dataclasses.replace(proposal, assessment=unassessed("stale-or-unknown")))
     return rows
@@ -145,14 +147,15 @@ def assess(sources: Sources, proposals: Sequence[Proposal], *, reader: Callable[
 
 def _assess_one(sources: Sources, proposal: Proposal, *, reader: Callable[[str, str], DesignView],
                 config: Mapping[str, Any], budget: judge.Budget, env: Mapping[str, str] | None,
-                keychain, providers: Mapping[str, Provider] | None) -> Proposal:
+                keychain, providers: Mapping[str, Provider] | None, root: pathlib.Path | None) -> Proposal:
     basis, view = _basis(sources, proposal, reader)
     request = request_for(sources, proposal, basis, view)
     if not any(type(field) is judge.PublicSnapshotField and role.endswith("excerpt") for role, field in request.fields):
         result = judge.Judgement("unused(insufficient-input)", request.purpose, None)
     else:
         result = judge.judge(request, config=config, policy=sources.policy_digest(), sources=sources,
-                             state_dir=sources.state_dir, budget=budget, env=env, keychain=keychain, providers=providers)
+                             state_dir=sources.state_dir, budget=budget, env=env, keychain=keychain, providers=providers,
+                             root=root)
     latest, latest_view = _basis(sources, proposal, reader)
     latest_request = request_for(sources, proposal, latest, latest_view)
     applied = judge.apply(result, current_input_ref=digest_of(latest), config=config, sources=sources,

@@ -269,9 +269,10 @@ def _proposals(args: argparse.Namespace) -> int:
     from oah.design.sources import assessment, read_view
     from oah.rerank import DEFAULTS
 
+    root = pathlib.Path.cwd()  # one folder names the project: its design store, its configuration and its approval
     sources = _sources()
-    store = open_store(pathlib.Path.cwd())
-    config = load_config(pathlib.Path.cwd()).section("rerank", DEFAULTS)
+    store = open_store(root)
+    config = load_config(root).section("rerank", DEFAULTS)
     reader = lambda project, name: read_view(store, project, name)
     design = None
     if args.design:
@@ -279,7 +280,8 @@ def _proposals(args: argparse.Namespace) -> int:
         view = reader(project, name)
         design = (view.uid, view.design)
     proposals, findings = sources.proposals(design=design)
-    proposals = (assessment.assess(sources, proposals, reader=reader, config=config) if args.action == "assess"
+    proposals = (assessment.assess(sources, proposals, reader=reader, config=config, root=root)
+                 if args.action == "assess"
                  else assessment.recorded(sources, proposals, reader=reader, config=config))
     if args.json:
         _print({"proposals": [item.to_json() for item in proposals], "findings": [item.to_json() for item in findings]})

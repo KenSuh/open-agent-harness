@@ -20,10 +20,12 @@ Approval. It lives on this device, in `<OAH_HOME, else the home folder's .oah>/s
 never in the project: a repository can ship configuration, and configuration alone sends nothing new. One record
 holds one project (the canonical path of its git common directory, so its worktrees share it, or the folder
 outside git), the exact destination the user saw (address, key name, model) and, per scope, the digest of what
-that scope sends. `oah.rerank.admit` asks `DeviceApproval.verdict` before any key lookup:
+that scope sends. An approval covers Impact ordering alone (`POLICIES`): no other Jev use is offered the key stored
+on this device. The project is always the folder a caller names; the current folder is never a stand-in for it.
+`oah.rerank.admit` asks `DeviceApproval.verdict` before any key lookup:
 
 - `granted`: enabled, the same destination, every asked scope approved with today's digest;
-- `no-consent`: no record, or a scope the user never approved;
+- `no-consent`: no record, no project named, or a scope no approval covers;
 - `consent-revoked`: the user switched the project off here, which stops every key source;
 - `consent-stale`: the destination or what a scope sends changed since the approval;
 - `device-state`: the record cannot be trusted (unreadable, malformed, another owner, writable by others, a
@@ -121,26 +123,7 @@ POLICIES: dict[str, Policy] = {
         never=("the row detail", "the queried target", "file contents", "absolute paths"),
         bounds=(("rows in one request", rerank.CANDIDATE_LIMIT), ("requests in one run", 1),
                 ("seconds waited", int(rerank.TIMEOUT_LIMIT)), ("characters in one path", PATH_LIMIT))),
-    "skills": Policy(
-        1, "Skill order", ("skill id", "the reasons oah selected the skill", "task kind", "stage", "risk"),
-        never=("skill file contents", "task text", "source code"),
-        bounds=(("skills in one request", rerank.CANDIDATE_LIMIT),
-                ("characters of reasons per skill", typesafe.DESCRIPTION_LIMIT))),
-    "difficulty": Policy(
-        1, "Difficulty advice",
-        ("kind", "intensity", "reasoning", "risk", "the task's accepted Intent, or the request before one exists",
-         "the Scope paths"),
-        never=("source code", "diffs", "file contents", "stored values"),
-        bounds=(("characters of text", typesafe.WORK_LIMIT),)),
-    "model": Policy(
-        1, "Model choice", ("stage", "tier", "kind", "intensity", "reasoning", "risk", "candidate model and effort pairs"),
-        never=("task text", "source code", "paths")),
-    "judgement": Policy(
-        1, "Source and material judgement", ("slices of verified public snapshots", "fixed labels"),
-        never=("design text", "task text", "source code")),
-    "judgement-design-text": Policy(1, "Design text in a judgement", ("design excerpts",)),
-    "judgement-task-text": Policy(1, "Task text in a judgement", ("task text excerpts",)),
-}
+}  # every scope an approval can cover. The other scopes of `rerank.SCOPES` have none, so they never get one.
 
 
 def policy_digest(scope: str) -> str:
@@ -159,9 +142,11 @@ class Project(NamedTuple):
     root: pathlib.Path  # where the project's configuration is read: the top of the work tree, or the folder
 
 
-def project(root: pathlib.Path | str | None = None) -> Project:
-    """The project `root` belongs to (the current folder's when omitted): worktrees of one repository are one."""
-    folder = pathlib.Path.cwd() if root is None else pathlib.Path(root)
+def project(root: pathlib.Path | str) -> Project:
+    """The project the folder `root` belongs to: worktrees of one repository are one. A caller names the folder."""
+    if root is None:
+        raise ValueError("a Jev project is named by its folder; the current folder is not a stand-in")
+    folder = pathlib.Path(root)
     common = top = None
     try:
         found = run_git(folder, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel")
@@ -276,11 +261,13 @@ def _write_record(place: Device, found: Project, fields: Mapping[str, object]) -
 class DeviceApproval:
     """The approval recorded on this device for one project. `verdict` never raises and never looks a key up."""
 
-    def __init__(self, root: pathlib.Path | str | Project | None = None, env: Mapping[str, str] | None = None) -> None:
+    def __init__(self, root: pathlib.Path | str | Project | None, env: Mapping[str, str] | None = None) -> None:
         self._root = root
         self._env = env
 
     def verdict(self, scopes: Sequence[str], *, url: str, key_name: str, model: str) -> str:
+        if self._root is None:
+            return rerank.NO_CONSENT  # no project was named, so there is no approval to find
         try:
             found = self._root if isinstance(self._root, Project) else project(self._root)
             place = device(found, self._env)
@@ -307,8 +294,8 @@ class DeviceApproval:
             return rerank.DEVICE_STATE
 
 
-def device_approval(root: pathlib.Path | str | None = None, env: Mapping[str, str] | None = None) -> DeviceApproval:
-    """The approval store `oah.rerank.admit` asks when a caller injects none."""
+def device_approval(root: pathlib.Path | str, env: Mapping[str, str] | None = None) -> DeviceApproval:
+    """The approval store `oah.rerank.admit` asks for the project a caller named, when the caller injects none."""
     return DeviceApproval(root, env)
 
 
@@ -375,7 +362,8 @@ def status(root: pathlib.Path | str, *, env: Mapping[str, str] | None = None) ->
 def prepare(root: pathlib.Path | str, *, scopes: Iterable[str] = ("impact",),
             env: Mapping[str, str] | None = None) -> dict:
     """The approval preview for `scopes`: the project, the destination, what each scope sends, and the token
-    `enable` takes. Nothing is written and no key is looked up, in the environment or in the key store."""
+    `enable` takes. Nothing is written and no key is looked up, in the environment or in the key store. A scope
+    without a policy (today every scope but `impact`) is refused with `scope`."""
     wanted = tuple(dict.fromkeys(scopes))
     if not wanted or any(scope not in POLICIES for scope in wanted):
         return _refused(SCOPE)
@@ -517,7 +505,7 @@ def dispatch(argv: Sequence[str], *, stdin: object = None, env: Mapping[str, str
     """(exit code, result) of one call from a packaged entry. It prints nothing and reports a failure as a word.
 
         status       --root <folder>
-        prepare      --root <folder> [--scope <scope>]...   the scope is `impact` when none is named
+        prepare      --root <folder> [--scope <scope>]...   `impact` when none is named, and the only one today
         enable       --root <folder>                        the token of `prepare`, one line on `stdin`
         disable      --root <folder>
         key-state

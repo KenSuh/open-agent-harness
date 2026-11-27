@@ -16,12 +16,17 @@ A provider runs only when every gate passes, checked in this order:
    nothing. For TypeSafe, `admit` first settles from the configuration text and this device's state alone where
    the request would go and which credential may go there, and only then looks a key up:
    - the key stored on this device goes only to the official address under the name `TYPESAFE_API_KEY`, and only
-     for a project and use the user approved on this device (`oah.project_tools_jev`);
+     for a project and use the user approved on this device (`oah.project_tools_jev`, which approves Impact
+     ordering alone);
    - an environment variable keeps its documented precedence for that pair and for an address on this machine;
    - any other address or key name needs that device approval for the exact pair and reads the environment only;
      the shared key name is never sent there (`unused(error:insecure-url)` when the environment holds it);
    - Impact ordering needs the device approval whatever the key source, and a project the user switched off on
-     this device sends nothing.
+     this device sends nothing;
+   - the approval belongs to the project a caller names with `root`, never to the current folder. A caller that
+     names none gets no device decision: nothing on this device is read, an environment key keeps its
+     behaviour, and a use that needs the approval is refused (`no-consent`);
+   - a use the approval admitted keeps the approval's bounds (`bounded`), whatever the configuration says.
    `Admission.reason` names the exact refusal (`no-consent`, `consent-revoked`, `consent-stale`,
    `device-state`, `destination`, `key-locked`, `key-denied`); the status keeps the words run records accept;
 5. `unused(circuit-open)` or `unused(daily-limit)`: given a state folder (`state_dir`), the breaker in
@@ -340,9 +345,10 @@ def admit(config: Mapping, *, brief_disabled: bool = False, env: Mapping[str, st
           approval: Approval | None = None) -> Admission:
     """Every gate in order. `scopes` names what the caller would send; a caller that names none needs them all.
 
-    `root` is the project the consent belongs to (the current folder's project when omitted). `approval`
-    replaces the device consent store. A keychain test double with no `approval` is read as before, with no
-    home, project or host discovery; the device key store itself is never read without the device approval."""
+    `root` is the project the consent belongs to, and `approval` replaces the device consent store. With
+    neither, no device decision is made: no home, project or host is discovered, and a use that needs the
+    approval (the key stored on this device, another destination, Impact ordering) is refused. A keychain test
+    double with no `approval` is read as before; the device key store itself is never read without the approval."""
     provider = key = key_name = None
     try:
         if brief_disabled:
@@ -400,9 +406,10 @@ def _admit_typesafe(provider: Provider, key_name: str, config: Mapping, *, env: 
             return Admission(None, None, unused(f"error:{INSECURE_URL}") if value else unused("no key"),
                              INSECURE_URL if kind == REFUSED else DESTINATION)
         device = kind == OFFICIAL and not value  # only the official pair may use the key stored on this device
+        stored = keychain is None or isinstance(keychain, (secrets.MacKeychain, secrets.WindowsCredentials))
         if approval is not None:
             judge = approval
-        elif keychain is None or isinstance(keychain, (secrets.MacKeychain, secrets.WindowsCredentials)):
+        elif stored and root is not None:  # the approval is the named project's; the current folder names none
             from oah import project_tools_jev  # it imports this package, so not at module level
 
             judge = project_tools_jev.device_approval(root, env=env)
@@ -410,7 +417,7 @@ def _admit_typesafe(provider: Provider, key_name: str, config: Mapping, *, env: 
         if verdict in (REVOKED, DEVICE_STATE):
             return Admission(None, None, unused("no key"), verdict)  # switched off here: no key source sends
         needed = (kind == CUSTOM or any(scope in CONSENT_ALWAYS for scope in named)
-                  or (device and judge is not None))
+                  or (device and (stored or judge is not None)))
         if needed and verdict != GRANTED:
             return Admission(None, None, unused("no key"), verdict or NO_CONSENT)
         if value:
@@ -588,16 +595,18 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
                       root: pathlib.Path | None = None, brief_disabled: bool = False,
                       env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
                       providers: Mapping[str, Provider] | None = None, state_dir: pathlib.Path | None = None,
-                      notify: Callable[[str], None] | None = None, record_notice: bool = True) -> Advice:
+                      notify: Callable[[str], None] | None = None, record_notice: bool = True,
+                      approval: Approval | None = None) -> Advice:
     """Jev's tier for the work, beside the rule tier from routing.Axes or axes["tier"]; `decide` applies it.
 
-    Omitted config loads root's [rerank] section for `oah call`; without root it uses disabled defaults. A plain
+    `root` names the project, for its device approval (`admit`) and for an omitted config, which loads root's
+    [rerank] section for `oah call`; without root an omitted config is the disabled defaults. A plain
     string is sent as written, under the same limit and checks. With `state_dir`, the first request of the project
     prints `SCOPE_NOTICE` through `notify` (stderr by default) and, unless `record_notice` is false, records that it
     was shown; the breaker there can stop the request and, unless `record_notice` is false, records its outcome
     (an answer below `difficulty_min_confidence` leaves the count alone).
     """
-    provider = key = answer = confidence = failure = None
+    provider = key = answer = confidence = failure = admission = None
     try:
         if isinstance(axes, routing.Axes):
             axes = dict(axes.to_json(), tier=routing.recommend(axes).tier)
@@ -609,13 +618,16 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
         if implicit_config:
             config = load_config(root).section("rerank", DEFAULTS) if root is not None else DEFAULTS
         breaker = circuit.Breaker(state_dir, circuit.limits(config), write=record_notice)
-        provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                      providers=providers, scopes=("difficulty",), root=root)
-        env = keychain = providers = None
+        admission = admit(config, brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
+                          scopes=("difficulty",), root=root, approval=approval)
+        provider, key, status = admission[:3]
+        env = keychain = providers = approval = None
         if provider is None:
             if implicit_config and status == unused("not-enabled"):
                 status = unused("not-configured")
             return Advice(rule_tier, None, None, status, truncated=work.truncated)
+        if admission.consented:
+            config = bounded(config)
         provider_name, status = _call(lambda: _valid_text(provider.name))
         if status != USED:
             return Advice(rule_tier, None, None, status, truncated=work.truncated)
@@ -646,6 +658,7 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
         failure = _classify_failure(exc)
     finally:
         del axes, work, config, root, brief_disabled, env, keychain, providers, provider, key, answer, confidence
+        del approval, admission
     if type(failure) is str:
         raise ProviderError(failure) from None
     raise BaseException.with_traceback(failure, None) from None
@@ -655,22 +668,27 @@ def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, s
                 brief_disabled: bool = False, env: Mapping[str, str] | None = None,
                 keychain: secrets.Keychain | None = None,
                 providers: Mapping[str, Provider] | None = None,
-                state_dir: pathlib.Path | None = None) -> ModelJudgement:
+                state_dir: pathlib.Path | None = None, root: pathlib.Path | None = None,
+                approval: Approval | None = None) -> ModelJudgement:
     """One (model, effort) proposal from the provider, for the caller to validate against its rules.
 
-    With `state_dir`, the breaker there can stop the request and records its outcome."""
-    provider = key = answer = failure = None
+    With `state_dir`, the breaker there can stop the request and records its outcome. `root` names the project
+    whose device approval applies (`admit`)."""
+    provider = key = answer = failure = admission = None
     try:
         axes = request.get("axes") if isinstance(request.get("axes"), Mapping) else {}
         sent = {"stage": str(request.get("stage", "")), "tier": str(request.get("tier", "")),
                 "axes": {name: str(axes[name]) for name in AXES if name in axes}}
         pairs = tuple((str(model), str(effort)) for model, effort in candidates)
         breaker = circuit.Breaker(state_dir, circuit.limits(config))
-        provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                      providers=providers, scopes=("model",))
-        env = keychain = providers = None
+        admission = admit(config, brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
+                          scopes=("model",), root=root, approval=approval)
+        provider, key, status = admission[:3]
+        env = keychain = providers = approval = None
         if provider is None:
             return ModelJudgement(status)
+        if admission.consented:
+            config = bounded(config)
         provider_name, status = _call(lambda: _valid_text(provider.name))
         if status != USED:
             return ModelJudgement(status)
@@ -697,6 +715,7 @@ def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, s
         failure = _classify_failure(exc)
     finally:
         del request, candidates, config, brief_disabled, env, keychain, providers, provider, key, answer
+        del root, approval, admission
     if type(failure) is str:
         raise ProviderError(failure) from None
     raise BaseException.with_traceback(failure, None) from None

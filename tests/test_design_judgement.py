@@ -196,7 +196,7 @@ class ProvenanceTest(JudgementCase):
                     request = judge.Request("candidate-priority", "candidate-priority/v2",
                                             (("o0:evidence_excerpt", field), ("o1:evidence_excerpt", self.notes())),
                                             ("o0", "o1"))
-                with mock.patch.object(judge, "_gate", wraps=judge._gate) as gate:
+                with mock.patch.object(judge, "admit", wraps=judge.admit) as gate:
                     self.assertEqual("unused(secret)", self.run_judge(request).status)
                 gate.assert_not_called()
         self.assertEqual([], self.provider.calls)

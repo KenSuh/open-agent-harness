@@ -281,7 +281,7 @@ class AdmitTest(unittest.TestCase):
             self.assert_refused(result, "unused(no key)", rerank.NO_CONSENT)
             made.assert_called_once_with(pathlib.Path("somewhere"), env={})
             approval.answer = rerank.GRANTED
-            result = admit(settings(), env={}, scopes=("skills",))
+            result = admit(settings(), env={}, scopes=("skills",), root=pathlib.Path("somewhere"))
             self.assertEqual((result.status, result.key.reveal(), result.consented),
                              ("used", self.store.values[SHARED], True))
 
@@ -290,7 +290,7 @@ class AdmitTest(unittest.TestCase):
         chain = secrets.MacKeychain(search_path=str(empty))
         approval = Verdict(rerank.NO_CONSENT)
         with mock.patch.object(jev, "device_approval", return_value=approval):
-            result = admit(settings(), env={}, keychain=chain, scopes=("skills",))
+            result = admit(settings(), env={}, keychain=chain, scopes=("skills",), root=pathlib.Path("somewhere"))
         self.assertEqual((result.status, result.reason), ("unused(no key)", rerank.NO_CONSENT))
         self.assertEqual(len(approval.asked), 1)
 
@@ -338,7 +338,7 @@ class ConsentTest(DeviceCase):
                                                   "model": typesafe.DEFAULT_MODEL})
         self.assertEqual(preview["credential"], ["environment", "device"])
         self.assertEqual(self.verdict(), rerank.GRANTED)
-        self.assertEqual(self.verdict("skills"), rerank.NO_CONSENT, "a scope the user never approved")
+        self.assertEqual(self.verdict("skills"), rerank.NO_CONSENT, "a scope no approval covers")
         self.assertEqual(self.verdict("impact", "skills"), rerank.NO_CONSENT)
         status = jev.status(self.repo, env=self.env)
         self.assertEqual((status["consent"], status["scopes"]), ("enabled", {"impact": "granted"}))
@@ -346,10 +346,8 @@ class ConsentTest(DeviceCase):
         self.assertEqual(self.verdict(), rerank.REVOKED)
         self.assertEqual(jev.status(self.repo, env=self.env)["consent"], "disabled")
         self.assertEqual(jev.disable(self.repo, env=self.env)["status"], "disabled", "switching off twice is fine")
-        self.approve("impact", "skills")
-        self.assertEqual(self.verdict("impact", "skills"), rerank.GRANTED)
-        self.approve("skills")
-        self.assertEqual(self.verdict("impact"), rerank.NO_CONSENT, "a new approval replaces the scopes")
+        self.approve("impact")
+        self.assertEqual(self.verdict(), rerank.GRANTED, "approving again switches the project back on")
 
     def test_the_impact_preview_lists_exactly_what_is_sent(self) -> None:
         scope = jev.prepare(self.repo, env=self.env)["scopes"][0]
@@ -431,6 +429,7 @@ class ConsentTest(DeviceCase):
             "another project": json.dumps(dict(record, project=dict(record["project"], path="elsewhere"))),
             "an unknown state": json.dumps(dict(record, state="maybe")),
             "an unknown scope": json.dumps(dict(record, scopes={"everything": "0" * 64})),
+            "a scope no approval covers": json.dumps(dict(record, scopes=dict(record["scopes"], skills="0" * 64))),
             "no scopes": json.dumps(dict(record, scopes={})),
             "a short digest": json.dumps(dict(record, scopes={"impact": "abc"})),
             "an extra destination field": json.dumps(dict(record, destination=dict(record["destination"], x="y"))),
@@ -487,7 +486,7 @@ class ConsentTest(DeviceCase):
         self.assertEqual(self.verdict(env=env), rerank.GRANTED)
 
     def test_refusals_of_a_preview(self) -> None:
-        for scopes in ((), ("everything",), ("impact", "Impact")):
+        for scopes in ((), ("everything",), ("impact", "Impact"), ("skills",), ("impact", "skills"), rerank.SCOPES):
             with self.subTest(scopes=scopes):
                 self.assertEqual(jev.prepare(self.repo, scopes=scopes, env=self.env), {"ok": False, "status": "scope"})
         for label, options in (("the shared key name elsewhere", {"url": ELSEWHERE}),
@@ -520,7 +519,7 @@ class ConsentTest(DeviceCase):
         with mock.patch.object(secrets, "find", refuse), mock.patch.object(secrets, "get", refuse), \
                 mock.patch.object(secrets, "system_keychain", refuse):
             jev.status(self.repo, env=env)
-            preview = jev.prepare(self.repo, scopes=rerank.SCOPES, env=env)
+            preview = jev.prepare(self.repo, env=env)
             self.assertEqual(jev.enable(self.repo, token=preview["token"], env=env)["status"], "enabled")
             jev.device_approval(self.repo, env=env).verdict(("impact",), url=OFFICIAL, key_name=SHARED,
                                                            model=typesafe.DEFAULT_MODEL)
@@ -639,10 +638,11 @@ class DispatchTest(DeviceCase):
         self.assertEqual((shown["status"], shown["consent"], shown["scopes"]), ("ok", "enabled", {"impact": "granted"}))
         self.assertEqual(self.call("disable", "--root", self.root), (0, {"ok": True, "status": "disabled"}))
         self.assertEqual(self.call("status", "--root", self.root)[1]["consent"], "disabled")
-        code, preview = self.call("prepare", "--root", self.root, "--scope", "skills", "--scope", "impact")
-        self.assertEqual((code, [item["scope"] for item in preview["scopes"]]), (0, ["skills", "impact"]))
-        self.assertEqual(self.call("prepare", "--root", self.root, "--scope", "everything"),
-                         (1, {"ok": False, "status": "scope"}))
+        code, preview = self.call("prepare", "--root", self.root, "--scope", "impact")
+        self.assertEqual((code, [item["scope"] for item in preview["scopes"]]), (0, ["impact"]))
+        for scope in ("skills", "everything"):
+            self.assertEqual(self.call("prepare", "--root", self.root, "--scope", scope, "--scope", "impact"),
+                             (1, {"ok": False, "status": "scope"}))
 
     def test_commands_that_take_no_value_never_touch_the_stream(self) -> None:
         for argv in (("status", "--root", self.root), ("prepare", "--root", self.root),
@@ -1018,8 +1018,6 @@ class ImpactOrderTest(DeviceCase):
 
     def test_no_approval_no_request_and_no_key_lookup(self) -> None:
         del self.env[SHARED]
-        self.assert_untouched(self.order(), "unused(no-consent)")
-        self.approve("skills")
         self.assert_untouched(self.order(), "unused(no-consent)")
         self.approve("impact")
         jev.disable(self.repo, env=self.env)
