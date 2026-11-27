@@ -618,6 +618,157 @@ select:disabled {
   color: var(--muted);
 }
 
+/* Project tool settings: the open card takes the row; one feedback region sits by the buttons. */
+.tool-card[data-editing] {
+  grid-column: 1 / -1;
+}
+
+.tool-edit {
+  align-self: flex-start;
+}
+
+.tool-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.tool-settings h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.tool-fields,
+.tool-review {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.tool-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  max-width: 560px;
+}
+
+.tool-field label {
+  font-weight: 600;
+}
+
+.tool-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.tool-settings input[type="text"],
+.tool-settings textarea {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+}
+
+.tool-settings textarea {
+  resize: vertical;
+}
+
+.tool-settings textarea:disabled,
+.tool-fields:disabled input,
+.tool-fields:disabled textarea {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tool-settings [aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.field-problem {
+  color: var(--danger);
+}
+
+.tool-optional {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.tool-boundary,
+.tool-upgrade {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+}
+
+.tool-plan {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+.tool-plan caption {
+  text-align: left;
+  font-weight: 600;
+  padding-bottom: 4px;
+}
+
+.tool-plan th,
+.tool-plan td {
+  text-align: left;
+  vertical-align: top;
+  font-weight: normal;
+  padding: 4px 8px 4px 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.tool-plan thead th {
+  color: var(--muted);
+}
+
+.tool-kept ul {
+  padding-left: 18px;
+}
+
+.tool-settings-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-height: 1.45em;
+}
+
+.tool-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tool-save {
+  color: var(--accent-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 button[aria-disabled="true"] {
   opacity: 0.55;
   cursor: not-allowed;

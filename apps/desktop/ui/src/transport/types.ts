@@ -16,7 +16,11 @@ import type {
   NoticeDto,
   PresetApplyReq,
   ProjectDto,
+  ProjectToolsApplyDto,
+  ProjectToolsApplyReq,
   ProjectToolsDto,
+  ProjectToolsPlanDto,
+  ProjectToolsPlanReq,
   RefreshDto,
   RulesStateDto,
   ReviewResultDto,
@@ -69,6 +73,10 @@ export interface Transport {
   rulesCheck(): Promise<RulesStateDto>;
   rulesSync(req: WorkflowProjectReq): Promise<RulesSyncDto>;
   projectToolsStatus(req: WorkflowProjectReq): Promise<ProjectToolsDto>;
+  /** Reads only: what the edits would change. Empty edits return the saved settings. */
+  projectToolsPlan(req: WorkflowProjectReq<ProjectToolsPlanReq>): Promise<ProjectToolsPlanDto>;
+  /** Saves the edits exactly as the plan `plan_id` names showed them. */
+  projectToolsApply(req: WorkflowProjectReq<ProjectToolsApplyReq>): Promise<ProjectToolsApplyDto>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
   onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;

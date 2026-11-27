@@ -35,6 +35,18 @@ describe("tauri transport (standalone, mocked @tauri-apps/api)", () => {
     expect(invoke.mock.calls).toEqual([["project_tools_status", { req }]]);
   });
 
+  it("calls project_tools_plan and project_tools_apply with the project id and input under req", async () => {
+    invoke.mockResolvedValue(null);
+    const t = createTauriTransport();
+    const edits = [{ kind: "wiki-dir" as const, value: "notes" }];
+    await t.projectToolsPlan({ project_id: "p1", input: { edits } });
+    await t.projectToolsApply({ project_id: "p1", input: { edits, plan_id: "plan-1", approve_upgrade: "abc" } });
+    expect(invoke.mock.calls).toEqual([
+      ["project_tools_plan", { req: { project_id: "p1", input: { edits } } }],
+      ["project_tools_apply", { req: { project_id: "p1", input: { edits, plan_id: "plan-1", approve_upgrade: "abc" } } }],
+    ]);
+  });
+
   it("calls the exact M1-S1 command names with a single req argument", async () => {
     invoke.mockResolvedValue(null);
     const t = createTauriTransport();

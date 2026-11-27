@@ -50,8 +50,9 @@ describe("Project tool cards (standalone test transport)", () => {
       expect(node.querySelector(".tool-next")?.textContent).toBe(`Next step: ${card.next_step}`);
       expect(node.getAttribute("data-state")).toBe(card.state);
       expect(node.getAttribute("aria-labelledby")).toBe(node.querySelector("h3")?.id);
-      // A step the app cannot do yet is text, never a button.
-      expect(node.querySelector("button, a, input, select")).toBeNull();
+      // A step the app cannot do yet is text, never a button; the one control opens this card's settings.
+      const controls = Array.from(node.querySelectorAll("button, a, input, select, textarea"));
+      expect(controls.map((control) => control.textContent)).toEqual([`Edit ${card.name} Settings`]);
     }
     expect(tool("wiki").querySelector("code")?.textContent).toBe("docs/wiki");
     expect(tool("wiki").querySelector(".tool-paths")?.textContent).toContain("(in the project)");

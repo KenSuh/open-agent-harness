@@ -381,6 +381,123 @@ export interface ProjectToolsDto {
   tools: ProjectToolDto[];
 }
 
+/**
+ * Project tool settings: `project_tools_plan` and `project_tools_apply` (core `config::tools`).
+ * Both take `WorkflowProjectReq<...>`: `{ project_id, input }` under the single `req` argument.
+ * Nothing here carries config bytes, a full path, a key or a credential.
+ */
+export type ProjectToolsEdit =
+  | { kind: "wiki-dir"; value: string }
+  /** `null` removes the separate list, so the Impact Map follows the wiki folder again. */
+  | { kind: "impact-wiki-dirs"; value: string[] | null }
+  | { kind: "impact-graph-file"; value: string }
+  | { kind: "impact-rerank"; value: boolean }
+  | { kind: "jev-enabled"; value: boolean }
+  | { kind: "wiki-index-managed"; value: boolean }
+  | { kind: "wiki-index-exclude"; value: string[] }
+  | { kind: "wiki-index-embedding-model"; value: string }
+  | { kind: "graphify-managed"; value: boolean };
+
+/** A value and whether the file gives it; without the key the value is the default. */
+export interface ToolSettingDto<T> {
+  value: T;
+  explicit: boolean;
+}
+
+/** The settings as `.oah/config.toml` has them now (core `ProjectTools`, same nesting). */
+export interface ProjectToolsSettingsDto {
+  wiki: { dir: ToolSettingDto<string> };
+  impact: {
+    wiki_dirs: ToolSettingDto<string[]>;
+    graph_file: ToolSettingDto<string>;
+    rerank: ToolSettingDto<boolean>;
+  };
+  jev: { enabled: ToolSettingDto<boolean>; provider: ToolSettingDto<string> };
+  managed: {
+    wiki_index: {
+      managed: ToolSettingDto<boolean>;
+      exclude: ToolSettingDto<string[]>;
+      embedding_model: ToolSettingDto<string>;
+    };
+    graphify: { managed: ToolSettingDto<boolean> };
+  };
+}
+
+/** The `[project_tools]` parts core offers for editing; one that is not listed is not shown. */
+export type ProjectToolsOptionalSection = "wiki-index" | "graphify";
+
+/** A value of one settings key as the file writes it. */
+export type ToolSettingValue = string | boolean | string[];
+
+/** One key the save changes; `null` is a key the file does not have. `key` is dotted, such as `wiki.dir`. */
+export interface ToolsKeyChangeDto {
+  key: string;
+  before: ToolSettingValue | null;
+  after: ToolSettingValue | null;
+}
+
+export type ToolsKeptReason = "explicit-wiki-dirs" | "other-provider";
+
+/** A value the plan leaves as the file has it, with the reason. */
+export interface ToolsKeptDto {
+  key: string;
+  value: ToolSettingValue;
+  reason: ToolsKeptReason;
+}
+
+/** For a v0.4.0 file: the one-way upgrade to acknowledge, for exactly the bytes `fingerprint` names. */
+export interface ToolsUpgradeDto {
+  message: string;
+  fingerprint: string;
+}
+
+/** For a v0.4.0 file: what the save finds at the backup path (relative to the project, written with `/`). */
+export interface ToolsBackupDto {
+  state: "write" | "reuse" | "conflict";
+  path: string;
+}
+
+/** `project_tools_plan`'s input. An empty `edits` reads the saved settings and plans nothing. */
+export interface ProjectToolsPlanReq {
+  edits: ProjectToolsEdit[];
+}
+
+/** What the edits would do, computed by reading only. */
+export interface ProjectToolsPlanDto {
+  /** The project the plan is for; a plan for another project is dropped. */
+  project_id: string;
+  /** Names this project, the file's bytes now and the bytes the save would write. */
+  plan_id: string;
+  /** The target file, relative to the project and written with `/`: `.oah/config.toml`. */
+  config_path: string;
+  settings: ProjectToolsSettingsDto;
+  optional: ProjectToolsOptionalSection[];
+  /** Empty when there is nothing to write. */
+  changes: ToolsKeyChangeDto[];
+  kept: ToolsKeptDto[];
+  upgrade: ToolsUpgradeDto | null;
+  backup: ToolsBackupDto | null;
+  notices: NoticeDto[];
+}
+
+/** `project_tools_apply`'s input: the same edits, the plan they were shown as and nothing else. */
+export interface ProjectToolsApplyReq {
+  edits: ProjectToolsEdit[];
+  plan_id: string;
+  /** The plan's `upgrade.fingerprint`, sent only after the user acknowledged that plan's upgrade. */
+  approve_upgrade?: string;
+}
+
+export interface ProjectToolsApplyDto {
+  project_id: string;
+  plan_id: string;
+  /** `false` when the file already had these settings. */
+  saved: boolean;
+  upgraded: boolean;
+  /** Where the original v0.4.0 file is kept, relative to the project; `null` without an upgrade. */
+  backup: string | null;
+}
+
 /** M1-S3 Explore review shapes (core `review`; EXPLORE-PRODUCTION-BRIEF, Independent desktop contract). */
 export interface ReviewSpec {
   repo: string;

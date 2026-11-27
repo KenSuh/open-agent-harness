@@ -6,7 +6,13 @@ import type {
   ApplyProjectSkillReq,
   NoticeDto,
   ProjectDto,
+  ProjectToolsApplyReq,
   ProjectToolsDto,
+  ProjectToolsEdit,
+  ProjectToolsPlanDto,
+  ProjectToolsPlanReq,
+  ProjectToolsSettingsDto,
+  ToolSettingValue,
   RefreshDto,
   ReviewResultDto,
   SettingsDto,
@@ -53,6 +59,58 @@ export const sampleAgents = {
 /** The shared project tool cards (same folder), byte-compared by core's own test. */
 export const sampleProjectTools = projectTools as ProjectToolsDto;
 
+/** The saved settings the fake plans from: a current-format file that gives only the wiki folder. */
+export const sampleToolSettings: ProjectToolsSettingsDto = {
+  wiki: { dir: { value: "docs/wiki", explicit: true } },
+  impact: {
+    wiki_dirs: { value: ["docs/wiki"], explicit: false },
+    graph_file: { value: "graphify-out/graph.json", explicit: false },
+    rerank: { value: false, explicit: false },
+  },
+  jev: { enabled: { value: false, explicit: false }, provider: { value: "", explicit: false } },
+  managed: {
+    wiki_index: {
+      managed: { value: false, explicit: false },
+      exclude: { value: [], explicit: false },
+      embedding_model: { value: "", explicit: false },
+    },
+    graphify: { managed: { value: false, explicit: false } },
+  },
+};
+
+const SETTING_ACCESSORS: Record<ProjectToolsEdit["kind"], [string, (s: ProjectToolsSettingsDto) => { value: ToolSettingValue; explicit: boolean }]> = {
+  "wiki-dir": ["wiki.dir", (s) => s.wiki.dir],
+  "impact-wiki-dirs": ["impact.wiki_dirs", (s) => s.impact.wiki_dirs],
+  "impact-graph-file": ["impact.graph_file", (s) => s.impact.graph_file],
+  "impact-rerank": ["impact.rerank", (s) => s.impact.rerank],
+  "jev-enabled": ["rerank.enabled", (s) => s.jev.enabled],
+  "wiki-index-managed": ["project_tools.wiki_index.managed", (s) => s.managed.wiki_index.managed],
+  "wiki-index-exclude": ["project_tools.wiki_index.exclude", (s) => s.managed.wiki_index.exclude],
+  "wiki-index-embedding-model": ["project_tools.wiki_index.embedding_model", (s) => s.managed.wiki_index.embedding_model],
+  "graphify-managed": ["project_tools.graphify.managed", (s) => s.managed.graphify.managed],
+};
+
+/** Like core's plan for a current-format file: one before/after row per edit, an ID that names the edits. */
+export function samplePlan(projectId: string, edits: ProjectToolsEdit[], extra: Partial<ProjectToolsPlanDto> = {}): ProjectToolsPlanDto {
+  return {
+    project_id: projectId,
+    plan_id: `plan:${JSON.stringify(edits)}`,
+    config_path: ".oah/config.toml",
+    settings: sampleToolSettings,
+    optional: [],
+    changes: edits.map((edit) => {
+      const [key, read] = SETTING_ACCESSORS[edit.kind];
+      const now = read(sampleToolSettings);
+      return { key, before: now.explicit ? now.value : null, after: edit.value };
+    }),
+    kept: [],
+    upgrade: null,
+    backup: null,
+    notices: [],
+    ...extra,
+  };
+}
+
 export const sampleAppInfo = appInfo as AppInfoDto;
 export const sampleProject = project as ProjectDto;
 export const sampleSettings = settings as SettingsDto;
@@ -93,6 +151,9 @@ export interface FakeTransport extends Transport {
   workflowRequests: WorkflowProjectReq<StagesSetReq | PresetApplyReq | Record<string, never>>[];
   /** Every `start_review` request, in order. */
   reviewRequests: StartReviewReq[];
+  /** Every `project_tools_plan` and `project_tools_apply` request, in order. */
+  toolsPlanRequests: WorkflowProjectReq<ProjectToolsPlanReq>[];
+  toolsApplyRequests: WorkflowProjectReq<ProjectToolsApplyReq>[];
   /** Every `apply_project_skill` request, in order. */
   applyRequests: ApplyProjectSkillReq[];
   /** Sends an event to the channel of the review start at `index` (default: the newest). */
@@ -265,6 +326,20 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       return fake.override.projectToolsStatus
         ? fake.override.projectToolsStatus(req)
         : { ...sampleProjectTools, project_id: req.project_id };
+    },
+    toolsPlanRequests: [],
+    toolsApplyRequests: [],
+    async projectToolsPlan(req) {
+      fake.calls.push("project_tools_plan");
+      fake.toolsPlanRequests.push(req);
+      return fake.override.projectToolsPlan ? fake.override.projectToolsPlan(req) : samplePlan(req.project_id, req.input.edits);
+    },
+    async projectToolsApply(req) {
+      fake.calls.push("project_tools_apply");
+      fake.toolsApplyRequests.push(req);
+      return fake.override.projectToolsApply
+        ? fake.override.projectToolsApply(req)
+        : { project_id: req.project_id, plan_id: req.input.plan_id, saved: true, upgraded: false, backup: null };
     },
     emitProbe: (event) => probeSink?.(event),
     emitAgentsChanged: (change) => agentsSink?.(change),

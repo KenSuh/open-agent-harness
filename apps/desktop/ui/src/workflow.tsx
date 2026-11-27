@@ -1,4 +1,4 @@
-// 한국어: 팀 작업 흐름 화면 — 섹션 카드·에이전트 선택·단일 배너·프리셋·업그레이드 확인·규칙 동기 상태·고급 보기와 프로젝트 도구(위키·영향 지도·Jev) 상태 카드. 판단은 모두 core 응답을 그대로 쓴다.
+// 한국어: 팀 작업 흐름 화면 — 섹션 카드·에이전트 선택·단일 배너·프리셋·업그레이드 확인·규칙 동기 상태·고급 보기와 프로젝트 도구(위키·영향 지도·Jev) 상태 카드·설정 편집 진입. 판단은 모두 core 응답을 그대로 쓴다.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentId,
@@ -7,6 +7,7 @@ import type {
   ErrorDto,
   PresetApplyReq,
   ProjectToolDto,
+  ProjectToolId,
   ProjectToolsDto,
   RulesStateDto,
   SectionDto,
@@ -15,6 +16,7 @@ import type {
   ToolPathBase,
   WorkflowDto,
 } from "./contract";
+import { ToolSettingsPanel, useToolSettings, type ToolSettings } from "./project-tools-settings";
 import { toErrorDto, type Transport } from "./transport/types";
 
 type PageLoad = { status: "loading" } | { status: "ready"; value: WorkflowDto } | { status: "error"; error: ErrorDto };
@@ -370,11 +372,21 @@ const TOOL_PATH_BASE: Record<ToolPathBase, string> = {
   "state-dir": "in the OAH state folder",
 };
 
-/** One card, top to bottom: the tool's name, what was found, why when it is a problem, then the next step. */
-function ToolCard({ tool }: { tool: ProjectToolDto }) {
+/**
+ * One card, top to bottom: the tool's name, what was found, why when it is a problem, the next step, then its
+ * settings. Only one card's settings are open at a time, and an open card takes the full row.
+ */
+function ToolCard({ tool, settings, saved }: { tool: ProjectToolDto; settings: ToolSettings; saved: string | null }) {
   const titleId = `project-tool-${tool.id}`;
+  const open = settings.editor?.tool === tool.id;
   return (
-    <article className="tool-card" aria-labelledby={titleId} data-tool={tool.id} data-state={tool.state}>
+    <article
+      className="tool-card"
+      aria-labelledby={titleId}
+      data-tool={tool.id}
+      data-state={tool.state}
+      data-editing={open ? "" : undefined}
+    >
       <h3 id={titleId}>{tool.name}</h3>
       <p className="tool-status">{tool.status}</p>
       {tool.reason ? <p className="tool-reason">{tool.reason}</p> : null}
@@ -397,18 +409,31 @@ function ToolCard({ tool }: { tool: ProjectToolDto }) {
           ))}
         </ul>
       ) : null}
+      {saved ? <p className="tool-saved">{saved}</p> : null}
+      {open ? (
+        <ToolSettingsPanel name={tool.name} settings={settings} />
+      ) : settings.editor ? (
+        <p className="muted tool-settings-wait">Close the open settings to edit these.</p>
+      ) : (
+        <button type="button" className="tool-edit" id={`project-tool-edit-${tool.id}`} onClick={() => settings.open(tool.id)}>
+          Edit {tool.name} Settings
+        </button>
+      )}
     </article>
   );
 }
 
 /**
- * The Project Wiki, Impact Map and Jev cards. Reading them changes and starts nothing, so the only control is
- * Check Again; a step this app cannot do yet is described in the card's text and has no button.
+ * The Project Wiki, Impact Map and Jev cards. Reading them changes and starts nothing. A card's settings are read
+ * only after its Edit button is pressed, and saved only after a preview of the exact changes is confirmed; a step
+ * this app cannot do yet is described in the card's text and has no button.
  */
 function ProjectTools({ transport, projectId }: { transport: Transport; projectId: string }) {
   const [tools, setTools] = useState<ToolsLoad>({ value: null, checking: true, error: null });
   const [announcement, setAnnouncement] = useState("");
+  const [saved, setSaved] = useState<{ projectId: string; tool: ProjectToolId; text: string } | null>(null);
   const reads = useRef(0);
+  const returnFocus = useRef<{ projectId: string; tool: ProjectToolId } | null>(null);
 
   const check = useCallback(
     async (announce: boolean) => {
@@ -451,6 +476,25 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
     };
   }, [check]);
 
+  const settings = useToolSettings(transport, projectId, (tool, text) => {
+    setSaved({ projectId, tool, text });
+    setAnnouncement(text);
+    void check(false);
+  });
+  const editing = settings.editor?.tool ?? null;
+  useEffect(() => {
+    if (editing) {
+      returnFocus.current = { projectId, tool: editing };
+      setSaved(null);
+    } else if (returnFocus.current) {
+      // The editor closed: focus goes back to the button that opened it, unless the project changed meanwhile.
+      if (returnFocus.current.projectId === projectId) {
+        document.getElementById(`project-tool-edit-${returnFocus.current.tool}`)?.focus();
+      }
+      returnFocus.current = null;
+    }
+  }, [editing, projectId]);
+
   return (
     <section className="project-tools" aria-labelledby="project-tools-title">
       <div className="project-tools-head">
@@ -468,7 +512,7 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
       </div>
       <p className="muted">
         What this project has for its wiki, impact map and Jev. Checking only reads the project: it changes nothing
-        and starts nothing.
+        and starts nothing. Settings are saved only after you review the exact changes.
       </p>
       <p className="visually-hidden" role="status">
         {announcement}
@@ -485,7 +529,12 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
       {tools.value ? (
         <div className="tool-cards" aria-busy={tools.checking}>
           {tools.value.tools.map((tool) => (
-            <ToolCard key={tool.id} tool={tool} />
+            <ToolCard
+              key={tool.id}
+              tool={tool}
+              settings={settings}
+              saved={saved?.projectId === projectId && saved.tool === tool.id ? saved.text : null}
+            />
           ))}
         </div>
       ) : tools.checking ? (
