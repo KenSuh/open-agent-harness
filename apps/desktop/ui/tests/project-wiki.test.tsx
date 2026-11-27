@@ -261,7 +261,7 @@ describe("Project Wiki panel (standalone test transport, nothing is written)", (
     expect(count(t, "project_wiki_overview")).toBe(2);
   });
 
-  it("says when there is nothing to do and when the default folder cannot be saved as the choice", async () => {
+  it("says when the wiki needs no files or settings changes", async () => {
     const t = await openWiki(overviewNotes);
     t.override.projectWikiPlan = async () => ({
       ...forProject(sampleWiki.planSetup),
@@ -269,10 +269,8 @@ describe("Project Wiki panel (standalone test transport, nothing is written)", (
       folders: [],
       writes: 0,
       settings: null,
-      choice_not_saved: true,
     });
     await click(button("Preview Setup"));
-    expect(text()).toContain("notes is the default folder, and a default is never written to the file.");
     expect(feedback()).toBe("Nothing to do: every file is in place and the settings already lead to this folder.");
     expect(panelButtons()).toEqual(["Back to the Wiki Overview", "Close"]);
   });

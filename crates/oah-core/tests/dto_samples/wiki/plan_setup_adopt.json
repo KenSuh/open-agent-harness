@@ -49,13 +49,6 @@
         "key": "wiki.dir",
         "before": null,
         "after": "notes"
-      },
-      {
-        "key": "impact.wiki_dirs",
-        "before": null,
-        "after": [
-          "notes"
-        ]
       }
     ],
     "kept": [],
@@ -67,6 +60,5 @@
       "state": "write",
       "path": ".oah/config.toml.v0.4.bak"
     }
-  },
-  "choice_not_saved": false
+  }
 }

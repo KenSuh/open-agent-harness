@@ -255,9 +255,6 @@ struct Survey {
     tools: ToolsPlan,
     changes: Vec<ToolsChange>,
     id: String,
-    /// The chosen folder is the default one while other folders look like a wiki too, and no setting records the
-    /// choice: the settings writer never writes a default value.
-    choice_not_saved: bool,
 }
 
 fn plan_id(scope: &WikiScope, request: &WikiActionReq, wiki_id: &str, tools: &ToolsPlan) -> String {
@@ -292,7 +289,6 @@ fn request_of(source: &str) -> WikiActionReq {
 fn survey(scope: &WikiScope, request: &WikiActionReq) -> Result<Survey, Error> {
     let binding = scope.binding();
     let current = plan_tools_save(&binding, &[])?;
-    let mut choice_not_saved = false;
     // The request with the date filled in, as the apply sends it back.
     let (reviewed, changes, effective, wiki_id) = match request {
         WikiActionReq::Setup { selected, today } => {
@@ -306,13 +302,15 @@ fn survey(scope: &WikiScope, request: &WikiActionReq) -> Result<Survey, Error> {
                 today: today.clone().unwrap_or_else(today_utc),
             };
             let plan = wiki::plan_setup(&scope.pin, &request)?;
-            choice_not_saved =
-                listed > 1 && plan.config_dir.is_none() && request.configured.is_none();
-            let changes: Vec<ToolsChange> = plan
-                .config_dir
-                .iter()
-                .map(|dir| ToolsChange::WikiDir(dir.clone()))
-                .collect();
+            let changes = if listed > 1 && request.configured.is_none() {
+                vec![ToolsChange::ExplicitWikiDir(plan.dir.clone())]
+            } else {
+                plan.config_dir
+                    .iter()
+                    .cloned()
+                    .map(ToolsChange::WikiDir)
+                    .collect()
+            };
             let effective = WikiActionReq::Setup {
                 selected: selected.clone(),
                 today: Some(request.today.clone()),
@@ -330,7 +328,7 @@ fn survey(scope: &WikiScope, request: &WikiActionReq) -> Result<Survey, Error> {
             let changes = if plan.files.is_empty() {
                 Vec::new()
             } else {
-                vec![ToolsChange::WikiDir(plan.destination.clone())]
+                vec![ToolsChange::ExplicitWikiDir(plan.destination.clone())]
             };
             let id = plan.id.clone();
             (
@@ -357,7 +355,6 @@ fn survey(scope: &WikiScope, request: &WikiActionReq) -> Result<Survey, Error> {
         tools,
         changes,
         id,
-        choice_not_saved,
     })
 }
 
@@ -458,7 +455,6 @@ fn plan_dto(scope: &WikiScope, survey: &Survey) -> WikiPlanDto {
             unresolved_links: Vec::new(),
             unresolved_total: 0,
             settings,
-            choice_not_saved: survey.choice_not_saved,
         },
         Reviewed::Copy { plan, .. } => WikiPlanDto {
             project_id,
@@ -488,7 +484,6 @@ fn plan_dto(scope: &WikiScope, survey: &Survey) -> WikiPlanDto {
             unresolved_links: plan.unresolved_links.clone(),
             unresolved_total: plan.unresolved_total,
             settings,
-            choice_not_saved: false,
         },
     }
 }

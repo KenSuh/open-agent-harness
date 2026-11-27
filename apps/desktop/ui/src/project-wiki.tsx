@@ -345,14 +345,7 @@ function PlanSettings({ review, acknowledge }: { review: Review; acknowledge: (v
   const { plan } = review;
   const { settings } = plan;
   if (!settings) {
-    return plan.choice_not_saved ? (
-      <p>
-        The project's settings are not changed: <Dir>{plan.dir}</Dir> is the default folder, and a default is never written
-        to the file. While other folders also look like a wiki, the Project Wiki card keeps listing them.
-      </p>
-    ) : (
-      <p>The project's settings are not changed.</p>
-    );
+    return <p>The project's settings are not changed.</p>;
   }
   return (
     <div className="wiki-block">

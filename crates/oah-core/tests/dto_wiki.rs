@@ -189,18 +189,11 @@ fn plan_samples() {
             unresolved_total: 0,
             settings: Some(WikiSettingsPlanDto {
                 config_path: String::from(".oah/config.toml"),
-                changes: vec![
-                    WikiSettingChangeDto {
-                        key: String::from("wiki.dir"),
-                        before: None,
-                        after: text("notes"),
-                    },
-                    WikiSettingChangeDto {
-                        key: String::from("impact.wiki_dirs"),
-                        before: None,
-                        after: Some(WikiSettingValue::List(vec![String::from("notes")])),
-                    },
-                ],
+                changes: vec![WikiSettingChangeDto {
+                    key: String::from("wiki.dir"),
+                    before: None,
+                    after: text("notes"),
+                }],
                 kept: Vec::new(),
                 upgrade: Some(WikiUpgradeDto {
                     message: oah_core::config::UPGRADE_WARNING.to_string(),
@@ -211,7 +204,6 @@ fn plan_samples() {
                     path: String::from(".oah/config.toml.v0.4.bak"),
                 }),
             }),
-            choice_not_saved: false,
         },
     );
     assert_sample(
@@ -264,7 +256,6 @@ fn plan_samples() {
                 upgrade: None,
                 backup: None,
             }),
-            choice_not_saved: false,
         },
     );
 }

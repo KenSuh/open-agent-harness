@@ -547,6 +547,8 @@ pub enum ToolsChange {
     /// The project wiki's folder. The Impact Map reads it too while the file gives no `impact.wiki_dirs`; this
     /// change never writes that key. A list the file gives is kept as written and reported.
     WikiDir(String),
+    #[serde(skip)]
+    ExplicitWikiDir(String),
     /// The explicit list of wiki folders the Impact Map reads, or `None` to remove the override, which puts
     /// the map back on the project wiki's folder.
     ImpactWikiDirs(Option<Vec<String>>),
@@ -567,7 +569,7 @@ impl ToolsChange {
     /// The setting this change is about, as its dotted key.
     pub fn key(&self) -> &'static str {
         match self {
-            ToolsChange::WikiDir(_) => "wiki.dir",
+            ToolsChange::WikiDir(_) | ToolsChange::ExplicitWikiDir(_) => "wiki.dir",
             ToolsChange::ImpactWikiDirs(_) => "impact.wiki_dirs",
             ToolsChange::ImpactGraphFile(_) => "impact.graph_file",
             ToolsChange::ImpactRerank(_) => "impact.rerank",
@@ -636,10 +638,6 @@ fn require_path(where_: &str, key: &str, value: &str, kind: Portable) -> Result<
 }
 
 /// The edits of `changes` over the settings `tools` read, and what they leave as it is.
-///
-/// A change that asks for the value the setting already has (given or default) yields no edit, so a file is
-/// never touched to write a default. A value that is not portable, or the same setting listed twice, is
-/// `OAH_CONFIG_INVALID`.
 pub(crate) fn edits_for(
     where_: &str,
     tools: &ProjectTools,
@@ -664,9 +662,11 @@ pub(crate) fn edits_for(
     for change in changes {
         let key = change.key();
         match change {
-            ToolsChange::WikiDir(dir) => {
+            ToolsChange::WikiDir(dir) | ToolsChange::ExplicitWikiDir(dir) => {
                 require_path(where_, key, dir, Portable::Path)?;
-                if tools.wiki.dir.value != *dir {
+                let pin =
+                    matches!(change, ToolsChange::ExplicitWikiDir(_)) && !tools.wiki.dir.explicit;
+                if tools.wiki.dir.value != *dir || pin {
                     edits.push(Edit::set(&["wiki", "dir"], dir.as_str()));
                 }
                 // Without a list of its own the map reads the selected folder, so nothing is written for it.

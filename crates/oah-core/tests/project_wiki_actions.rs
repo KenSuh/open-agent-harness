@@ -318,7 +318,6 @@ fn an_ambiguous_wiki_is_chosen_from_the_folders_found_and_its_content_stays() {
         (WikiPlanMode::Adopt, "notes")
     );
     assert_eq!(plan.folders, ["notes/templates"]);
-    assert!(!plan.choice_not_saved);
     let settings = plan
         .settings
         .as_ref()
@@ -336,21 +335,13 @@ fn an_ambiguous_wiki_is_chosen_from_the_folders_found_and_its_content_stays() {
             )
         })
         .collect();
-    // The Impact Map's wiki folders follow the wiki folder, as the settings writer decides.
     assert_eq!(
         changed,
-        [
-            (
-                "wiki.dir",
-                None,
-                Some(WikiSettingValue::Text(String::from("notes")))
-            ),
-            (
-                "impact.wiki_dirs",
-                None,
-                Some(WikiSettingValue::List(vec![String::from("notes")]))
-            )
-        ]
+        [(
+            "wiki.dir",
+            None,
+            Some(WikiSettingValue::Text(String::from("notes")))
+        )]
     );
     assert_eq!(tree(&fixture.project), before, "the preview wrote");
 
@@ -359,6 +350,7 @@ fn an_ambiguous_wiki_is_chosen_from_the_folders_found_and_its_content_stays() {
     assert_eq!(done.settings.state, WikiSettingsState::Saved);
     assert_eq!(done.folders_created, ["notes/templates"]);
     assert!(fixture.config().contains("dir = \"notes\""));
+    assert!(!fixture.config().contains("wiki_dirs"));
     let after = tree(&fixture.project);
     for (path, bytes) in &before {
         assert_eq!(after.get(path), Some(bytes), "{path} changed");
@@ -692,16 +684,22 @@ fn a_blocked_copy_is_refused_and_a_link_is_never_followed() {
 }
 
 #[test]
-fn choosing_the_default_folder_among_several_says_that_the_choice_is_not_saved() {
+fn choosing_the_default_folder_among_several_is_saved_explicitly() {
     let fixture = Fixture::with(|project| {
         write(project, "docs/wiki/index.md", b"# Docs\n");
         write(project, "wiki/index.md", b"# Other\n");
     });
     assert_eq!(fixture.overview().target.state, WikiTargetState::Choose);
-    let plan = fixture.plan(&setup(Some("docs/wiki"))).unwrap();
-    assert!(plan.settings.is_none() && plan.choice_not_saved);
-    let plan = fixture.plan(&setup(Some("wiki"))).unwrap();
-    assert!(plan.settings.is_some() && !plan.choice_not_saved);
+    let request = setup(Some("docs/wiki"));
+    let plan = fixture.plan(&request).unwrap();
+    assert_eq!(plan.settings.as_ref().unwrap().changes[0].key, "wiki.dir");
+    let done = fixture.apply(&request, &plan).unwrap();
+    assert!(done.complete);
+    assert_eq!(done.settings.state, WikiSettingsState::Saved);
+    let overview = fixture.overview();
+    assert_eq!(overview.target.state, WikiTargetState::Ready);
+    assert_eq!(overview.target.dir.as_deref(), Some("docs/wiki"));
+    assert!(overview.configured.unwrap().explicit);
 }
 
 #[test]

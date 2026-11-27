@@ -240,9 +240,6 @@ pub struct WikiPlanDto {
     pub unresolved_total: usize,
     /// `None` when the settings already lead to `dir`, or a copy has no file to switch to.
     pub settings: Option<WikiSettingsPlanDto>,
-    /// The chosen folder is the default one while other folders look like a wiki too. The settings file is not
-    /// changed to say so (a default value is never written), so the status keeps listing the other folders.
-    pub choice_not_saved: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]

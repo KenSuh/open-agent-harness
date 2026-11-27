@@ -603,7 +603,6 @@ export interface WikiPlanDto {
   unresolved_links: { file: string; line: number; target: string }[];
   unresolved_total: number;
   settings: WikiSettingsPlanDto | null;
-  choice_not_saved: boolean;
 }
 
 export type WikiItemStatus = "created" | "kept" | "failed" | "pending";
