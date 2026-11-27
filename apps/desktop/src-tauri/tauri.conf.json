@@ -48,7 +48,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/oah"],
+    "externalBin": ["binaries/oah", "binaries/oah-project-tools"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

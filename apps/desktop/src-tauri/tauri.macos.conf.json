@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "externalBin": [
+      "binaries/oah"
+    ],
+    "macOS": {
+      "files": {
+        "MacOS/oah-project-tools": "binaries/oah-project-tools-macos"
+      }
+    }
+  }
+}

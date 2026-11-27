@@ -117,13 +117,31 @@ jobs:
           rustup default stable
           rustc --version
           cargo --version
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      # stage-cli.mjs freezes the project-tools runner with exactly this Python and the PyInstaller version the
+      # hash-locked file pins; it installs nothing itself and refuses any other builder.
+      - name: Install the pinned project-tools builder
+        run: python -m pip install --disable-pip-version-check --require-hashes -r apps/desktop/scripts/project-tools-requirements.txt
       - name: Build the UI
         working-directory: apps/desktop/ui
         run: |
           npm ci
           npm run build
-      - name: Stage the bundled CLI
+      - name: Stage the bundled CLI and the project-tools runner
+        env:
+          OAH_PROJECT_TOOLS_PYTHON: python
         run: node apps/desktop/scripts/stage-cli.mjs
+      # The frozen runner must name the same map generator as the Python source and accept its maps.
+      - name: Check the staged project-tools runner against the Python source
+        shell: bash
+        run: |
+          runner="apps/desktop/src-tauri/binaries/oah-project-tools-macos"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            runner="apps/desktop/src-tauri/binaries/oah-project-tools-$(rustc -vV | sed -n 's/^host: //p').exe"
+          fi
+          OAH_PROJECT_TOOLS_BIN="$runner" python -m unittest -v tests.test_project_tools_runner.BinaryTest
       - name: Build the desktop app
         run: cargo build -p oah-desktop --release --locked --features tauri/custom-protocol
       - name: Start, check the CLI copy, stop, start again
@@ -135,9 +153,11 @@ jobs:
 
   # Opt-in packaging for a pinned candidate: Run workflow, tick "installers" and give the full commit SHA the chosen
   # branch is at. Each runner builds only its own native architecture with the locked Tauri CLI, which also stages
-  # the bundled CLI (beforeBuildCommand). No signing credentials are used: the macOS app gets an ad-hoc signature
-  # only (not Developer ID, not notarized) and the Windows setup is not signed. The artifacts are disposable
-  # rehearsal or release-candidate files; publishing a release stays a separate, manual step.
+  # the bundled CLI and the project-tools runner (beforeBuildCommand). No signing credentials are used: the macOS
+  # app gets an ad-hoc signature only (not Developer ID, not notarized) and the Windows setup is not signed. The
+  # artifacts are disposable rehearsal or release-candidate files; publishing a release stays a separate, manual
+  # step. On macOS the runner is placed by tauri.macos.conf.json and keeps its own ad-hoc signature without the
+  # hardened runtime (stage-cli.mjs says why); the app and the CLI are signed as before.
   installer:
     name: installer (${{ matrix.platform }}, manual)
     if: github.event_name == 'workflow_dispatch' && inputs.installers
@@ -212,6 +232,13 @@ jobs:
       - name: Install the locked Tauri CLI
         working-directory: apps/desktop
         run: npm ci
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      # stage-cli.mjs freezes the project-tools runner with exactly this Python and the PyInstaller version the
+      # hash-locked file pins; it installs nothing itself and refuses any other builder.
+      - name: Install the pinned project-tools builder
+        run: python -m pip install --disable-pip-version-check --require-hashes -r apps/desktop/scripts/project-tools-requirements.txt
       - name: Build the installer
         shell: bash
         working-directory: apps/desktop
@@ -219,6 +246,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           BUNDLE: ${{ matrix.bundle }}
           CONFIG: ${{ matrix.config }}
+          OAH_PROJECT_TOOLS_PYTHON: python
         run: |
           set -- build --ci --verbose --bundles "$BUNDLE" --target "$TARGET"
           if [ -n "$CONFIG" ]; then set -- "$@" --config "$CONFIG"; fi
@@ -264,7 +292,7 @@ jobs:
           else
             [ "$(head -c 2 "$file")" = MZ ] || fail "$name is not a Windows executable"
             grep -aqF NullsoftInst "$file" || fail "$name is not an NSIS installer"
-            # The setup stub's own PE architecture is NSIS's choice; verify both packaged x64 binaries instead.
+            # The setup stub's own PE architecture is NSIS's choice; verify the packaged x64 binaries instead.
             check_pe_x64() {
               local bin="$1" real_bin size dos e_lfanew b0 b1 b2 b3 offset pe_hdr
               [ ! -L "$bin" ] && [ -f "$bin" ] || fail "$bin is missing or not a regular file"
@@ -287,6 +315,7 @@ jobs:
             }
             check_pe_x64 "target/$TARGET/release/oah-desktop.exe"
             check_pe_x64 "apps/desktop/src-tauri/binaries/oah-$TARGET.exe"
+            check_pe_x64 "apps/desktop/src-tauri/binaries/oah-project-tools-$TARGET.exe"
           fi
           out="$workspace/installer-out"
           mkdir "$out"
@@ -298,7 +327,7 @@ jobs:
           fi
           printf '%s  %s\n' "$hash" "$name" > "$out/$name.sha256"
           cat "$out/$name.sha256"
-      - name: Start the app inside the DMG, check the CLI copy, stop, start again
+      - name: Start the app inside the DMG, check the CLI copy and the project-tools runner, stop, start again
         if: matrix.bundle == 'dmg'
         shell: bash
         run: |
@@ -310,8 +339,10 @@ jobs:
           trap 'hdiutil detach "$mnt"' EXIT
           for file in "$mnt"/OAH.app/Contents/MacOS/*; do [ "$(lipo -archs "$file")" = arm64 ]; done
           codesign --verify --deep --strict --verbose=2 "$mnt/OAH.app"
+          # The packaged runner itself: it starts, prints the version and builds the same map as the Python source.
+          OAH_PROJECT_TOOLS_BIN="$mnt/OAH.app/Contents/MacOS/oah-project-tools" python -m unittest -v tests.test_project_tools_runner.BinaryTest
           node apps/desktop/scripts/smoke-start.mjs --app "$mnt/OAH.app/Contents/MacOS/oah-desktop"
-      - name: Install the Windows app and verify it starts
+      - name: Install the Windows app, verify it starts and check the project-tools runner
         if: matrix.bundle == 'nsis'
         shell: pwsh
         run: |
@@ -326,6 +357,10 @@ jobs:
             throw "NSIS installation failed with exit code $($setup.ExitCode)"
           }
           node apps/desktop/scripts/smoke-start.mjs --app (Join-Path $destination 'oah-desktop.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The installed runner itself: it starts, prints the version and builds the same map as the Python source.
+          $env:OAH_PROJECT_TOOLS_BIN = Join-Path $destination 'oah-project-tools.exe'
+          python -m unittest -v tests.test_project_tools_runner.BinaryTest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
