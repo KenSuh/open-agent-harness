@@ -1,7 +1,7 @@
 // 한국어: 프로젝트 도구 카드 테스트 — core 공유 샘플로 카드 순서·글 상태·다음 단계를 보고, 프로젝트가 바뀐 뒤 늦게 온 응답을 버리며, 다시 확인이 한 번만 알림을 낸다 (독립 테스트 전송 계층).
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../src/App";
-import type { ProjectToolsDto } from "../src/contract";
+import type { ImpactMapRunDto, ProjectToolsDto, TaskEvent } from "../src/contract";
 import { button, click, emit, mount, unmount } from "./support/dom";
 import { createFakeTransport, deferred, sampleProject, sampleProjectTools } from "./support/fakeTransport";
 
@@ -29,7 +29,62 @@ const forProject = (id: string, status: string): ProjectToolsDto => ({
   tools: sampleProjectTools.tools.map((card) => (card.id === "wiki" ? { ...card, status } : card)),
 });
 
+function withBuildableMap() {
+  const t = createFakeTransport({ project: sampleProject });
+  t.override.projectToolsStatus = async ({ project_id }) => ({
+    project_id,
+    tools: sampleProjectTools.tools.map((card) =>
+      card.id === "impact-map" ? { ...card, state: "ready" } : card
+    ),
+  });
+  return t;
+}
+
 describe("Project tool cards (standalone test transport)", () => {
+  it("starts an Impact Map job only on request and uses the returned task id to cancel it", async () => {
+    const t = withBuildableMap();
+    let deliver: (event: TaskEvent<ImpactMapRunDto>) => void = () => {
+      throw new Error("No Impact Map request was started");
+    };
+    t.override.startImpactMap = async (req, onEvent) => {
+      expect(req).toEqual({ project_id: sampleProject.id, input: { action: "refresh" } });
+      deliver = onEvent;
+      return "impact-1";
+    };
+    await openPage(t);
+    expect(t.calls).not.toContain("start_impact_map");
+    await click(button("Build Impact Map"));
+    await emit(() => deliver({ event: "progress", data: { phase: "building-impact-map", done: 1, total: 2 } }));
+    expect(tool("impact-map").querySelector('[role="status"]')?.textContent).toContain("Building the map locally");
+    await click(button("Cancel"));
+    expect(t.calls).toContain("task_cancel:impact-1");
+    await emit(() => deliver({ event: "cancelled" }));
+    expect(tool("impact-map").querySelector('[role="status"]')?.textContent).toContain("The run stopped");
+    expect(button("Build Impact Map").getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("ignores an Impact Map completion for a previously selected project", async () => {
+    const t = withBuildableMap();
+    let deliver: (event: TaskEvent<ImpactMapRunDto>) => void = () => {
+      throw new Error("No Impact Map request was started");
+    };
+    t.override.startImpactMap = async (_req, onEvent) => {
+      deliver = onEvent;
+      return "impact-1";
+    };
+    t.override.projectOpenDialog = async () => secondProject;
+    await openPage(t);
+    await click(button("Build Impact Map"));
+    await click(button("+ Open…"));
+    await emit(() => deliver({
+      event: "done",
+      data: { project_id: sampleProject.id, action: "refresh", changed: true, graph: "available", refusal: null },
+    }));
+    expect(tool("impact-map").textContent).not.toContain("Impact Map built.");
+    expect(tool("impact-map").textContent).not.toContain("The Graphify file matches this checkout");
+    expect(button("Build Impact Map").getAttribute("aria-disabled")).toBe("false");
+  });
+
   it("is not read without a project", async () => {
     const t = createFakeTransport();
     await mount(<App transport={t} />);

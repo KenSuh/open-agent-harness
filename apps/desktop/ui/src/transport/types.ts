@@ -6,6 +6,8 @@ import type {
   AppInfoDto,
   ErrorDto,
   BannerDto,
+  ImpactMapRunDto,
+  ImpactMapRunReq,
   InstalledSkillDto,
   InstalledSkillManagementDto,
   InstalledSkillTarget,
@@ -80,6 +82,10 @@ export interface Transport {
   rulesCheck(): Promise<RulesStateDto>;
   rulesSync(req: WorkflowProjectReq): Promise<RulesSyncDto>;
   projectToolsStatus(req: WorkflowProjectReq): Promise<ProjectToolsDto>;
+  startImpactMap(
+    req: WorkflowProjectReq<ImpactMapRunReq>,
+    onEvent: (event: TaskEvent<ImpactMapRunDto>) => void,
+  ): Promise<TaskId>;
   /** Reads only: what the edits would change. Empty edits return the saved settings. */
   projectToolsPlan(req: WorkflowProjectReq<ProjectToolsPlanReq>): Promise<ProjectToolsPlanDto>;
   /** Saves the edits exactly as the plan `plan_id` names showed them. */

@@ -18,6 +18,7 @@ import type {
 } from "./contract";
 import { ToolSettingsPanel, useToolSettings, type ToolSettings } from "./project-tools-settings";
 import { ProjectWikiPanel } from "./project-wiki";
+import { ImpactMapActions } from "./project-impact-map";
 import { toErrorDto, type Transport } from "./transport/types";
 
 type PageLoad = { status: "loading" } | { status: "ready"; value: WorkflowDto } | { status: "error"; error: ErrorDto };
@@ -385,12 +386,14 @@ function ToolCard({
   settings,
   saved,
   wiki,
+  actions,
 }: {
   tool: ProjectToolDto;
   settings: ToolSettings;
   saved: string | null;
   /** Whether the wiki panel is open, how to open it, and the panel itself on the Project Wiki card. */
   wiki: { open: boolean; show: () => void; panel: ReactNode };
+  actions?: ReactNode;
 }) {
   const titleId = `project-tool-${tool.id}`;
   const open = settings.editor?.tool === tool.id;
@@ -406,9 +409,9 @@ function ToolCard({
       <h3 id={titleId}>{tool.name}</h3>
       <p className="tool-status">{tool.status}</p>
       {tool.reason ? <p className="tool-reason">{tool.reason}</p> : null}
-      <p className="tool-next">
+      {(!actions || tool.state !== "ready") && <p className="tool-next">
         <strong>Next step:</strong> {tool.next_step}
-      </p>
+      </p>}
       {tool.paths.length > 0 ? (
         <ul className="tool-paths">
           {tool.paths.map((path) => (
@@ -425,6 +428,7 @@ function ToolCard({
           ))}
         </ul>
       ) : null}
+      {actions}
       {saved ? <p className="tool-saved">{saved}</p> : null}
       {open ? (
         <ToolSettingsPanel name={tool.name} settings={settings} />
@@ -595,6 +599,14 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
               settings={settings}
               saved={saved?.projectId === projectId && saved.tool === tool.id ? saved.text : null}
               wiki={wiki}
+              actions={tool.id === "impact-map" && ["ready", "map-found", "unknown"].includes(tool.state)
+                ? <ImpactMapActions
+                    key={projectId}
+                    transport={transport}
+                    projectId={projectId}
+                    onSettled={() => void check(false)}
+                  />
+                : null}
             />
           ))}
         </div>

@@ -363,6 +363,21 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
         ? fake.override.projectToolsStatus(req)
         : { ...sampleProjectTools, project_id: req.project_id };
     },
+    async startImpactMap(req, onEvent) {
+      fake.calls.push("start_impact_map");
+      if (fake.override.startImpactMap) return fake.override.startImpactMap(req, onEvent);
+      onEvent({
+        event: "done",
+        data: {
+          project_id: req.project_id,
+          action: req.input.action,
+          changed: req.input.action === "refresh",
+          graph: "absent",
+          refusal: null,
+        },
+      });
+      return "task-impact";
+    },
     toolsPlanRequests: [],
     toolsApplyRequests: [],
     async projectToolsPlan(req) {

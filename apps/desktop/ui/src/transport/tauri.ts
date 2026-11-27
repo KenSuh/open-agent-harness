@@ -7,6 +7,7 @@ import type {
   AppInfoDto,
   ApplyProjectSkillDto,
   BannerDto,
+  ImpactMapRunDto,
   InstalledSkillDto,
   InstalledSkillManagementDto,
   LinkedSkillSourceDto,
@@ -84,6 +85,11 @@ export function createTauriTransport(): Transport {
     rulesCheck: () => call<RulesStateDto>("rules_check"),
     rulesSync: (req) => call<RulesSyncDto>("rules_sync", req),
     projectToolsStatus: (req) => call<ProjectToolsDto>("project_tools_status", req),
+    startImpactMap(req, onEvent) {
+      const channel = new Channel<TaskEvent<ImpactMapRunDto>>();
+      channel.onmessage = onEvent;
+      return call<TaskId>("start_impact_map", req, { onEvent: channel });
+    },
     projectToolsPlan: (req) => call<ProjectToolsPlanDto>("project_tools_plan", req),
     projectToolsApply: (req) => call<ProjectToolsApplyDto>("project_tools_apply", req),
     projectWikiOverview: (req) => call<ProjectWikiDto>("project_wiki_overview", req),

@@ -381,6 +381,21 @@ export interface ProjectToolsDto {
   tools: ProjectToolDto[];
 }
 
+export type ImpactMapAction = "status" | "refresh";
+export type ImpactGraphState = "absent" | "available" | "stale" | "unproven";
+
+export interface ImpactMapRunReq {
+  action: ImpactMapAction;
+}
+
+export interface ImpactMapRunDto {
+  project_id: string;
+  action: ImpactMapAction;
+  changed: boolean;
+  graph: ImpactGraphState | null;
+  refusal: string | null;
+}
+
 /**
  * Project tool settings: `project_tools_plan` and `project_tools_apply` (core `config::tools`).
  * Both take `WorkflowProjectReq<...>`: `{ project_id, input }` under the single `req` argument.
