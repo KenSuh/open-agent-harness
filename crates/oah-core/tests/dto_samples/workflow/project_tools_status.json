@@ -7,7 +7,7 @@
       "state": "found",
       "status": "The project settings point to the wiki folder docs/wiki.",
       "reason": null,
-      "next_step": "No action needed. The OAH app can search its text; indexing from the app is not available yet.",
+      "next_step": "Use Wiki Setup & Search for text search, or Local Wiki Index to search by meaning.",
       "paths": [
         {
           "label": "Wiki folder",
@@ -35,7 +35,7 @@
       "state": "on",
       "status": "Jev is turned on in this project's settings (provider: typesafe).",
       "reason": null,
-      "next_step": "No action needed. A connection test from this app is not available yet.",
+      "next_step": "Use Manage Jev on this device to review approval, save a key, or test the connection.",
       "paths": [],
       "notes": [
         "This is the project setting only. OAH did not look for a key or contact TypeSafe.",

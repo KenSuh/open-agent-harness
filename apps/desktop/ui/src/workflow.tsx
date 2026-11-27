@@ -608,6 +608,7 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
                     key={projectId}
                     transport={transport}
                     projectId={projectId}
+                    hasMap={tool.state === "map-found"}
                     onSettled={() => void check(false)}
                   />
                 : tool.id === "jev" ? <JevControls transport={transport} projectId={projectId} />

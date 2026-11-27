@@ -173,7 +173,7 @@ fn found(root: &Path, dir: &str, configured: bool) -> Card {
     let card = Card::new(
         "found",
         status,
-        "No action needed. The OAH app can search its text; indexing from the app is not available yet.",
+        "Use Wiki Setup & Search for text search, or Local Wiki Index to search by meaning.",
     )
     .path(project_path("Wiki folder", dir));
     if missing.is_empty() {

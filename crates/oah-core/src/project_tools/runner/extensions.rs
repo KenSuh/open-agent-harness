@@ -1,13 +1,13 @@
 use super::{
     ANSWER_LIMIT, EXIT_REFUSED, Failure, ProjectTools, RUNNER_NAME, ReplyProblem, RunnerError,
-    SCHEMA, STDERR_LIMIT, STEPS, STOP_GRACE, VERSION_LIMIT, is_code, is_commit_id, same_folder,
-    tool_env,
+    SCHEMA, STDERR_LIMIT, STEPS, STOP_GRACE, VERSION_LIMIT, is_code, is_commit_id, run_bundled,
+    same_folder, tool_env,
 };
 use crate::app::Ctx;
 use crate::config::{ProjectTools as ToolsSettings, WikiIndexDevice};
 use crate::dto::{JevInput, JevResult, WikiIndexInput, WikiIndexResult};
 use crate::paths::oah_home;
-use crate::proc::tree::{TreeRun, run_tree_input};
+use crate::proc::tree::TreeRun;
 use crate::tasks::Progress;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::ffi::{OsStr, OsString};
@@ -192,7 +192,7 @@ impl ProjectTools {
             OsStr::new("--root"),
             call.root.as_os_str(),
         ];
-        let output = run_tree_input(
+        let output = run_bundled(
             &TreeRun {
                 program: &self.program,
                 args: &args,

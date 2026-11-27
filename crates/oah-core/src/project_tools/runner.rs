@@ -33,7 +33,7 @@ use crate::app::Ctx;
 use crate::error::Coded;
 use crate::paths::Env;
 use crate::proc::Output;
-use crate::proc::tree::{TreeError, TreeRun, run_tree};
+use crate::proc::tree::{TreeError, TreeRun, run_tree, run_tree_input};
 use crate::tasks::{CancelToken, Progress, ProgressSink};
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
@@ -498,7 +498,7 @@ impl ProjectTools {
         stdout_limit: usize,
         cancel: &CancelToken,
     ) -> Result<Output, TreeError> {
-        run_tree(
+        run_bundled(
             &TreeRun {
                 program: &self.program,
                 args,
@@ -510,8 +510,39 @@ impl ProjectTools {
                 grace: STOP_GRACE,
             },
             cancel,
+            &[],
         )
     }
+}
+
+fn run_bundled(run: &TreeRun<'_>, cancel: &CancelToken, input: &[u8]) -> Result<Output, TreeError> {
+    let execute = |spec: &TreeRun<'_>| {
+        if input.is_empty() {
+            run_tree(spec, cancel)
+        } else {
+            run_tree_input(spec, cancel, input)
+        }
+    };
+    #[cfg(windows)]
+    {
+        let parent = run
+            .env
+            .iter()
+            .find(|(name, value)| name == "TEMP" && Path::new(value).is_absolute())
+            .map_or_else(std::env::temp_dir, |(_, value)| PathBuf::from(value));
+        let scratch = tempfile::Builder::new()
+            .prefix("oah-project-tools-")
+            .tempdir_in(parent)
+            .map_err(TreeError::Spawn)?;
+        let mut env = run.env.to_vec();
+        env.retain(|(name, _)| name != "TEMP" && name != "TMP");
+        for name in ["TEMP", "TMP"] {
+            env.push((OsString::from(name), scratch.path().as_os_str().to_owned()));
+        }
+        execute(&TreeRun { env: &env, ..*run })
+    }
+    #[cfg(not(windows))]
+    execute(run)
 }
 
 /// The tool's whole environment for a request about `root`.

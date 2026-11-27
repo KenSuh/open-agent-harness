@@ -23,10 +23,12 @@ type Run = { id: TaskId | null; cancelling: boolean };
 export function ImpactMapActions({
   transport,
   projectId,
+  hasMap,
   onSettled,
 }: {
   transport: Transport;
   projectId: string;
+  hasMap: boolean;
   onSettled: () => void;
 }) {
   const active = useRef<Run | null>(null);
@@ -130,7 +132,7 @@ export function ImpactMapActions({
     <>
       <div className="tool-settings-actions">
         <button className="tool-save" type="button" aria-disabled={busy} onClick={() => void start("refresh")}>
-          Build Impact Map
+          {hasMap ? "Refresh Impact Map" : "Build Impact Map"}
         </button>
         <button type="button" aria-disabled={busy} onClick={() => void start("status")}>
           Check Graphify

@@ -225,8 +225,7 @@ fn unknown(reason: &str) -> Card {
     Card::new(
         "unknown",
         "OAH could not tell this repository's state from its files.",
-        "No action needed. OAH does not run Git to check, and building a map from this app is not \
-         available yet.",
+        "Use Build Impact Map to check the repository with Git.",
     )
     .reason(reason.to_string())
 }
@@ -247,8 +246,7 @@ fn git(root: &Path, git_dir: &Path, common_dir: &Path, state: Option<&Path>) -> 
         return Card::new(
             "map-found",
             "An Impact Map file exists for this checkout. OAH has not checked whether it is current.",
-            "Checking or refreshing it from this app is not available yet. With the OAH source CLI, run \
-             oah impact status.",
+            "Use Refresh Impact Map to bring it up to date, or Check Graphify to verify the attached graph.",
         )
         .path(map);
     }
@@ -256,8 +254,7 @@ fn git(root: &Path, git_dir: &Path, common_dir: &Path, state: Option<&Path>) -> 
         Tracked::Some => Card::new(
             "ready",
             "Git tracks files here. No Impact Map has been built for this checkout.",
-            "Building the map from this app is not available yet. With the OAH source CLI, run oah \
-             impact build.",
+            "Use Build Impact Map to create the map for this checkout.",
         ),
         Tracked::None => Card::new(
             "no-tracked-files",

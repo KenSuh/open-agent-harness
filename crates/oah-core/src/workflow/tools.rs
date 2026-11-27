@@ -253,10 +253,7 @@ fn jev_card(settings: &Settings) -> ProjectToolDto {
                 (Ok(false), _) => Card::new(
                     "off",
                     "Jev is off for this project.",
-                    format!(
-                        "No action needed. Jev stays off unless enabled = true is set under [rerank] in \
-                         {SETTINGS_FILE}. Turning it on from this app is not available yet."
-                    ),
+                    "Use Edit Jev Settings to turn it on for the project. Then review device approval in Manage Jev on this device.",
                 )
                 .note(SETTING_ONLY),
                 (Ok(true), Ok("")) => Card::new(
@@ -277,7 +274,7 @@ fn jev_card(settings: &Settings) -> ProjectToolDto {
                     Card::new(
                         "on",
                         format!("Jev is turned on in this project's settings (provider: {JEV_PROVIDER})."),
-                        "No action needed. A connection test from this app is not available yet.",
+                        "Use Manage Jev on this device to review approval, save a key, or test the connection.",
                     )
                     .note(SETTING_ONLY)
                     .note(match impact {
