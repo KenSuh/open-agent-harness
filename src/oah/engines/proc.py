@@ -280,7 +280,8 @@ class _WindowsJob:
 def run_command(argv: Sequence[str], *, timeout: float, cwd: str | None = None,
                 env: Mapping[str, str] | None = None, encoding: str = "utf-8",
                 stdin_text: str | None = None) -> RunResult:
-    """Run argv without a shell. On timeout the whole process tree is killed."""
+    """Run argv without a shell. On timeout the whole process tree is killed, and likewise when the caller is
+    interrupted while it waits (a signal handler that raises, Ctrl-C): the tree does not outlive the call."""
     if not argv:
         raise ValueError("empty command")
     if is_batch(str(argv[0])):
@@ -319,6 +320,15 @@ def run_command(argv: Sequence[str], *, timeout: float, cwd: str | None = None,
             except subprocess.TimeoutExpired:
                 out, err = b"", b""
             return RunResult(None, decode_output(out, encoding), decode_output(err, encoding), True)
+        except BaseException:
+            # The child runs in its own session (its own Job Object on Windows), so whatever stops the caller
+            # would not reach it.
+            kill_tree(proc)
+            try:
+                proc.communicate(timeout=REAP_SECONDS)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                pass
+            raise
         return RunResult(proc.returncode, decode_output(out, encoding), decode_output(err, encoding), False)
     finally:
         if job is not None:

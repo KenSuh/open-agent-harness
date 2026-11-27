@@ -303,6 +303,40 @@ class RunTest(unittest.TestCase):
             time.sleep(0.2)
         self.assertFalse(_pid_alive(child_pid), "the grandchild survived the timeout")
 
+    def test_an_interrupted_caller_does_not_leave_its_process_tree(self):
+        work = make_tmp_dir(self)
+        pid_file = work / "child.pid"
+        spawner = work / "spawner.py"
+        spawner.write_text(
+            "import os, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "open(sys.argv[1] + '.tmp', 'w').write(str(child.pid))\n"
+            "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        wait, waits = subprocess.Popen.communicate, []
+
+        def interrupted(process, *args, **kwargs):
+            waits.append(kwargs.get("timeout"))
+            if len(waits) > 1:
+                return wait(process, *args, **kwargs)
+            deadline = time.monotonic() + 30
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise KeyboardInterrupt  # what a raising signal handler does to the waiting caller
+
+        started = time.monotonic()
+        with patch.object(subprocess.Popen, "communicate", interrupted), self.assertRaises(KeyboardInterrupt):
+            run_command([sys.executable, str(spawner), str(pid_file)], timeout=120)
+        self.assertLess(time.monotonic() - started, 60)
+        self.assertEqual(waits, [120, proc_module.REAP_SECONDS], "the killed tree was not reaped")
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 10
+        while _pid_alive(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        self.assertFalse(_pid_alive(child_pid), "the grandchild survived its interrupted caller")
+
     @unittest.skipUnless(os.name == "nt", "Windows Job Object lifetime")
     def test_timeout_kills_child_after_launcher_exits(self):
         work = make_tmp_dir(self)
