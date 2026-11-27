@@ -82,6 +82,7 @@ pub enum Error {
     Agents(AgentError),
     Rules(RulesError),
     ProjectSkill(ProjectSkillError),
+    ProjectTools(crate::project_tools::runner::RunnerError),
     Workflow(WorkflowError),
     /// A skill review that ended without an outcome, with the upstream cause behind it (M1-S3).
     Review(ReviewFailed),
@@ -120,6 +121,7 @@ impl Error {
     /// Whether this is the stop of a cancelled task.
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Error::Task(TaskError::Cancelled))
+            || matches!(self, Error::ProjectTools(error) if error.is_cancelled())
     }
 }
 
@@ -256,6 +258,7 @@ impl Coded for Error {
             Error::Agents(error) => error.code(),
             Error::Rules(error) => Coded::code(error),
             Error::ProjectSkill(error) => error.code(),
+            Error::ProjectTools(error) => error.code(),
             Error::Workflow(error) => error.code(),
             Error::Review(error) => error.code(),
             Error::ReviewStore(error) => error.code(),
@@ -275,6 +278,7 @@ impl Coded for Error {
             Error::Agents(error) => Coded::message(error),
             Error::Rules(error) => Coded::message(error),
             Error::ProjectSkill(error) => error.message(),
+            Error::ProjectTools(error) => Coded::message(error),
             Error::Workflow(error) => Coded::message(error),
             Error::Review(error) => error.message(),
             Error::ReviewStore(error) => error.message(),
@@ -334,6 +338,12 @@ impl From<ConfigError> for Error {
 impl From<TaskError> for Error {
     fn from(error: TaskError) -> Self {
         Error::Task(error)
+    }
+}
+
+impl From<crate::project_tools::runner::RunnerError> for Error {
+    fn from(error: crate::project_tools::runner::RunnerError) -> Self {
+        Error::ProjectTools(error)
     }
 }
 

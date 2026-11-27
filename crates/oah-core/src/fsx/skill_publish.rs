@@ -215,6 +215,10 @@ impl ProjectRoot {
         operation(&project)
     }
 
+    pub(crate) fn verify_selection(&self) -> Result<(), PublishError> {
+        self.with_project(|_| Ok(()))
+    }
+
     /// Returns a managed acquisition only after verifying the receipt, live object and complete inventory.
     /// Missing management state is `Ok(None)`. Changes and unsafe paths are errors.
     pub fn installed(
@@ -256,6 +260,9 @@ impl ProjectRoot {
 #[cfg(not(any(target_os = "macos", windows)))]
 impl ProjectRoot {
     pub fn open(_: &Path, _: &Path) -> Result<Self, PublishError> {
+        Err(PublishError::Unsupported)
+    }
+    pub(crate) fn verify_selection(&self) -> Result<(), PublishError> {
         Err(PublishError::Unsupported)
     }
     pub fn installed(&self, _: Engine, _: &SkillLeaf) -> Result<Option<Acquisition>, PublishError> {
