@@ -58,6 +58,7 @@ FAKE_TOOL = r'''
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import urllib.request
 
@@ -117,6 +118,14 @@ def main():
     store = home / "fake.json"
     if command == "init":
         home.mkdir(parents=True)
+        try:  # like the real tool: a new folder inside a Git worktree that is not its own is refused
+            found = subprocess.run(["git", "-C", str(home), "rev-parse", "--show-toplevel"], capture_output=True,
+                                   text=True)
+        except OSError:
+            found = None
+        if found is not None and found.returncode == 0:
+            sys.stderr.write("fake gbrain: %s is inside the Git worktree %s\n" % (home, found.stdout.strip()))
+            return 1
         (home / "brain.pglite").mkdir()
         config = {"engine": "pglite", "database_path": str(home / "brain.pglite"),
                   "embedding_model": option(args, "--embedding-model"),
@@ -629,10 +638,22 @@ class BuildTest(IndexCase):
                 self.assertEqual((env["GBRAIN_SELF_UPGRADE_MODE"], env["GBRAIN_SKIP_STARTUP_HOOKS"],
                                   env["GBRAIN_NO_AUTOPILOT_INSTALL"], env["GBRAIN_TELEMETRY"], env["OLLAMA_BASE_URL"]),
                                  ("off", "1", "1", "off", self.ollama.url + "/v1"))
-                for name in ("HOME", "GBRAIN_HOME", "TMPDIR", "TEMP", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+                for name in ("HOME", "GBRAIN_HOME", "TMPDIR", "TEMP", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL",
+                             "GIT_CEILING_DIRECTORIES"):
                     self.assertTrue(inside(env[name], self.state_root), name)
+                self.assertTrue(inside(call["cwd"], env["GIT_CEILING_DIRECTORIES"])
+                                and not inside(env["GIT_CEILING_DIRECTORIES"], call["cwd"]),
+                                "Git, asked where the tool runs, could look above the index folder")
                 self.assertNotIn(os.path.normcase(os.path.realpath(self.repo)),
                                  [os.path.normcase(os.path.realpath(part)) for part in env["PATH"].split(os.pathsep)])
+
+    def test_a_state_folder_inside_another_git_worktree_stays_out_of_the_tools_sight(self):
+        # The real tool asks Git where its new folder lies and refuses a worktree that is not its own.
+        subprocess.run(["git", "init", "-q", str(self.state_root.parent)], check=True, capture_output=True,
+                       env=git_env())
+        built = self.build()
+        self.assertEqual((built["ok"], built["state"]), (True, "ready"), built.get("message"))
+        self.assertEqual(self.search("retry budget")["mode"], "semantic")
 
     def test_a_new_commit_that_leaves_the_notes_alone_needs_no_rebuild(self):
         self.assertTrue(self.build()["ok"])

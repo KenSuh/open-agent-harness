@@ -33,10 +33,12 @@ worktree, never a shell or a batch file, started in a folder of the generation w
 allow-list (no provider credential, proxy or tool setting is inherited), its home inside the generation, and
 self-upgrade, startup hooks, autopilot install and telemetry switched off. The tool never sees the repository: it
 reads the mirror, which holds only the selected notes under names this module made up, so no hook, plugin or
-configuration file of the project can reach it. Embeddings come from an Ollama server that already runs at a
-literal loopback address and from a model that server already has. This module never installs, starts, stops,
-pulls or deletes anything, and it refuses a model the server marks as remote. It does not confine the tool's own
-network use with an operating-system sandbox; it gives the tool no credential and no address but the loopback one.
+configuration file of the project can reach it. Nor does it see a repository that happens to hold the state folder:
+Git, asked from inside a generation, is told to look no higher than the generation. Embeddings come from an Ollama
+server that already runs at a literal loopback address and from a model that server already has. This module never
+installs, starts, stops, pulls or deletes anything, and it refuses a model the server marks as remote. It does not
+confine the tool's own network use with an operating-system sandbox; it gives the tool no credential and no address
+but the loopback one.
 
 Calls. summary() reads current.json and pending.json and nothing else: it starts no Git, sends no request, runs no
 tool and creates nothing, so it is the call for a surface that is merely opened; it cannot tell a current index
@@ -877,10 +879,11 @@ def _checked_model(base: str, tools: LocalTools, timeouts: Timeouts) -> tuple[st
 
 # ---- running the tool in its own place ----
 
-def _child_env(home: pathlib.Path, tmp: pathlib.Path, search: Sequence[pathlib.Path | str],
+def _child_env(gen: _Generation, tmp: pathlib.Path, search: Sequence[pathlib.Path | str],
                extra: Mapping[str, str]) -> dict[str, str]:
     """The whole environment of a child: built here, nothing inherited but the names Windows itself needs."""
     env: dict[str, str] = {}
+    home = gen.home
     folders = [str(folder) for folder in search]
     if os.name == "nt":
         for key, value in os.environ.items():
@@ -896,6 +899,11 @@ def _child_env(home: pathlib.Path, tmp: pathlib.Path, search: Sequence[pathlib.P
                TEMP=str(tmp), LC_ALL="C", XDG_CONFIG_HOME=str(home / ".config"), XDG_CACHE_HOME=str(home / ".cache"),
                XDG_DATA_HOME=str(home / ".local" / "share"), XDG_STATE_HOME=str(home / ".local" / "state"),
                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull, GIT_TERMINAL_PROMPT="0")
+    # Git, asked from inside the generation, finds the mirror or nothing, never a repository that happens to hold the
+    # state folder: the tool refuses to set itself up inside a worktree that is not its own. The variable is a list,
+    # so a folder whose path holds the list separator cannot be named in it.
+    if os.pathsep not in str(gen.path):
+        env["GIT_CEILING_DIRECTORIES"] = str(gen.path)
     env.update(extra)
     if os.name == "nt":  # there a name is the same whatever its case, so each is given once
         env = {name: env[name] for name in {key.upper(): key for key in env}.values()}
@@ -945,7 +953,7 @@ def _run_tool(run: _Run, args: Sequence[str], timeout: float) -> RunResult:
     with scratch.directory("run-", root=gen.tmp, ignore_cleanup_errors=True) as tmp:
         try:
             return run_command((*run.command, *args), timeout=timeout, cwd=str(gen.work),
-                               env=_child_env(gen.home, pathlib.Path(tmp), search, extra))
+                               env=_child_env(gen, pathlib.Path(tmp), search, extra))
         except FileNotFoundError:
             raise Refusal(CODE_TOOL_MISSING, f"{run.command[0]} could not be started. Install gbrain yourself or "
                           "correct the configured path.") from None
@@ -1202,7 +1210,7 @@ def _mirror_git(run: _Run, *args: str) -> RunResult:
     extra = dict(_MIRROR_AUTHOR, GIT_CONFIG_GLOBAL=str(gen.git_config))
     with scratch.directory("run-", root=gen.tmp, ignore_cleanup_errors=True) as tmp:
         result = run_command(git_argv() + _GIT_MIRROR + ("-C", str(gen.mirror), *args), timeout=run.timeouts.git,
-                             cwd=str(gen.mirror), env=_child_env(gen.home, pathlib.Path(tmp), _git_folders(), extra))
+                             cwd=str(gen.mirror), env=_child_env(gen, pathlib.Path(tmp), _git_folders(), extra))
     if result.timed_out or result.returncode != 0:
         raise Refusal(CODE_GIT, f"Git could not prepare the mirror ({args[0]}: {_tail(result.stderr)}). Retry.")
     return result
