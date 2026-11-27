@@ -772,8 +772,10 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         if any(_flagged(item) for item in strings):
             return Judgement(unused("secret"), request.purpose, None)
         breaker = circuit.Breaker(state_dir, circuit.limits(config))
-        provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                      providers=providers)
+        provider, key, status = _gate(
+            config, brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
+            scopes=("judgement", *(("judgement-design-text",) if has_design else ()),
+                    *(("judgement-task-text",) if has_task else ())))
         env = keychain = providers = None
         if provider is None:
             return Judgement(status, request.purpose, None)

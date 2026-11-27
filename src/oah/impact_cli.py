@@ -270,6 +270,12 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     shown, total, overflow = query.cap(rows, limit=settings["limit"], strong_only=args.strong_only)
     identity = query.db_identity(data, info.commit, shown, found,
                                  default_branch=(branch.data, branch.commit) if branch.data is not None else None)
+    if settings["rerank"] and not args.no_rerank:
+        # Opt-in order of the weak rows already shown. No row is added or removed, and the DB digest above is of
+        # rows that never move.
+        from oah import project_tools_jev
+
+        shown, rerank = project_tools_jev.order_impact(shown, root=root, files=files, offline=args.offline)
     plan = query.rerun_plan([row for row in rows if row.target in changed]) if since else []
     layers = impact_scope.layers(targets=targets, gate_status=gate_status,
                                  db_available=identity["status"] == "available",

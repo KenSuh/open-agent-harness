@@ -17,7 +17,15 @@ Data sent, and nothing else:
 - source and material judgement (`oah.rerank.judge`, off unless `[rerank.judgement] enabled = true`): slices of
   verified public snapshots, fixed labels and, only with `send_design_text = true`, design excerpts, with oah's
   closed rubric questions: a Choice plus a Noul on whether any option fits, or one Noul per label. Its reply is
-  parsed strictly: a repeated key or a non-finite number fails the whole answer.
+  parsed strictly: a repeated key or a non-finite number fails the whole answer;
+- Impact ordering (`oah.project_tools_jev.order_impact`): the re-rank request above, where each candidate is one
+  weak row's repository-relative path and line, with its binding, layer and file kind as fixed words. The query
+  and task kind are fixed labels. No row detail, queried target, file content or absolute path;
+- connection check (`oah.project_tools_jev.run_test`): `build_probe_request`, one fixed sentence and one fixed
+  yes/no question, the same bytes for every user, project and machine, sent to `OFFICIAL_URL` alone.
+
+`destination(config, key_name)` names where a `[rerank]` table points, from its text alone: official, loopback,
+custom or refused. The caller decides from that, before any key lookup, which credential may go there.
 
 The key goes only into the Authorization header. Errors carry a short code, never response text.
 """
@@ -41,6 +49,11 @@ from oah.secrets import Secret
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 DEFAULT_KEY_NAME = "TYPESAFE_API_KEY"
+OFFICIAL_URL = DEFAULT_URL  # the one address a device key, or the shared key name, may reach
+OFFICIAL, LOOPBACK, CUSTOM, REFUSED = "official", "loopback", "custom", "refused"
+PROBE_QUESTION = "check"
+PROBE_TIMEOUT = 10.0  # seconds, the longest one connection check waits
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 DESCRIPTION_LIMIT = 200
 WORK_LIMIT = 16_000  # characters, about 4,000 tokens, over the whole work text
 RESPONSE_LIMIT = 4 * 1024 * 1024
@@ -408,6 +421,72 @@ def _check_url(url: str) -> str | None:
         del url, parts, host
 
 
+def destination(config: Mapping, key_name: str) -> tuple[str, str, str]:
+    """(kind, url, model) a `[rerank]` table names, read from its text alone: no lookup and no request.
+
+    - official: exactly `OFFICIAL_URL` with the key name `DEFAULT_KEY_NAME`, the only pair a device key may use;
+    - loopback: this machine, where tests and local stand-ins listen;
+    - custom: any other address, or the official address with another key name;
+    - refused: an address `post_json` would not open, or another host's address that carries a user name, a
+      password, a query or a fragment."""
+    settings = url = model = parts = None
+    try:
+        settings = config.get("typesafe") if isinstance(config, Mapping) else None
+        settings = settings if isinstance(settings, Mapping) else {}
+        url = str(settings.get("url") or DEFAULT_URL)
+        model = str(settings.get("model") or DEFAULT_MODEL)
+        if _check_url(url) is not None:
+            return REFUSED, url, model
+        if url == OFFICIAL_URL and key_name == DEFAULT_KEY_NAME:
+            return OFFICIAL, url, model
+        parts = urllib.parse.urlsplit(url)
+        if parts.hostname in LOOPBACK_HOSTS:
+            return LOOPBACK, url, model
+        if "@" in parts.netloc or "?" in url or "#" in url:
+            return REFUSED, url, model
+        return CUSTOM, url, model
+    finally:
+        del config, key_name, settings, parts
+
+
+def build_probe_request() -> dict:
+    """The fixed connection check: nothing about the user, the project or the machine."""
+    return {"model": DEFAULT_MODEL,
+            "state": "oah connection check. This text is fixed and carries no project data.",
+            "questions": {PROBE_QUESTION: {"type": "noul", "instructions": "Is `state` a connection check?"}}}
+
+
+def parse_probe_response(body: object) -> str:
+    """The answering model's name ("" when the reply names none), or ProviderError(bad-response)."""
+    result = code = None
+    try:
+        try:
+            result, code = _outcome(_parse_probe_response, body)
+        finally:
+            del body
+        return _finish(result, code)
+    finally:
+        del result, code
+
+
+def _parse_probe_response(body: object) -> tuple[str | None, str | None]:
+    answers = answer = model = None
+    try:
+        answers = _answers(body)
+        if answers is None or len(answers) != 1:
+            return None, BAD_RESPONSE
+        answer = answers.get(PROBE_QUESTION)
+        if not isinstance(answer, Mapping) or answer.get("type") != "noul":
+            return None, BAD_RESPONSE
+        noul = _number(answer.get("noul"))
+        if noul is None or not 0.0 <= noul <= 1.0:
+            return None, BAD_RESPONSE
+        model = body.get("model") if isinstance(body, Mapping) else None
+        return (model if isinstance(model, str) and _MODEL_NAME.fullmatch(model) else ""), None
+    finally:
+        del body, answers, answer, model
+
+
 def post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> object:
     """POST payload as JSON and return the parsed reply; any failure raises ProviderError(code)."""
     result = code = None
@@ -416,6 +495,20 @@ def post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> obj
             result, code = _outcome(_post_json, url, payload, key=key, timeout=timeout)
         finally:
             del url, payload, key, timeout
+        return _finish(result, code)
+    finally:
+        del result, code
+
+
+def post_official(payload: Mapping, *, key: Secret, timeout: float = PROBE_TIMEOUT) -> object:
+    """POST to `OFFICIAL_URL` alone and read the reply strictly; no `[rerank]` table reaches this call."""
+    result = code = None
+    try:
+        try:
+            result, code = _outcome(_post_json, OFFICIAL_URL, payload, key=key,
+                                    timeout=min(float(timeout), PROBE_TIMEOUT), strict=True)
+        finally:
+            del payload, key, timeout
         return _finish(result, code)
     finally:
         del result, code

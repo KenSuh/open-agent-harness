@@ -2,14 +2,28 @@
 """Optional AI re-ranking (A2, A9, A10).
 
     section = load_config(root).section("rerank", rerank.DEFAULTS)
-    result = rerank.rerank("impact", candidates, config=section, query=question)
+    result = rerank.rerank("skills", candidates, config=section, query=question)
     result.status   # "used" or "unused(<reason>)"
+
+Impact rows go through `oah.project_tools_jev.order_impact`, which builds the candidates from fixed fields and
+asks under the `impact` scope.
 
 A provider runs only when every gate passes, checked in this order:
 1. `unused(disabled-by-brief)`: the caller passed `brief_disabled=True` (`--no-rerank`, or the packet);
 2. `unused(not-enabled)`: `[rerank] enabled` is not `true` (the default is off);
 3. `unused(not-configured)`: `[rerank] provider` is empty; `unused(unknown-provider)` names none known;
-4. `unused(no key)`: `oah.secrets.get(<the provider's key name>)` found nothing;
+4. `unused(no key)`: no key may be used. For another provider, `oah.secrets.get(<the provider's key name>)` found
+   nothing. For TypeSafe, `admit` first settles from the configuration text and this device's state alone where
+   the request would go and which credential may go there, and only then looks a key up:
+   - the key stored on this device goes only to the official address under the name `TYPESAFE_API_KEY`, and only
+     for a project and use the user approved on this device (`oah.project_tools_jev`);
+   - an environment variable keeps its documented precedence for that pair and for an address on this machine;
+   - any other address or key name needs that device approval for the exact pair and reads the environment only;
+     the shared key name is never sent there (`unused(error:insecure-url)` when the environment holds it);
+   - Impact ordering needs the device approval whatever the key source, and a project the user switched off on
+     this device sends nothing.
+   `Admission.reason` names the exact refusal (`no-consent`, `consent-revoked`, `consent-stale`,
+   `device-state`, `destination`, `key-locked`, `key-denied`); the status keeps the words run records accept;
 5. `unused(circuit-open)` or `unused(daily-limit)`: given a state folder (`state_dir`), the breaker in
    `oah.rerank.circuit` is open after repeated timeout, network, 429 or 529 failures, or this UTC day's
    `[rerank] max_requests_per_day` is used up. Every use that sends a request records its outcome there.
@@ -44,24 +58,27 @@ tuple of two strings, else `unused(error:bad-response)`; whether it is one of th
 from __future__ import annotations
 
 import math
+import os
 import pathlib
 import sys
 from dataclasses import dataclass
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, NamedTuple, Protocol, Sequence
 
 from oah import routing, secrets
 from oah.config import ConfigError, load_config
 from oah.intent import END as INTENT_END
 from oah.rerank import circuit
 from oah.rerank.judgement_policy import DEFAULTS as JUDGEMENT_DEFAULTS
-from oah.rerank.base import (BAD_RESPONSE, KEY_NAME, TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
-                             _classify_failure, _raise_if_interrupted)
-from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, WORK_LIMIT, TypeSafeProvider
+from oah.rerank.base import (BAD_RESPONSE, INSECURE_URL, KEY_NAME, TIERS, Candidate, Provider, ProviderError,
+                             _INTERRUPTIONS, _classify_failure, _raise_if_interrupted)
+from oah.rerank.typesafe import (CUSTOM, DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, OFFICIAL, REFUSED, WORK_LIMIT,
+                                 TypeSafeProvider, destination)
 from oah.toolkit.checks import CONTENT_RULES
 
-__all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "WORK_LIMIT", "Advice", "Candidate", "Decision", "ModelJudgement",
-           "Provider", "ProviderError", "RerankResult", "Work", "advise_difficulty", "decide", "intent_work",
-           "judge_model", "min_confidence", "request_work", "rerank", "scope_work"]
+__all__ = ["CANDIDATE_LIMIT", "DEFAULTS", "PROVIDERS", "SCOPES", "TIERS", "WORK_LIMIT", "Admission", "Advice",
+           "Approval", "Candidate", "Decision", "ModelJudgement", "Provider", "ProviderError", "RerankResult", "Work",
+           "admit", "advise_difficulty", "bounded", "decide", "intent_work", "judge_model", "min_confidence",
+           "request_work", "rerank", "scope_work"]
 
 DEFAULTS = {
     "enabled": False,
@@ -83,6 +100,16 @@ DEFAULTS = {
 PROVIDERS: dict[str, Provider] = {"typesafe": TypeSafeProvider()}
 
 USED = "used"
+TYPESAFE = "typesafe"  # the provider name whose destination and credential `admit` settles before any lookup
+# What a Jev use sends is one of these scopes; a device approval covers the scopes the user confirmed.
+SCOPES = ("impact", "skills", "difficulty", "model", "judgement", "judgement-design-text", "judgement-task-text")
+CONSENT_ALWAYS = frozenset({"impact"})  # scopes that need the device approval whatever the key source
+CANDIDATE_LIMIT = 50  # the most candidates an approved request carries; [rerank] max_candidates can only lower it
+TIMEOUT_LIMIT = 10.0  # seconds, the longest an approved request waits; [rerank] timeout_seconds can only lower it
+# A device approval's answer for (scopes, destination), and the other exact refusals in `Admission.reason`.
+GRANTED, NO_CONSENT, REVOKED, STALE, DEVICE_STATE = ("granted", "no-consent", "consent-revoked", "consent-stale",
+                                                     "device-state")
+DESTINATION, KEY_LOCKED, KEY_DENIED = "destination", "key-locked", "key-denied"
 INTENT_PARTS = ("Problem", "Desired outcome", "Success conditions", "Constraints", "Non-goals")
 INTENT_TEXT, SCOPE_PATHS, REQUEST_TEXT = "the Intent text", "the Scope paths", "the request text"
 SCOPE_WIDENED = "OAH_RERANK_SCOPE_WIDENED"
@@ -248,6 +275,7 @@ class RerankResult:
     status: str
     provider: str | None = None
     scores: tuple[tuple[str, float], ...] = ()
+    reason: str | None = None  # `Admission.reason` when the gate refused; never recorded
 
     @property
     def used(self) -> bool:
@@ -290,37 +318,137 @@ class ModelJudgement:
 AXES = ("kind", "intensity", "reasoning", "risk")
 
 
-def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | None,
-          keychain: secrets.Keychain | None,
-          providers: Mapping[str, Provider] | None) -> tuple[Provider | None, secrets.Secret | None, str]:
-    """(provider, key, status): provider and key are set only when every gate passed."""
+class Approval(Protocol):
+    """The user's consent on this device for one project: `verdict` answers for the scopes and exact destination."""
+
+    def verdict(self, scopes: Sequence[str], *, url: str, key_name: str, model: str) -> str: ...
+
+
+class Admission(NamedTuple):
+    """What `admit` decided. `provider` and `key` are set only when every gate passed."""
+
+    provider: Provider | None
+    key: secrets.Secret | None
+    status: str  # "used" or "unused(<reason>)", in the words run records accept
+    reason: str | None = None  # the exact refusal behind `unused(no key)` or `unused(error:insecure-url)`
+    consented: bool = False  # a device approval admitted this use, so its bounds apply
+
+
+def admit(config: Mapping, *, brief_disabled: bool = False, env: Mapping[str, str] | None = None,
+          keychain: secrets.Keychain | None = None, providers: Mapping[str, Provider] | None = None,
+          scopes: Sequence[str] | None = None, root: pathlib.Path | None = None,
+          approval: Approval | None = None) -> Admission:
+    """Every gate in order. `scopes` names what the caller would send; a caller that names none needs them all.
+
+    `root` is the project the consent belongs to (the current folder's project when omitted). `approval`
+    replaces the device consent store. A keychain test double with no `approval` is read as before, with no
+    home, project or host discovery; the device key store itself is never read without the device approval."""
     provider = key = key_name = None
     try:
         if brief_disabled:
-            return None, None, unused("disabled-by-brief")
+            return Admission(None, None, unused("disabled-by-brief"))
         if config.get("enabled") is not True:
-            return None, None, unused("not-enabled")
+            return Admission(None, None, unused("not-enabled"))
         name = config.get("provider")
         if not isinstance(name, str) or not name.strip():
-            return None, None, unused("not-configured")
+            return Admission(None, None, unused("not-configured"))
         provider = (PROVIDERS if providers is None else providers).get(name.strip())
         if provider is None:
-            return None, None, unused("unknown-provider")
+            return Admission(None, None, unused("unknown-provider"))
         key_name, status = _call(lambda: _valid_text(provider.key_name(config)))
         if status != USED:
-            return None, None, status
+            return Admission(None, None, status)
+        if name.strip() == TYPESAFE:
+            return _admit_typesafe(provider, key_name, config, env=env, keychain=keychain, scopes=scopes, root=root,
+                                   approval=approval)
+        if scopes is not None and any(scope in CONSENT_ALWAYS for scope in scopes):
+            return Admission(None, None, unused("unknown-provider"))  # no device approval covers another provider
         try:
             key = secrets.get(key_name, env=env, keychain=keychain)
         except BaseException as exc:
             _raise_if_interrupted(exc)
             if not isinstance(exc, ValueError):
                 raise
-            return None, None, unused(f"error:{KEY_NAME}")
+            return Admission(None, None, unused(f"error:{KEY_NAME}"))
         if not key:
-            return None, None, unused("no key")
-        return provider, key, USED
+            return Admission(None, None, unused("no key"))
+        return Admission(provider, key, USED)
     finally:
-        del config, brief_disabled, env, keychain, providers, provider, key, key_name
+        del config, brief_disabled, env, keychain, providers, scopes, root, approval, provider, key, key_name
+
+
+def _admit_typesafe(provider: Provider, key_name: str, config: Mapping, *, env: Mapping[str, str] | None,
+                    keychain: secrets.Keychain | None, scopes: Sequence[str] | None, root: pathlib.Path | None,
+                    approval: Approval | None) -> Admission:
+    """The TypeSafe gate: destination, key name, scope and device approval are settled before any key lookup."""
+    value = key = judge = None
+    try:
+        try:
+            secrets.check_name(key_name)
+        except ValueError:
+            return Admission(None, None, unused(f"error:{KEY_NAME}"))
+        named = () if scopes is None else tuple(scopes)
+        required = SCOPES if scopes is None else named
+        if not required or any(scope not in SCOPES for scope in required):
+            raise ValueError(f"a Jev use names its scopes from: {', '.join(SCOPES)}")
+        kind, url, model = destination(config, key_name)
+        value = (os.environ if env is None else env).get(key_name)
+        if kind == REFUSED or (kind == CUSTOM and key_name == DEFAULT_KEY_NAME):
+            # Settled from the text: an address the transport would not open, or the shared key name with another
+            # address. No key goes there, from the environment or from this device, and none is looked up. The
+            # status says what was held back: a key that exists, or none (the words these cases always had).
+            return Admission(None, None, unused(f"error:{INSECURE_URL}") if value else unused("no key"),
+                             INSECURE_URL if kind == REFUSED else DESTINATION)
+        device = kind == OFFICIAL and not value  # only the official pair may use the key stored on this device
+        if approval is not None:
+            judge = approval
+        elif keychain is None or isinstance(keychain, (secrets.MacKeychain, secrets.WindowsCredentials)):
+            from oah import project_tools_jev  # it imports this package, so not at module level
+
+            judge = project_tools_jev.device_approval(root, env=env)
+        verdict = None if judge is None else judge.verdict(required, url=url, key_name=key_name, model=model)
+        if verdict in (REVOKED, DEVICE_STATE):
+            return Admission(None, None, unused("no key"), verdict)  # switched off here: no key source sends
+        needed = (kind == CUSTOM or any(scope in CONSENT_ALWAYS for scope in named)
+                  or (device and judge is not None))
+        if needed and verdict != GRANTED:
+            return Admission(None, None, unused("no key"), verdict or NO_CONSENT)
+        if value:
+            return Admission(provider, secrets.Secret(value), USED, None, needed)
+        if not device:
+            return Admission(None, None, unused("no key"))
+        state, key = secrets.find(key_name, keychain=keychain)
+        if key is None:
+            return Admission(None, None, unused("no key"),
+                             {secrets.LOCKED: KEY_LOCKED, secrets.DENIED: KEY_DENIED}.get(state))
+        return Admission(provider, key, USED, None, needed)
+    finally:
+        del provider, key_name, config, env, keychain, scopes, root, approval, value, key, judge
+
+
+def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | None,
+          keychain: secrets.Keychain | None, providers: Mapping[str, Provider] | None,
+          scopes: Sequence[str] | None = None, root: pathlib.Path | None = None,
+          approval: Approval | None = None) -> tuple[Provider | None, secrets.Secret | None, str]:
+    """(provider, key, status) of `admit`: provider and key are set only when every gate passed."""
+    try:
+        return admit(config, brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
+                     scopes=scopes, root=root, approval=approval)[:3]
+    finally:
+        del config, brief_disabled, env, keychain, providers, scopes, root, approval
+
+
+def bounded(config: Mapping) -> dict:
+    """The table with an approved request's bounds: the configuration can lower them and cannot raise them."""
+    bounded = dict(config)
+    timeout = config.get("timeout_seconds")
+    fits = (isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and math.isfinite(timeout)
+            and 0 < timeout <= TIMEOUT_LIMIT)
+    bounded["timeout_seconds"] = float(timeout) if fits else TIMEOUT_LIMIT
+    limit = config.get("max_candidates")
+    fits = isinstance(limit, int) and not isinstance(limit, bool) and 0 < limit <= CANDIDATE_LIMIT
+    bounded["max_candidates"] = limit if fits else CANDIDATE_LIMIT
+    return bounded
 
 
 def _call(action: Callable[[], object]) -> tuple[object, str]:
@@ -400,21 +528,29 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
            brief_disabled: bool = False, env: Mapping[str, str] | None = None,
            keychain: secrets.Keychain | None = None,
            providers: Mapping[str, Provider] | None = None,
-           state_dir: pathlib.Path | None = None) -> RerankResult:
+           state_dir: pathlib.Path | None = None, scopes: Sequence[str] | None = None,
+           root: pathlib.Path | None = None, approval: Approval | None = None) -> RerankResult:
     """Re-order candidates when the user enabled a provider and its key exists; else keep the order.
 
-    With `state_dir`, the breaker there can stop the request and records its outcome."""
-    provider = key = failure = None
+    With `state_dir`, the breaker there can stop the request and records its outcome. `scopes`, `root` and
+    `approval` go to `admit`; a skills re-rank names the `skills` scope itself. A use a device approval admitted
+    keeps that approval's bounds (`CANDIDATE_LIMIT`, `TIMEOUT_LIMIT`) whatever the configuration says."""
+    provider = key = failure = admission = None
     try:
         items = tuple(candidates)
         if len({item.name for item in items}) != len(items):
             raise ValueError("rerank candidates need unique names")
         breaker = circuit.Breaker(state_dir, circuit.limits(config))
-        provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                      providers=providers)
-        env = keychain = providers = None
+        if scopes is None and kind == "skills":
+            scopes = ("skills",)
+        admission = admit(config, brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
+                          scopes=scopes, root=root, approval=approval)
+        provider, key, status = admission[:3]
+        env = keychain = providers = approval = None
         if provider is None:
-            return RerankResult(items, status)
+            return RerankResult(items, status, reason=admission.reason)
+        if admission.consented:
+            config = bounded(config)
         provider_name, status = _call(lambda: _valid_text(provider.name))
         if status != USED:
             return RerankResult(items, status)
@@ -442,6 +578,7 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
         failure = _classify_failure(exc)
     finally:
         del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key
+        del scopes, root, approval, admission
     if type(failure) is str:
         raise ProviderError(failure) from None
     raise BaseException.with_traceback(failure, None) from None
@@ -473,7 +610,7 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
             config = load_config(root).section("rerank", DEFAULTS) if root is not None else DEFAULTS
         breaker = circuit.Breaker(state_dir, circuit.limits(config), write=record_notice)
         provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                      providers=providers)
+                                      providers=providers, scopes=("difficulty",), root=root)
         env = keychain = providers = None
         if provider is None:
             if implicit_config and status == unused("not-enabled"):
@@ -530,7 +667,7 @@ def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, s
         pairs = tuple((str(model), str(effort)) for model, effort in candidates)
         breaker = circuit.Breaker(state_dir, circuit.limits(config))
         provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                      providers=providers)
+                                      providers=providers, scopes=("model",))
         env = keychain = providers = None
         if provider is None:
             return ModelJudgement(status)

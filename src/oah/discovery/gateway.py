@@ -32,7 +32,8 @@ def reachable(operation: str, *, managed: bool = False, discovery: bool = False,
     if not isinstance(settings, Mapping) or settings.get("enabled") is not True \
             or settings.get("send_task_text") is not True:
         return False
-    provider, _key, _status = rerank._gate(config, brief_disabled=False, env=env, keychain=keychain, providers=None)
+    provider, _key, _status = rerank._gate(config, brief_disabled=False, env=env, keychain=keychain, providers=None,
+                                           scopes=("judgement", "judgement-task-text"))
     return provider is not None and callable(getattr(provider, "judge", None))
 
 
