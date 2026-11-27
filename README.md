@@ -62,11 +62,9 @@ choices. **Agents** also lists Cursor for skills and rules only. Choose from the
 
 The desktop app saves assignments in `.oah/config.toml` and syncs them into the managed rules in `AGENTS.md`.
 Use each agent in its own tool, or use the desktop's bundled commands with that configuration. The bundled
-helper provides `doctor`, `sections show`, `rules check` and `rules sync`. The source CLI has its own settings:
-its task loop does not read the desktop's `.oah/config.toml`, and `oah init` or `oah rules sync` can replace
-the desktop-managed `AGENTS.md` block. Choose either the desktop Team Workflow or the source CLI task loop
-for a repository. The source CLI's `oah call` directly runs Claude Code and Codex CLI with its own stage
-routing; its dedicated `oah review` and automatic `oah fix` commands run Codex.
+helper provides `doctor`, `sections show`, `rules check` and `rules sync`. The source CLI reads the same
+build, review and fix assignments. `oah call` launches Claude Code and Codex CLI directly. Use other
+assigned agents through their own tools. The dedicated `oah review` and automatic `oah fix` commands run Codex.
 
 ## What oah does for you
 
@@ -180,25 +178,25 @@ and places its helper in `bin/`. These bundled commands work with the desktop co
 Open a Git worktree, then go to **Team Workflow → Project Tools**.
 
 - **Project Wiki.** Set up a new wiki or point OAH to existing Markdown notes. Use text search or build a
-  local semantic index with gbrain and Ollama when both are installed and configured.
-- **Impact Map.** Build a map of the committed project and query affected files and checks. OAH can read a
-  Graphify graph when its provenance matches the current checkout.
+  local semantic index of committed notes with gbrain and Ollama.
+- **Impact Map.** Build or refresh a map of the selected worktree and check whether an existing Graphify
+  graph matches it. Use `oah impact` in the source CLI to query affected files and checks.
 - **Jev.** Turn on optional Impact Map result ordering for this project. Review what is sent and approve it
   on this device. Store a key in macOS Keychain or Windows Credential Manager and manage approval from the
   same panel. [Key and approval settings](docs/keys.md#a-key-alone-never-turns-the-re-ranker-on)
 
 ### Alternative: initialize a separate project with the source CLI
 
-Use a separate working copy that Team Workflow has not configured. In a Git repository with a remote, run
-`oah init` after installing the source CLI. Review and confirm the setup plan, then commit the project files
-it creates. Open your AI in that project and ask in plain words.
+Use a separate working copy for this walkthrough. Source CLI commands `oah init` and `oah rules sync` can
+replace the managed `AGENTS.md` block. In a Git repository with a remote, run `oah init` after installing
+the source CLI. Review and confirm the setup plan, then commit the project files it creates. Open your AI
+in that project and ask in plain words.
 
 - “Build login with oah.”
 - “Is the review done? Did all the gates pass?”
 - “Land this version.” Say this after inspecting the result and the checks.
 
-Use a separate working copy that Team Workflow has not configured for the source CLI
-[first-task walkthrough](examples/hello-oah/README.md).
+[Source CLI first-task walkthrough](examples/hello-oah/README.md).
 [Setup details](docs/how-it-works.md#first-run) explain the plan and the generated files.
 
 ### Find, install and update skills in Desktop

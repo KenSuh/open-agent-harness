@@ -62,11 +62,9 @@ v1.0.0의 **Team Workflow**에서는 저장소의 각 단계를 맡을 에이전
 
 앱은 배정을 `.oah/config.toml`에 저장하고 `AGENTS.md`의 관리 규칙에 동기화한다. 각 에이전트는 해당
 도구에서 실행하거나 이 설정을 사용하는 데스크톱 번들 명령을 쓸 수 있다. 번들 도우미는 `doctor`,
-`sections show`, `rules check`, `rules sync`를 제공한다. 소스 CLI는 별도 설정을 사용한다. 작업 루프는
-데스크톱의 `.oah/config.toml`을 읽지 않으며, `oah init`이나 `oah rules sync`는 데스크톱 관리 블록을
-대체할 수 있다. 저장소에서는 데스크톱 Team Workflow와 소스 CLI 작업 루프 중 하나를 시작점으로 고른다.
-소스 CLI의 `oah call`은 자체 단계 설정에 따라 Claude Code와 Codex CLI를 직접 실행한다. 전용 명령인
-`oah review`와 자동 `oah fix`는 Codex를 실행한다.
+`sections show`, `rules check`, `rules sync`를 제공한다. 소스 CLI도 같은 구현·리뷰·수정 단계 배정을
+읽는다. `oah call`은 Claude Code와 Codex CLI를 직접 실행한다. 다른 에이전트는 각 도구에서 실행한다.
+전용 명령인 `oah review`와 자동 `oah fix`는 Codex를 실행한다.
 
 ## oah가 챙겨 주는 일
 
@@ -174,26 +172,26 @@ oah 1.3.0
 
 Git 작업 폴더를 연 뒤 **Team Workflow → Project Tools**로 이동한다.
 
-- **Project Wiki.** 새 위키를 만들거나 기존 Markdown 노트가 담긴 폴더를 지정한다. 텍스트로 검색할 수
-  있으며, gbrain과 Ollama가 설치 및 설정되어 있으면 로컬 의미 검색 인덱스도 만들 수 있다.
-- **Impact Map.** 커밋된 프로젝트로 영향 지도를 만들고, 변경에 영향을 받는 파일과 검사를 조회한다.
-  현재 체크아웃에서 생성된 것으로 확인된 Graphify 그래프를 함께 읽을 수 있다.
+- **Project Wiki.** 새 위키를 만들거나 기존 Markdown 노트가 담긴 폴더를 지정한다. 텍스트로 검색하거나,
+  gbrain과 Ollama로 커밋된 노트의 로컬 의미 검색 인덱스를 만들 수 있다.
+- **Impact Map.** 선택한 작업 폴더의 영향 지도를 만들거나 갱신하고, 기존 Graphify 그래프가 현재
+  체크아웃과 맞는지 확인한다. 변경에 영향을 받는 파일과 검사는 소스 CLI의 `oah impact`로 조회한다.
 - **Jev.** 프로젝트에서 Impact Map 결과의 순서를 조정하는 선택 기능이다. 전송할 내용을 확인한 뒤
   이 기기에서 승인한다. macOS 키체인이나 Windows 자격 증명 관리자에 키를 저장하고 같은 화면에서
   승인을 관리할 수 있다. [키와 승인 설정](docs/ko/keys.md)
 
 ### 다른 경로: 별도 프로젝트에서 소스 CLI 초기화하기
 
-Team Workflow가 설정하지 않은 별도 작업 복사본을 사용한다. 소스 CLI를 설치한 뒤 원격 저장소가 연결된
-Git 저장소에서 `oah init`을 실행한다. 설정 계획을 검토하고 승인한 뒤 생성된 프로젝트 파일을 커밋한다.
-그 프로젝트에서 AI를 열고 평소 말로 요청한다.
+이 예제 실습에는 별도 작업 복사본을 사용한다. 소스 CLI의 `oah init`과 `oah rules sync`는 `AGENTS.md`의
+관리 블록을 바꿀 수 있다. 소스 CLI를 설치한 뒤 원격 저장소가 연결된 Git 저장소에서 `oah init`을
+실행한다. 설정 계획을 검토하고 승인한 뒤 생성된 프로젝트 파일을 커밋한다. 그 프로젝트에서 AI를 열고
+평소 말로 요청한다.
 
 - “로그인 기능을 oah로 만들어 줘.”
 - “리뷰 끝났어? 게이트 다 통과했어?”
 - “이 버전을 반영해 줘.” 결과와 검사를 살핀 뒤 확인한다.
 
-Team Workflow가 설정하지 않은 별도 작업 복사본에서 소스 CLI
-[첫 작업 따라 하기](examples/hello-oah/README.ko.md)를 진행한다.
+[소스 CLI 첫 작업 따라 하기](examples/hello-oah/README.ko.md)를 진행한다.
 [설정 상세](docs/ko/how-it-works.md#처음-실행하기)에서 설정 계획과 생성 파일을 설명한다.
 
 ### 데스크톱에서 스킬 찾기, 설치, 갱신
