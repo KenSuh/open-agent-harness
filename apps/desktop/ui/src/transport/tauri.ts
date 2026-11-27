@@ -33,6 +33,7 @@ import type {
   WikiSearchDto,
   WorkflowDto,
 } from "../contract";
+import type { JevReply } from "../jevContract";
 import { toErrorDto, type ScanChanged, type Transport } from "./types";
 
 /** Every command takes exactly one argument named `req` (CONTRACTS C3). */
@@ -100,6 +101,7 @@ export function createTauriTransport(): Transport {
       return call<TaskId>("start_project_wiki_apply", req, { onEvent: channel });
     },
     projectWikiSearch: (req) => call<WikiSearchDto>("project_wiki_search", req),
+    projectJevAction: (req) => call<JevReply>("project_jev_action", req),
     onNotice: (handler) => listen<NoticeDto>("notice", (event) => handler(event.payload)),
     onScanChanged: (handler) =>
       listen<ScanChanged>("scan-changed", (event) => handler(event.payload)),

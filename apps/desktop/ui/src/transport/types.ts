@@ -47,6 +47,7 @@ import type {
   WorkflowDto,
   WorkflowProjectReq,
 } from "../contract";
+import type { JevActionReq, JevReply } from "../jevContract";
 
 export interface ScanChanged {
   scope: "skill" | "root" | "config" | "rules" | "all";
@@ -97,6 +98,8 @@ export interface Transport {
   /** Applies the request exactly as the plan `plan_id` names showed it; `taskCancel` stops it before the next file. */
   startProjectWikiApply(req: WorkflowProjectReq<WikiApplyReq>, onEvent: (event: TaskEvent<WikiApplyDto>) => void): Promise<TaskId>;
   projectWikiSearch(req: WorkflowProjectReq<WikiSearchReq>): Promise<WikiSearchDto>;
+  /** One Jev action of one project (consent, device key, connection check). Only a `store-key` input carries a key; no answer can. */
+  projectJevAction(req: JevActionReq): Promise<JevReply>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
   onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;

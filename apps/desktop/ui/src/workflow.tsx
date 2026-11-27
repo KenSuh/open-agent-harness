@@ -16,6 +16,7 @@ import type {
   ToolPathBase,
   WorkflowDto,
 } from "./contract";
+import { JevControls } from "./jev-controls";
 import { ToolSettingsPanel, useToolSettings, type ToolSettings } from "./project-tools-settings";
 import { ProjectWikiPanel } from "./project-wiki";
 import { ImpactMapActions } from "./project-impact-map";
@@ -430,7 +431,6 @@ function ToolCard({
           ))}
         </ul>
       ) : null}
-      {actions}
       {saved ? <p className="tool-saved">{saved}</p> : null}
       {open ? (
         <ToolSettingsPanel name={tool.name} settings={settings} />
@@ -452,6 +452,7 @@ function ToolCard({
           </button>
         </div>
       )}
+      {actions}
     </article>
   );
 }
@@ -608,7 +609,7 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
                     projectId={projectId}
                     onSettled={() => void check(false)}
                   />
-                : null}
+                : tool.id === "jev" ? <JevControls transport={transport} projectId={projectId} /> : null}
             />
           ))}
         </div>

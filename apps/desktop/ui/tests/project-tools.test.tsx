@@ -105,11 +105,13 @@ describe("Project tool cards (standalone test transport)", () => {
       expect(node.querySelector(".tool-next")?.textContent).toBe(`Next step: ${card.next_step}`);
       expect(node.getAttribute("data-state")).toBe(card.state);
       expect(node.getAttribute("aria-labelledby")).toBe(node.querySelector("h3")?.id);
-      // A step the app cannot do yet is text, never a button; the controls open this card's settings and, on the
-      // Project Wiki card, the wiki panel.
       const controls = Array.from(node.querySelectorAll("button, a, input, select, textarea"));
       expect(controls.map((control) => control.textContent)).toEqual(
-        card.id === "wiki" ? ["Wiki Setup & Search", `Edit ${card.name} Settings`] : [`Edit ${card.name} Settings`],
+        [
+          ...(card.id === "wiki" ? ["Wiki Setup & Search"] : []),
+          `Edit ${card.name} Settings`,
+          ...(card.id === "jev" ? ["Manage Jev on this device"] : []),
+        ],
       );
     }
     expect(tool("wiki").querySelector("code")?.textContent).toBe("docs/wiki");

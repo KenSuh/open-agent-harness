@@ -33,6 +33,7 @@ import type {
   WorkflowDto,
   WorkflowProjectReq,
 } from "../../src/contract";
+import type { JevAction, JevActionReq, JevReply } from "../../src/jevContract";
 import type { ScanChanged, Transport } from "../../src/transport/types";
 import appInfo from "../../../../../crates/oah-core/tests/dto_samples/app/app_info.json";
 import settings from "../../../../../crates/oah-core/tests/dto_samples/app/settings.json";
@@ -140,6 +141,38 @@ export function samplePlan(projectId: string, edits: ProjectToolsEdit[], extra: 
   };
 }
 
+/** What core answers for each Jev action by default: an official destination, nothing approved, no stored key. */
+export function sampleJevReply(project_id: string, kind: JevAction): JevReply {
+  const destination = { kind: "official" as const, url: "https://api.typesafe.ai/v1/systemone", model: "example-model" };
+  const base = { project_id, ok: true };
+  switch (kind) {
+    case "status":
+      return { ...base, action: "status", status: "ok", destination, consent: "none", scopes: [] };
+    case "key-state":
+      return { ...base, action: "key-state", status: "ok", key_state: { environment: false, device: "missing" } };
+    case "prepare":
+      return {
+        ...base, action: "prepare", status: "ready", destination, token: "v1:impact:fake-token",
+        scopes: [{
+          scope: "impact", title: "Impact ordering", sends: ["One request per run with at most 20 rows."],
+          labels: ["project-relative path", "line", "binding", "kind/layer"], never: ["file contents", "the query", "row details"], bounds: { requests: 1 },
+        }],
+      };
+    case "enable":
+      return { ...base, action: "enable", status: "enabled" };
+    case "disable":
+      return { ...base, action: "disable", status: "disabled" };
+    case "store-key":
+      return { ...base, action: "store-key", status: "added" };
+    case "delete-key":
+      return { ...base, action: "delete-key", status: "removed" };
+    case "prepare-test":
+      return { ...base, action: "prepare-test", status: "ready", destination, token: "v1:probe:fake-token", requests: 1, timeout_seconds: 10 };
+    case "test":
+      return { ...base, action: "test", status: "ok", source: "device" };
+  }
+}
+
 export const sampleAppInfo = appInfo as AppInfoDto;
 export const sampleProject = project as ProjectDto;
 export const sampleSettings = settings as SettingsDto;
@@ -183,6 +216,8 @@ export interface FakeTransport extends Transport {
   /** Every `project_tools_plan` and `project_tools_apply` request, in order. */
   toolsPlanRequests: WorkflowProjectReq<ProjectToolsPlanReq>[];
   toolsApplyRequests: WorkflowProjectReq<ProjectToolsApplyReq>[];
+  /** Every `project_jev_action` request, in order (a store-key request holds the fake key the test typed). */
+  jevRequests: JevActionReq[];
   /** Every `apply_project_skill` request, in order. */
   applyRequests: ApplyProjectSkillReq[];
   /** Every `project_wiki_plan`, `start_project_wiki_apply` and `project_wiki_search` request, in order. */
@@ -380,6 +415,12 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
     },
     toolsPlanRequests: [],
     toolsApplyRequests: [],
+    jevRequests: [],
+    async projectJevAction(req) {
+      fake.calls.push("project_jev_action:" + req.input.kind);
+      fake.jevRequests.push(req);
+      return fake.override.projectJevAction ? fake.override.projectJevAction(req) : sampleJevReply(req.project_id, req.input.kind);
+    },
     async projectToolsPlan(req) {
       fake.calls.push("project_tools_plan");
       fake.toolsPlanRequests.push(req);
