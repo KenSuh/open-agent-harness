@@ -95,7 +95,7 @@ provider = "typesafe"
 ```
 
 Impact Map에서 결과 순서를 조정하려면 `[impact].rerank = true`도 설정한다. Desktop의 **Team Workflow →
-Project Tools → Jev → Manage Jev on this device**에서 전송 대상과 데이터를 검토하고 이 프로젝트에 승인한다.
+Project Tools → Jev → Manage Jev on this device**에서 전송할 데이터를 검토하고 공식 TypeSafe 주소를 승인한다.
 같은 화면에서 키 저장·삭제, 별도의 연결 테스트, 프로젝트 승인 철회를 할 수 있다.
 
 OS에 저장한 TypeSafe 키는 공식 주소에서 승인받은 Impact Map 요청과 연결 테스트에 쓰인다. 기존에 OS에 키를 저장해
@@ -112,8 +112,8 @@ OS에 저장한 TypeSafe 키는 공식 주소에서 승인받은 Impact Map 요�
 | `rerank=unused(no key)` | 이 요청에 사용할 수 있는 키가 없다. 키 출처와 프로젝트 승인을 확인한다. |
 | `rerank=unused(disabled-by-brief)` | 명령에 `--no-rerank`를 줬거나 패킷에서 껐다. |
 
-Impact Map에는 `[rerank.typesafe].key_name`으로 다른 환경 변수 이름을 지정하거나 별도의 HTTPS 주소를 연결할 수 있다.
-정확한 주소와 키 이름을 승인한다. 별도의 HTTPS 주소에는 전용 환경 변수 키를 사용한다.
+CLI 연동에서 별도의 HTTPS 주소를 쓰려면 정확한 주소를 승인하고
+`[rerank.typesafe].key_name`으로 전용 환경 변수 키를 지정한다.
 
 ## Artificial Analysis 점수
 

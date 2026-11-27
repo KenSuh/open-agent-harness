@@ -315,7 +315,7 @@ def _destination(found: Project) -> tuple[dict | None, str]:
     except ValueError:
         return None, rerank.DESTINATION
     kind, url, model = typesafe.destination(section, key_name)
-    if kind == typesafe.REFUSED or (kind == typesafe.CUSTOM and key_name == typesafe.DEFAULT_KEY_NAME):
+    if kind == typesafe.REFUSED or (kind == typesafe.CUSTOM and key_name.upper() == typesafe.DEFAULT_KEY_NAME):
         return None, rerank.DESTINATION
     if len(url) > 512 or len(model) > 128 or not url.isprintable() or not model.isprintable():
         return None, rerank.DESTINATION

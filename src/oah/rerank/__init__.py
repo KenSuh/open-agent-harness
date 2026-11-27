@@ -399,7 +399,7 @@ def _admit_typesafe(provider: Provider, key_name: str, config: Mapping, *, env: 
             raise ValueError(f"a Jev use names its scopes from: {', '.join(SCOPES)}")
         kind, url, model = destination(config, key_name)
         value = (os.environ if env is None else env).get(key_name)
-        if kind == REFUSED or (kind == CUSTOM and key_name == DEFAULT_KEY_NAME):
+        if kind == REFUSED or (kind == CUSTOM and key_name.upper() == DEFAULT_KEY_NAME):
             # Settled from the text: an address the transport would not open, or the shared key name with another
             # address. No key goes there, from the environment or from this device, and none is looked up. The
             # status says what was held back: a key that exists, or none (the words these cases always had).

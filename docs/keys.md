@@ -99,7 +99,7 @@ provider = "typesafe"
 ```
 
 For Impact Map ordering, also set `[impact].rerank = true`. In Desktop, open **Team Workflow → Project Tools →
-Jev → Manage Jev on this device** to review and approve the destination and the data the project sends. You can
+Jev → Manage Jev on this device** to review the data the project sends and approve the official TypeSafe address. You can
 save or remove a key, run a separate connection test, and revoke the project's approval from that panel.
 
 The OS-stored TypeSafe key is used at the official TypeSafe address for approved Impact Map requests and for
@@ -117,9 +117,8 @@ Packet plans, briefs, run records and impact results report the outcome.
 | `rerank=unused(no key)` | The request has no usable key. Check the key source and the project's approval. |
 | `rerank=unused(disabled-by-brief)` | The command ran with `--no-rerank`, or the packet turned it off. |
 
-Impact Map ordering supports another environment variable name through `[rerank.typesafe].key_name` and a custom
-HTTPS destination. Approve the exact destination and key name. Use a separate environment credential for a
-custom destination.
+In CLI integrations, a custom HTTPS destination requires approval for its exact address and a separate
+environment credential named by `[rerank.typesafe].key_name`.
 
 ## Artificial Analysis scores
 

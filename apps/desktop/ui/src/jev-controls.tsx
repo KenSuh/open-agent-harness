@@ -461,8 +461,8 @@ export function JevControls({ transport, projectId }: { transport: Transport; pr
           <p>
             Sends one fixed synthetic request to <code translate="no">{view.testPreview.destination?.url ?? "the official TypeSafe address"}</code>
             {view.testPreview.destination ? <> (model <code translate="no">{view.testPreview.destination.model}</code>)</> : null}.
-            It holds no project data and sends {view.testPreview.requests ?? 1} request
-            {view.testPreview.timeout_seconds ? ", waiting up to " + view.testPreview.timeout_seconds + " seconds" : ""}.
+            It holds no project data.
+            {view.testPreview.timeout_seconds ? ` Network timeout is ${view.testPreview.timeout_seconds} seconds.` : ""}
           </p>
           <p className="muted">The provider may charge for it. This does not approve or turn on Jev.</p>
         </Preview>

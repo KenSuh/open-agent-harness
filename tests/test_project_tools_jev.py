@@ -177,6 +177,14 @@ class AdmitTest(unittest.TestCase):
                 self.assert_refused(result, "unused(no key)", rerank.DESTINATION)
         self.assertEqual(approval.asked, [], "no approval can allow it")
 
+    def test_the_shared_name_is_reserved_regardless_of_case(self) -> None:
+        key_name = SHARED.lower()
+        approval = Verdict(rerank.GRANTED)
+        result = admit(settings(url=ELSEWHERE, key_name=key_name), env={key_name: self.key},
+                       keychain=self.store, scopes=("impact",), approval=approval)
+        self.assert_refused(result, "unused(error:insecure-url)", rerank.DESTINATION)
+        self.assertEqual(approval.asked, [])
+
     def test_another_address_reads_only_its_own_environment_key_after_approval(self) -> None:
         table = settings(url=ELSEWHERE, key_name=OTHER_NAME)
         self.assert_refused(admit(table, env={OTHER_NAME: self.key}, keychain=self.store, scopes=("skills",)),
@@ -490,6 +498,8 @@ class ConsentTest(DeviceCase):
             with self.subTest(scopes=scopes):
                 self.assertEqual(jev.prepare(self.repo, scopes=scopes, env=self.env), {"ok": False, "status": "scope"})
         for label, options in (("the shared key name elsewhere", {"url": ELSEWHERE}),
+                               ("a different spelling of the shared name elsewhere",
+                                {"url": ELSEWHERE, "key_name": SHARED.lower()}),
                                ("an address that is not HTTPS", {"url": "http://jev.example.test/x"}),
                                ("a URL too long to show", {"url": ELSEWHERE + "/" + "x" * 512, "key_name": OTHER_NAME}),
                                ("a model too long to show", {"model": "x" * 129}),
