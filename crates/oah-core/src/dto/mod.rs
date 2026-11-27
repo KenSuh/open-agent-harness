@@ -13,6 +13,7 @@ mod app;
 mod notice;
 mod plan;
 mod project;
+mod project_tools_settings;
 mod review;
 mod skills;
 mod task;
@@ -29,6 +30,11 @@ pub use app::{
 pub use notice::{NoticeDto, NoticeLevel};
 pub use plan::{ApplyReportDto, BasisDto, ChangePlanDto, ItemResultDto, PlanItemDto};
 pub use project::{ConfigStateDto, ProjectDto, ProjectKindDto};
+pub use project_tools_settings::{
+    ProjectToolsApplyDto, ProjectToolsApplyReq, ProjectToolsPlanDto, ProjectToolsPlanReq,
+    ToolSettingValue, ToolsBackupDto, ToolsBackupStateDto, ToolsKeptDto, ToolsKeyChangeDto,
+    ToolsUpgradeDto,
+};
 pub use review::{
     GateDecisionDto, GateReasonDto, ReviewOutcomeDto, ReviewReq, ReviewSpecDto, kind_name,
     result_name,

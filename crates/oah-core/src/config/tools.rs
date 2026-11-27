@@ -34,6 +34,7 @@ use super::error::{ConfigError, Notice, notice_codes};
 use super::file::{ConfigFile, Merger, not_a_table, type_error};
 use super::save::Edit;
 use super::value::{Table, Value};
+use serde::{Deserialize, Serialize};
 
 /// `[wiki] dir` when the file does not give it.
 pub const DEFAULT_WIKI_DIR: &str = "docs/wiki";
@@ -59,7 +60,7 @@ pub const TOOL_KEYS: [&[&str]; 10] = [
 ];
 
 /// A value and whether the file gives it; without the key the value is the default.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Setting<T> {
     pub value: T,
     pub explicit: bool,
@@ -82,13 +83,13 @@ impl<T> Setting<T> {
 }
 
 /// Project Wiki: `[wiki] dir`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WikiTool {
     pub dir: Setting<String>,
 }
 
 /// Impact Map: `[impact] wiki_dirs`, `graph_file` and `rerank`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImpactTool {
     pub wiki_dirs: Setting<Vec<String>>,
     pub graph_file: Setting<String>,
@@ -96,14 +97,14 @@ pub struct ImpactTool {
 }
 
 /// Jev: `[rerank] enabled` and `provider`. A key, a consent and a destination are never read from this file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JevTool {
     pub enabled: Setting<bool>,
     pub provider: Setting<String>,
 }
 
 /// `[project_tools.wiki_index]`: what the project asks of a managed local wiki index.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WikiIndexTool {
     /// The project asks OAH to keep a local index of its wiki. Each machine still approves and stores it locally.
     pub managed: Setting<bool>,
@@ -114,27 +115,28 @@ pub struct WikiIndexTool {
 }
 
 /// `[project_tools.graphify]`: what the project asks of a managed code graph. Its file is `impact.graph_file`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphifyTool {
     /// The project asks OAH to refresh the graph. Each machine still approves a run locally.
     pub managed: Setting<bool>,
 }
 
 /// `[project_tools]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManagedTools {
     pub wiki_index: WikiIndexTool,
     pub graphify: GraphifyTool,
 }
 
 /// The project-tools settings as both CLIs and the desktop app read them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectTools {
     pub wiki: WikiTool,
     pub impact: ImpactTool,
     pub jev: JevTool,
     pub managed: ManagedTools,
     /// `OAH_CONFIG_NOT_PORTABLE` and `OAH_CONFIG_UNKNOWN_KEY` findings; the values above are still the file's.
+    #[serde(skip)]
     pub notices: Vec<Notice>,
 }
 
@@ -510,7 +512,13 @@ fn note_list(
 }
 
 /// One setting a caller asks to change. Each names a value of the model, never a key of the file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "kebab-case",
+    deny_unknown_fields
+)]
 pub enum ToolsChange {
     /// The project wiki's folder. `impact.wiki_dirs` follows it while the file does not pin other folders: when
     /// that key is absent or names exactly the wiki folder used until now. Another explicit list is kept.

@@ -17,7 +17,8 @@ use oah_core::dto::{
     AgentStatusDto, AgentsChangedDto, AgentsProbeReq, AppInfoDto, ApplyProjectSkillDto,
     ApplyProjectSkillReq, ApplyProjectSkillStatus, BannerDto, Empty, InstalledSkillDto,
     InstalledSkillManagementDto, InstalledSkillTarget, LinkedSkillSourceDto, PresetApplyReq,
-    ProjectDto, ProjectToolsDto, RefreshDto, RegisterSkillSourceReq, RemoveInstalledSkillReq,
+    ProjectDto, ProjectToolsApplyDto, ProjectToolsApplyReq, ProjectToolsDto, ProjectToolsPlanDto,
+    ProjectToolsPlanReq, RefreshDto, RegisterSkillSourceReq, RemoveInstalledSkillReq,
     RemovedSkillDto, ReviewOutcomeDto, ReviewReq, RulesStateDto, RulesSyncDto, SettingsDto,
     SettingsSetReq, StagesSetDto, StagesSetReq, TaskCancelReq, TaskSnapshotDto, WorkflowDto,
     WorkflowProjectReq,
@@ -508,6 +509,39 @@ pub fn project_tools_status(
     shell.call(|ctx| app::project_tools_status(ctx, req))
 }
 
+async fn run_project_settings<R: Send + 'static>(
+    shell: State<'_, Shell>,
+    operation: impl FnOnce(&Ctx<'_>) -> Result<R, Error> + Send + 'static,
+) -> Result<R, ErrorDto> {
+    let shell = Shell {
+        session: Arc::clone(&shell.session),
+    };
+    tauri::async_runtime::spawn_blocking(move || shell.call(operation))
+        .await
+        .map_err(|_| ErrorDto {
+            code: "OAH_PROJECT_TOOLS_INTERRUPTED".to_owned(),
+            message: "The project settings operation stopped before reporting its result."
+                .to_owned(),
+            hint: Some("Open the settings again to check their current values.".to_owned()),
+        })?
+}
+
+#[tauri::command]
+pub async fn project_tools_plan(
+    req: WorkflowProjectReq<ProjectToolsPlanReq>,
+    shell: State<'_, Shell>,
+) -> Result<ProjectToolsPlanDto, ErrorDto> {
+    run_project_settings(shell, move |ctx| app::project_tools_plan(ctx, req)).await
+}
+
+#[tauri::command]
+pub async fn project_tools_apply(
+    req: WorkflowProjectReq<ProjectToolsApplyReq>,
+    shell: State<'_, Shell>,
+) -> Result<ProjectToolsApplyDto, ErrorDto> {
+    run_project_settings(shell, move |ctx| app::project_tools_apply(ctx, req)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +606,107 @@ mod tests {
         let now = project_tools_status(req(&second_id), app.state::<Shell>()).unwrap();
         assert_eq!(now.project_id, second_id);
         assert_eq!(state_of(&now), "none");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn settings_ipc_previews_before_writing_and_refuses_stale_approvals() {
+        use serde_json::{Value, json};
+
+        let base = oah_core::paths::canonical_folder(&std::env::temp_dir())
+            .unwrap()
+            .join(format!("oah-settings-ipc-{}", std::process::id()));
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let mut env = Env::from_process().unwrap();
+        env.set(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, &base);
+        env.set("GIT_CEILING_DIRECTORIES", &base);
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                project_tools_plan,
+                project_tools_apply
+            ])
+            .manage(Shell {
+                session: Arc::new(Session::new(env)),
+            })
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let view = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let open = |folder: &Path| {
+            app.state::<Shell>()
+                .call(|ctx| app::project_open(ctx, folder))
+                .unwrap()
+                .id
+        };
+        let invoke = |cmd: &str, project_id: &str, input: Value| {
+            tauri::test::get_ipc_response(
+                &view,
+                tauri::webview::InvokeRequest {
+                    cmd: cmd.to_owned(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: if cfg!(windows) {
+                        "http://tauri.localhost"
+                    } else {
+                        "tauri://localhost"
+                    }
+                    .parse()
+                    .unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(
+                        json!({ "req": { "project_id": project_id, "input": input } }),
+                    ),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_owned(),
+                },
+            )
+            .map(|response| response.deserialize::<Value>().unwrap())
+        };
+        let id = open(&first);
+        let edits = json!([{ "kind": "wiki-dir", "value": "docs/handbook" }]);
+        let plan = invoke("project_tools_plan", &id, json!({ "edits": edits })).unwrap();
+        assert_eq!(plan["project_id"], id);
+        assert_eq!(plan["config_path"], ".oah/config.toml");
+        assert_eq!(
+            plan["settings"]["wiki"]["dir"],
+            json!({ "value": "docs/wiki", "explicit": false })
+        );
+        assert!(!first.join(".oah").exists());
+
+        let input = json!({ "plan_id": plan["plan_id"], "edits": edits });
+        let other = open(&second);
+        let error = invoke("project_tools_apply", &id, input.clone()).unwrap_err();
+        assert_eq!(error["code"], codes::PROJECT_CHANGED);
+        assert_ne!(id, other);
+        assert!(!second.join(".oah").exists());
+
+        assert_eq!(open(&first), id);
+        let altered = json!({
+            "plan_id": plan["plan_id"],
+            "edits": [{ "kind": "wiki-dir", "value": "other" }]
+        });
+        let error = invoke("project_tools_apply", &id, altered).unwrap_err();
+        assert_eq!(error["code"], codes::PLAN_STALE);
+        assert!(!first.join(".oah").exists());
+        let saved = invoke("project_tools_apply", &id, input).unwrap();
+        assert_eq!(
+            saved,
+            json!({
+                "project_id": id, "plan_id": plan["plan_id"],
+                "saved": true, "upgraded": false, "backup": null,
+            })
+        );
+        let reread = invoke("project_tools_plan", &id, json!({ "edits": [] })).unwrap();
+        assert_eq!(
+            reread["settings"]["wiki"]["dir"],
+            json!({ "value": "docs/handbook", "explicit": true })
+        );
+        assert!(!first.join("AGENTS.md").exists());
         std::fs::remove_dir_all(&base).unwrap();
     }
 
