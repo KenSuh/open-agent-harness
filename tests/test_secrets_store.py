@@ -411,22 +411,23 @@ class MacNativeSmokeTest(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows Credential Manager is Windows-only")
 class WindowsStoreTest(unittest.TestCase):
-    """The real Credential Manager, in a namespace no product entry uses, kept to the logon session."""
+    """The real Credential Manager, in a namespace no product entry uses, kept to the logon session.
+
+    A logon session without a credential set (error 1312, as over SSH with a key) answers `locked` to every call.
+    There the round trip is skipped and the refusal itself is checked."""
 
     def setUp(self) -> None:
         self.chain = secrets.WindowsCredentials(service="oah-selftest-" + token_source.token_hex(4),
                                                 persist=secrets.CRED_PERSIST_SESSION)
         self.name = "OAH_SELFTEST_" + token_source.token_hex(4).upper()
+        self.usable = self.chain.probe(self.name)[0] != secrets.LOCKED
 
     def store(self, value: str) -> str:
-        try:
-            return secrets.store(self.name, secrets.Secret(value), keychain=self.chain)
-        except secrets.KeyStoreError as exc:
-            if exc.state == secrets.LOCKED:
-                self.skipTest("this logon session has no credential set (error 1312), as over SSH with a key")
-            raise
+        return secrets.store(self.name, secrets.Secret(value), keychain=self.chain)
 
     def test_add_update_read_and_remove(self) -> None:
+        if not self.usable:
+            self.skipTest("this logon session has no credential set (error 1312), as over SSH with a key")
         first, second = fake_key(), fake_key() + "키🔑 with space"
         self.assertEqual(self.chain.probe(self.name), (secrets.MISSING, None))
         self.assertEqual(self.store(first), secrets.ADDED)
@@ -440,11 +441,22 @@ class WindowsStoreTest(unittest.TestCase):
         self.assertEqual(self.chain.probe(self.name), (secrets.MISSING, None))
         self.assertEqual(secrets.remove(self.name, keychain=self.chain), secrets.MISSING)
 
+    def test_a_session_without_a_credential_set_says_locked(self) -> None:
+        if self.usable:
+            self.skipTest("this logon session has a credential set")
+        self.assertEqual(self.chain.probe(self.name), (secrets.LOCKED, None))
+        self.assertIsNone(self.chain.lookup(self.name))
+        self.assertEqual(secrets.find(self.name, keychain=self.chain), (secrets.LOCKED, None))
+        for action in (lambda: self.store(fake_key()), lambda: secrets.remove(self.name, keychain=self.chain)):
+            with self.assertRaises(secrets.KeyStoreError) as caught:
+                action()
+            self.assertEqual(caught.exception.state, secrets.LOCKED)
+
     def test_a_blob_over_the_limit_is_refused(self) -> None:
         with self.assertRaises(secrets.KeyStoreError) as caught:
             self.chain.store(self.name, "a" * (secrets.CRED_BLOB_LIMIT // 2 + 1))
-        self.assertEqual(caught.exception.state, secrets.FAILED)
-        self.assertEqual(self.chain.probe(self.name)[0], secrets.MISSING)
+        self.assertEqual(caught.exception.state, secrets.FAILED)  # refused by size, before any call to Windows
+        self.assertEqual(self.chain.probe(self.name)[0], secrets.MISSING if self.usable else secrets.LOCKED)
 
 
 @unittest.skipIf(os.name == "nt", "off Windows the Credential Manager path answers unsupported")
