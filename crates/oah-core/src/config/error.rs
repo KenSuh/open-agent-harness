@@ -19,6 +19,10 @@ pub mod codes {
     pub const LAYOUT_UNSUPPORTED: &str = "OAH_CONFIG_LAYOUT_UNSUPPORTED";
     /// An edit names a key outside the tables OAH writes.
     pub const KEY_NOT_OWNED: &str = "OAH_CONFIG_KEY_NOT_OWNED";
+    /// The approved project-tools plan is not the plan the project and its file give now.
+    pub const PLAN_STALE: &str = crate::error::codes::PLAN_STALE;
+    /// The folder of a project-tools change is not the project the change was made for.
+    pub const PROJECT_CHANGED: &str = crate::error::codes::PROJECT_CHANGED;
 }
 
 /// Notice codes: reported, never fatal.
@@ -29,6 +33,9 @@ pub mod notice_codes {
     pub const SECTION_UNLISTED: &str = "OAH_SECTION_UNLISTED";
     /// v0.4.0 `[stages]` keys ignored because the file also has 1.0 keys.
     pub const STAGES_LEGACY_IGNORED: &str = "OAH_STAGES_LEGACY_IGNORED";
+    /// A project-tools value that only this machine can use (an absolute path, a drive, `..`, a backslash); it is
+    /// read as written.
+    pub const NOT_PORTABLE: &str = "OAH_CONFIG_NOT_PORTABLE";
 }
 
 /// A configuration failure: a stable code and a message that names the file.

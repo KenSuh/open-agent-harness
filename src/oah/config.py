@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import pathlib
+import re
 import tomllib
 import types
 from dataclasses import dataclass
@@ -168,3 +169,206 @@ def load_config(root: pathlib.Path) -> Config:
                           f"{path} cannot be read ({exc.strerror or exc}); "
                           "make it a readable file or remove it to use the defaults") from exc
     return parse_config(data, path=path)
+
+
+# Project tools — Project Wiki, Impact Map and Jev. The Rust core owns this part of the file's format and its
+# defaults (crates/oah-core/src/config/tools.rs) and is the only writer; the source CLI reads the same keys here.
+# A key the file does not give keeps the default every command already used, and no key follows another:
+# impact.wiki_dirs without a value is ["docs/wiki"] whatever wiki.dir says. Program paths, cache or index folders,
+# host approvals, keys and network consent are per-machine state and are never read from this file.
+PROJECT_TOOLS_TABLE = "project_tools"
+NOT_PORTABLE = "OAH_CONFIG_NOT_PORTABLE"
+UNKNOWN_NOTICE = "OAH_CONFIG_UNKNOWN_KEY"
+PROJECT_TOOLS_DEFAULTS: Mapping[str, Any] = types.MappingProxyType({
+    "wiki.dir": "docs/wiki",
+    "impact.wiki_dirs": ("docs/wiki",),
+    "impact.graph_file": "graphify-out/graph.json",
+    "impact.rerank": False,
+    "rerank.enabled": False,
+    "rerank.provider": "",
+})
+_MANAGED_DEFAULTS: Mapping[str, Any] = _freeze({
+    "wiki_index": {"managed": False, "exclude": [], "embedding_model": ""},
+    "graphify": {"managed": False},
+})
+_RESERVED_NAMES = frozenset(("CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)),
+                             *(f"LPT{n}" for n in range(1, 10))))
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+
+
+def portable_problem(text: str, *, glob: bool = False) -> str | None:
+    """Why text is not a portable project-relative path (or glob), or None when it is one: relative, written with
+    /, without . or .., a drive or a scheme, and usable as a name on Windows as on Unix. One trailing / is accepted."""
+    if not text:
+        return "it is empty"
+    if "\\" in text:
+        return "it uses a backslash"
+    if text.startswith("/"):
+        return "it is an absolute path"
+    if text.startswith("~"):
+        return "it starts with ~"
+    if ":" in text:
+        return "it names a drive, a scheme or a stream"
+    if any(char < " " or char == "\x7f" for char in text):
+        return "it has a control character"
+    if any(char in ('<>"|' if glob else '<>"|?*') for char in text):
+        return "it has a character Windows does not allow in names"
+    for part in text.removesuffix("/").split("/"):
+        if not part:
+            return "it has an empty name between two /"
+        if part in (".", ".."):
+            return "it has a . or .. part"
+        if part.endswith((".", " ")):
+            return "a name in it ends with a dot or a space"
+        stem = part.split(".")[0]
+        if stem.isascii() and stem.upper() in _RESERVED_NAMES:
+            return "it uses a name Windows reserves"
+    return None
+
+
+def model_problem(text: str) -> str | None:
+    """Why text is not a model name, or None when it is one or empty. A URL, a host and a file path are refused."""
+    if not text:
+        return None
+    if _MODEL_NAME.fullmatch(text) is None or "//" in text or ".." in text:
+        return "it is not a model name"
+    return None
+
+
+@dataclass(frozen=True)
+class Setting:
+    """A value and whether the file gives it; without the key the value is the default."""
+    value: Any
+    explicit: bool
+
+
+@dataclass(frozen=True)
+class ProjectTools:
+    """The project-tools settings, as the Rust core reads them from the same file."""
+    wiki_dir: Setting
+    impact_wiki_dirs: Setting
+    impact_graph_file: Setting
+    impact_rerank: Setting
+    jev_enabled: Setting
+    jev_provider: Setting
+    wiki_index_managed: Setting
+    wiki_index_exclude: Setting
+    wiki_index_embedding_model: Setting
+    graphify_managed: Setting
+    notices: tuple[tuple[str, str], ...]  # (code, dotted key): OAH_CONFIG_NOT_PORTABLE, OAH_CONFIG_UNKNOWN_KEY
+
+    def view(self) -> dict:
+        """The plain form both implementations are compared in (crates/oah-core/tests/config_samples)."""
+        def plain(setting: Setting) -> dict:
+            value = list(setting.value) if isinstance(setting.value, tuple) else setting.value
+            return {"value": value, "explicit": setting.explicit}
+
+        return {
+            "wiki": {"dir": plain(self.wiki_dir)},
+            "impact": {"wiki_dirs": plain(self.impact_wiki_dirs), "graph_file": plain(self.impact_graph_file),
+                       "rerank": plain(self.impact_rerank)},
+            "jev": {"enabled": plain(self.jev_enabled), "provider": plain(self.jev_provider)},
+            "managed": {
+                "wiki_index": {"managed": plain(self.wiki_index_managed), "exclude": plain(self.wiki_index_exclude),
+                               "embedding_model": plain(self.wiki_index_embedding_model)},
+                "graphify": {"managed": plain(self.graphify_managed)},
+            },
+            "notices": sorted([code, key] for code, key in self.notices),
+        }
+
+
+def project_tools(config: Config) -> ProjectTools:
+    """Read the Project Wiki, Impact Map and Jev settings of config. Reads only the keys of the shared contract;
+    the other keys of [wiki], [impact] and [rerank] stay with the commands that own them. A wrong type, a table
+    written as a value or a blank wiki folder is OAH_CONFIG_INVALID."""
+    where = config.where
+    notices: list[tuple[str, str]] = []
+
+    def invalid(message: str) -> ConfigError:
+        return ConfigError("OAH_CONFIG_INVALID", f"{where}: {message}")
+
+    def table(name: str) -> Mapping[str, Any]:
+        given = config.raw.get(name, {})
+        if not isinstance(given, Mapping):
+            raise invalid(f"{name} must be a table, not {_describe(given)}; write it as a [{name}] section")
+        return given
+
+    def strings(dotted: str, items: Any, what: str) -> tuple[str, ...]:
+        if not all(isinstance(item, str) for item in items):
+            raise invalid(f"{dotted} must list {what} as strings")
+        return tuple(items)
+
+    def read(dotted: str, kind: type, what: str = "") -> Setting:
+        name, key = dotted.split(".")
+        given, default = table(name), PROJECT_TOOLS_DEFAULTS[dotted]
+        if key not in given:
+            return Setting(default, False)
+        value = given[key]
+        if kind is tuple:
+            if not isinstance(value, (list, tuple)):
+                raise config._type_error(dotted, [], value)
+            return Setting(strings(dotted, value, what), True)
+        if type(value) is not kind:
+            raise config._type_error(dotted, default, value)
+        return Setting(value, True)
+
+    def note(dotted: str, setting: Setting, *, glob: bool = False) -> None:
+        if not setting.explicit:
+            return
+        items = setting.value if isinstance(setting.value, tuple) else (setting.value,)
+        # An empty value names nothing to carry to another machine; it is read as it always was.
+        if any(item and portable_problem(item, glob=glob) for item in items):
+            notices.append((NOT_PORTABLE, dotted))
+
+    wiki_dir = read("wiki.dir", str)
+    if not wiki_dir.value.strip():
+        raise invalid("wiki.dir must be a folder path; set it to a folder inside the project or remove it to "
+                      "use the default")
+    note("wiki.dir", wiki_dir)
+    wiki_dirs = read("impact.wiki_dirs", tuple, "folder paths")
+    graph_file = read("impact.graph_file", str)
+    rerank = read("impact.rerank", bool)
+    note("impact.wiki_dirs", wiki_dirs)
+    note("impact.graph_file", graph_file)
+    enabled, provider = read("rerank.enabled", bool), read("rerank.provider", str)
+
+    explicit: set[str] = set()
+
+    def merge(defaults: Mapping[str, Any], given: Mapping[str, Any], dotted: str) -> dict:
+        merged = {key: _thaw(value) for key, value in defaults.items()}
+        for key, value in given.items():
+            name = f"{dotted}.{key}"
+            if key not in defaults:
+                notices.append((UNKNOWN_NOTICE, name))
+            elif isinstance(defaults[key], Mapping):
+                if not isinstance(value, Mapping):
+                    raise config._type_error(name, defaults[key], value)
+                merged[key] = merge(defaults[key], value, name)
+            elif not _same_type(defaults[key], value):
+                raise config._type_error(name, defaults[key], value)
+            else:
+                merged[key] = value
+                explicit.add(name)
+        return merged
+
+    managed = merge(_MANAGED_DEFAULTS, table(PROJECT_TOOLS_TABLE), PROJECT_TOOLS_TABLE)
+
+    def chosen(*path: str) -> Setting:
+        dotted = ".".join((PROJECT_TOOLS_TABLE, *path))
+        value = managed
+        for part in path:
+            value = value[part]
+        if isinstance(value, (list, tuple)):
+            value = strings(dotted, value, "globs")
+        return Setting(value, dotted in explicit)
+
+    exclude, model = chosen("wiki_index", "exclude"), chosen("wiki_index", "embedding_model")
+    note(f"{PROJECT_TOOLS_TABLE}.wiki_index.exclude", exclude, glob=True)
+    if model_problem(model.value):
+        notices.append((NOT_PORTABLE, f"{PROJECT_TOOLS_TABLE}.wiki_index.embedding_model"))
+    return ProjectTools(
+        wiki_dir=wiki_dir, impact_wiki_dirs=wiki_dirs, impact_graph_file=graph_file, impact_rerank=rerank,
+        jev_enabled=enabled, jev_provider=provider,
+        wiki_index_managed=chosen("wiki_index", "managed"), wiki_index_exclude=exclude,
+        wiki_index_embedding_model=model, graphify_managed=chosen("graphify", "managed"),
+        notices=tuple(notices))

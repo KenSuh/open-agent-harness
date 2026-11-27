@@ -14,6 +14,12 @@
 //! * [`save_project`] and [`save_settings`] change only the keys an [`Edit`] names, keep comments, order, line
 //!   ends, the byte order mark and every other table byte for byte, and re-read the result before writing it.
 //!   The first save of a v0.4.0 file is the one-way upgrade of §3.1 and needs the user's [`UpgradeApproval`].
+//! * [`ProjectTools`] reads the Project Wiki, Impact Map and Jev settings that the Python source CLI reads from
+//!   the same file (`[wiki] dir`, `[impact] wiki_dirs` / `graph_file` / `rerank`, `[rerank] enabled` /
+//!   `provider`) and the reserved `[project_tools]` table. [`plan_tools_save`] shows what a typed
+//!   [`ToolsChange`] would write, reading only; [`apply_tools_save`] writes exactly an approved plan, bound to
+//!   the project, its root and the bytes the plan was made from. These two are the entry points the settings
+//!   preview and apply of the app and the CLI call.
 //!
 //! Known difference: the TOML parser reads TOML 1.1, which accepts a few forms (such as a newline inside an
 //! inline table) that v0.4.0's TOML 1.0 parser refused.
@@ -24,6 +30,7 @@ mod patch;
 mod project;
 mod save;
 mod settings;
+mod tools;
 mod value;
 
 pub use error::{ConfigError, Notice, codes, notice_codes};
@@ -35,11 +42,18 @@ pub use project::{
     skills_defaults,
 };
 pub use save::{
-    Backup, Edit, PROJECT_TABLES, SaveOutcome, SavePlan, UPGRADE_WARNING, UpgradeApproval,
-    UpgradeWarning, backup_path, plan_project_save, save_project,
+    Backup, BackupPlan, Edit, PROJECT_TABLES, SaveOutcome, SavePlan, ToolsApproval, ToolsBinding,
+    ToolsKeyChange, ToolsPlan, UPGRADE_WARNING, UpgradeApproval, UpgradeWarning, apply_tools_save,
+    backup_path, plan_project_save, plan_tools_save, save_project,
 };
 pub use settings::{
     AUTOMATION_LEVELS, AutoloadSettings, HistorySettings, SETTINGS_TABLES, SettingsValues, THEMES,
     UiSettings, UserSettings, save_settings,
+};
+pub use tools::{
+    DEFAULT_GRAPH_FILE, DEFAULT_WIKI_DIR, GraphifyTool, ImpactTool, JEV_PROVIDER, JevTool,
+    KeptReason, MANAGED_TABLE, ManagedTools, Portable, ProjectTools, Setting, TOOL_KEYS,
+    ToolsChange, ToolsKept, WikiIndexTool, WikiTool, managed_defaults, model_problem,
+    portable_problem,
 };
 pub use value::{Datetime, DatetimeKind, Table, Value};

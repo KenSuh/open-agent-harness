@@ -1,0 +1,1210 @@
+{
+  "about": "Shared samples of the project-tools settings in .oah/config.toml. The Rust core (crates/oah-core/tests/config_tools.rs) and the Python source CLI (tests/test_config.py) read every sample and must give exactly these values. toml is the file text (null: no file); a leading U+FEFF is the byte order mark.",
+  "schema": 1,
+  "cases": [
+    {
+      "name": "missing-file",
+      "note": "no file: every value is the default and nothing is explicit",
+      "toml": null,
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "empty-file",
+      "note": "an empty file reads like a missing one",
+      "toml": "",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "legacy-v04-rerank-on",
+      "note": "a v0.4.0 file written by oah init with Jev consent: the opt-in is read as written",
+      "toml": "# oah project settings, written by `oah init`.\n[stages]\ninitial = \"claude\"\nreview = \"codex\"\ncorrection = \"codex\"\n\n[models]\nprofile = \"balanced\"\nfetch_scores = true\n\n[engines.claude]\ncommand = [\"claude\"]\nquality_order = []\n\n[engines.claude.tiers]\nhigh = { model = \"\", effort = \"high\", timeout_min = 60 }\n\n[preflight]\ndefault_branch = \"main\"\n\n[skills]\nauto_update = true\nupdate_interval_days = 1\n\n# TypeSafe Jev re-orders the skills and impact results. You consented to it in `oah init`.\n[rerank]\nenabled = true\nprovider = \"typesafe\"\n# difficulty_min_confidence = 0.6\n\n[impact]\nrerank = true\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": true,
+            "explicit": true
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": true,
+            "explicit": true
+          },
+          "provider": {
+            "value": "typesafe",
+            "explicit": true
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "legacy-v04-rerank-off",
+      "note": "a v0.4.0 file with the recorded refusal",
+      "toml": "[stages]\ninitial = \"claude\"\nreview = \"codex\"\ncorrection = \"codex\"\n\n# The TypeSafe Jev re-ranker is off: you answered no in `oah init`.\n[rerank]\nenabled = false\nprovider = \"\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": true
+          },
+          "provider": {
+            "value": "",
+            "explicit": true
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "current-1.0-configured",
+      "note": "a 1.0 file: only the contract keys are read; the other keys of [wiki], [impact] and [rerank] stay with the source CLI",
+      "toml": "[stages]\nplan = \"claude\"\nbuild = \"claude\"\nreview = \"codex\"\nfix = \"codex\"\n\n[sections]\norder = [\"plan\", \"build\", \"review\", \"fix\"]\n\n[wiki]\ndir = \"knowledge/wiki\"\nlink_roots = [\"docs\"]\nstale_days = 90\n\n[impact]\nlimit = 20\nwiki_dirs = [\"knowledge/wiki\", \"docs/adr\"]\ngraph_file = \"graphs/code.json\"\n\n[rerank]\nenabled = true\nprovider = \"typesafe\"\ntimeout_seconds = 5.0\nmax_candidates = 20\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "knowledge/wiki",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "knowledge/wiki",
+              "docs/adr"
+            ],
+            "explicit": true
+          },
+          "graph_file": {
+            "value": "graphs/code.json",
+            "explicit": true
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": true,
+            "explicit": true
+          },
+          "provider": {
+            "value": "typesafe",
+            "explicit": true
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "mixed-legacy-and-1.0",
+      "note": "v0.4.0 and 1.0 stage keys together do not change the tools values",
+      "toml": "[stages]\ninitial = \"codex\"\nplan = \"claude\"\nbuild = \"claude\"\nreview = \"codex\"\nfix = \"codex\"\n\n[engines.codex]\ncommand = [\"codex\"]\n\n[agents.claude]\ncommand = [\"claude\"]\n\n[wiki]\ndir = \"wiki\"\n\n[impact]\nrerank = false\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "wiki",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": true
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "bom-crlf-korean",
+      "note": "a byte order mark, CRLF line ends and a non-ASCII folder",
+      "toml": "\ufeff[wiki]\r\ndir = \"\ubb38\uc11c/\uc704\ud0a4\"\r\n\r\n[impact]\r\nwiki_dirs = [\"\ubb38\uc11c/\uc704\ud0a4\"]\r\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "\ubb38\uc11c/\uc704\ud0a4",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "\ubb38\uc11c/\uc704\ud0a4"
+            ],
+            "explicit": true
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "wiki-dir-does-not-move-the-map",
+      "note": "impact.wiki_dirs without a value stays the default; reading never follows wiki.dir",
+      "toml": "[wiki]\ndir = \"knowledge/wiki\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "knowledge/wiki",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "explicit-wiki-dirs-override",
+      "note": "an explicit list is kept as written, also when it differs from wiki.dir",
+      "toml": "[wiki]\ndir = \"docs/wiki\"\n[impact]\nwiki_dirs = [\"notes\", \"docs/decisions\"]\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "notes",
+              "docs/decisions"
+            ],
+            "explicit": true
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "trailing-slash-is-portable",
+      "note": "one trailing / is accepted without a notice",
+      "toml": "[wiki]\ndir = \"docs/wiki/\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki/",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "empty-values-kept",
+      "note": "an empty graph file and an empty list are read as written, without a notice",
+      "toml": "[impact]\nwiki_dirs = []\ngraph_file = \"\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [],
+            "explicit": true
+          },
+          "graph_file": {
+            "value": "",
+            "explicit": true
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "not-portable-values",
+      "note": "machine-only values are read as written and flagged",
+      "toml": "[wiki]\ndir = \"/srv/shared/wiki\"\n[impact]\nwiki_dirs = [\"docs/wiki\", \"..\\\\other\"]\ngraph_file = \"C:/graphs/graph.json\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "/srv/shared/wiki",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki",
+              "..\\other"
+            ],
+            "explicit": true
+          },
+          "graph_file": {
+            "value": "C:/graphs/graph.json",
+            "explicit": true
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": [
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "impact.graph_file"
+          ],
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "impact.wiki_dirs"
+          ],
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "wiki.dir"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "not-portable-names",
+      "note": "names Windows cannot use, a parent step and a home folder are flagged",
+      "toml": "[wiki]\ndir = \"docs/aux\"\n[impact]\nwiki_dirs = [\"~/wiki\"]\ngraph_file = \"graphs/../graph.json\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/aux",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "~/wiki"
+            ],
+            "explicit": true
+          },
+          "graph_file": {
+            "value": "graphs/../graph.json",
+            "explicit": true
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": [
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "impact.graph_file"
+          ],
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "impact.wiki_dirs"
+          ],
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "wiki.dir"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "managed-configured",
+      "note": "the reserved table for the managed wiki index and graph",
+      "toml": "[project_tools.wiki_index]\nmanaged = true\nexclude = [\"raw/**\", \"log_archive_*.md\"]\nembedding_model = \"bge-m3\"\n\n[project_tools.graphify]\nmanaged = true\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": true,
+              "explicit": true
+            },
+            "exclude": {
+              "value": [
+                "raw/**",
+                "log_archive_*.md"
+              ],
+              "explicit": true
+            },
+            "embedding_model": {
+              "value": "bge-m3",
+              "explicit": true
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": true,
+              "explicit": true
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "managed-unknown-keys",
+      "note": "machine state written into the reserved table is not read: each unknown key is a notice",
+      "toml": "[project_tools]\ncache_root = \"/var/cache/oah\"\n\n[project_tools.wiki_index]\nmanaged = true\nhost = \"http://127.0.0.1:11434\"\n\n[project_tools.ollama]\nurl = \"http://127.0.0.1:11434\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": true,
+              "explicit": true
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": [
+          [
+            "OAH_CONFIG_UNKNOWN_KEY",
+            "project_tools.cache_root"
+          ],
+          [
+            "OAH_CONFIG_UNKNOWN_KEY",
+            "project_tools.ollama"
+          ],
+          [
+            "OAH_CONFIG_UNKNOWN_KEY",
+            "project_tools.wiki_index.host"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "managed-not-portable",
+      "note": "an absolute glob and a URL as a model name are flagged",
+      "toml": "[project_tools.wiki_index]\nexclude = [\"drafts/**\", \"/abs/**\"]\nembedding_model = \"http://localhost:11434/bge-m3\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [
+                "drafts/**",
+                "/abs/**"
+              ],
+              "explicit": true
+            },
+            "embedding_model": {
+              "value": "http://localhost:11434/bge-m3",
+              "explicit": true
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": [
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "project_tools.wiki_index.embedding_model"
+          ],
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "project_tools.wiki_index.exclude"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "managed-empty-tables",
+      "note": "empty tables give nothing",
+      "toml": "[project_tools]\n[project_tools.wiki_index]\n[project_tools.graphify]\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "docs/wiki",
+            "explicit": false
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "docs/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "wiki-not-a-table",
+      "toml": "wiki = \"docs/wiki\"\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "wiki-dir-wrong-type",
+      "toml": "[wiki]\ndir = 5\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "wiki-dir-blank",
+      "toml": "[wiki]\ndir = \"  \"\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "wiki-dir-blank-separator",
+      "toml": "[wiki]\ndir = \"\\u001c\"\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "wiki-dir-empty",
+      "toml": "[wiki]\ndir = \"\"\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "impact-not-a-table",
+      "toml": "impact = true\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "impact-wiki-dirs-not-an-array",
+      "toml": "[impact]\nwiki_dirs = \"docs/wiki\"\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "impact-wiki-dirs-not-strings",
+      "toml": "[impact]\nwiki_dirs = [\"docs/wiki\", 1]\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "impact-graph-file-wrong-type",
+      "toml": "[impact]\ngraph_file = false\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "impact-rerank-wrong-type",
+      "toml": "[impact]\nrerank = \"yes\"\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "rerank-not-a-table",
+      "toml": "rerank = 1\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "rerank-enabled-wrong-type",
+      "toml": "[rerank]\nenabled = 1\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "rerank-provider-wrong-type",
+      "toml": "[rerank]\nprovider = true\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "managed-not-a-table",
+      "toml": "project_tools = []\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "managed-subtable-not-a-table",
+      "toml": "[project_tools]\nwiki_index = true\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "managed-flag-wrong-type",
+      "toml": "[project_tools.wiki_index]\nmanaged = \"on\"\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "managed-exclude-not-strings",
+      "toml": "[project_tools.wiki_index]\nexclude = [true]\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "managed-model-wrong-type",
+      "toml": "[project_tools.wiki_index]\nembedding_model = 3\n",
+      "error": "OAH_CONFIG_INVALID"
+    },
+    {
+      "name": "managed-graphify-wrong-type",
+      "toml": "[project_tools.graphify]\nmanaged = 1\n",
+      "error": "OAH_CONFIG_INVALID"
+    }
+  ]
+}

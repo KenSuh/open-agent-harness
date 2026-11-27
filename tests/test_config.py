@@ -1,10 +1,12 @@
 # 설정 로더 검사 — .oah/config.toml 의 기본값 병합, 모르는 키·타입 오류, CRLF·BOM, 결과 격리를 본다.
 from __future__ import annotations
 
+import json
 import pathlib
 import unittest
 
-from oah.config import CONFIG_RELATIVE_PATH, Config, ConfigError, load_config
+from oah.config import (CONFIG_RELATIVE_PATH, PROJECT_TOOLS_DEFAULTS, Config, ConfigError, Setting, load_config,
+                        model_problem, parse_config, portable_problem, project_tools)
 from tests.helpers import make_tmp_dir
 
 TIERS = {"low": {"model": "sonnet", "effort": "low", "timeout_min": 15},
@@ -208,6 +210,120 @@ class SectionTest(unittest.TestCase):
         self.assertEqual(config.sections(), ("s",))
         self.assertEqual(config.section("s", {}),
                          {"items": [{"values": [1]}], "tuple_items": [{"values": [2]}]})
+
+
+SAMPLES = pathlib.Path(__file__).resolve().parent.parent / "crates" / "oah-core" / "tests" / "config_samples"
+
+
+def tools_of(text: str | None):
+    config = Config(path=None, raw={}) if text is None else parse_config(text.encode("utf-8"))
+    return project_tools(config)
+
+
+class ProjectToolsTest(unittest.TestCase):
+    """The Project Wiki, Impact Map and Jev settings: the Rust core owns the format, both read the same samples."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.samples = json.loads((SAMPLES / "project_tools.json").read_text(encoding="utf-8"))
+
+    def test_every_shared_sample_reads_as_the_contract_says(self):
+        self.assertEqual(self.samples["schema"], 1)
+        read = refused = 0
+        for case in self.samples["cases"]:
+            with self.subTest(case["name"]):
+                if "error" in case:
+                    with self.assertRaises(ConfigError) as ctx:
+                        tools_of(case["toml"])
+                    self.assertEqual(ctx.exception.code, case["error"])
+                    refused += 1
+                else:
+                    self.assertEqual(tools_of(case["toml"]).view(), case["expect"])
+                    read += 1
+        self.assertEqual((read, refused), (17, 19), "the sample counts changed")
+
+    def test_defaults_are_the_ones_the_commands_use(self):
+        from oah import rerank
+        from oah.impact.defaults import DEFAULTS as IMPACT_DEFAULTS
+        from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS
+
+        defaults = PROJECT_TOOLS_DEFAULTS
+        self.assertEqual(defaults["wiki.dir"], WIKI_DEFAULTS["dir"])
+        self.assertEqual(list(defaults["impact.wiki_dirs"]), IMPACT_DEFAULTS["wiki_dirs"])
+        self.assertEqual(defaults["impact.graph_file"], IMPACT_DEFAULTS["graph_file"])
+        self.assertIs(defaults["impact.rerank"], IMPACT_DEFAULTS["rerank"])
+        self.assertIs(defaults["rerank.enabled"], rerank.DEFAULTS["enabled"])
+        self.assertEqual(defaults["rerank.provider"], rerank.DEFAULTS["provider"])
+        self.assertEqual(set(defaults), {"wiki.dir", "impact.wiki_dirs", "impact.graph_file", "impact.rerank",
+                                         "rerank.enabled", "rerank.provider"})
+
+    def test_the_commands_read_the_same_values_from_every_sample(self):
+        from oah import rerank
+        from oah.impact.defaults import DEFAULTS as IMPACT_DEFAULTS
+        from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS
+
+        checked = 0
+        for case in self.samples["cases"]:
+            if "error" in case:
+                continue
+            with self.subTest(case["name"]):
+                config = (Config(path=None, raw={}) if case["toml"] is None
+                          else parse_config(case["toml"].encode("utf-8")))
+                tools = project_tools(config)
+                impact = config.section("impact", IMPACT_DEFAULTS)
+                jev = config.section("rerank", rerank.DEFAULTS)
+                self.assertEqual(config.section("wiki", WIKI_DEFAULTS)["dir"], tools.wiki_dir.value)
+                self.assertEqual(impact["wiki_dirs"], list(tools.impact_wiki_dirs.value))
+                self.assertEqual(impact["graph_file"], tools.impact_graph_file.value)
+                self.assertIs(impact["rerank"], tools.impact_rerank.value)
+                self.assertIs(jev["enabled"], tools.jev_enabled.value)
+                self.assertEqual(jev["provider"], tools.jev_provider.value)
+                checked += 1
+        self.assertEqual(checked, 17)
+
+    def test_the_reserved_table_is_ignored_by_the_existing_commands(self):
+        from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS
+
+        root = write_config(self, '[wiki]\ndir = "notes"\n[project_tools.wiki_index]\nmanaged = true\n'
+                                  '[project_tools.future]\nanything = 1\n')
+        config = load_config(root)
+        self.assertEqual(config.section("wiki", WIKI_DEFAULTS)["dir"], "notes")
+        tools = project_tools(config)
+        self.assertTrue(tools.wiki_index_managed.value)
+        self.assertEqual(tools.notices, (("OAH_CONFIG_UNKNOWN_KEY", "project_tools.future"),))
+
+    def test_reading_a_file_gives_the_same_as_its_bytes_and_changes_nothing(self):
+        data = b'\xef\xbb\xbf[wiki]\r\ndir = "knowledge/wiki"\r\n[rerank]\r\nenabled = true\r\nprovider = "typesafe"\r\n'
+        root = write_config(self, data)
+        tools = project_tools(load_config(root))
+        self.assertEqual(tools.wiki_dir, Setting("knowledge/wiki", True))
+        self.assertEqual(tools.impact_wiki_dirs, Setting(("docs/wiki",), False))
+        self.assertEqual((tools.jev_enabled.value, tools.jev_provider.value), (True, "typesafe"))
+        self.assertEqual((root / ".oah" / "config.toml").read_bytes(), data)
+        self.assertEqual(sorted(path.name for path in (root / ".oah").iterdir()), ["config.toml"])
+
+    def test_errors_name_the_file_and_the_key(self):
+        root = write_config(self, "[impact]\nwiki_dirs = 3\n")
+        with self.assertRaises(ConfigError) as ctx:
+            project_tools(load_config(root))
+        message = str(ctx.exception)
+        self.assertTrue(message.startswith("OAH_CONFIG_INVALID: "), message)
+        self.assertIn(str(root / ".oah" / "config.toml"), message)
+        self.assertIn("impact.wiki_dirs must be an array, not an integer", message)
+
+    def test_portable_values(self):
+        for good in ("docs/wiki", "wiki", "knowledge/wiki/", "a.b/c-d_e", "문서/위키"):
+            self.assertIsNone(portable_problem(good), good)
+        for bad in ("", "/abs", "C:/wiki", "docs\\wiki", "../wiki", "docs/./wiki", "docs//wiki", "~/wiki",
+                    "docs/wiki.", "docs/wiki ", "docs/aux", "docs/NUL.txt", "docs/wi*ki", "docs/a\tb",
+                    "https://example.com/wiki"):
+            self.assertIsNotNone(portable_problem(bad), bad)
+        self.assertIsNone(portable_problem("drafts/**/*.md", glob=True))
+        self.assertIsNotNone(portable_problem("../**", glob=True))
+        for good in ("", "bge-m3", "bge-m3:latest", "nomic-ai/nomic-embed-text"):
+            self.assertIsNone(model_problem(good), good)
+        for bad in ("http://localhost:11434", "/models/x", "a b", "..", "-x", "a\\b", "a" * 129):
+            self.assertIsNotNone(model_problem(bad), bad)
 
 
 if __name__ == "__main__":

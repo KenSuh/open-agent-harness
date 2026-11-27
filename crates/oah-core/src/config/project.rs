@@ -2,6 +2,7 @@
 use super::error::{ConfigError, Notice, codes, notice_codes};
 use super::file::{ConfigFile, Merger, not_a_table, type_error};
 use super::save::UpgradeWarning;
+use super::tools::ProjectTools;
 use super::value::{Table, Value};
 use std::fmt;
 use std::path::Path;
@@ -331,6 +332,12 @@ impl ProjectConfig {
 
     pub fn notices(&self) -> &[Notice] {
         &self.notices
+    }
+
+    /// The Project Wiki, Impact Map and Jev settings of the same file. They are read on request and are not part
+    /// of [`Effective`], so a broken tools table never stops the sections and stages from being read.
+    pub fn tools(&self) -> Result<ProjectTools, ConfigError> {
+        ProjectTools::read(&self.file)
     }
 
     /// For a v0.4.0 file, the warning the user must see and approve before the first save.
