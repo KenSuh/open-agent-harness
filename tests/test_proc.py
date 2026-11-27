@@ -73,7 +73,7 @@ def _ended_waits(ready: pathlib.Path, *ends: type[BaseException], after: float |
             with contextlib.suppress(subprocess.TimeoutExpired):
                 wait(process, *args, **{**kwargs, "timeout": after})
         end = ends[len(waits) - 1]
-        raise end(process.args, kwargs.get("timeout")) if end is subprocess.TimeoutExpired else end()
+        raise end(process.args, kwargs["timeout"]) if end is subprocess.TimeoutExpired else end()
 
     with patch.object(subprocess.Popen, "communicate", ended):
         yield waits, children
@@ -388,13 +388,15 @@ class RunTest(unittest.TestCase):
                 case.mkdir()
                 tree_pid, stop, done = case / "tree.pid", case / "stop", case / "done"
                 argv = [sys.executable, str(supervisor), str(tree_pid), str(stop), str(done)]
-                with _ended_waits(tree_pid, end) as (waits, children):
+                with _ended_waits(tree_pid, end) as (waits, children), \
+                        patch.object(proc_module, "kill_tree") as hard_stop:
                     if end is KeyboardInterrupt:
                         with self.assertRaises(KeyboardInterrupt):
                             run_command(argv, timeout=120, cancel=stop.touch, cancel_timeout=30)
                     else:
                         result = run_command(argv, timeout=120, cancel=stop.touch, cancel_timeout=30)
                         self.assertEqual((result.timed_out, result.returncode), (True, None))
+                hard_stop.assert_not_called()
                 self.assertEqual(waits, [120, 30, proc_module.REAP_SECONDS], "ask, wait for the child, then reap")
                 self.assertTrue(done.exists(), "the supervising child was killed before it had stopped its own tree")
                 self.assertEqual(children[0].returncode, 0, "the supervising child did not exit by itself")

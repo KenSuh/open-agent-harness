@@ -341,10 +341,9 @@ def run_command(argv: Sequence[str], *, timeout: float, cwd: str | None = None,
             job.close()
 
 
-def _stop_tree(proc: subprocess.Popen, cancel: Callable[[], None] | None, seconds: float) -> None:
+def _stop_tree(proc: subprocess.Popen[bytes], cancel: Callable[[], None] | None, seconds: float) -> None:
     """Kill the tree of a child that the caller no longer waits for. A supervising child is asked first and has
-    `seconds` to stop its own tree and exit, before this kill and before its Job Object closes. A request that
-    fails, a child that takes too long and a new interrupt all lead straight to the kill."""
+    `seconds` to stop its own tree and exit before hard cleanup. A reaped supervisor's PID can be reused."""
     try:
         if cancel is not None:
             try:
@@ -361,7 +360,8 @@ def _stop_tree(proc: subprocess.Popen, cancel: Callable[[], None] | None, second
             except Exception:
                 pass
     finally:
-        kill_tree(proc)
+        if cancel is None or proc.returncode is None:
+            kill_tree(proc)
 
 
 def kill_tree(proc: subprocess.Popen) -> None:
