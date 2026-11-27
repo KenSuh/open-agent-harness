@@ -248,28 +248,36 @@ fn join(prefix: &str, name: &str) -> String {
     }
 }
 
-/// The components of a folder name relative to the project. `./` in front and one `/` at the end are accepted.
+/// The components of a folder name relative to the project. It is read the way the Project Tools status card reads
+/// `[wiki] dir`: spaces around it, `.` parts and repeated `/` are dropped, and on Windows `\` is a separator. The
+/// project folder itself is not a wiki folder here.
 fn rel_dir(text: &str) -> Result<Vec<String>, WikiError> {
     let invalid = |reason: &str| WikiError::DirInvalid {
         dir: text.chars().filter(|c| !c.is_control()).take(120).collect(),
         reason: reason.to_string(),
     };
-    let dir = text.strip_prefix("./").unwrap_or(text);
-    let dir = dir.strip_suffix('/').unwrap_or(dir);
+    let unified = if cfg!(windows) {
+        text.trim().replace('\\', "/")
+    } else {
+        text.trim().to_string()
+    };
+    if unified.starts_with('/') || unified.contains(['\\', ':']) {
+        return Err(invalid(
+            "it must be relative to the project and written with /",
+        ));
+    }
+    let parts: Vec<String> = unified
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .map(str::to_string)
+        .collect();
+    let dir = parts.join("/");
     if dir.is_empty() || dir.chars().count() > DIR_CHARS_MAX {
         return Err(invalid(
             "give a folder inside the project, such as docs/wiki",
         ));
     }
-    if dir.starts_with('/') || dir.contains(['\\', ':']) {
-        return Err(invalid(
-            "it must be relative to the project and written with /",
-        ));
-    }
-    let parts: Vec<String> = dir.split('/').map(str::to_string).collect();
-    if parts.len() > DIR_DEPTH_MAX
-        || portable_paths(std::slice::from_ref(&dir.to_string())).is_err()
-    {
+    if parts.len() > DIR_DEPTH_MAX || portable_paths(std::slice::from_ref(&dir)).is_err() {
         return Err(invalid(
             "a name in it is not usable on every supported system, or it is too deep",
         ));
@@ -448,9 +456,13 @@ fn discover_in(project: &Folder) -> Result<WikiDiscovery, WikiError> {
         }
     }
     vaults.sort_by(|a, b| a.dir.cmp(&b.dir));
+    // A vault marker on a standard wiki folder, or on a folder above one, marks that same wiki (the status card
+    // counts it the same way).
+    let standard: Vec<String> = found.candidates.iter().map(|c| path_key(&c.dir)).collect();
     for vault in vaults {
         let key = path_key(&vault.dir);
-        if !found.candidates.iter().any(|c| path_key(&c.dir) == key) {
+        let same_wiki = |dir: &String| *dir == key || dir.starts_with(&format!("{key}/"));
+        if !standard.iter().any(same_wiki) {
             found.candidates.push(vault);
         }
     }
@@ -1247,6 +1259,12 @@ mod tests {
     fn folder_names_are_relative_portable_and_outside_managed_folders() {
         assert_eq!(rel_dir("docs/wiki").unwrap(), ["docs", "wiki"]);
         assert_eq!(rel_dir("./docs/wiki/").unwrap(), ["docs", "wiki"]);
+        assert_eq!(rel_dir(" ./docs//wiki/ ").unwrap(), ["docs", "wiki"]);
+        // The status card reads a Windows separator on Windows only, and so does this.
+        assert_eq!(
+            rel_dir("docs\\wiki").ok(),
+            cfg!(windows).then(|| vec!["docs".to_string(), "wiki".to_string()])
+        );
         assert_eq!(rel_dir("문서/위키").unwrap(), ["문서", "위키"]);
         for bad in [
             "",
@@ -1256,8 +1274,9 @@ mod tests {
             "docs/../wiki",
             "/docs/wiki",
             "C:/wiki",
-            "docs\\wiki",
-            "docs//wiki",
+            "C:\\wiki",
+            " ",
+            "./",
             "docs/wiki.",
             "docs/con",
             ".git/wiki",

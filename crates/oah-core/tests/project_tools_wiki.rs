@@ -424,6 +424,25 @@ fn two_wikis_need_a_choice_and_nothing_is_written_until_one_is_made() {
     assert_eq!(apply_setup(&f.root, &req, "sha256:guess"), Err(ambiguous));
     assert_eq!(f.snapshot(), before);
 
+    // An Obsidian vault above a standard wiki folder marks that same wiki, as on the status card.
+    let nested = Fixture::new();
+    nested.write("knowledge/.obsidian/app.json", b"{}");
+    nested.write("knowledge/wiki/index.md", b"standard\n");
+    let found = discover(&nested.root).unwrap();
+    assert_eq!(
+        found
+            .candidates
+            .iter()
+            .map(|c| c.dir.as_str())
+            .collect::<Vec<_>>(),
+        ["knowledge/wiki"]
+    );
+    let plan = plan_setup(&nested.root, &request(None, None)).unwrap();
+    assert_eq!(
+        (plan.dir.as_str(), plan.config_dir.as_deref()),
+        ("knowledge/wiki", Some("knowledge/wiki"))
+    );
+
     let chosen = request(None, Some("vault"));
     let plan = plan_setup(&f.root, &chosen).unwrap();
     assert_eq!((plan.dir.as_str(), plan.mode), ("vault", SetupMode::Adopt));
