@@ -1,5 +1,5 @@
 // 한국어: 팀 작업 흐름 화면 — 섹션 카드·에이전트 선택·단일 배너·프리셋·업그레이드 확인·규칙 동기 상태·고급 보기와 프로젝트 도구(위키·영향 지도·Jev) 상태 카드·설정 편집 진입. 판단은 모두 core 응답을 그대로 쓴다.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   AgentId,
   AgentOptionDto,
@@ -17,6 +17,7 @@ import type {
   WorkflowDto,
 } from "./contract";
 import { ToolSettingsPanel, useToolSettings, type ToolSettings } from "./project-tools-settings";
+import { ProjectWikiPanel } from "./project-wiki";
 import { toErrorDto, type Transport } from "./transport/types";
 
 type PageLoad = { status: "loading" } | { status: "ready"; value: WorkflowDto } | { status: "error"; error: ErrorDto };
@@ -366,6 +367,8 @@ function Assignments({ transport, projectId }: { transport: Transport; projectId
 /** What the cards hold: the last answer for this project, whether a check runs, and why the last one failed. */
 type ToolsLoad = { value: ProjectToolsDto | null; checking: boolean; error: ErrorDto | null };
 
+const WIKI_OPEN_ID = "project-wiki-open";
+
 const TOOL_PATH_BASE: Record<ToolPathBase, string> = {
   project: "in the project",
   "git-common-dir": "in the Git folder",
@@ -374,18 +377,31 @@ const TOOL_PATH_BASE: Record<ToolPathBase, string> = {
 
 /**
  * One card, top to bottom: the tool's name, what was found, why when it is a problem, the next step, then its
- * settings. Only one card's settings are open at a time, and an open card takes the full row.
+ * settings. Only one card's settings are open at a time, and an open card takes the full row. The Project Wiki
+ * card also opens the wiki panel; while that is open no settings are, and the other way round.
  */
-function ToolCard({ tool, settings, saved }: { tool: ProjectToolDto; settings: ToolSettings; saved: string | null }) {
+function ToolCard({
+  tool,
+  settings,
+  saved,
+  wiki,
+}: {
+  tool: ProjectToolDto;
+  settings: ToolSettings;
+  saved: string | null;
+  /** Whether the wiki panel is open, how to open it, and the panel itself on the Project Wiki card. */
+  wiki: { open: boolean; show: () => void; panel: ReactNode };
+}) {
   const titleId = `project-tool-${tool.id}`;
   const open = settings.editor?.tool === tool.id;
+  const wikiHere = tool.id === "wiki" && wiki.open;
   return (
     <article
       className="tool-card"
       aria-labelledby={titleId}
       data-tool={tool.id}
       data-state={tool.state}
-      data-editing={open ? "" : undefined}
+      data-editing={open || wikiHere ? "" : undefined}
     >
       <h3 id={titleId}>{tool.name}</h3>
       <p className="tool-status">{tool.status}</p>
@@ -412,12 +428,23 @@ function ToolCard({ tool, settings, saved }: { tool: ProjectToolDto; settings: T
       {saved ? <p className="tool-saved">{saved}</p> : null}
       {open ? (
         <ToolSettingsPanel name={tool.name} settings={settings} />
+      ) : wikiHere ? (
+        wiki.panel
       ) : settings.editor ? (
         <p className="muted tool-settings-wait">Close the open settings to edit these.</p>
+      ) : wiki.open ? (
+        <p className="muted tool-settings-wait">Close the wiki panel to edit these.</p>
       ) : (
-        <button type="button" className="tool-edit" id={`project-tool-edit-${tool.id}`} onClick={() => settings.open(tool.id)}>
-          Edit {tool.name} Settings
-        </button>
+        <div className="tool-actions">
+          {tool.id === "wiki" ? (
+            <button type="button" id={WIKI_OPEN_ID} onClick={wiki.show}>
+              Wiki Setup & Search
+            </button>
+          ) : null}
+          <button type="button" className="tool-edit" id={`project-tool-edit-${tool.id}`} onClick={() => settings.open(tool.id)}>
+            Edit {tool.name} Settings
+          </button>
+        </div>
       )}
     </article>
   );
@@ -426,7 +453,8 @@ function ToolCard({ tool, settings, saved }: { tool: ProjectToolDto; settings: T
 /**
  * The Project Wiki, Impact Map and Jev cards. Reading them changes and starts nothing. A card's settings are read
  * only after its Edit button is pressed, and saved only after a preview of the exact changes is confirmed; a step
- * this app cannot do yet is described in the card's text and has no button.
+ * this app cannot do yet is described in the card's text and has no button. The wiki's folders are read only after
+ * its Wiki Setup & Search button is pressed.
  */
 function ProjectTools({ transport, projectId }: { transport: Transport; projectId: string }) {
   const [tools, setTools] = useState<ToolsLoad>({ value: null, checking: true, error: null });
@@ -434,6 +462,10 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
   const [saved, setSaved] = useState<{ projectId: string; tool: ProjectToolId; text: string } | null>(null);
   const reads = useRef(0);
   const returnFocus = useRef<{ projectId: string; tool: ProjectToolId } | null>(null);
+  /** The project whose wiki panel is open; a panel opened under another project is not shown. */
+  const [wikiFor, setWikiFor] = useState<string | null>(null);
+  const wikiReturn = useRef<string | null>(null);
+  const wikiOpen = wikiFor === projectId;
 
   const check = useCallback(
     async (announce: boolean) => {
@@ -495,6 +527,34 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
     }
   }, [editing, projectId]);
 
+  useEffect(() => {
+    if (wikiOpen) {
+      wikiReturn.current = projectId;
+      setSaved(null);
+      return;
+    }
+    // A panel left open under another project does not come back with that project.
+    if (wikiFor !== null) setWikiFor(null);
+    if (wikiReturn.current !== null) {
+      // The panel closed: focus goes back to the button that opened it, unless the project changed meanwhile.
+      if (wikiReturn.current === projectId) document.getElementById(WIKI_OPEN_ID)?.focus();
+      wikiReturn.current = null;
+    }
+  }, [wikiOpen, wikiFor, projectId]);
+
+  const wiki = {
+    open: wikiOpen,
+    show: () => setWikiFor(projectId),
+    panel: wikiOpen ? (
+      <ProjectWikiPanel
+        transport={transport}
+        projectId={projectId}
+        onChanged={() => void check(false)}
+        onClose={() => setWikiFor(null)}
+      />
+    ) : null,
+  };
+
   return (
     <section className="project-tools" aria-labelledby="project-tools-title">
       <div className="project-tools-head">
@@ -512,7 +572,7 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
       </div>
       <p className="muted">
         What this project has for its wiki, impact map and Jev. Checking only reads the project: it changes nothing
-        and starts nothing. Settings are saved only after you review the exact changes.
+        and starts nothing. Settings and wiki files are written only after you review the exact changes.
       </p>
       <p className="visually-hidden" role="status">
         {announcement}
@@ -534,6 +594,7 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
               tool={tool}
               settings={settings}
               saved={saved?.projectId === projectId && saved.tool === tool.id ? saved.text : null}
+              wiki={wiki}
             />
           ))}
         </div>

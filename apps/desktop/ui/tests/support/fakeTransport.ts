@@ -12,6 +12,7 @@ import type {
   ProjectToolsPlanDto,
   ProjectToolsPlanReq,
   ProjectToolsSettingsDto,
+  ProjectWikiDto,
   ToolSettingValue,
   RefreshDto,
   ReviewResultDto,
@@ -23,6 +24,12 @@ import type {
   PresetApplyReq,
   TaskEvent,
   TaskSnapshotDto,
+  WikiActionReq,
+  WikiApplyDto,
+  WikiApplyReq,
+  WikiPlanDto,
+  WikiSearchDto,
+  WikiSearchReq,
   WorkflowDto,
   WorkflowProjectReq,
 } from "../../src/contract";
@@ -39,6 +46,15 @@ import probeRequest from "../../../../../crates/oah-core/tests/dto_samples/agent
 import workflowLegacy from "../../../../../crates/oah-core/tests/dto_samples/workflow/sections_show_legacy.json";
 import stagesUpgraded from "../../../../../crates/oah-core/tests/dto_samples/workflow/stages_set_upgraded.json";
 import projectTools from "../../../../../crates/oah-core/tests/dto_samples/workflow/project_tools_status.json";
+import wikiOverviewChoose from "../../../../../crates/oah-core/tests/dto_samples/wiki/overview_choose.json";
+import wikiOverviewNone from "../../../../../crates/oah-core/tests/dto_samples/wiki/overview_none.json";
+import wikiOverviewReady from "../../../../../crates/oah-core/tests/dto_samples/wiki/overview_ready.json";
+import wikiPlanSetup from "../../../../../crates/oah-core/tests/dto_samples/wiki/plan_setup_adopt.json";
+import wikiPlanCopy from "../../../../../crates/oah-core/tests/dto_samples/wiki/plan_copy.json";
+import wikiApplyDone from "../../../../../crates/oah-core/tests/dto_samples/wiki/apply_done.json";
+import wikiApplyStopped from "../../../../../crates/oah-core/tests/dto_samples/wiki/apply_stopped.json";
+import wikiApplySettingsStale from "../../../../../crates/oah-core/tests/dto_samples/wiki/apply_settings_stale.json";
+import wikiSearch from "../../../../../crates/oah-core/tests/dto_samples/wiki/search.json";
 
 /** The shared Team Workflow samples (crates/oah-core/tests/dto_samples/workflow), byte-compared by core's own test. */
 export const sampleWorkflow = {
@@ -58,6 +74,19 @@ export const sampleAgents = {
 
 /** The shared project tool cards (same folder), byte-compared by core's own test. */
 export const sampleProjectTools = projectTools as ProjectToolsDto;
+
+/** The shared Project Wiki samples (crates/oah-core/tests/dto_samples/wiki), byte-compared by core's own test. */
+export const sampleWiki = {
+  overviewChoose: wikiOverviewChoose as ProjectWikiDto,
+  overviewNone: wikiOverviewNone as ProjectWikiDto,
+  overviewReady: wikiOverviewReady as ProjectWikiDto,
+  planSetup: wikiPlanSetup as WikiPlanDto,
+  planCopy: wikiPlanCopy as WikiPlanDto,
+  applyDone: wikiApplyDone as WikiApplyDto,
+  applyStopped: wikiApplyStopped as WikiApplyDto,
+  applySettingsStale: wikiApplySettingsStale as WikiApplyDto,
+  search: wikiSearch as WikiSearchDto,
+};
 
 /** The saved settings the fake plans from: a current-format file that gives only the wiki folder. */
 export const sampleToolSettings: ProjectToolsSettingsDto = {
@@ -156,6 +185,12 @@ export interface FakeTransport extends Transport {
   toolsApplyRequests: WorkflowProjectReq<ProjectToolsApplyReq>[];
   /** Every `apply_project_skill` request, in order. */
   applyRequests: ApplyProjectSkillReq[];
+  /** Every `project_wiki_plan`, `start_project_wiki_apply` and `project_wiki_search` request, in order. */
+  wikiPlanRequests: WorkflowProjectReq<WikiActionReq>[];
+  wikiApplyRequests: WorkflowProjectReq<WikiApplyReq>[];
+  wikiSearchRequests: WorkflowProjectReq<WikiSearchReq>[];
+  /** Sends an event to the channel of the wiki apply start at `index` (default: the newest). */
+  emitWikiApply(event: TaskEvent<WikiApplyDto>, index?: number): void;
   /** Sends an event to the channel of the review start at `index` (default: the newest). */
   emitReview(event: TaskEvent<ReviewResultDto>, index?: number): void;
 }
@@ -174,6 +209,7 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
   let probeSink: ((event: TaskEvent<AgentStatusDto[]>) => void) | null = null;
   let agentsSink: ((change: AgentsChangedDto) => void) | null = null;
   const reviewSinks: Array<(event: TaskEvent<ReviewResultDto>) => void> = [];
+  const wikiSinks: Array<(event: TaskEvent<WikiApplyDto>) => void> = [];
   let probeCount = 0;
   const fake: FakeTransport = {
     calls: [],
@@ -340,6 +376,37 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       return fake.override.projectToolsApply
         ? fake.override.projectToolsApply(req)
         : { project_id: req.project_id, plan_id: req.input.plan_id, saved: true, upgraded: false, backup: null };
+    },
+    wikiPlanRequests: [],
+    wikiApplyRequests: [],
+    wikiSearchRequests: [],
+    async projectWikiOverview(req) {
+      fake.calls.push("project_wiki_overview");
+      // Like core: the answer names the project the request named.
+      return fake.override.projectWikiOverview
+        ? fake.override.projectWikiOverview(req)
+        : { ...sampleWiki.overviewNone, project_id: req.project_id };
+    },
+    async projectWikiPlan(req) {
+      fake.calls.push("project_wiki_plan");
+      fake.wikiPlanRequests.push(req);
+      if (fake.override.projectWikiPlan) return fake.override.projectWikiPlan(req);
+      return { ...(req.input.action === "copy" ? sampleWiki.planCopy : sampleWiki.planSetup), project_id: req.project_id };
+    },
+    async startProjectWikiApply(req, onEvent) {
+      fake.calls.push("start_project_wiki_apply");
+      fake.wikiApplyRequests.push(req);
+      wikiSinks.push(onEvent);
+      if (fake.override.startProjectWikiApply) return fake.override.startProjectWikiApply(req, onEvent);
+      return `wiki-apply-${wikiSinks.length}`;
+    },
+    emitWikiApply: (event, index = wikiSinks.length - 1) => wikiSinks[index]?.(event),
+    async projectWikiSearch(req) {
+      fake.calls.push("project_wiki_search");
+      fake.wikiSearchRequests.push(req);
+      return fake.override.projectWikiSearch
+        ? fake.override.projectWikiSearch(req)
+        : { ...sampleWiki.search, project_id: req.project_id };
     },
     emitProbe: (event) => probeSink?.(event),
     emitAgentsChanged: (change) => agentsSink?.(change),

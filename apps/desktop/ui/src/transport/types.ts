@@ -21,6 +21,7 @@ import type {
   ProjectToolsDto,
   ProjectToolsPlanDto,
   ProjectToolsPlanReq,
+  ProjectWikiDto,
   RefreshDto,
   RulesStateDto,
   ReviewResultDto,
@@ -35,6 +36,12 @@ import type {
   TaskEvent,
   TaskId,
   TaskSnapshotDto,
+  WikiActionReq,
+  WikiApplyDto,
+  WikiApplyReq,
+  WikiPlanDto,
+  WikiSearchDto,
+  WikiSearchReq,
   WorkflowDto,
   WorkflowProjectReq,
 } from "../contract";
@@ -77,6 +84,13 @@ export interface Transport {
   projectToolsPlan(req: WorkflowProjectReq<ProjectToolsPlanReq>): Promise<ProjectToolsPlanDto>;
   /** Saves the edits exactly as the plan `plan_id` names showed them. */
   projectToolsApply(req: WorkflowProjectReq<ProjectToolsApplyReq>): Promise<ProjectToolsApplyDto>;
+  /** Reads only: the folders that look like a wiki and the one in use. */
+  projectWikiOverview(req: WorkflowProjectReq): Promise<ProjectWikiDto>;
+  /** Reads only: what a setup or a copy would create, keep and change. */
+  projectWikiPlan(req: WorkflowProjectReq<WikiActionReq>): Promise<WikiPlanDto>;
+  /** Applies the request exactly as the plan `plan_id` names showed it; `taskCancel` stops it before the next file. */
+  startProjectWikiApply(req: WorkflowProjectReq<WikiApplyReq>, onEvent: (event: TaskEvent<WikiApplyDto>) => void): Promise<TaskId>;
+  projectWikiSearch(req: WorkflowProjectReq<WikiSearchReq>): Promise<WikiSearchDto>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
   onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;

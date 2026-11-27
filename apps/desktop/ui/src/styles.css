@@ -774,6 +774,135 @@ button[aria-disabled="true"] {
   cursor: not-allowed;
 }
 
+/* Project Wiki panel: it reuses the settings panel's frame, plan table, feedback row and buttons. */
+.tool-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wiki-panel h5 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.wiki-panel ul {
+  padding-left: 18px;
+}
+
+.wiki-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  min-width: 0;
+}
+
+.wiki-choice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.wiki-choice legend {
+  font-weight: 600;
+}
+
+.wiki-blocked {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+}
+
+/* A long list of files scrolls inside the card; the region takes keyboard focus so the arrow keys scroll it. */
+.wiki-scroll {
+  max-height: 320px;
+  overflow: auto;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.wiki-number {
+  font-variant-numeric: tabular-nums;
+}
+
+.wiki-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.wiki-progress progress {
+  flex: 1 1 160px;
+  max-width: 320px;
+  accent-color: var(--accent);
+}
+
+.wiki-search {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.wiki-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  max-width: 560px;
+}
+
+.wiki-search-form label {
+  font-weight: 600;
+}
+
+.wiki-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wiki-panel input[type="search"] {
+  flex: 1 1 200px;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+}
+
+.wiki-search-status {
+  min-height: 1.45em;
+}
+
+.wiki-hits {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  list-style: none;
+}
+
+.wiki-panel .wiki-hits {
+  padding-left: 0;
+}
+
+.wiki-hits li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  min-width: 0;
+}
+
+.wiki-hit-context {
+  color: var(--muted);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

@@ -16,6 +16,7 @@ import type {
   ProjectToolsApplyDto,
   ProjectToolsDto,
   ProjectToolsPlanDto,
+  ProjectWikiDto,
   RefreshDto,
   ReviewResultDto,
   RulesStateDto,
@@ -26,6 +27,9 @@ import type {
   TaskEvent,
   TaskId,
   TaskSnapshotDto,
+  WikiApplyDto,
+  WikiPlanDto,
+  WikiSearchDto,
   WorkflowDto,
 } from "../contract";
 import { toErrorDto, type ScanChanged, type Transport } from "./types";
@@ -82,6 +86,14 @@ export function createTauriTransport(): Transport {
     projectToolsStatus: (req) => call<ProjectToolsDto>("project_tools_status", req),
     projectToolsPlan: (req) => call<ProjectToolsPlanDto>("project_tools_plan", req),
     projectToolsApply: (req) => call<ProjectToolsApplyDto>("project_tools_apply", req),
+    projectWikiOverview: (req) => call<ProjectWikiDto>("project_wiki_overview", req),
+    projectWikiPlan: (req) => call<WikiPlanDto>("project_wiki_plan", req),
+    startProjectWikiApply(req, onEvent) {
+      const channel = new Channel<TaskEvent<WikiApplyDto>>();
+      channel.onmessage = onEvent;
+      return call<TaskId>("start_project_wiki_apply", req, { onEvent: channel });
+    },
+    projectWikiSearch: (req) => call<WikiSearchDto>("project_wiki_search", req),
     onNotice: (handler) => listen<NoticeDto>("notice", (event) => handler(event.payload)),
     onScanChanged: (handler) =>
       listen<ScanChanged>("scan-changed", (event) => handler(event.payload)),

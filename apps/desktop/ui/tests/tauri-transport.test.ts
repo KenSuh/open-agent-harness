@@ -47,6 +47,31 @@ describe("tauri transport (standalone, mocked @tauri-apps/api)", () => {
     ]);
   });
 
+  it("calls the Project Wiki commands with the project id and input under req, and a Channel for the apply", async () => {
+    invoke.mockResolvedValue(null);
+    const t = createTauriTransport();
+    const request = { action: "setup" as const, selected: "notes", today: null };
+    await t.projectWikiOverview({ project_id: "p1", input: {} });
+    await t.projectWikiPlan({ project_id: "p1", input: request });
+    await t.projectWikiSearch({ project_id: "p1", input: { dir: null, query: "plan", max_hits: null } });
+    expect(invoke.mock.calls).toEqual([
+      ["project_wiki_overview", { req: { project_id: "p1", input: {} } }],
+      ["project_wiki_plan", { req: { project_id: "p1", input: request } }],
+      ["project_wiki_search", { req: { project_id: "p1", input: { dir: null, query: "plan", max_hits: null } } }],
+    ]);
+    invoke.mockReset();
+    invoke.mockResolvedValue("task-3");
+    const received: unknown[] = [];
+    const apply = { project_id: "p1", input: { request: { ...request, today: "2026-01-02" }, plan_id: "sha256:abc" } };
+    expect(await t.startProjectWikiApply(apply, (event) => received.push(event))).toBe("task-3");
+    const [command, args] = invoke.mock.calls[0]!;
+    expect(command).toBe("start_project_wiki_apply");
+    expect(args.req).toEqual(apply);
+    expect(args.onEvent).toBeInstanceOf(FakeChannel);
+    args.onEvent.onmessage({ event: "cancelled" });
+    expect(received).toEqual([{ event: "cancelled" }]);
+  });
+
   it("calls the exact M1-S1 command names with a single req argument", async () => {
     invoke.mockResolvedValue(null);
     const t = createTauriTransport();

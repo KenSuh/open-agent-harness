@@ -498,6 +498,153 @@ export interface ProjectToolsApplyDto {
   backup: string | null;
 }
 
+/**
+ * Project Wiki actions: `project_wiki_overview`, `project_wiki_plan`, `start_project_wiki_apply` and
+ * `project_wiki_search` (core `dto::wiki`). Each takes `WorkflowProjectReq<...>`. A path is relative to the
+ * project or to the wiki folder and written with `/`; nothing here carries a full path or the bytes of a file.
+ */
+export type WikiActionReq =
+  /** `selected` is one of the overview's folders; `today` is the plan's date, sent back by the apply. */
+  | { action: "setup"; selected: string | null; today: string | null }
+  | { action: "copy"; source: string };
+
+/** `start_project_wiki_apply`'s input: the request, the plan it was shown as and nothing else. */
+export interface WikiApplyReq {
+  request: WikiActionReq;
+  plan_id: string;
+  /** The plan's `settings.upgrade.fingerprint`, sent only after the user acknowledged that plan's upgrade. */
+  approve_upgrade?: string;
+}
+
+/** Without `dir` the wiki folder in use is searched. */
+export interface WikiSearchReq {
+  dir: string | null;
+  query: string;
+  max_hits: number | null;
+}
+
+export interface WikiCandidateDto {
+  dir: string;
+  /** One of the standard wiki locations. */
+  standard: boolean;
+  obsidian: boolean;
+  index: boolean;
+  log: boolean;
+}
+
+export type WikiTargetState = "ready" | "incomplete" | "none" | "choose" | "configured-missing" | "unavailable";
+
+/** The folder a setup without a choice would use, and what it would do. */
+export interface WikiTargetDto {
+  state: WikiTargetState;
+  dir: string | null;
+  creates: number;
+  sets_dir: boolean;
+  error: ErrorDto | null;
+}
+
+export interface ProjectWikiDto {
+  project_id: string;
+  /** The standard folder, where a copy goes. */
+  default_dir: string;
+  configured: { dir: string; explicit: boolean } | null;
+  settings_error: ErrorDto | null;
+  candidates: WikiCandidateDto[];
+  problems: { dir: string; error: ErrorDto }[];
+  truncated: boolean;
+  target: WikiTargetDto;
+}
+
+export type WikiActionKind = "setup" | "copy";
+export type WikiFileAction = "create" | "keep" | "blocked" | "copy" | "same";
+export type WikiCopyBlock =
+  | "link"
+  | "not-portable"
+  | "case-collision"
+  | "oversized"
+  | "too-deep"
+  | "unreadable"
+  | "conflict"
+  | "link-leaves-wiki";
+
+/** One file of a plan, relative to the wiki folder. `bytes` is the size of a file to copy. */
+export interface WikiPlanFileDto {
+  path: string;
+  action: WikiFileAction;
+  bytes: number | null;
+}
+
+/** The settings change that follows the files; the same shapes as a settings plan's. */
+export interface WikiSettingsPlanDto {
+  config_path: string;
+  changes: ToolsKeyChangeDto[];
+  kept: { key: string; value: ToolSettingValue; reason: string }[];
+  upgrade: ToolsUpgradeDto | null;
+  backup: ToolsBackupDto | null;
+}
+
+/** What the request would do, computed by reading only. */
+export interface WikiPlanDto {
+  project_id: string;
+  /** Names the project, the request, the folders and files as they are now and the settings change. */
+  plan_id: string;
+  action: WikiActionKind;
+  /** The wiki folder after the apply. */
+  dir: string;
+  source: string | null;
+  mode: "create" | "adopt" | "copy";
+  today: string | null;
+  folders: string[];
+  files: WikiPlanFileDto[];
+  writes: number;
+  blocked: { path: string; reason: WikiCopyBlock; line: number | null; target: string | null }[];
+  blocked_total: number;
+  left: string[];
+  unresolved_links: { file: string; line: number; target: string }[];
+  unresolved_total: number;
+  settings: WikiSettingsPlanDto | null;
+  choice_not_saved: boolean;
+}
+
+export type WikiItemStatus = "created" | "kept" | "failed" | "pending";
+export type WikiSettingsState = "unchanged" | "saved" | "skipped" | "stale" | "failed";
+
+/** The `done` payload of a wiki apply: what happened to each file, then to the settings. */
+export interface WikiApplyDto {
+  project_id: string;
+  plan_id: string;
+  action: WikiActionKind;
+  dir: string;
+  source: string | null;
+  folders_created: string[];
+  items: { path: string; status: WikiItemStatus }[];
+  counts: { created: number; kept: number; failed: number; pending: number };
+  /** Why the files stopped; `OAH_WIKI_STOPPED` when the user stopped the apply. */
+  stop: ErrorDto | null;
+  settings: {
+    state: WikiSettingsState;
+    config_path: string;
+    upgraded: boolean;
+    backup: string | null;
+    error: ErrorDto | null;
+  };
+  /** Every file is in place and the settings lead to `dir`. */
+  complete: boolean;
+}
+
+export type WikiSkipReason = "link" | "not-portable" | "oversized" | "not-text" | "unreadable" | "too-deep";
+
+export interface WikiSearchDto {
+  project_id: string;
+  dir: string;
+  /** `file` is relative to `dir`; `line` counts from 1; `heading` is the nearest heading above the line. */
+  hits: { file: string; line: number; heading: string | null; context: string }[];
+  truncated: boolean;
+  files_searched: number;
+  skipped: { path: string; reason: WikiSkipReason }[];
+  skipped_total: number;
+}
+
 /** M1-S3 Explore review shapes (core `review`; EXPLORE-PRODUCTION-BRIEF, Independent desktop contract). */
 export interface ReviewSpec {
   repo: string;
