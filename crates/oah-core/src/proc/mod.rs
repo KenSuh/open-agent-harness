@@ -6,6 +6,7 @@
 //! when a grandchild keeps the pipes open, and a child that is still running then is killed.
 
 pub(crate) mod resolve;
+pub(crate) mod tree;
 
 use crate::paths::Env;
 use std::fmt;
