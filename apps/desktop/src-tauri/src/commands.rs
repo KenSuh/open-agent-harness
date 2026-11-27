@@ -9,6 +9,8 @@
 //! blocking thread a task runs on, the `scan-changed` and `agents-changed` events, and starting the agents probe
 //! when the window regains focus. Whether a focus probe checks sign-in again is decided in core (60 s per agent).
 
+pub mod wiki;
+
 use std::path::Path;
 use std::sync::Arc;
 
