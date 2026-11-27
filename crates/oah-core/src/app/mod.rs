@@ -9,6 +9,7 @@
 mod agents;
 mod cli_copy;
 mod doctor;
+mod impact_map;
 mod installed;
 mod installed_management;
 mod refresh;
@@ -35,6 +36,7 @@ pub use doctor::{
     Doctor, doctor, doctor_exit, doctor_project_commands, doctor_project_commands_with,
     doctor_with, doctor_with_options,
 };
+pub use impact_map::{impact_map_key, run_impact_map};
 pub use installed::skills_installed;
 pub use installed_management::{
     inspect_installed_skill, register_skill_source, remove_installed_skill,

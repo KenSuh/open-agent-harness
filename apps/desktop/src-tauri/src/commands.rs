@@ -36,6 +36,8 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+pub(crate) mod impact_map;
+
 /// The name of the invalidation event of CONTRACTS C4.
 pub const SCAN_CHANGED: &str = "scan-changed";
 

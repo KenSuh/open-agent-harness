@@ -409,9 +409,11 @@ function ToolCard({
       <h3 id={titleId}>{tool.name}</h3>
       <p className="tool-status">{tool.status}</p>
       {tool.reason ? <p className="tool-reason">{tool.reason}</p> : null}
-      {(!actions || tool.state !== "ready") && <p className="tool-next">
-        <strong>Next step:</strong> {tool.next_step}
-      </p>}
+      {(!actions || tool.state !== "ready") ? (
+        <p className="tool-next">
+          <strong>Next step:</strong> {tool.next_step}
+        </p>
+      ) : null}
       {tool.paths.length > 0 ? (
         <ul className="tool-paths">
           {tool.paths.map((path) => (

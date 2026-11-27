@@ -10,6 +10,7 @@
 
 mod agents;
 mod app;
+mod impact_map;
 mod notice;
 mod plan;
 mod project;
@@ -28,6 +29,7 @@ pub use app::{
     AppInfoDto, CliDto, CliState, RefreshDto, SettingEdit, SettingValue, SettingsDto,
     SettingsSetReq, UiDto,
 };
+pub use impact_map::{ImpactGraphState, ImpactMapAction, ImpactMapRunDto, ImpactMapRunReq};
 pub use notice::{NoticeDto, NoticeLevel};
 pub use plan::{ApplyReportDto, BasisDto, ChangePlanDto, ItemResultDto, PlanItemDto};
 pub use project::{ConfigStateDto, ProjectDto, ProjectKindDto};
