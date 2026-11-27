@@ -436,6 +436,16 @@ impl BoundFolder {
         })
     }
 
+    /// The identity of the pinned root folder on its volume: the same text for the same folder as long as it
+    /// exists, and another text for any other folder, also one later put at the same path.
+    pub fn root_identity(&self) -> String {
+        let id = self.root.id();
+        format!(
+            "{:x}-{:x}-{}-{}",
+            id.volume, id.index, id.birth_seconds, id.birth_nanos
+        )
+    }
+
     /// Checks that every pinned name still names the folder that was opened.
     pub fn check(&self) -> Result<()> {
         self.dir.as_ref().unwrap_or(&self.root).check()

@@ -787,6 +787,65 @@ fn the_writer_owns_exactly_the_contract_keys_and_notices_have_codes() {
     assert_eq!(error.code(), codes::INVALID);
 }
 
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn a_plan_is_stale_for_another_folder_put_at_the_same_path() {
+    for config in [Some("[stages]\nplan = \"claude\"\n"), None] {
+        let parent = tempfile::tempdir().unwrap();
+        let parent = paths::canonical_folder(parent.path()).unwrap();
+        let root = parent.join("project");
+        let make = |root: &Path| {
+            fs::create_dir(root).unwrap();
+            if let Some(text) = config {
+                fs::create_dir(root.join(".oah")).unwrap();
+                fs::write(root.join(".oah").join("config.toml"), text).unwrap();
+            }
+        };
+        let listing = |root: &Path| {
+            let mut names: Vec<String> = fs::read_dir(root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        make(&root);
+        // The id the caller holds is made from the path alone, so both folders have it.
+        let binding = ToolsBinding::new(paths::folder_id(&root), root.clone());
+        let changes = wiki("notes");
+        let plan = plan_tools_save(&binding, &changes).unwrap();
+        let approval = plan.approve(false);
+        // The approved project moves away and another real folder, with the same bytes, takes its path.
+        let moved = parent.join("moved");
+        fs::rename(&root, &moved).unwrap();
+        make(&root);
+        let before = listing(&root);
+        assert_ne!(plan_tools_save(&binding, &changes).unwrap().id(), plan.id());
+        let error = apply_tools_save(&binding, &changes, &approval, quick()).unwrap_err();
+        assert_eq!(error.code(), codes::PLAN_STALE, "{error}");
+        assert_eq!(listing(&root), before, "the other folder was changed");
+        if let Some(text) = config {
+            assert_eq!(
+                fs::read_to_string(root.join(".oah/config.toml")).unwrap(),
+                text
+            );
+            assert_eq!(
+                fs::read_to_string(moved.join(".oah/config.toml")).unwrap(),
+                text
+            );
+        } else {
+            assert!(before.is_empty() && listing(&moved).is_empty());
+        }
+        // Back at its path, the approved folder takes the approved plan.
+        fs::remove_dir_all(&root).unwrap();
+        fs::rename(&moved, &root).unwrap();
+        assert_eq!(plan_tools_save(&binding, &changes).unwrap().id(), plan.id());
+        apply_tools_save(&binding, &changes, &approval, quick()).unwrap();
+        let saved = fs::read_to_string(root.join(".oah/config.toml")).unwrap();
+        assert!(saved.contains("dir = \"notes\""), "{saved}");
+    }
+}
+
 #[cfg(not(any(target_os = "macos", windows)))]
 #[test]
 fn where_the_folder_cannot_be_bound_a_plan_works_and_a_save_is_refused() {

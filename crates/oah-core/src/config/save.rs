@@ -377,8 +377,9 @@ pub struct ToolsPlan {
 }
 
 impl ToolsPlan {
-    /// 64 hexadecimal digits that name this plan: the project id, the canonical root, the exact bytes the file
-    /// has now (or that it is missing) and the exact bytes the save would write. An approval carries it back.
+    /// 64 hexadecimal digits that name this plan: the project id, the canonical root and the identity of the
+    /// folder it names now, the exact bytes the file has now (or that it is missing) and the exact bytes the
+    /// save would write. An approval carries it back.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -600,16 +601,18 @@ fn plan_backup(config: &Path, original: &[u8]) -> Result<BackupPlan, ConfigError
 fn tools_plan_id(
     project_id: &str,
     root: &Path,
+    folder: &str,
     before: Option<Fingerprint>,
     after: Option<&[u8]>,
     upgrade: bool,
 ) -> String {
     let before = before.map(Fingerprint::to_hex);
     let after = after.map(|bytes| Fingerprint::of(bytes).to_hex());
-    let parts: [&[u8]; 6] = [
-        b"oah-project-tools-plan-v1",
+    let parts: [&[u8]; 7] = [
+        b"oah-project-tools-plan-v2",
         project_id.as_bytes(),
         root.as_os_str().as_encoded_bytes(),
+        folder.as_bytes(),
         before.as_deref().unwrap_or("missing").as_bytes(),
         after.as_deref().unwrap_or("unchanged").as_bytes(),
         &[u8::from(upgrade)],
@@ -634,8 +637,16 @@ pub fn plan_tools_save(
     changes: &[ToolsChange],
 ) -> Result<ToolsPlan, ConfigError> {
     let root = bound_root(&binding.project_id, &binding.root)?;
+    let folder = root_identity(&root);
     let snapshot = read_bound_config(&root)?;
-    let plan = build_tools_plan(&binding.project_id, root, snapshot, changes, plan_backup)?;
+    let plan = build_tools_plan(
+        &binding.project_id,
+        root,
+        &folder,
+        snapshot,
+        changes,
+        plan_backup,
+    )?;
     if plan.after.is_some() {
         check_entry(
             &plan.config_path().with_file_name(LOCK_NAME),
@@ -647,11 +658,27 @@ pub fn plan_tools_save(
     Ok(plan)
 }
 
-/// The plan for `changes` to the file read as `snapshot`; `backup` reports what is at the backup path of a v0.4.0
-/// file.
+/// What the plan id says about which folder the root path named when the plan was made: the folder's own
+/// identity on its volume (file index and creation time), not its path. Another folder put at the same path
+/// later has another one, so a plan made for the first is stale there. `unbound` where the folder cannot be
+/// opened that way; [`apply_tools_save`] then refuses or finds the plan stale.
+#[cfg(any(target_os = "macos", windows))]
+fn root_identity(root: &Path) -> String {
+    BoundFolder::open(root, ".oah")
+        .map_or_else(|_| String::from("unbound"), |folder| folder.root_identity())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn root_identity(_root: &Path) -> String {
+    String::from("unbound")
+}
+
+/// The plan for `changes` to the file read as `snapshot` in the root folder whose identity is `folder`; `backup`
+/// reports what is at the backup path of a v0.4.0 file.
 fn build_tools_plan(
     project_id: &str,
     root: PathBuf,
+    folder: &str,
     snapshot: ProjectConfig,
     changes: &[ToolsChange],
     backup: impl FnOnce(&Path, &[u8]) -> Result<BackupPlan, ConfigError>,
@@ -723,6 +750,7 @@ fn build_tools_plan(
     let id = tools_plan_id(
         project_id,
         &root,
+        folder,
         file.source_bytes().map(Fingerprint::of),
         save.bytes.as_deref(),
         upgrade.is_some(),
@@ -751,8 +779,8 @@ fn build_tools_plan(
 /// compares the names with the handles again and stops.
 ///
 /// The plan is made again from the bytes read through those handles and must be the approved one, otherwise
-/// `OAH_PLAN_STALE`: a plan for another project or root, for a file that changed since, or for other changes
-/// cannot be used. A v0.4.0 file needs the approval of the upgrade of exactly its bytes
+/// `OAH_PLAN_STALE`: a plan for another project or root, for another folder that now has the root's path, for a
+/// file that changed since, or for other changes cannot be used. A v0.4.0 file needs the approval of the upgrade of exactly its bytes
 /// (`OAH_CONFIG_UPGRADE_REQUIRED`), and its backup must be new or identical (`OAH_CONFIG_BACKUP_CONFLICT`).
 ///
 /// Then, under the writer lock that [`save_project`] also takes, the file is opened once more and must still hold
@@ -792,9 +820,12 @@ pub fn apply_tools_save(
         .map_err(|error| bound_error(error, &path))?
         .map(|file| file.bytes().to_vec());
     let snapshot = ProjectConfig::from_file(ConfigFile::from_bytes(&path, seen)?)?;
+    // The identity comes from the handle this save holds, so the plan is the approved one only when the
+    // approval was given for this very folder, not merely for its path.
     let plan = build_tools_plan(
         &binding.project_id,
         root.clone(),
+        &folder.root_identity(),
         snapshot,
         changes,
         |_, original| {
