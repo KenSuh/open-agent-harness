@@ -395,10 +395,9 @@ fn every_error_has_its_own_code_and_a_message_without_a_path() {
             may_have_changed: true,
         },
     ] {
-        assert!(
-            stopped.message().contains("check the status again"),
-            "{stopped}"
-        );
+        let message = stopped.message();
+        assert!(message.contains("Check the status again"), "{message}");
+        assert!(!message.contains("Impact Map"), "{message}");
     }
     let unchanged = RunnerError::Cancelled {
         may_have_changed: false,

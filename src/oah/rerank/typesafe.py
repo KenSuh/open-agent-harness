@@ -53,7 +53,6 @@ OFFICIAL_URL = DEFAULT_URL  # the one address a device key, or the shared key na
 OFFICIAL, LOOPBACK, CUSTOM, REFUSED = "official", "loopback", "custom", "refused"
 PROBE_QUESTION = "check"
 PROBE_TIMEOUT = 10.0  # seconds, the longest one connection check waits
-_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 DESCRIPTION_LIMIT = 200
 WORK_LIMIT = 16_000  # characters, about 4,000 tokens, over the whole work text
 RESPONSE_LIMIT = 4 * 1024 * 1024
@@ -456,21 +455,16 @@ def build_probe_request() -> dict:
             "questions": {PROBE_QUESTION: {"type": "noul", "instructions": "Is `state` a connection check?"}}}
 
 
-def parse_probe_response(body: object) -> str:
-    """The answering model's name ("" when the reply names none), or ProviderError(bad-response)."""
-    result = code = None
+def validate_probe_response(body: object) -> None:
     try:
-        try:
-            result, code = _outcome(_parse_probe_response, body)
-        finally:
-            del body
-        return _finish(result, code)
+        _, code = _outcome(_validate_probe_response, body)
     finally:
-        del result, code
+        del body
+    _finish(None, code)
 
 
-def _parse_probe_response(body: object) -> tuple[str | None, str | None]:
-    answers = answer = model = None
+def _validate_probe_response(body: object) -> tuple[None, str | None]:
+    answers = answer = None
     try:
         answers = _answers(body)
         if answers is None or len(answers) != 1:
@@ -481,10 +475,9 @@ def _parse_probe_response(body: object) -> tuple[str | None, str | None]:
         noul = _number(answer.get("noul"))
         if noul is None or not 0.0 <= noul <= 1.0:
             return None, BAD_RESPONSE
-        model = body.get("model") if isinstance(body, Mapping) else None
-        return (model if isinstance(model, str) and _MODEL_NAME.fullmatch(model) else ""), None
+        return None, None
     finally:
-        del body, answers, answer, model
+        del body, answers, answer
 
 
 def post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> object:

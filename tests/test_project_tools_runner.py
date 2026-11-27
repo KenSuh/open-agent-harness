@@ -215,6 +215,15 @@ class MainTest(unittest.TestCase):
                          (70, False, "unavailable", "OAH_PROJECT_TOOLS_INTERNAL"))
         self.assertEqual((shown["error"]["message"], list(shown)), ("RuntimeError: boom", DOCUMENT))
 
+    def test_desktop_approval_returns_no_preview_for_a_custom_jev_destination(self):
+        repo = make_git_repo(self)
+        git_commit(repo, {".oah/config.toml": '[rerank.typesafe]\nurl = "https://example.test/judge"\n'
+                                            'key_name = "LOCAL_JEV_KEY"\n'})
+        home = make_tmp_dir(self)
+        with mock.patch.dict(os.environ, {"OAH_HOME": str(home)}):
+            code, shown = self.call("jev", "prepare", "--root", str(repo))
+        self.assertEqual((code, shown["result"]), (69, {"ok": False, "status": "destination"}))
+
     def test_an_answer_over_the_output_limit_is_replaced(self):
         huge = impact.failure("status", "/x", "OAH_PROJECT_TOOLS_IO", "m")
         object.__setattr__(huge, "store", {"path": "p" * 5000, "source": "git-common-dir"})

@@ -491,6 +491,8 @@ class ConsentTest(DeviceCase):
                 self.assertEqual(jev.prepare(self.repo, scopes=scopes, env=self.env), {"ok": False, "status": "scope"})
         for label, options in (("the shared key name elsewhere", {"url": ELSEWHERE}),
                                ("an address that is not HTTPS", {"url": "http://jev.example.test/x"}),
+                               ("a URL too long to show", {"url": ELSEWHERE + "/" + "x" * 512, "key_name": OTHER_NAME}),
+                               ("a model too long to show", {"model": "x" * 129}),
                                ("a key name that is not a name", {"key_name": "has space"})):
             with self.subTest(case=label):
                 write_config(self.repo, **options)
@@ -736,7 +738,7 @@ class DispatchTest(DeviceCase):
                                  (1, {"ok": False, "status": "ack-required"}))
         self.assertEqual((sent, self.store.calls), ([], []))
         self.assertEqual(self.call("test-run", stdin=pipe(ack + "\r\n"), env=env, transport=transport),
-                         (0, {"ok": True, "status": "ok", "source": "environment", "model": "jev-1.14.0"}))
+                         (0, {"ok": True, "status": "ok", "source": "environment"}))
         self.assertEqual(sent, [typesafe.build_probe_request()])
         self.assertEqual(self.call("test-run", stdin=pipe(ack), transport=transport),
                          (1, {"ok": False, "status": "no-key"}))
@@ -867,7 +869,7 @@ class ConnectionCheckTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
                                           "ALL_PROXY": "http://127.0.0.1:9"}):
             result, recorder = self.check(FakeResponse(reply()))
-        self.assertEqual(result, {"ok": True, "status": "ok", "source": "environment", "model": "jev-1.14.0"})
+        self.assertEqual(result, {"ok": True, "status": "ok", "source": "environment"})
         self.assertEqual(len(recorder.seen), 1)
         seen = recorder.seen[0]
         self.assertEqual((seen["url"], seen["method"], seen["timeout"]), (OFFICIAL, "POST", 10.0))
@@ -882,7 +884,7 @@ class ConnectionCheckTest(unittest.TestCase):
     def test_the_stored_key_is_used_when_the_environment_has_none(self) -> None:
         self.store.values[SHARED] = self.key
         result, recorder = self.check(FakeResponse(reply(model="")), env={SHARED: ""})
-        self.assertEqual(result, {"ok": True, "status": "ok", "source": "device", "model": ""})
+        self.assertEqual(result, {"ok": True, "status": "ok", "source": "device"})
         self.assertEqual(recorder.seen[0]["headers"]["authorization"], f"Bearer {self.key}")
         self.assertEqual(self.store.calls, [("probe", SHARED)])
 
@@ -920,11 +922,9 @@ class ConnectionCheckTest(unittest.TestCase):
                 self.assertEqual(len(recorder.seen), 1, "one request, never a retry")
                 self.assertNotIn(self.key, json.dumps(result))
 
-    def test_the_result_is_bounded(self) -> None:
-        for model in ("x" * 65, "has space", "<b>", 7, None, ["jev"], echo := f"model-{self.key}-{'y' * 80}"):
-            with self.subTest(model=str(model)[:20]):
-                result, _recorder = self.check(FakeResponse(reply(model=model, extra_field=echo)))
-                self.assertEqual(result, {"ok": True, "status": "ok", "source": "environment", "model": ""})
+    def test_the_result_ignores_provider_metadata(self) -> None:
+        result, _recorder = self.check(FakeResponse(reply(model="jev-preview", extra_field="test metadata")))
+        self.assertEqual(result, {"ok": True, "status": "ok", "source": "environment"})
 
     def test_an_injected_transport_gets_the_fixed_payload_and_an_opaque_key(self) -> None:
         calls = []

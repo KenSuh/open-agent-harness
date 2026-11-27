@@ -276,11 +276,13 @@ pub enum RunnerError {
     Version,
     /// The project root or the Git program is not an absolute path. Nothing was started.
     Request,
-    /// The task was cancelled and the tool's process tree was stopped. `may_have_changed` is true for a refresh
-    /// that had started: it may already have saved a map.
-    Cancelled { may_have_changed: bool },
+    Cancelled {
+        may_have_changed: bool,
+    },
     /// The deadline passed and the tool's process tree was stopped. `may_have_changed` as for `Cancelled`.
-    TimedOut { may_have_changed: bool },
+    TimedOut {
+        may_have_changed: bool,
+    },
     /// The tool wrote more than a stream's cap and its process tree was stopped.
     Output,
     /// The tool could not be run to an answer.
@@ -317,8 +319,7 @@ impl From<ReplyProblem> for RunnerError {
     }
 }
 
-/// The check that follows a stopped refresh.
-const CHECK_AGAIN: &str = "it may already have saved a newer map, so check the status again";
+const CHECK_AGAIN: &str = "Changes may have been saved. Check the status again.";
 
 impl Coded for RunnerError {
     fn code(&self) -> &'static str {
@@ -351,15 +352,13 @@ impl Coded for RunnerError {
             } => String::from("the project tools were stopped before they changed anything"),
             RunnerError::Cancelled {
                 may_have_changed: true,
-            } => format!("the Impact Map refresh was stopped; {CHECK_AGAIN}"),
+            } => format!("The operation was stopped. {CHECK_AGAIN}"),
             RunnerError::TimedOut {
                 may_have_changed: false,
             } => String::from("the project tools did not finish in time and were stopped"),
             RunnerError::TimedOut {
                 may_have_changed: true,
-            } => format!(
-                "the Impact Map refresh did not finish in time and was stopped; {CHECK_AGAIN}"
-            ),
+            } => format!("The operation timed out and was stopped. {CHECK_AGAIN}"),
             RunnerError::Output => {
                 String::from("the project tools printed more than expected and were stopped")
             }

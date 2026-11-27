@@ -47,8 +47,8 @@ def _plain(text: object, limit: int) -> str:
 
 def _destination(value: object) -> dict[str, str]:
     if isinstance(value, dict) and value.get("kind") in ("official", "custom", "loopback"):
-        return {"kind": "official" if value["kind"] == "official" else "custom", "url": _plain(value.get("url"), 512),
-                "model": _plain(value.get("model"), 128)}
+        return {"kind": "official" if value["kind"] == "official" else "custom",
+                "url": value["url"], "model": value["model"]}
     return {"kind": "refused", "url": "", "model": ""}
 
 
@@ -94,7 +94,10 @@ def run_jev(action: str, root: pathlib.Path, stream: BinaryIO) -> dict[str, Any]
             result["source"] = "device"
         return result
     if action == "prepare":
-        result.update(token=value["token"], destination=_destination(value["destination"]),
+        destination = _destination(value["destination"])
+        if destination["kind"] != "official":
+            return {"ok": False, "status": "destination"}
+        result.update(token=value["token"], destination=destination,
                       scopes=[{name: scope[name] for name in ("scope", "title", "sends", "labels", "never", "bounds")}
                               for scope in value["scopes"]])
     elif action == "prepare-test":

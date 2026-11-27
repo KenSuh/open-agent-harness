@@ -317,6 +317,8 @@ def _destination(found: Project) -> tuple[dict | None, str]:
     kind, url, model = typesafe.destination(section, key_name)
     if kind == typesafe.REFUSED or (kind == typesafe.CUSTOM and key_name == typesafe.DEFAULT_KEY_NAME):
         return None, rerank.DESTINATION
+    if len(url) > 512 or len(model) > 128 or not url.isprintable() or not model.isprintable():
+        return None, rerank.DESTINATION
     return {"kind": kind, "url": url, "key_name": key_name, "model": model}, ""
 
 
@@ -482,10 +484,10 @@ def run_test(*, ack: str, env: Mapping[str, str] | None = None, store: secrets.K
                 return _refused({secrets.LOCKED: rerank.KEY_LOCKED, secrets.DENIED: rerank.KEY_DENIED}.get(state, NO_KEY))
         try:
             send = typesafe.post_official if transport is None else transport
-            model = typesafe.parse_probe_response(send(payload, key=key, timeout=typesafe.PROBE_TIMEOUT))
+            typesafe.validate_probe_response(send(payload, key=key, timeout=typesafe.PROBE_TIMEOUT))
         except ProviderError as exc:
             return _refused(exc.code, source=source)
-        return {"ok": True, "status": "ok", "source": source, "model": model}
+        return {"ok": True, "status": "ok", "source": source}
     finally:
         del env, store, key, value
 
