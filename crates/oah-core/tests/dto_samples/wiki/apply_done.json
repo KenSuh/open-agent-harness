@@ -1,0 +1,47 @@
+{
+  "project_id": "3f2a9c1d5e7b8a60",
+  "plan_id": "sha256:5d41402abc4b2a76b9719d911017c592ae2f8d1c7b3e4f5a6b7c8d9e0f1a2b3c",
+  "action": "setup",
+  "dir": "notes",
+  "source": null,
+  "folders_created": [
+    "notes/templates"
+  ],
+  "items": [
+    {
+      "path": "index.md",
+      "status": "kept"
+    },
+    {
+      "path": "log.md",
+      "status": "created"
+    },
+    {
+      "path": "wiki-guide.md",
+      "status": "created"
+    },
+    {
+      "path": "templates/note.md",
+      "status": "created"
+    },
+    {
+      "path": "templates/decision.md",
+      "status": "created"
+    }
+  ],
+  "counts": {
+    "created": 4,
+    "kept": 1,
+    "failed": 0,
+    "pending": 0
+  },
+  "stop": null,
+  "settings": {
+    "state": "saved",
+    "config_path": ".oah/config.toml",
+    "upgraded": true,
+    "backup": ".oah/config.toml.v0.4.bak",
+    "error": null
+  },
+  "complete": true
+}

@@ -17,6 +17,10 @@ mod settings;
 mod skill_apply;
 pub mod sync;
 
+pub use crate::project_tools::wiki_actions::{
+    WIKI_APPLY, project_wiki_apply, project_wiki_overview, project_wiki_plan, project_wiki_search,
+    wiki_apply_key,
+};
 pub use crate::workflow::{
     preset_apply, project_tools_apply, project_tools_apply_in, project_tools_plan,
     project_tools_plan_in, project_tools_status, project_tools_status_in, rules_check, rules_sync,
@@ -117,6 +121,16 @@ struct ProjectSelection {
     skill_root: Result<ProjectRoot, ProjectSkillError>,
 }
 
+/// The selected project for an operation that writes into it: its id and root, the native selection made when
+/// it was opened (or why there is none) and the number of that selection.
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectPin {
+    pub(crate) selection: u64,
+    pub(crate) project_id: String,
+    pub(crate) root: PathBuf,
+    pub(crate) pin: Result<ProjectRoot, ProjectSkillError>,
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -184,6 +198,27 @@ impl Session {
             cancel,
             progress,
         }
+    }
+
+    /// The selected project with the pin of its explicit open; `None` when no project is open.
+    pub(crate) fn project_pin(&self) -> Option<ProjectPin> {
+        let slot = lock(&self.project);
+        let held = slot.held.as_ref()?;
+        Some(ProjectPin {
+            selection: held.stamp.selection,
+            project_id: held.opened.id.clone(),
+            root: held.opened.project.root.clone(),
+            pin: held.skill_root.clone(),
+        })
+    }
+
+    /// Whether the project of `selection` is still the selected one, with the same id and a usable pin.
+    pub(crate) fn holds_selection(&self, selection: u64, project_id: &str) -> bool {
+        lock(&self.project).held.as_ref().is_some_and(|held| {
+            held.stamp.selection == selection
+                && held.opened.id == project_id
+                && held.skill_root.is_ok()
+        })
     }
 
     /// A stamp for an explicit open, which starts a new selection.

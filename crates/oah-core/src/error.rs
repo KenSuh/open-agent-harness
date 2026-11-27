@@ -13,6 +13,7 @@ use crate::fsx::skill_publish::PublishError;
 use crate::paths::{Env, PathsError};
 use crate::plan::PlanError;
 use crate::project::ProjectError;
+use crate::project_tools::wiki::WikiError;
 use crate::review::StoreError;
 use crate::review::delivery::DeliveryError;
 use crate::rules::RulesError;
@@ -87,6 +88,8 @@ pub enum Error {
     /// The review store under `OAH_HOME/state` could not be read or written (M1-S3).
     ReviewStore(StoreError),
     SkillDelivery(DeliveryError),
+    /// A Project Wiki action was refused or stopped; every path in it is relative to the project.
+    Wiki(WikiError),
 }
 
 /// The serialized error: `code` is stable, `message` and `hint` are English text for a person.
@@ -217,6 +220,23 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         "OAH_SKILL_SOURCE_UNSUPPORTED" => {
             "Give a public GitHub repository as OWNER/REPO and the skill folder inside it."
         }
+        "OAH_WIKI_AMBIGUOUS" => "Choose one of the folders listed, then preview again.",
+        "OAH_WIKI_MISSING" => {
+            "Create the folder, or correct dir under [wiki] in .oah/config.toml, then check again."
+        }
+        "OAH_WIKI_PLAN_BLOCKED" | "OAH_WIKI_COPY_OVERLAP" => {
+            "Resolve what the preview lists, then preview again. Nothing was written."
+        }
+        "OAH_WIKI_PATH_UNSAFE" | "OAH_WIKI_DIR_INVALID" => {
+            "Use a real folder inside the project, not a link, then check again."
+        }
+        "OAH_WIKI_FS_UNSUPPORTED" | "OAH_WIKI_HOME_SCOPE" => {
+            "Open an ordinary project folder on a local APFS or fixed NTFS volume."
+        }
+        "OAH_WIKI_ACCESS_DENIED" | "OAH_WIKI_IO" => {
+            "Check access to the project folder, then preview again."
+        }
+        "OAH_WIKI_STOPPED" => "Preview again to finish; the files already written are kept.",
         "OAH_SKILL_REVIEW_FAILED" => {
             "Check that the repository is public and the folder holds a SKILL.md, then review again."
         }
@@ -240,6 +260,7 @@ impl Coded for Error {
             Error::Review(error) => error.code(),
             Error::ReviewStore(error) => error.code(),
             Error::SkillDelivery(error) => error.code(),
+            Error::Wiki(error) => error.code(),
         }
     }
 
@@ -258,6 +279,7 @@ impl Coded for Error {
             Error::Review(error) => error.message(),
             Error::ReviewStore(error) => error.message(),
             Error::SkillDelivery(error) => error.message(),
+            Error::Wiki(error) => Coded::message(error),
         }
     }
 }
@@ -342,6 +364,12 @@ impl From<AgentError> for Error {
 impl From<RulesError> for Error {
     fn from(error: RulesError) -> Self {
         Error::Rules(error)
+    }
+}
+
+impl From<WikiError> for Error {
+    fn from(error: WikiError) -> Self {
+        Error::Wiki(error)
     }
 }
 

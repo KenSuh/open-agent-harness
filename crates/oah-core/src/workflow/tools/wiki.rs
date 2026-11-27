@@ -173,14 +173,14 @@ fn found(root: &Path, dir: &str, configured: bool) -> Card {
     let card = Card::new(
         "found",
         status,
-        "No action needed. Indexing and search from this app are not available yet.",
+        "No action needed. The OAH app can search its text; indexing from the app is not available yet.",
     )
     .path(project_path("Wiki folder", dir));
     if missing.is_empty() {
         card
     } else {
         card.note(format!(
-            "Not in this folder: {}. A wiki works without them; adding them from this app is not available yet.",
+            "Not in this folder: {}. A wiki works without them; the OAH app can add them and leaves what is there.",
             missing.join(", ")
         ))
     }
@@ -296,8 +296,8 @@ fn detected(root: &Path) -> Card {
             "detected",
             format!("Possible wiki folder found: {dir}. It is not selected yet."),
             format!(
-                "To select it, set dir = \"{dir}\" under [wiki] in {SETTINGS_FILE}. Then check again. \
-                 Selecting it from this app is not available yet."
+                "To select it, use Set up wiki in the OAH app, or set dir = \"{dir}\" under [wiki] in \
+                 {SETTINGS_FILE}. Then check again."
             ),
         )
         .path(project_path(label, dir)),

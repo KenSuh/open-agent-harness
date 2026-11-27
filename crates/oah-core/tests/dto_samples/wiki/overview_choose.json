@@ -1,0 +1,43 @@
+{
+  "project_id": "3f2a9c1d5e7b8a60",
+  "default_dir": "docs/wiki",
+  "configured": {
+    "dir": "docs/wiki",
+    "explicit": false
+  },
+  "settings_error": null,
+  "candidates": [
+    {
+      "dir": "wiki",
+      "standard": true,
+      "obsidian": false,
+      "index": true,
+      "log": false
+    },
+    {
+      "dir": "notes",
+      "standard": false,
+      "obsidian": true,
+      "index": false,
+      "log": false
+    }
+  ],
+  "problems": [
+    {
+      "dir": "knowledge/wiki",
+      "error": {
+        "code": "OAH_WIKI_PATH_UNSAFE",
+        "message": "knowledge/wiki is not a real folder or file of this project (a link, a junction, a name that differs only by case, or something that changed while it was read); nothing was written through it",
+        "hint": "Use a real folder inside the project, not a link, then check again."
+      }
+    }
+  ],
+  "truncated": false,
+  "target": {
+    "state": "choose",
+    "dir": null,
+    "creates": 0,
+    "sets_dir": false,
+    "error": null
+  }
+}

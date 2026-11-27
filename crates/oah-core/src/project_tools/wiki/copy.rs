@@ -15,8 +15,8 @@
 //! when every file is there and verified.
 
 use super::{
-    ApplyItem, ItemStatus, Located, SEARCH_FILE_BYTES_MAX, WikiError, fail, join, locate, path_key,
-    portable_name, project_folder, rel_dir,
+    ApplyItem, ApplyWatch, ItemStatus, Located, SEARCH_FILE_BYTES_MAX, WikiError, fail, join,
+    locate, path_key, portable_name, project_folder, rel_dir,
 };
 use crate::fsx::Fingerprint;
 use crate::fsx::skill_publish::{Content, EntryKind, Folder, ProjectRoot, PublishError};
@@ -512,6 +512,16 @@ pub fn apply_copy(
     request: &WikiCopyRequest,
     confirmed_id: &str,
 ) -> Result<WikiCopyReport, WikiError> {
+    apply_copy_watched(root, request, confirmed_id, &mut |_, _| true)
+}
+
+/// [`apply_copy`] with a watch that sees the progress and may stop the copy between two files.
+pub fn apply_copy_watched(
+    root: &ProjectRoot,
+    request: &WikiCopyRequest,
+    confirmed_id: &str,
+    watch: ApplyWatch<'_>,
+) -> Result<WikiCopyReport, WikiError> {
     let survey = survey_copy(root, request)?;
     let plan = &survey.plan;
     if plan.id != confirmed_id {
@@ -545,7 +555,7 @@ pub fn apply_copy(
         stop: None,
         config_dir: None,
     };
-    match write_copy(&survey, &mut report) {
+    match write_copy(&survey, &mut report, watch) {
         // A source without a file to copy leaves no wiki at the destination to switch to.
         Ok(()) => report.config_dir = (!plan.files.is_empty()).then(|| plan.destination.clone()),
         Err(err) => report.stop = Some(err),
@@ -553,10 +563,19 @@ pub fn apply_copy(
     Ok(report)
 }
 
-fn write_copy(survey: &CopySurvey, report: &mut WikiCopyReport) -> Result<(), WikiError> {
+fn write_copy(
+    survey: &CopySurvey,
+    report: &mut WikiCopyReport,
+    watch: ApplyWatch<'_>,
+) -> Result<(), WikiError> {
     let plan = &survey.plan;
-    if plan.copies() == 0 {
+    let total = plan.copies();
+    if total == 0 {
         return Ok(());
+    }
+    let mut written = 0;
+    if !watch(written, total) {
+        return Err(WikiError::Stopped);
     }
     let created: BTreeSet<&str> = plan.folders.iter().map(String::as_str).collect();
     let located = &survey.destination;
@@ -577,6 +596,10 @@ fn write_copy(survey: &CopySurvey, report: &mut WikiCopyReport) -> Result<(), Wi
         if file.action != CopyAction::Copy {
             continue;
         }
+        if written > 0 && !watch(written, total) {
+            return Err(WikiError::Stopped);
+        }
+        written += 1;
         let (folder, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
         let from = join(&plan.source, &file.path);
         let to = join(&plan.destination, &file.path);

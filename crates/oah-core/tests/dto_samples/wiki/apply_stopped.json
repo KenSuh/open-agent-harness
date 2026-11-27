@@ -1,0 +1,44 @@
+{
+  "project_id": "3f2a9c1d5e7b8a60",
+  "plan_id": "sha256:5d41402abc4b2a76b9719d911017c592ae2f8d1c7b3e4f5a6b7c8d9e0f1a2b3c",
+  "action": "copy",
+  "dir": "docs/wiki",
+  "source": "notes",
+  "folders_created": [
+    "docs",
+    "docs/wiki"
+  ],
+  "items": [
+    {
+      "path": "a.md",
+      "status": "created"
+    },
+    {
+      "path": "b.md",
+      "status": "pending"
+    },
+    {
+      "path": "deep/c.md",
+      "status": "pending"
+    }
+  ],
+  "counts": {
+    "created": 1,
+    "kept": 0,
+    "failed": 0,
+    "pending": 2
+  },
+  "stop": {
+    "code": "OAH_WIKI_STOPPED",
+    "message": "stopped before the next file; the files already written stay and the rest was not started",
+    "hint": "Preview again to finish; the files already written are kept."
+  },
+  "settings": {
+    "state": "skipped",
+    "config_path": ".oah/config.toml",
+    "upgraded": false,
+    "backup": null,
+    "error": null
+  },
+  "complete": false
+}

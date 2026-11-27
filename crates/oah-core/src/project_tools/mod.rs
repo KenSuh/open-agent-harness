@@ -2,3 +2,4 @@
 //! The local operations behind the Team Workflow project tools.
 
 pub mod wiki;
+pub mod wiki_actions;

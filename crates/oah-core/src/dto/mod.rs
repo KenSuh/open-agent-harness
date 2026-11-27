@@ -17,6 +17,7 @@ mod project_tools_settings;
 mod review;
 mod skills;
 mod task;
+mod wiki;
 mod workflow;
 
 pub use agents::{
@@ -45,6 +46,13 @@ pub use skills::{
     RegisterSkillSourceReq, RemoveInstalledSkillReq, RemovedSkillDto, SkillScopeDto,
 };
 pub use task::{Progress, TaskCancelReq, TaskEvent, TaskId, TaskSnapshotDto, TaskState};
+pub use wiki::{
+    ProjectWikiDto, WikiActionKind, WikiActionReq, WikiApplyDto, WikiApplyReq, WikiBackupDto,
+    WikiBackupState, WikiConfiguredDto, WikiCountsDto, WikiFileAction, WikiPlanDto,
+    WikiPlanFileDto, WikiPlanMode, WikiProblemDto, WikiSearchDto, WikiSearchReq,
+    WikiSettingChangeDto, WikiSettingKeptDto, WikiSettingValue, WikiSettingsPlanDto,
+    WikiSettingsResultDto, WikiSettingsState, WikiTargetDto, WikiTargetState, WikiUpgradeDto,
+};
 pub use workflow::{
     AdvancedDto, AgentOptionDto, BannerAgentDto, BannerDto, BannerPairDto, BannerSectionDto,
     ConfigFormatDto, DriftDto, IndependenceReq, PlannedWriteDto, PresetApplyReq, PresetDto,

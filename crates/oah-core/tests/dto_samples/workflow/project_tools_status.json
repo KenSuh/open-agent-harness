@@ -7,7 +7,7 @@
       "state": "found",
       "status": "The project settings point to the wiki folder docs/wiki.",
       "reason": null,
-      "next_step": "No action needed. Indexing and search from this app are not available yet.",
+      "next_step": "No action needed. The OAH app can search its text; indexing from the app is not available yet.",
       "paths": [
         {
           "label": "Wiki folder",
@@ -16,7 +16,7 @@
         }
       ],
       "notes": [
-        "Not in this folder: wiki-guide.md, templates. A wiki works without them; adding them from this app is not available yet."
+        "Not in this folder: wiki-guide.md, templates. A wiki works without them; the OAH app can add them and leaves what is there."
       ]
     },
     {

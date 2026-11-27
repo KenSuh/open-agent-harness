@@ -1,0 +1,75 @@
+{
+  "project_id": "3f2a9c1d5e7b8a60",
+  "plan_id": "sha256:5d41402abc4b2a76b9719d911017c592ae2f8d1c7b3e4f5a6b7c8d9e0f1a2b3c",
+  "action": "copy",
+  "dir": "docs/wiki",
+  "source": "notes",
+  "mode": "copy",
+  "today": null,
+  "folders": [
+    "docs",
+    "docs/wiki",
+    "docs/wiki/deep"
+  ],
+  "files": [
+    {
+      "path": "a.md",
+      "action": "same",
+      "bytes": 10
+    },
+    {
+      "path": "b.md",
+      "action": "copy",
+      "bytes": 2048
+    },
+    {
+      "path": "deep/c.md",
+      "action": "copy",
+      "bytes": 3500000
+    }
+  ],
+  "writes": 2,
+  "blocked": [
+    {
+      "path": "link.md",
+      "reason": "link-leaves-wiki",
+      "line": 7,
+      "target": "../README.md"
+    }
+  ],
+  "blocked_total": 1,
+  "left": [
+    ".obsidian/workspace.json"
+  ],
+  "unresolved_links": [
+    {
+      "file": "a.md",
+      "line": 3,
+      "target": "missing-note"
+    }
+  ],
+  "unresolved_total": 1,
+  "settings": {
+    "config_path": ".oah/config.toml",
+    "changes": [
+      {
+        "key": "wiki.dir",
+        "before": "notes",
+        "after": "docs/wiki"
+      }
+    ],
+    "kept": [
+      {
+        "key": "impact.wiki_dirs",
+        "value": [
+          "notes",
+          "adr"
+        ],
+        "reason": "explicit-wiki-dirs"
+      }
+    ],
+    "upgrade": null,
+    "backup": null
+  },
+  "choice_not_saved": false
+}

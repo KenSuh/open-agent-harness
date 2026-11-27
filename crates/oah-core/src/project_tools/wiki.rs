@@ -25,7 +25,7 @@ mod copy;
 pub use copy::{
     COPY_BYTES_MAX, COPY_DEPTH_MAX, COPY_FILE_BYTES_MAX, COPY_FILES_MAX, CopyAction, CopyBlock,
     CopyBlocked, CopyFile, LinkNote, WikiCopyPlan, WikiCopyReport, WikiCopyRequest, apply_copy,
-    plan_copy,
+    apply_copy_watched, plan_copy,
 };
 
 use crate::error::Coded;
@@ -149,6 +149,10 @@ pub enum WikiError {
         path: String,
         detail: String,
     },
+    /// The project folder is the home folder, or could not be told apart from it. No wiki is written there.
+    Home,
+    /// The caller's watch stopped the apply between two files. What was written stays; the rest was not started.
+    Stopped,
 }
 
 impl Coded for WikiError {
@@ -165,6 +169,8 @@ impl Coded for WikiError {
             WikiError::Blocked { .. } => "OAH_WIKI_PLAN_BLOCKED",
             WikiError::Overlap { .. } => "OAH_WIKI_COPY_OVERLAP",
             WikiError::Io { .. } => "OAH_WIKI_IO",
+            WikiError::Home => "OAH_WIKI_HOME_SCOPE",
+            WikiError::Stopped => "OAH_WIKI_STOPPED",
         }
     }
 
@@ -206,6 +212,15 @@ impl Coded for WikiError {
                 "{source} and {destination} are the same folder or one is inside the other; nothing to copy"
             ),
             WikiError::Io { path, detail } => format!("cannot use {path}: {detail}"),
+            WikiError::Home => {
+                "the project folder is your home folder, or could not be told apart from it; OAH does not set \
+                 up a wiki there"
+                    .to_string()
+            }
+            WikiError::Stopped => {
+                "stopped before the next file; the files already written stay and the rest was not started"
+                    .to_string()
+            }
         }
     }
 }
@@ -222,7 +237,10 @@ impl std::error::Error for WikiError {}
 fn fail(path: &str, err: PublishError) -> WikiError {
     let path = path.to_string();
     match err {
-        PublishError::UnsafePath | PublishError::Changed => WikiError::Unsafe { path },
+        // A new file that could not be verified under its name is named by its place in the project.
+        PublishError::UnsafePath | PublishError::Changed | PublishError::MovedUnverified { .. } => {
+            WikiError::Unsafe { path }
+        }
         PublishError::Unsupported => WikiError::Unsupported { path },
         PublishError::Occupied => WikiError::Stale,
         PublishError::Io(err) => match err.kind() {
@@ -833,6 +851,20 @@ pub fn apply_setup(
     request: &WikiSetupRequest,
     confirmed_id: &str,
 ) -> Result<WikiApplyReport, WikiError> {
+    apply_setup_watched(root, request, confirmed_id, &mut |_, _| true)
+}
+
+/// Asked before each file an apply writes, with how many files it has written and how many it writes in all.
+/// `false` stops the apply there ([`WikiError::Stopped`] in the report): no file is left half-written.
+pub type ApplyWatch<'a> = &'a mut dyn FnMut(usize, usize) -> bool;
+
+/// [`apply_setup`] with a watch that sees the progress and may stop the apply between two files.
+pub fn apply_setup_watched(
+    root: &ProjectRoot,
+    request: &WikiSetupRequest,
+    confirmed_id: &str,
+    watch: ApplyWatch<'_>,
+) -> Result<WikiApplyReport, WikiError> {
     let survey = survey_setup(root, request)?;
     if survey.plan.id != confirmed_id {
         return Err(WikiError::Stale);
@@ -866,16 +898,29 @@ pub fn apply_setup(
         stop: None,
         config_dir: None,
     };
-    match write_setup(&survey, &mut report) {
+    match write_setup(&survey, &mut report, watch) {
         Ok(()) => report.config_dir = survey.plan.config_dir.clone(),
         Err(err) => report.stop = Some(err),
     }
     Ok(report)
 }
 
-fn write_setup(survey: &SetupSurvey, report: &mut WikiApplyReport) -> Result<(), WikiError> {
+fn write_setup(
+    survey: &SetupSurvey,
+    report: &mut WikiApplyReport,
+    watch: ApplyWatch<'_>,
+) -> Result<(), WikiError> {
     let plan = &survey.plan;
     let located = &survey.located;
+    let total = plan
+        .files
+        .iter()
+        .filter(|file| file.action == FileAction::Create)
+        .count();
+    let mut written = 0;
+    if total > 0 && !watch(written, total) {
+        return Err(WikiError::Stopped);
+    }
     let mut wiki = located.deepest.clone();
     for index in located.spelled.len() - located.missing..located.spelled.len() {
         let path = located.spelled[..=index].join("/");
@@ -899,6 +944,10 @@ fn write_setup(survey: &SetupSurvey, report: &mut WikiApplyReport) -> Result<(),
         if plan.files[index].action != FileAction::Create {
             continue;
         }
+        if written > 0 && !watch(written, total) {
+            return Err(WikiError::Stopped);
+        }
+        written += 1;
         let (folder, name) = match standard.split_once('/') {
             None => (&wiki, *standard),
             Some((_, leaf)) => (&templates, leaf),
