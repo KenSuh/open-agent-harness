@@ -47,7 +47,8 @@ status commands (`claude auth status`, `codex login status`) and reads the answe
 
 ## Where `oah` looks for a key
 
-`oah` has exactly one lookup for keys, in `oah.secrets`. For a key named `<NAME>` it tries, in order:
+`oah.secrets` looks up a key named `<NAME>` in the following order. Jev also applies the destination and approval
+rules below.
 
 1. **The environment variable `<NAME>`**, when it is set and not empty.
 2. **The OS keychain**, under the service `oah` and the account `<NAME>`:
@@ -88,9 +89,8 @@ cmdkey /generic:oah:TYPESAFE_API_KEY /user:oah /pass
 
 ## A key alone never turns the re-ranker on
 
-The TypeSafe Jev re-ranker runs only when **you enabled it and the key is present**. A key in your environment
-does not enable it. Guided `oah init` asks once, says what it sends and that TypeSafe may charge for requests,
-and records your answer in `.oah/config.toml`:
+Guided `oah init` explains what TypeSafe receives and that it may charge for requests. It saves the project
+setting in `.oah/config.toml`.
 
 ```toml
 [rerank]
@@ -98,16 +98,28 @@ enabled = true
 provider = "typesafe"
 ```
 
-Every packet plan, brief, run record and impact result then says `rerank=used` or `rerank=unused(<reason>)`:
+For Impact Map ordering, also set `[impact].rerank = true`. In Desktop, open **Team Workflow → Project Tools →
+Jev → Manage Jev on this device** to review and approve the destination and the data the project sends. You can
+save or remove a key, run a separate connection test, and revoke the project's approval from that panel.
+
+The OS-stored TypeSafe key is used at the official TypeSafe address for approved Impact Map requests and for
+the connection test. To keep using Jev for skills, difficulty, model selection, or other CLI judgements after
+upgrading from a key stored only in the OS, set `TYPESAFE_API_KEY` in the environment. These uses support the
+official address and local endpoints. Switching off a project's device approval also stops that project's CLI
+requests.
+
+Packet plans, briefs, run records and impact results report the outcome.
 
 | Result | Meaning |
 |---|---|
 | `rerank=used` | The re-ranker ran and re-ordered the candidates. It never adds or drops one. |
 | `rerank=unused(not-enabled)` | `[rerank] enabled` is not `true`. This is the default. |
-| `rerank=unused(no key)` | It is enabled, but the lookup above found no key. |
+| `rerank=unused(no key)` | The request has no usable key. Check the key source and the project's approval. |
 | `rerank=unused(disabled-by-brief)` | The command ran with `--no-rerank`, or the packet turned it off. |
 
-To use another variable name, set `key_name` under `[rerank.typesafe]`.
+Impact Map ordering supports another environment variable name through `[rerank.typesafe].key_name` and a custom
+HTTPS destination. Approve the exact destination and key name. Use a separate environment credential for a
+custom destination.
 
 ## Artificial Analysis scores
 

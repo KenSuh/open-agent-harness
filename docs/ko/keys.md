@@ -45,7 +45,7 @@ API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 프�
 
 ## oah가 키를 찾는 곳
 
-키를 찾는 경로는 `oah.secrets` 하나뿐이다. 이름이 `<NAME>`인 키를 이 순서로 찾는다.
+`oah.secrets`는 이름이 `<NAME>`인 키를 다음 순서로 찾는다. Jev에는 아래의 전송 대상과 승인 조건도 적용한다.
 
 1. **환경 변수 `<NAME>`.** 설정돼 있고 비어 있지 않을 때 쓴다.
 2. **OS 키체인.** 서비스 `oah`, 계정 `<NAME>`으로 찾는다.
@@ -85,9 +85,8 @@ cmdkey /generic:oah:TYPESAFE_API_KEY /user:oah /pass
 
 ## 키만으로는 재정렬기가 켜지지 않는다
 
-TypeSafe Jev 재정렬기는 **사용자가 켰고 키도 있을 때만** 돈다. 환경 변수에 키가 있다고 켜지지 않는다. 안내형
-`oah init`이 한 번 묻는다. 무엇을 보내는지, TypeSafe가 요청마다 요금을 받을 수 있다는 점을 밝히고 답을
-`.oah/config.toml`에 적는다.
+안내형 `oah init`은 TypeSafe에 보내는 내용과 요금이 발생할 수 있다는 점을 설명하고 프로젝트 설정을
+`.oah/config.toml`에 저장한다.
 
 ```toml
 [rerank]
@@ -95,16 +94,26 @@ enabled = true
 provider = "typesafe"
 ```
 
-그 뒤로 패킷 계획, 지시문, 실행 기록, 영향 결과마다 `rerank=used`나 `rerank=unused(<이유>)`가 붙는다.
+Impact Map에서 결과 순서를 조정하려면 `[impact].rerank = true`도 설정한다. Desktop의 **Team Workflow →
+Project Tools → Jev → Manage Jev on this device**에서 전송 대상과 데이터를 검토하고 이 프로젝트에 승인한다.
+같은 화면에서 키 저장·삭제, 별도의 연결 테스트, 프로젝트 승인 철회를 할 수 있다.
+
+OS에 저장한 TypeSafe 키는 공식 주소에서 승인받은 Impact Map 요청과 연결 테스트에 쓰인다. 기존에 OS에 키를 저장해
+스킬 순서, 난이도, 모델 선택 또는 다른 CLI 판단에 Jev를 쓰던 경우, 업데이트 후에는 환경 변수 `TYPESAFE_API_KEY`를
+설정한다. 이 기능들은 공식 주소와 로컬 주소를 지원한다. 이 기기에서 프로젝트 승인을 철회하면 해당 프로젝트의 CLI
+요청도 중단된다.
+
+패킷 계획, 지시문, 실행 기록과 영향 결과에 실행 상태가 표시된다.
 
 | 결과 | 뜻 |
 |---|---|
 | `rerank=used` | 재정렬기가 돌아 후보 순서를 다시 매겼다. 후보를 더하거나 빼지는 않는다. |
 | `rerank=unused(not-enabled)` | `[rerank] enabled`가 `true`가 아니다. 기본값이다. |
-| `rerank=unused(no key)` | 켜 두었지만 위 경로에서 키를 찾지 못했다. |
+| `rerank=unused(no key)` | 이 요청에 사용할 수 있는 키가 없다. 키 출처와 프로젝트 승인을 확인한다. |
 | `rerank=unused(disabled-by-brief)` | 명령에 `--no-rerank`를 줬거나 패킷에서 껐다. |
 
-다른 변수 이름을 쓰려면 `[rerank.typesafe]`에 `key_name`을 적는다.
+Impact Map에는 `[rerank.typesafe].key_name`으로 다른 환경 변수 이름을 지정하거나 별도의 HTTPS 주소를 연결할 수 있다.
+정확한 주소와 키 이름을 승인한다. 별도의 HTTPS 주소에는 전용 환경 변수 키를 사용한다.
 
 ## Artificial Analysis 점수
 
