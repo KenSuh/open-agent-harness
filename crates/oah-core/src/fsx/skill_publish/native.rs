@@ -366,18 +366,30 @@ impl Dir {
         self.child(name)
     }
 
-    /// Writes a complete new file under `name` and never replaces one: the bytes go to a temporary sibling that
-    /// is flushed and then renamed without replacement. `Occupied` when the name is taken.
+    /// Writes a complete new file under `name` and never replaces one: the bytes go to a staged sibling that is
+    /// flushed and then given the name without replacement, the way [`BoundFolder::publish_new`] does it.
+    /// `Occupied` when the name is taken.
     pub(super) fn publish_new(&self, name: &str, data: &[u8]) -> Result<()> {
         use std::collections::hash_map::RandomState;
         use std::hash::BuildHasher;
 
         self.check()?;
-        let temp = format!(
+        // Not built from `name`: a copied file's own name can be as long as a name may be.
+        let staged = format!(
             ".oah-{:016x}.tmp",
             RandomState::new().hash_one(std::process::id())
         );
-        os::publish_new(self, &temp, name, data)?;
+        let mut file = os::stage(self, &staged)?;
+        let landed = file
+            .write_all(data)
+            .and_then(|()| file.sync_all())
+            .map_err(PublishError::from)
+            .and_then(|()| install_shared(self, &staged, &file, name));
+        if let Err(err) = landed {
+            let _ = os::remove_file(self, &staged, &file);
+            return Err(err);
+        }
+        drop(file);
         self.sync()?;
         self.check()
     }
@@ -402,6 +414,24 @@ fn retry_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
                 std::thread::sleep(SHARING_POLL);
             }
             other => return other,
+        }
+    }
+}
+
+/// [`os::install_file`] for a file other programs may notice at once. On Windows a scanner or an indexer can hold
+/// a new file open for a moment without sharing its name, so a refused rename is tried again for [`SHARING_WAIT`].
+fn install_shared(dir: &Dir, staged: &str, file: &File, name: &str) -> Result<()> {
+    let deadline = Instant::now() + SHARING_WAIT;
+    loop {
+        match os::install_file(dir, staged, file, name) {
+            Err(PublishError::Io(err))
+                if cfg!(windows)
+                    && matches!(err.raw_os_error(), Some(5 | 32))
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(SHARING_POLL);
+            }
+            outcome => return outcome,
         }
     }
 }

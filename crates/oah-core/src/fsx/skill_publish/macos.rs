@@ -338,29 +338,3 @@ pub(super) fn revert_file(
     rx::renameat_with(dir.file(), staged, dir.file(), name, RenameFlags::EXCHANGE)
         .map_err(|_| unverified())
 }
-
-pub(super) fn publish_new(dir: &Dir, temp: &str, name: &str, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-
-    let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    // The process umask narrows this, as it does for a file the user saves.
-    let mut file = File::from(
-        rx::openat(dir.file(), temp, flags, Mode::from_raw_mode(0o666)).map_err(native)?,
-    );
-    let landed = file
-        .write_all(data)
-        .and_then(|()| file.sync_all())
-        .map_err(PublishError::from)
-        .and_then(|()| {
-            rx::renameat_with(dir.file(), temp, dir.file(), name, RenameFlags::NOREPLACE)
-                .map_err(native)
-        });
-    if let Err(err) = landed {
-        let _ = rx::unlinkat(dir.file(), temp, AtFlags::empty());
-        return Err(err);
-    }
-    if identity(&regular(dir, name, FileAccess::Read)?)? != identity(&file)? {
-        return Err(PublishError::Changed);
-    }
-    Ok(())
-}
