@@ -54,6 +54,31 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+@contextlib.contextmanager
+def _ended_waits(ready: pathlib.Path, *ends: type[BaseException], after: float | None = None):
+    """End run_command's first waits once `ready` exists, one for each of `ends`: KeyboardInterrupt as a raising
+    signal handler would, subprocess.TimeoutExpired as the deadline would. With `after`, the wait really runs for
+    that many seconds first. Yields the timeout of every wait and the process each one waited for."""
+    wait, waits, children = subprocess.Popen.communicate, [], []
+
+    def ended(process, *args, **kwargs):
+        waits.append(kwargs.get("timeout"))
+        children.append(process)
+        if len(waits) > len(ends):
+            return wait(process, *args, **kwargs)
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if after is not None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                wait(process, *args, **{**kwargs, "timeout": after})
+        end = ends[len(waits) - 1]
+        raise end(process.args, kwargs.get("timeout")) if end is subprocess.TimeoutExpired else end()
+
+    with patch.object(subprocess.Popen, "communicate", ended):
+        yield waits, children
+
+
 class ResolveTest(unittest.TestCase):
     def test_resolve_returns_none_when_missing(self):
         empty = make_tmp_dir(self)
@@ -336,6 +361,108 @@ class RunTest(unittest.TestCase):
         while _pid_alive(child_pid) and time.monotonic() < deadline:
             time.sleep(0.2)
         self.assertFalse(_pid_alive(child_pid), "the grandchild survived its interrupted caller")
+
+    def test_a_supervising_child_is_asked_to_stop_its_own_tree_before_the_kill(self):
+        work = make_tmp_dir(self)
+        supervisor = work / "supervisor.py"
+        # The child's own tree runs where killing the child does not reach it on POSIX: only the child stops it.
+        supervisor.write_text(
+            "import os, pathlib, subprocess, sys, time\n"
+            "tree_pid, stop, done = map(pathlib.Path, sys.argv[1:4])\n"
+            "own = {'start_new_session': True} if os.name != 'nt' else {\n"
+            "    'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}\n"
+            "tree = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], **own)\n"
+            "tree_pid.with_suffix('.tmp').write_text(str(tree.pid), encoding='utf-8')\n"
+            "os.replace(tree_pid.with_suffix('.tmp'), tree_pid)\n"
+            "limit = time.monotonic() + 120\n"
+            "while not stop.exists() and time.monotonic() < limit:\n"
+            "    time.sleep(0.01)\n"
+            "tree.kill()\n"
+            "tree.wait()\n"
+            "done.touch()\n",
+            encoding="utf-8",
+        )
+        for end in (KeyboardInterrupt, subprocess.TimeoutExpired):  # the caller is interrupted, or its deadline passes
+            with self.subTest(end=end.__name__):
+                case = work / end.__name__
+                case.mkdir()
+                tree_pid, stop, done = case / "tree.pid", case / "stop", case / "done"
+                argv = [sys.executable, str(supervisor), str(tree_pid), str(stop), str(done)]
+                with _ended_waits(tree_pid, end) as (waits, children):
+                    if end is KeyboardInterrupt:
+                        with self.assertRaises(KeyboardInterrupt):
+                            run_command(argv, timeout=120, cancel=stop.touch, cancel_timeout=30)
+                    else:
+                        result = run_command(argv, timeout=120, cancel=stop.touch, cancel_timeout=30)
+                        self.assertEqual((result.timed_out, result.returncode), (True, None))
+                self.assertEqual(waits, [120, 30, proc_module.REAP_SECONDS], "ask, wait for the child, then reap")
+                self.assertTrue(done.exists(), "the supervising child was killed before it had stopped its own tree")
+                self.assertEqual(children[0].returncode, 0, "the supervising child did not exit by itself")
+                pid = int(tree_pid.read_text(encoding="utf-8"))
+                deadline = time.monotonic() + 10
+                while _pid_alive(pid) and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                self.assertFalse(_pid_alive(pid), "the supervised tree survived the caller")
+
+    def test_a_supervising_child_that_does_not_stop_is_killed_after_the_bounded_wait(self):
+        work = make_tmp_dir(self)
+        ready = work / "ready"
+        deaf = work / "deaf.py"
+        deaf.write_text("import pathlib, sys, time\npathlib.Path(sys.argv[1]).touch()\ntime.sleep(60)\n",
+                        encoding="utf-8")
+
+        def refuse():
+            raise OSError("the request cannot be delivered")
+
+        interrupt, expiry, reap = KeyboardInterrupt, subprocess.TimeoutExpired, proc_module.REAP_SECONDS
+        for name, cancel, ends, expected in (
+                ("the child ignores the request", lambda: None, (interrupt,), [120, 0.2, reap]),
+                ("the caller is interrupted again while it waits", lambda: None, (interrupt, interrupt), [120, 0.2]),
+                ("the request cannot be made", refuse, (interrupt,), [120, reap]),
+                ("the child ignores the request made at the deadline", lambda: None, (expiry,), [120, 0.2, reap]),
+                ("the caller is interrupted while it waits at the deadline", lambda: None, (expiry, interrupt),
+                 [120, 0.2])):
+            with self.subTest(name):
+                ready.unlink(missing_ok=True)
+                started = time.monotonic()
+                with _ended_waits(ready, *ends) as (waits, children):
+                    if ends[-1] is interrupt:  # an interrupt is never lost, whichever wait it ends
+                        with self.assertRaises(KeyboardInterrupt):
+                            run_command([sys.executable, str(deaf), str(ready)], timeout=120, cancel=cancel,
+                                        cancel_timeout=0.2)
+                    else:
+                        result = run_command([sys.executable, str(deaf), str(ready)], timeout=120, cancel=cancel,
+                                             cancel_timeout=0.2)
+                        self.assertEqual((result.timed_out, result.returncode), (True, None))
+                self.assertLess(time.monotonic() - started, 60)
+                self.assertEqual(waits, expected)
+                children[0].communicate(timeout=10)  # a new interrupt leaves the killed child for its caller
+                self.assertNotEqual(children[0].returncode, 0, "the child outlived the caller's wait")
+
+    @unittest.skipIf(os.name == "nt", "only a POSIX pipe write can be cut short")
+    def test_a_supervising_child_is_not_left_reading_input_that_was_cut_short(self):
+        work = make_tmp_dir(self)
+        ready, stop, done = work / "ready", work / "stop", work / "done"
+        reader = work / "reader.py"
+        # Busy until it is asked, like a child that has not reached its input yet; then it reads all of it.
+        reader.write_text(
+            "import pathlib, sys, time\n"
+            "ready, stop, done = map(pathlib.Path, sys.argv[1:4])\n"
+            "ready.touch()\n"
+            "limit = time.monotonic() + 120\n"
+            "while not stop.exists() and time.monotonic() < limit:\n"
+            "    time.sleep(0.01)\n"
+            "done.write_text(str(len(sys.stdin.buffer.read())), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        text = "x" * (1 << 22)  # more than a pipe holds: the caller is still writing when it is interrupted
+        with _ended_waits(ready, KeyboardInterrupt, after=0.5) as (waits, children), \
+                self.assertRaises(KeyboardInterrupt):
+            run_command([sys.executable, str(reader), str(ready), str(stop), str(done)], timeout=120,
+                        stdin_text=text, cancel=stop.touch, cancel_timeout=10)
+        self.assertEqual(waits, [120, 10, proc_module.REAP_SECONDS])
+        self.assertEqual(children[0].returncode, 0, "the child was left waiting for the rest of its input")
+        self.assertLess(int(done.read_text(encoding="utf-8")), len(text))
 
     @unittest.skipUnless(os.name == "nt", "Windows Job Object lifetime")
     def test_timeout_kills_child_after_launcher_exits(self):

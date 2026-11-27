@@ -110,22 +110,36 @@ def _generation_run(mirror: pathlib.Path, argv, *, timeout: float, env=None, enc
     code = (f"import sys; sys.path.insert(0, {str(pathlib.Path(__file__).resolve().parents[2])!r}); "
             "from oah.impact.defaultbranch import _generation_worker; _generation_worker()")
     command = (sys.executable, "-c", code, str(mirror), str(os.getpid()), str(timeout), encoding, str(cancel), *argv)
+    stopping = 2 * REAP_SECONDS + 1  # what the owner may need to kill and reap Git, at its deadline or when asked
+    asked = False
+
+    def ask() -> None:
+        # Only the owner can stop Git, which runs outside the owner's session (inside its own Job on Windows).
+        # run_command asks before it kills the owner: on an interrupt, and at a deadline that a late owner missed.
+        nonlocal asked
+        asked = True
+        cancel.touch()
+
     try:
-        result = run_command(command, timeout=timeout + 2 * REAP_SECONDS + 1, env=env, stdin_text=stdin_text,
-                             encoding=encoding)
+        result = run_command(command, timeout=timeout + stopping, env=env, stdin_text=stdin_text, encoding=encoding,
+                             cancel=ask, cancel_timeout=stopping)
     except BaseException:
-        # run_command's POSIX session survives KeyboardInterrupt. Ask its owner to stop and reap Git
-        # before releasing our mirror lock; a hard parent exit is detected by the owner itself.
-        try:
-            cancel.touch()
-        except OSError:
-            pass
+        # An interrupted run_command has asked the owner and waited for it before killing what was left. An
+        # interrupt outside that wait leaves the owner running on POSIX, so it is asked here instead. A hard
+        # parent exit is detected by the owner itself.
+        if not asked:
+            try:
+                cancel.touch()
+            except OSError:
+                pass
+        # Git has to be reaped before our mirror lock is released, so wait for the owner's lease as well.
         try:
             with StateLock(mirror.with_suffix(".lock"), timeout=REAP_SECONDS + 1):
                 pass
         except (OSError, LockTimeout):
             pass  # A still-leased generation is retained and blocks allocation on the next query.
-        # Only this command's owner may clear cancellation: it may not have acquired its lease yet.
+        # Only this command's owner may clear cancellation: it may not have acquired its lease yet. A marker
+        # that it has cleared is never written again.
         raise
     if result.timed_out or result.returncode != 0:
         return RunResult(None, "", "", result.timed_out)

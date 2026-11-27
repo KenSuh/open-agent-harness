@@ -831,6 +831,48 @@ finally:
                     except ProcessLookupError:
                         pass
 
+    def test_the_real_runner_asks_the_generation_owner_before_its_hard_stop(self):
+        # The real runner on every platform, with its wait ended as Ctrl-C does or as the outer deadline does when
+        # the owner started late. It may kill the owner, and on Windows end the Job that the owned command also
+        # runs in, only after the owner has seen the cancellation, reaped its command, released the lease and
+        # cleared the marker that only the owner may clear.
+        owned = ("import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); limit = time.monotonic() + 60; "
+                 "exec('while not pathlib.Path(sys.argv[2]).exists() and time.monotonic() < limit:\\n"
+                 " time.sleep(0.01)')")
+        wait = subprocess.Popen.communicate
+        for end in (KeyboardInterrupt, subprocess.TimeoutExpired):
+            with self.subTest(end=end.__name__):
+                mirror = self.fx.tmp / ("mirror-" + uuid.uuid4().hex)
+                mirror.mkdir()
+                started, release = self.fx.tmp / f"owned-started-{end.__name__}", self.fx.tmp / "release-owned"
+                self.addCleanup(release.touch)
+                argv = (sys.executable, "-c", owned, str(started), str(release))
+                owners = []
+
+                def ended(process, *args, **kwargs):
+                    if owners:
+                        return wait(process, *args, **kwargs)
+                    owners.append(process)
+                    deadline = time.monotonic() + 30
+                    while not started.exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    raise end(process.args, kwargs.get("timeout")) if end is subprocess.TimeoutExpired else end()
+
+                with patch.object(subprocess.Popen, "communicate", ended):
+                    if end is KeyboardInterrupt:
+                        with self.assertRaises(KeyboardInterrupt):
+                            defaultbranch._generation_run(mirror, argv, timeout=60.0)
+                    else:
+                        result = defaultbranch._generation_run(mirror, argv, timeout=60.0)
+                        self.assertEqual((result.returncode, result.timed_out), (None, True))
+                self.assertTrue(started.exists(), "the owned command must be running when the wait ends")
+                out, err = owners[0].communicate(timeout=15)
+                self.assertEqual(owners[0].returncode, 0, err)
+                self.assertIsNone(json.loads(out)["returncode"], "the owner must report its command as cancelled")
+                self.assertEqual(list(mirror.glob("oah-cancel-*")), [], "a marker its owner cleared stays cleared")
+                with StateLock(mirror.with_suffix(".lock"), timeout=0):
+                    pass  # Free once the owner and, on POSIX, the command that inherited the lease have stopped.
+
     def test_concurrent_queries_keep_their_own_fetched_sha(self):
         self._concurrent_queries("map")
 

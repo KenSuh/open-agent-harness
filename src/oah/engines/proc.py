@@ -15,7 +15,7 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 BATCH_SUFFIXES = (".cmd", ".bat")
 REAP_SECONDS = 5
@@ -279,9 +279,15 @@ class _WindowsJob:
 
 def run_command(argv: Sequence[str], *, timeout: float, cwd: str | None = None,
                 env: Mapping[str, str] | None = None, encoding: str = "utf-8",
-                stdin_text: str | None = None) -> RunResult:
+                stdin_text: str | None = None, cancel: Callable[[], None] | None = None,
+                cancel_timeout: float = REAP_SECONDS) -> RunResult:
     """Run argv without a shell. On timeout the whole process tree is killed, and likewise when the caller is
-    interrupted while it waits (a signal handler that raises, Ctrl-C): the tree does not outlive the call."""
+    interrupted while it waits (a signal handler that raises, Ctrl-C): the tree does not outlive the call.
+
+    `cancel` is for a child that supervises a process tree of its own in another session or Job Object. Killing
+    such a child leaves that tree running on POSIX, and on Windows ends it before the child's own cleanup. So
+    on timeout or interrupt `cancel` is called first, to ask the child to stop, and the child has
+    `cancel_timeout` seconds to stop its tree and exit. What is left after that is killed like any other child."""
     if not argv:
         raise ValueError("empty command")
     if is_batch(str(argv[0])):
@@ -314,7 +320,7 @@ def run_command(argv: Sequence[str], *, timeout: float, cwd: str | None = None,
         try:
             out, err = proc.communicate(input=data, timeout=timeout)
         except subprocess.TimeoutExpired:
-            kill_tree(proc)
+            _stop_tree(proc, cancel, cancel_timeout)
             try:
                 out, err = proc.communicate(timeout=REAP_SECONDS)
             except subprocess.TimeoutExpired:
@@ -323,7 +329,7 @@ def run_command(argv: Sequence[str], *, timeout: float, cwd: str | None = None,
         except BaseException:
             # The child runs in its own session (its own Job Object on Windows), so whatever stops the caller
             # would not reach it.
-            kill_tree(proc)
+            _stop_tree(proc, cancel, cancel_timeout)
             try:
                 proc.communicate(timeout=REAP_SECONDS)
             except (subprocess.TimeoutExpired, OSError, ValueError):
@@ -333,6 +339,29 @@ def run_command(argv: Sequence[str], *, timeout: float, cwd: str | None = None,
     finally:
         if job is not None:
             job.close()
+
+
+def _stop_tree(proc: subprocess.Popen, cancel: Callable[[], None] | None, seconds: float) -> None:
+    """Kill the tree of a child that the caller no longer waits for. A supervising child is asked first and has
+    `seconds` to stop its own tree and exit, before this kill and before its Job Object closes. A request that
+    fails, a child that takes too long and a new interrupt all lead straight to the kill."""
+    try:
+        if cancel is not None:
+            try:
+                cancel()
+                # Input that the caller did not finish writing must not keep the child reading. The wait below
+                # would not close it, and would fail on a pipe it finds closed, so the pipe is taken away.
+                stdin, proc.stdin = proc.stdin, None
+                if stdin is not None:
+                    try:
+                        stdin.close()
+                    except OSError:
+                        pass
+                proc.communicate(timeout=seconds)
+            except Exception:
+                pass
+    finally:
+        kill_tree(proc)
 
 
 def kill_tree(proc: subprocess.Popen) -> None:
