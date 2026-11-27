@@ -579,13 +579,6 @@ impl BoundFolder {
             bytes: expected,
         } = before;
         let (staged, new) = stage(dir, name, data)?;
-        let id = match os::identity(&new) {
-            Ok(id) => id,
-            Err(err) => {
-                let _ = os::remove_file(dir, &staged, &new);
-                return Err(err);
-            }
-        };
         let aside = match os::exchange_file(dir, &staged, &new, name, &old) {
             Ok(aside) => aside,
             Err(err) => {
@@ -607,6 +600,12 @@ impl BoundFolder {
                 });
             }
         }
+        // The identity is read from the open handle after the exchange, never before it: NTFS gives a file
+        // renamed onto a name the creation time of the file that had the name (tunnelling), so an identity read
+        // before the rename no longer names the same file after it.
+        let id = os::identity(&new).map_err(|_| PublishError::MovedUnverified {
+            path: dir.path().join(name),
+        })?;
         // On Windows a reader cannot open the name while this handle, which may delete, is open.
         drop((new, old));
         dir.sync()?;
@@ -711,6 +710,24 @@ mod bound_tests {
         assert_eq!(entries(&oah), [NAME], "a staged or replaced file was left");
         assert_eq!(folder.read(NAME).unwrap().unwrap().bytes(), b"new bytes");
         assert!(folder.read("absent.toml").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_name_replaced_or_freed_a_moment_ago_is_replaced_and_published_again() {
+        // NTFS remembers a name's creation time for some seconds and gives it to the next file under that name,
+        // so the identity of a staged file changes at its rename. Every step here reuses the name at once.
+        let project = project(Some(b"one"));
+        let oah = project.root.join(".oah");
+        let folder = BoundFolder::open(&project.root, ".oah").unwrap();
+        for bytes in [b"two".as_slice(), b"three"] {
+            let before = folder.hold(NAME).unwrap().unwrap();
+            folder.replace(NAME, before, bytes).unwrap();
+            assert_eq!(fs::read(oah.join(NAME)).unwrap(), bytes);
+        }
+        fs::remove_file(oah.join(NAME)).unwrap();
+        folder.publish_new(NAME, b"four").unwrap();
+        assert_eq!(fs::read(oah.join(NAME)).unwrap(), b"four");
+        assert_eq!(entries(&oah), [NAME]);
     }
 
     #[test]
