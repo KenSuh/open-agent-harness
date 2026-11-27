@@ -80,7 +80,7 @@ fn every_shared_sample_reads_as_the_contract_says() {
             (expected, got) => panic!("{name}: expected error {expected:?}, got {got:?}"),
         }
     }
-    assert_eq!((read, refused), (17, 19), "the sample counts changed");
+    assert_eq!((read, refused), (20, 19), "the sample counts changed");
 }
 
 #[test]
@@ -227,20 +227,18 @@ fn a_plan_reads_only_and_names_what_would_change() {
         .collect();
     assert_eq!(
         changed,
-        [
-            ("wiki.dir", Some(String::from("\"knowledge/wiki\""))),
-            (
-                "impact.wiki_dirs",
-                Some(String::from("[\"knowledge/wiki\"]"))
-            ),
-        ]
+        [("wiki.dir", Some(String::from("\"knowledge/wiki\"")))]
     );
     assert!(plan.changes().iter().all(|change| change.before.is_none()));
     assert_eq!(plan.tools().wiki.dir.value, "docs/wiki");
     assert_eq!(plan.tools_after().wiki.dir.value, "knowledge/wiki");
+    // The map follows by reading the selected folder; no key is written for it.
     assert_eq!(
-        plan.tools_after().impact.wiki_dirs.value,
-        ["knowledge/wiki"]
+        plan.tools_after().impact.wiki_dirs,
+        Setting {
+            value: vec![String::from("knowledge/wiki")],
+            explicit: false
+        }
     );
     assert!(plan.upgrade_warning().is_none() && plan.backup().is_none());
     // The same project, file and change give the same plan; another change gives another one.
@@ -319,7 +317,7 @@ fn a_save_keeps_comments_unknown_keys_the_bom_and_crlf() {
     let expected = text.replace(
         "dir = \"docs/wiki\"  # default",
         "dir = \"knowledge/wiki\"  # default",
-    ) + "\r\n[impact]\r\nwiki_dirs = [\"knowledge/wiki\"]\r\n";
+    );
     assert_eq!(after, expected);
     assert!(
         !after.replace("\r\n", "").contains('\n'),
@@ -343,15 +341,17 @@ fn an_explicit_list_of_wiki_folders_is_kept_and_reported() {
     assert_eq!(plan.kept()[0].reason.as_str(), "explicit-wiki-dirs");
     apply(&project, &changes, &plan.approve(false)).unwrap();
     assert_eq!(project.text(), format!("{text}\n[wiki]\ndir = \"notes\"\n"));
-    // The override is removed on request, which puts the default back.
+    assert_eq!(project.tools().impact.wiki_dirs.value, ["docs/wiki", "adr"]);
+    // The override is removed on request, which puts the map back on the selected wiki folder.
     let reset = vec![ToolsChange::ImpactWikiDirs(None)];
     let plan = project.plan(&reset);
     apply(&project, &reset, &plan.approve(false)).unwrap();
+    assert!(!project.text().contains("wiki_dirs"), "{}", project.text());
     let tools = project.tools();
     assert_eq!(
         tools.impact.wiki_dirs,
         Setting {
-            value: vec![String::from("docs/wiki")],
+            value: vec![String::from("notes")],
             explicit: false
         }
     );

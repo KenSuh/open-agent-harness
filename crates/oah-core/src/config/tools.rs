@@ -7,7 +7,7 @@
 //! | field | key | default |
 //! |---|---|---|
 //! | `wiki.dir` | `[wiki] dir` | `"docs/wiki"` |
-//! | `impact.wiki_dirs` | `[impact] wiki_dirs` | `["docs/wiki"]` |
+//! | `impact.wiki_dirs` | `[impact] wiki_dirs` | the folder `[wiki] dir` gives, else `["docs/wiki"]` |
 //! | `impact.graph_file` | `[impact] graph_file` | `"graphify-out/graph.json"` |
 //! | `impact.rerank` | `[impact] rerank` | `false` |
 //! | `jev.enabled` | `[rerank] enabled` | `false` |
@@ -15,8 +15,10 @@
 //! | `managed.wiki_index.*` | `[project_tools.wiki_index]` `managed`, `exclude`, `embedding_model` | `false`, `[]`, `""` |
 //! | `managed.graphify.managed` | `[project_tools.graphify] managed` | `false` |
 //!
-//! A key the file does not give keeps the source CLI's default, and reading never follows one key from another:
-//! `impact.wiki_dirs` without a value is `["docs/wiki"]` whatever `wiki.dir` says. Every other key of
+//! A key the file does not give keeps the source CLI's default. One key follows another: without
+//! `[impact] wiki_dirs` the map reads the wiki folder the file selects with `[wiki] dir`, so choosing a wiki
+//! folder needs no second key. A list the file gives is an override and is read and kept as written; removing
+//! it puts the map back on the selected folder. Every other key of
 //! `[wiki]`, `[impact]` and `[rerank]` belongs to the source CLI: it is not read, reported or rewritten here.
 //! `[project_tools]` is the reserved table for the managed wiki index and graph of a later step; a source CLI
 //! that does not know it ignores it. Its unknown keys are `OAH_CONFIG_UNKNOWN_KEY` notices.
@@ -165,9 +167,7 @@ impl WikiTool {
         let where_ = file.where_();
         let table = top_table(file, "wiki")?;
         let dir = string_key(where_, table, "wiki.dir", DEFAULT_WIKI_DIR)?;
-        // Blank as the source CLI's `str.strip()` sees it, which also strips the four separators U+001C..U+001F.
-        let blank = |c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c);
-        if dir.value.chars().all(blank) {
+        if is_blank(&dir.value) {
             return Err(ConfigError::invalid(format!(
                 "{where_}: wiki.dir must be a folder path; set it to a folder inside the project or remove it to \
                  use the default"
@@ -179,17 +179,24 @@ impl WikiTool {
 }
 
 impl ImpactTool {
-    /// Reads the three `[impact]` keys alone.
+    /// Reads the three `[impact]` keys. Without `wiki_dirs` the list is the wiki folder `[wiki] dir` selects,
+    /// and `["docs/wiki"]` when the file selects none; a `[wiki]` table this cannot read does not stop the map,
+    /// which then has the default as it always had.
     pub fn read(file: &ConfigFile, notices: &mut Vec<Notice>) -> Result<ImpactTool, ConfigError> {
         let where_ = file.where_();
         let table = top_table(file, "impact")?;
-        let wiki_dirs = list_key(
+        let mut wiki_dirs = list_key(
             where_,
             table,
             "impact.wiki_dirs",
             &[DEFAULT_WIKI_DIR],
             "folder paths",
         )?;
+        if !wiki_dirs.explicit
+            && let Some(dir) = selected_wiki_dir(file)
+        {
+            wiki_dirs.value = vec![dir.to_string()];
+        }
         let graph_file = string_key(where_, table, "impact.graph_file", DEFAULT_GRAPH_FILE)?;
         let rerank = bool_key(where_, table, "impact.rerank", false)?;
         note_list(
@@ -309,6 +316,23 @@ impl ManagedTools {
                 managed: flag(&["graphify", "managed"]),
             },
         })
+    }
+}
+
+/// Blank as the source CLI's `str.strip()` sees it, which also strips the four separators U+001C..U+001F.
+fn is_blank(text: &str) -> bool {
+    text.chars()
+        .all(|c| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
+/// The folder `[wiki] dir` gives, when it gives one the wiki reader accepts: a string that is not blank.
+fn selected_wiki_dir(file: &ConfigFile) -> Option<&str> {
+    match file.values().get("wiki") {
+        Some(Value::Table(table)) => match table.get("dir") {
+            Some(Value::String(dir)) if !is_blank(dir) => Some(dir),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -520,10 +544,11 @@ fn note_list(
     deny_unknown_fields
 )]
 pub enum ToolsChange {
-    /// The project wiki's folder. `impact.wiki_dirs` follows it while the file does not pin other folders: when
-    /// that key is absent or names exactly the wiki folder used until now. Another explicit list is kept.
+    /// The project wiki's folder. The Impact Map reads it too while the file gives no `impact.wiki_dirs`; this
+    /// change never writes that key. A list the file gives is kept as written and reported.
     WikiDir(String),
-    /// The explicit list of wiki folders the Impact Map reads, or `None` to remove the override.
+    /// The explicit list of wiki folders the Impact Map reads, or `None` to remove the override, which puts
+    /// the map back on the project wiki's folder.
     ImpactWikiDirs(Option<Vec<String>>),
     /// The graph file the Impact Map reads, relative to the project.
     ImpactGraphFile(String),
@@ -644,15 +669,11 @@ pub(crate) fn edits_for(
                 if tools.wiki.dir.value != *dir {
                     edits.push(Edit::set(&["wiki", "dir"], dir.as_str()));
                 }
+                // Without a list of its own the map reads the selected folder, so nothing is written for it.
+                // A list the file gives is an override: it is kept as written and reported, unless the same
+                // change sets or removes it or it already names the new folder alone.
                 let dirs = &tools.impact.wiki_dirs;
-                let wanted = std::slice::from_ref(dir);
-                let follows =
-                    !dirs.explicit || dirs.value == std::slice::from_ref(&tools.wiki.dir.value);
-                if pins_wiki_dirs || dirs.value == wanted {
-                    // The same change sets the list itself, or it already names the new folder.
-                } else if follows {
-                    edits.push(Edit::set(&["impact", "wiki_dirs"], list_value(wanted)));
-                } else {
+                if dirs.explicit && !pins_wiki_dirs && dirs.value != std::slice::from_ref(dir) {
                     kept.push(ToolsKept {
                         key: "impact.wiki_dirs",
                         value: list_value(&dirs.value),
@@ -835,40 +856,58 @@ mod tests {
     }
 
     #[test]
-    fn the_map_follows_a_new_wiki_folder_unless_it_lists_its_own() {
+    fn the_map_follows_the_selected_wiki_folder_unless_it_lists_its_own() {
+        let dirs = |text: &str| ProjectTools::read(&file(text)).unwrap().impact.wiki_dirs;
+        let inherited = |dir: &str| Setting::default_of(vec![dir.to_string()]);
+        assert_eq!(dirs(""), inherited(DEFAULT_WIKI_DIR));
+        assert_eq!(
+            dirs("[wiki]\nstale_days = 30\n"),
+            inherited(DEFAULT_WIKI_DIR)
+        );
+        assert_eq!(dirs("[wiki]\ndir = \"notes\"\n"), inherited("notes"));
+        assert_eq!(
+            dirs("[wiki]\ndir = \"notes\"\n[impact]\nrerank = true\n"),
+            inherited("notes")
+        );
+        assert_eq!(
+            dirs("[wiki]\ndir = \"notes\"\n[impact]\nwiki_dirs = []\n"),
+            Setting::given(Vec::new())
+        );
+        // The map's own reader does not stop at a wiki table it cannot use; it has the default as before.
+        for broken in ["wiki = 3\n", "[wiki]\ndir = 3\n", "[wiki]\ndir = \" \"\n"] {
+            let read = ImpactTool::read(&file(broken), &mut Vec::new()).unwrap();
+            assert_eq!(read.wiki_dirs, inherited(DEFAULT_WIKI_DIR), "{broken}");
+        }
+
+        // Choosing a wiki folder writes that one key; the map follows by reading it.
         let moved = [ToolsChange::WikiDir("knowledge/wiki".into())];
         let (absent, kept) = edits("", &moved);
-        assert_eq!(
-            absent,
-            [
-                "wiki.dir=\"knowledge/wiki\"",
-                "impact.wiki_dirs=[\"knowledge/wiki\"]"
-            ]
-        );
+        assert_eq!(absent, ["wiki.dir=\"knowledge/wiki\""]);
         assert!(kept.is_empty());
-        let (mirror, _) = edits(
+        // A list the file gives is kept, also one that names the wiki folder used until now.
+        for own in [
             "[wiki]\ndir = \"notes\"\n[impact]\nwiki_dirs = [\"notes\"]\n",
-            &moved,
+            "[impact]\nwiki_dirs = [\"docs/wiki\", \"notes\"]\n",
+            "[impact]\nwiki_dirs = []\n",
+        ] {
+            let (own_edits, kept) = edits(own, &moved);
+            assert_eq!(own_edits, ["wiki.dir=\"knowledge/wiki\""], "{own}");
+            assert_eq!(kept.len(), 1, "{own}");
+            assert_eq!(kept[0].reason, KeptReason::ExplicitWikiDirs);
+        }
+        // Nothing to report when the list already names the new folder alone, or the change removes it.
+        let (same, kept) = edits("[impact]\nwiki_dirs = [\"knowledge/wiki\"]\n", &moved);
+        assert_eq!(same, ["wiki.dir=\"knowledge/wiki\""]);
+        assert!(kept.is_empty());
+        let (reset, kept) = edits(
+            "[wiki]\ndir = \"notes\"\n[impact]\nwiki_dirs = [\"notes\", \"adr\"]\n",
+            &[
+                ToolsChange::WikiDir("knowledge/wiki".into()),
+                ToolsChange::ImpactWikiDirs(None),
+            ],
         );
-        assert_eq!(
-            mirror,
-            [
-                "wiki.dir=\"knowledge/wiki\"",
-                "impact.wiki_dirs=[\"knowledge/wiki\"]"
-            ]
-        );
-        let (own, kept) = edits("[impact]\nwiki_dirs = [\"docs/wiki\", \"notes\"]\n", &moved);
-        assert_eq!(own, ["wiki.dir=\"knowledge/wiki\""]);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].reason, KeptReason::ExplicitWikiDirs);
-        let (back, _) = edits(
-            "[wiki]\ndir = \"notes\"\n[impact]\nwiki_dirs = [\"notes\"]\n",
-            &[ToolsChange::WikiDir(DEFAULT_WIKI_DIR.into())],
-        );
-        assert_eq!(
-            back,
-            ["wiki.dir=\"docs/wiki\"", "impact.wiki_dirs=[\"docs/wiki\"]"]
-        );
+        assert_eq!(reset, ["wiki.dir=\"knowledge/wiki\"", "-impact.wiki_dirs"]);
+        assert!(kept.is_empty());
         let (pinned, kept) = edits(
             "",
             &[

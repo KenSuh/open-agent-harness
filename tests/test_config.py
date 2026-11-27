@@ -5,8 +5,8 @@ import json
 import pathlib
 import unittest
 
-from oah.config import (CONFIG_RELATIVE_PATH, PROJECT_TOOLS_DEFAULTS, Config, ConfigError, Setting, load_config,
-                        model_problem, parse_config, portable_problem, project_tools)
+from oah.config import (CONFIG_RELATIVE_PATH, PROJECT_TOOLS_DEFAULTS, Config, ConfigError, Setting, impact_section,
+                        load_config, model_problem, parse_config, portable_problem, project_tools)
 from tests.helpers import make_tmp_dir
 
 TIERS = {"low": {"model": "sonnet", "effort": "low", "timeout_min": 15},
@@ -240,7 +240,7 @@ class ProjectToolsTest(unittest.TestCase):
                 else:
                     self.assertEqual(tools_of(case["toml"]).view(), case["expect"])
                     read += 1
-        self.assertEqual((read, refused), (17, 19), "the sample counts changed")
+        self.assertEqual((read, refused), (20, 19), "the sample counts changed")
 
     def test_defaults_are_the_ones_the_commands_use(self):
         from oah import rerank
@@ -270,7 +270,7 @@ class ProjectToolsTest(unittest.TestCase):
                 config = (Config(path=None, raw={}) if case["toml"] is None
                           else parse_config(case["toml"].encode("utf-8")))
                 tools = project_tools(config)
-                impact = config.section("impact", IMPACT_DEFAULTS)
+                impact = impact_section(config, IMPACT_DEFAULTS)
                 jev = config.section("rerank", rerank.DEFAULTS)
                 self.assertEqual(config.section("wiki", WIKI_DEFAULTS)["dir"], tools.wiki_dir.value)
                 self.assertEqual(impact["wiki_dirs"], list(tools.impact_wiki_dirs.value))
@@ -279,7 +279,26 @@ class ProjectToolsTest(unittest.TestCase):
                 self.assertIs(jev["enabled"], tools.jev_enabled.value)
                 self.assertEqual(jev["provider"], tools.jev_provider.value)
                 checked += 1
-        self.assertEqual(checked, 17)
+        self.assertEqual(checked, 20)
+
+    def test_the_impact_commands_read_the_selected_wiki_folder(self):
+        from oah.impact.defaults import DEFAULTS as IMPACT_DEFAULTS, configured
+
+        for text, expected in (
+                ("", ["docs/wiki"]),
+                ('[wiki]\nstale_days = 30\n', ["docs/wiki"]),
+                ('[wiki]\ndir = "notes"\n', ["notes"]),
+                ('[wiki]\ndir = "notes"\n[impact]\nlimit = 5\n', ["notes"]),
+                ('[wiki]\ndir = "notes"\n[impact]\nwiki_dirs = ["adr", "docs/wiki"]\n', ["adr", "docs/wiki"]),
+                ('[wiki]\ndir = "notes"\n[impact]\nwiki_dirs = []\n', []),
+                # A wiki folder the wiki commands refuse is not a new refusal of the map.
+                ('[wiki]\ndir = 5\n', ["docs/wiki"]),
+                ('[wiki]\ndir = " "\n', ["docs/wiki"])):
+            with self.subTest(text):
+                root = write_config(self, text)
+                self.assertEqual(configured(root)["wiki_dirs"], expected)
+                self.assertEqual(impact_section(load_config(root), IMPACT_DEFAULTS)["wiki_dirs"], expected)
+        self.assertEqual(IMPACT_DEFAULTS["wiki_dirs"], ["docs/wiki"])
 
     def test_the_reserved_table_is_ignored_by_the_existing_commands(self):
         from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS
@@ -297,7 +316,7 @@ class ProjectToolsTest(unittest.TestCase):
         root = write_config(self, data)
         tools = project_tools(load_config(root))
         self.assertEqual(tools.wiki_dir, Setting("knowledge/wiki", True))
-        self.assertEqual(tools.impact_wiki_dirs, Setting(("docs/wiki",), False))
+        self.assertEqual(tools.impact_wiki_dirs, Setting(("knowledge/wiki",), False))
         self.assertEqual((tools.jev_enabled.value, tools.jev_provider.value), (True, "typesafe"))
         self.assertEqual((root / ".oah" / "config.toml").read_bytes(), data)
         self.assertEqual(sorted(path.name for path in (root / ".oah").iterdir()), ["config.toml"])

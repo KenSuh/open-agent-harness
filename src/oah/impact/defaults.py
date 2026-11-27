@@ -72,7 +72,7 @@ def _check(settings: Mapping[str, object]) -> None:
 def configured(root: pathlib.Path, settings: Mapping[str, object] | None = None) -> dict[str, object]:
     """Explicit settings, else the repository's [impact] section from .oah/config.toml, over DEFAULTS."""
     if settings is None:
-        from oah.config import load_config
+        from oah.config import impact_section, load_config
 
-        settings = load_config(root).section("impact", DEFAULTS)
+        settings = impact_section(load_config(root), DEFAULTS)
     return effective(settings)

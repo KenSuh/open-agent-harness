@@ -173,9 +173,10 @@ def load_config(root: pathlib.Path) -> Config:
 
 # Project tools — Project Wiki, Impact Map and Jev. The Rust core owns this part of the file's format and its
 # defaults (crates/oah-core/src/config/tools.rs) and is the only writer; the source CLI reads the same keys here.
-# A key the file does not give keeps the default every command already used, and no key follows another:
-# impact.wiki_dirs without a value is ["docs/wiki"] whatever wiki.dir says. Program paths, cache or index folders,
-# host approvals, keys and network consent are per-machine state and are never read from this file.
+# A key the file does not give keeps the default every command already used. One key follows another: without
+# [impact] wiki_dirs the Impact Map reads the folder [wiki] dir selects, and a list the file gives is an override
+# read as written. Program paths, cache or index folders, host approvals, keys and network consent are per-machine
+# state and are never read from this file.
 PROJECT_TOOLS_TABLE = "project_tools"
 NOT_PORTABLE = "OAH_CONFIG_NOT_PORTABLE"
 UNKNOWN_NOTICE = "OAH_CONFIG_UNKNOWN_KEY"
@@ -277,6 +278,24 @@ class ProjectTools:
         }
 
 
+def _selected_wiki_dir(raw: Mapping[str, Any]) -> str | None:
+    """The folder [wiki] dir gives, when it gives one the wiki commands accept: a string that is not blank."""
+    wiki = raw.get("wiki")
+    folder = wiki.get("dir") if isinstance(wiki, Mapping) else None
+    return folder if isinstance(folder, str) and folder.strip() else None
+
+
+def impact_section(config: Config, defaults: Mapping[str, Any]) -> dict:
+    """config.section("impact", defaults) as the Impact Map reads it: without [impact] wiki_dirs the list is the
+    folder [wiki] dir selects, and the default when the file selects none. A list the file gives is kept as
+    written. A [wiki] table the wiki commands would refuse does not stop the map; it then has the default."""
+    merged = config.section("impact", defaults)
+    selected = _selected_wiki_dir(config.raw)
+    if selected is not None and "wiki_dirs" not in config.raw.get("impact", {}):
+        merged["wiki_dirs"] = [selected]
+    return merged
+
+
 def project_tools(config: Config) -> ProjectTools:
     """Read the Project Wiki, Impact Map and Jev settings of config. Reads only the keys of the shared contract;
     the other keys of [wiki], [impact] and [rerank] stay with the commands that own them. A wrong type, a table
@@ -326,6 +345,8 @@ def project_tools(config: Config) -> ProjectTools:
                       "use the default")
     note("wiki.dir", wiki_dir)
     wiki_dirs = read("impact.wiki_dirs", tuple, "folder paths")
+    if not wiki_dirs.explicit and wiki_dir.explicit:
+        wiki_dirs = Setting((wiki_dir.value,), False)
     graph_file = read("impact.graph_file", str)
     rerank = read("impact.rerank", bool)
     note("impact.wiki_dirs", wiki_dirs)

@@ -880,7 +880,7 @@ def _gh_repository(destination: str) -> tuple[str, str]:
 
 def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bool,
               git_context: _GitContext) -> _Reassessment:
-    from oah.config import CONFIG_RELATIVE_PATH, ConfigError, parse_config
+    from oah.config import CONFIG_RELATIVE_PATH, ConfigError, impact_section, parse_config
     from oah.impact import defaultbranch, mapstore, query
     from oah.impact.defaults import DEFAULTS, configured
     from oah.impact.errors import ImpactError
@@ -918,7 +918,7 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
                                 "the destination changed during assessment; run oah land again")
             try:
                 config = parse_config(evidence.committed_bytes(source, fetched, str(CONFIG_RELATIVE_PATH)) or b"")
-                fetched_settings = configured(source, config.section("impact", DEFAULTS))
+                fetched_settings = configured(source, impact_section(config, DEFAULTS))
             except ConfigError:
                 raise LandError("OAH_LAND_IMPACT_STALE", "the fetched impact configuration is invalid; fix it on "
                                 "the default branch, then run oah land again") from None

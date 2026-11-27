@@ -327,7 +327,7 @@
         "impact": {
           "wiki_dirs": {
             "value": [
-              "docs/wiki"
+              "wiki"
             ],
             "explicit": false
           },
@@ -438,8 +438,8 @@
       }
     },
     {
-      "name": "wiki-dir-does-not-move-the-map",
-      "note": "impact.wiki_dirs without a value stays the default; reading never follows wiki.dir",
+      "name": "wiki-dir-feeds-the-map",
+      "note": "without [impact] wiki_dirs the map reads the selected wiki folder; the list is still not explicit",
       "toml": "[wiki]\ndir = \"knowledge/wiki\"\n",
       "expect": {
         "wiki": {
@@ -451,7 +451,7 @@
         "impact": {
           "wiki_dirs": {
             "value": [
-              "docs/wiki"
+              "knowledge/wiki"
             ],
             "explicit": false
           },
@@ -563,6 +563,195 @@
       }
     },
     {
+      "name": "wiki-dir-feeds-the-map-beside-other-impact-keys",
+      "note": "other [impact] keys do not stop the map from reading the selected wiki folder",
+      "toml": "[wiki]\ndir = \"notes\"\n[impact]\nrerank = true\nhistory_limit = 50\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "notes",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "notes"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": true,
+            "explicit": true
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "empty-wiki-dirs-is-an-override",
+      "note": "a list the file gives is read as written, also an empty one",
+      "toml": "[wiki]\ndir = \"notes\"\n[impact]\nwiki_dirs = []\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "notes",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [],
+            "explicit": true
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "wiki-dir-not-portable-feeds-the-map-as-written",
+      "note": "the map reads the wiki folder the wiki commands read; the notice names wiki.dir once",
+      "toml": "[wiki]\ndir = \"/srv/shared/wiki\"\n",
+      "expect": {
+        "wiki": {
+          "dir": {
+            "value": "/srv/shared/wiki",
+            "explicit": true
+          }
+        },
+        "impact": {
+          "wiki_dirs": {
+            "value": [
+              "/srv/shared/wiki"
+            ],
+            "explicit": false
+          },
+          "graph_file": {
+            "value": "graphify-out/graph.json",
+            "explicit": false
+          },
+          "rerank": {
+            "value": false,
+            "explicit": false
+          }
+        },
+        "jev": {
+          "enabled": {
+            "value": false,
+            "explicit": false
+          },
+          "provider": {
+            "value": "",
+            "explicit": false
+          }
+        },
+        "managed": {
+          "wiki_index": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            },
+            "exclude": {
+              "value": [],
+              "explicit": false
+            },
+            "embedding_model": {
+              "value": "",
+              "explicit": false
+            }
+          },
+          "graphify": {
+            "managed": {
+              "value": false,
+              "explicit": false
+            }
+          }
+        },
+        "notices": [
+          [
+            "OAH_CONFIG_NOT_PORTABLE",
+            "wiki.dir"
+          ]
+        ]
+      }
+    },
+    {
       "name": "trailing-slash-is-portable",
       "note": "one trailing / is accepted without a notice",
       "toml": "[wiki]\ndir = \"docs/wiki/\"\n",
@@ -576,7 +765,7 @@
         "impact": {
           "wiki_dirs": {
             "value": [
-              "docs/wiki"
+              "docs/wiki/"
             ],
             "explicit": false
           },
