@@ -296,7 +296,7 @@ fn detected(root: &Path) -> Card {
             "detected",
             format!("Possible wiki folder found: {dir}. It is not selected yet."),
             format!(
-                "To select it, use Set up wiki in the OAH app, or set dir = \"{dir}\" under [wiki] in \
+                "To select it, open Wiki Setup & Search in the OAH app, or set dir = \"{dir}\" under [wiki] in \
                  {SETTINGS_FILE}. Then check again."
             ),
         )
