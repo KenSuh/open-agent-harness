@@ -306,9 +306,10 @@ class HostileRepositoryTest(SelectedCase):
         header, _, message = commit.partition("\n\n")
         signed = (header + "\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n fake\n -----END PGP SIGNATURE-----\n\n"
                   + message)
+        # Bytes, not text: text mode would write CRLF line ends on Windows, and git refuses such a commit.
         new = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-t", "commit", "-w", "--stdin"],
-                             input=signed, check=True, capture_output=True, text=True, encoding="utf-8",
-                             env=git_env()).stdout.strip()
+                             input=signed.encode("utf-8"), check=True, capture_output=True,
+                             env=git_env()).stdout.decode("ascii").strip()
         git(self.repo, "update-ref", "HEAD", new)
         git(self.repo, "config", "log.showSignature", "true")
         git(self.repo, "config", "gpg.program", self.tool.as_posix())
@@ -317,7 +318,9 @@ class HostileRepositoryTest(SelectedCase):
 
     def test_a_promised_object_is_not_fetched(self):
         tree_id = git(self.repo, "rev-parse", "HEAD^{tree}").stdout.strip()
-        (self.repo / ".git" / "objects" / tree_id[:2] / tree_id[2:]).unlink()
+        missing = self.repo / ".git" / "objects" / tree_id[:2] / tree_id[2:]
+        missing.chmod(0o600)  # git writes objects read-only, and Windows does not delete a read-only file
+        missing.unlink()
         for name, value in (("extensions.partialClone", "origin"), ("remote.origin.promisor", "true"),
                             ("remote.origin.url", f"ext::sh -c touch% {self.marker.as_posix()}"),
                             ("protocol.ext.allow", "always")):

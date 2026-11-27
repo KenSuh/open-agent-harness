@@ -236,6 +236,8 @@ def read_worktree(root: pathlib.Path, paths: list[str]) -> dict[str, str]:
         if not _safe_worktree_path(root, path):
             continue
         try:
+            if not (root / path).is_file():  # as in _file_key: a pipe or device is not content
+                continue
             contents[path] = (root / path).read_bytes().decode("utf-8", errors="replace")
         except OSError:
             continue  # removed since the manifest was taken; the after-build manifest catches it

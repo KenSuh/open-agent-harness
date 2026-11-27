@@ -158,9 +158,13 @@ class ContractTest(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes in a folder are a POSIX feature")
     def test_a_pipe_in_place_of_a_tracked_file_does_not_hold_the_run(self):
         repo = make_git_repo(self)
-        git_commit(repo, BASE)
-        (repo / "docs" / "guide.md").unlink()
-        os.mkfifo(repo / "docs" / "guide.md")  # reading it would wait for a writer forever
+        git_commit(repo, {**BASE, "db/schema.sql": "CREATE TABLE notes (id integer);\n"})
+        # Two reads: a changed path is hashed, and a path the index says not to look at is parsed as SQL as it is.
+        subprocess.run(["git", "-C", str(repo), "update-index", "--assume-unchanged", "db/schema.sql"], check=True,
+                       capture_output=True, env=git_env())
+        for name in ("docs/guide.md", "db/schema.sql"):
+            (repo / name).unlink()
+            os.mkfifo(repo / name)  # reading it would wait for a writer forever
         done = subprocess.run([sys.executable, "-m", "oah.project_tools_runner", "impact", "refresh", "--root",
                                str(repo)], capture_output=True, env=child_env(), timeout=120)
         answer = document(done)
