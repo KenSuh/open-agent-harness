@@ -110,6 +110,7 @@ describe("Project tool cards (standalone test transport)", () => {
         [
           ...(card.id === "wiki" ? ["Wiki Setup & Search"] : []),
           `Edit ${card.name} Settings`,
+          ...(card.id === "wiki" ? ["Local Wiki Index"] : []),
           ...(card.id === "jev" ? ["Manage Jev on this device"] : []),
         ],
       );

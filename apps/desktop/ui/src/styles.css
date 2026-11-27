@@ -1082,3 +1082,60 @@ code {
 .apply-status p {
   margin: 0;
 }
+
+.wiki-index {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wiki-index-toggle {
+  justify-self: start;
+}
+
+.wiki-index-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.wiki-index-body p,
+.wiki-index-body ul {
+  margin: 0;
+}
+
+.wiki-index-actions,
+.wiki-index-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wiki-index-search {
+  display: grid;
+  gap: 4px;
+}
+
+.wiki-index-search input {
+  flex: 1 1 160px;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+}
+
+.wiki-index-results ul {
+  display: grid;
+  gap: 8px;
+  padding-left: 18px;
+}
+
+.wiki-index-results li,
+.wiki-index-feedback {
+  overflow-wrap: anywhere;
+}

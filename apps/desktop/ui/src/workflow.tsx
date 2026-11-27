@@ -17,6 +17,7 @@ import type {
   WorkflowDto,
 } from "./contract";
 import { JevControls } from "./jev-controls";
+import { ProjectWikiIndex } from "./project-wiki-index";
 import { ToolSettingsPanel, useToolSettings, type ToolSettings } from "./project-tools-settings";
 import { ProjectWikiPanel } from "./project-wiki";
 import { ImpactMapActions } from "./project-impact-map";
@@ -609,7 +610,15 @@ function ProjectTools({ transport, projectId }: { transport: Transport; projectI
                     projectId={projectId}
                     onSettled={() => void check(false)}
                   />
-                : tool.id === "jev" ? <JevControls transport={transport} projectId={projectId} /> : null}
+                : tool.id === "jev" ? <JevControls transport={transport} projectId={projectId} />
+                  : tool.id === "wiki" && !wiki.open ? (
+                      <ProjectWikiIndex
+                        key={projectId}
+                        transport={transport}
+                        projectId={projectId}
+                        onUseWikiSearch={settings.editor ? undefined : wiki.show}
+                      />
+                    ) : null}
             />
           ))}
         </div>

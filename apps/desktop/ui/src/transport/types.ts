@@ -44,6 +44,8 @@ import type {
   WikiPlanDto,
   WikiSearchDto,
   WikiSearchReq,
+  WikiIndexInput,
+  WikiIndexReply,
   WorkflowDto,
   WorkflowProjectReq,
 } from "../contract";
@@ -100,6 +102,8 @@ export interface Transport {
   projectWikiSearch(req: WorkflowProjectReq<WikiSearchReq>): Promise<WikiSearchDto>;
   /** One Jev action of one project (consent, device key, connection check). Only a `store-key` input carries a key; no answer can. */
   projectJevAction(req: JevActionReq): Promise<JevReply>;
+  /** One explicit local wiki index action (status, probe, build or search); progress and the answer arrive on the channel. */
+  startWikiIndex(req: WorkflowProjectReq<WikiIndexInput>, onEvent: (event: TaskEvent<WikiIndexReply>) => void): Promise<TaskId>;
   onNotice(handler: (notice: NoticeDto) => void): Promise<Unlisten>;
   onScanChanged(handler: (change: ScanChanged) => void): Promise<Unlisten>;
   onAgentsChanged(handler: (change: AgentsChangedDto) => void): Promise<Unlisten>;

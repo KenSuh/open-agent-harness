@@ -717,3 +717,46 @@ export interface ReviewResultDto {
   gate: GateDecisionDto;
   unchanged: boolean;
 }
+
+/**
+ * `start_wiki_index`: the optional local semantic index of the project's committed wiki notes.
+ * Takes `WorkflowProjectReq<WikiIndexInput>` as the single `req` plus the task channel, and answers
+ * `TaskEvent<WikiIndexReply>`. The only text the webview sends is a search query; it never sends a path, a host,
+ * a binary or an argument list, and it has no action that downloads, installs, starts or approves anything.
+ */
+export type WikiIndexInput =
+  | { action: "status" | "probe" | "build" }
+  | { action: "search"; query: string };
+
+export type WikiIndexAction = WikiIndexInput["action"];
+
+/** Known `state` words; any other word is shown as generic text. */
+export type WikiIndexKnownState = "not_built" | "incomplete" | "ready" | "stale" | "unknown";
+
+export interface WikiIndexResultDto {
+  /** Relative to the project, written with `/`. */
+  file: string;
+  /** 1-based. */
+  line: number;
+  title?: string;
+  heading?: string;
+  snippet: string;
+}
+
+export interface WikiIndexReply {
+  /** The project the answer is about; an answer for another project is dropped. */
+  project_id: string;
+  /** The action this answers; an answer to another action is dropped. */
+  action: WikiIndexAction;
+  ok: boolean;
+  state: WikiIndexKnownState | (string & {});
+  /** A stable `OAH_WIKI_INDEX_*` code when `ok` is false, or when a search fell back to text. */
+  code?: string;
+  /** Text for the person; for a text-mode search it says why the index was not used. */
+  message?: string;
+  source?: { commit?: string; notes?: number };
+  model?: { name: string; dimensions?: number };
+  mode?: "semantic" | "text" | "none";
+  results?: WikiIndexResultDto[];
+  truncated?: boolean;
+}

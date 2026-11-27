@@ -30,6 +30,8 @@ import type {
   WikiPlanDto,
   WikiSearchDto,
   WikiSearchReq,
+  WikiIndexInput,
+  WikiIndexReply,
   WorkflowDto,
   WorkflowProjectReq,
 } from "../../src/contract";
@@ -218,6 +220,9 @@ export interface FakeTransport extends Transport {
   toolsApplyRequests: WorkflowProjectReq<ProjectToolsApplyReq>[];
   /** Every `project_jev_action` request, in order (a store-key request holds the fake key the test typed). */
   jevRequests: JevActionReq[];
+  wikiIndexRequests: WorkflowProjectReq<WikiIndexInput>[];
+  /** Sends one event to the n-th (default: latest) local wiki index task channel. */
+  emitWikiIndex(event: TaskEvent<WikiIndexReply>, index?: number): void;
   /** Every `apply_project_skill` request, in order. */
   applyRequests: ApplyProjectSkillReq[];
   /** Every `project_wiki_plan`, `start_project_wiki_apply` and `project_wiki_search` request, in order. */
@@ -246,6 +251,7 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
   const reviewSinks: Array<(event: TaskEvent<ReviewResultDto>) => void> = [];
   const wikiSinks: Array<(event: TaskEvent<WikiApplyDto>) => void> = [];
   let probeCount = 0;
+  const wikiIndexSinks: ((event: TaskEvent<WikiIndexReply>) => void)[] = [];
   const fake: FakeTransport = {
     calls: [],
     settingsEdits: [],
@@ -421,6 +427,15 @@ export function createFakeTransport(initial: { project?: ProjectDto | null; task
       fake.jevRequests.push(req);
       return fake.override.projectJevAction ? fake.override.projectJevAction(req) : sampleJevReply(req.project_id, req.input.kind);
     },
+    wikiIndexRequests: [],
+    async startWikiIndex(req, onEvent) {
+      fake.calls.push("start_wiki_index");
+      fake.wikiIndexRequests.push(req);
+      wikiIndexSinks.push(onEvent);
+      if (fake.override.startWikiIndex) return fake.override.startWikiIndex(req, onEvent);
+      return `wiki-index-${wikiIndexSinks.length}`;
+    },
+    emitWikiIndex: (event, index = wikiIndexSinks.length - 1) => wikiIndexSinks[index]?.(event),
     async projectToolsPlan(req) {
       fake.calls.push("project_tools_plan");
       fake.toolsPlanRequests.push(req);

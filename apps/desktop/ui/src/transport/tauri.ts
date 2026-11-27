@@ -31,6 +31,7 @@ import type {
   WikiApplyDto,
   WikiPlanDto,
   WikiSearchDto,
+  WikiIndexReply,
   WorkflowDto,
 } from "../contract";
 import type { JevReply } from "../jevContract";
@@ -102,6 +103,11 @@ export function createTauriTransport(): Transport {
     },
     projectWikiSearch: (req) => call<WikiSearchDto>("project_wiki_search", req),
     projectJevAction: (req) => call<JevReply>("project_jev_action", req),
+    startWikiIndex(req, onEvent) {
+      const channel = new Channel<TaskEvent<WikiIndexReply>>();
+      channel.onmessage = onEvent;
+      return call<TaskId>("start_wiki_index", req, { onEvent: channel });
+    },
     onNotice: (handler) => listen<NoticeDto>("notice", (event) => handler(event.payload)),
     onScanChanged: (handler) =>
       listen<ScanChanged>("scan-changed", (event) => handler(event.payload)),
