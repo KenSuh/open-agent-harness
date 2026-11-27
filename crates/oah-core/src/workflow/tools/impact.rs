@@ -5,66 +5,21 @@
 //! (`src/oah/impact/mapstore.py` `map_path`); its contents are not read, so it is never called current.
 
 use super::Card;
+use super::locate::{Git, POINTER_LIMIT, prefix};
 use crate::dto::{ProjectToolDto, ProjectToolIdDto, ToolPathBaseDto, ToolPathDto};
 use crate::fsx::links::{self, Entry};
-use crate::paths::{Project, ProjectKind};
+use crate::paths;
 use crate::rules::input::{ExpectedEntry, InspectedEntry, inspect_project_entry};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// The most of a `.git` file or `HEAD` that is read.
-const POINTER_LIMIT: u64 = 4096;
 /// The most of `packed-refs` that is searched for the checked-out branch.
 const PACKED_REFS_LIMIT: u64 = 4 * 1024 * 1024;
 /// `DIRC`, the version and the entry count.
 const INDEX_HEADER: u64 = 12;
 /// How many names of the Git folder are looked at for a shared index.
 const GIT_DIR_SCAN_LIMIT: usize = 512;
-
-/// The first `limit` bytes of the regular file at `path` and whether it is longer. `None` when there is no regular
-/// file there or it cannot be read; a pipe or a device is never opened.
-fn prefix(path: &Path, limit: u64) -> Option<(Vec<u8>, bool)> {
-    if !matches!(links::inspect(path), Ok(Entry::File)) {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .ok()?
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let longer = bytes.len() as u64 > limit;
-    bytes.truncate(limit as usize);
-    Some((bytes, longer))
-}
-
-/// The Git folder of the work tree at `root`: `.git` itself, or the folder a linked work tree's `.git` file names.
-fn git_dir(root: &Path) -> Option<PathBuf> {
-    let dot_git = root.join(".git");
-    match links::inspect(&dot_git).ok()? {
-        Entry::Directory => Some(dot_git),
-        Entry::File => {
-            let (bytes, longer) = prefix(&dot_git, POINTER_LIMIT)?;
-            if longer {
-                return None;
-            }
-            let text = String::from_utf8(bytes).ok()?;
-            let target = text.strip_prefix("gitdir:")?.trim();
-            if target.is_empty() {
-                return None;
-            }
-            let target = Path::new(target);
-            Some(if target.is_absolute() {
-                target.to_path_buf()
-            } else {
-                root.join(target)
-            })
-        }
-        _ => None,
-    }
-}
 
 /// Whether the checked-out branch has a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +73,23 @@ fn head(git_dir: &Path, common_dir: &Path) -> Head {
             "This repository stores its branches in a format OAH does not read directly.",
         );
     }
-    let loose = name
-        .split('/')
-        .fold(common_dir.to_path_buf(), |path, part| path.join(part));
-    if matches!(links::inspect(&loose), Ok(Entry::File)) {
+    // The branch as a file of its own: every folder on the way must be a real folder, never a link.
+    let mut parts = name.split('/').peekable();
+    let mut loose = common_dir.to_path_buf();
+    let mut found = true;
+    while let Some(part) = parts.next() {
+        loose.push(part);
+        let wanted = if parts.peek().is_some() {
+            Entry::Directory
+        } else {
+            Entry::File
+        };
+        if !links::inspect(&loose).is_ok_and(|entry| entry == wanted) {
+            found = false;
+            break;
+        }
+    }
+    if found {
         return Head::Commit;
     }
     match prefix(&common_dir.join("packed-refs"), PACKED_REFS_LIMIT) {
@@ -191,11 +159,12 @@ fn tracked(git_dir: &Path) -> Tracked {
 }
 
 /// The map file of this checkout, when one exists: `<state>/impact/maps/<sha256 of the root path>.json`, where
-/// `<state>` is the folder above the project's own `v1` state folder (`<common dir>/oah` unless `OAH_STATE_DIR`
-/// is set). Only its presence as a regular file is checked.
-fn map_file(project: &Project, common_dir: &Path) -> Option<ToolPathDto> {
-    let state = project.state_dir.parent()?;
-    let root = project.root.to_str()?;
+/// `<state>` is the source CLI's state folder (`<common dir>/oah` unless `OAH_STATE_DIR` is set) and the root
+/// path is the resolved one, as the source CLI's `root.resolve()` writes it. Only its presence as a regular file
+/// is checked.
+fn map_file(root: &Path, state: &Path, common_dir: &Path) -> Option<ToolPathDto> {
+    let root = paths::canonical_folder(root).ok()?;
+    let root = root.to_str()?;
     let key: String = Sha256::digest(root.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -266,11 +235,8 @@ fn unknown(reason: &str) -> Card {
     .reason(reason.to_string())
 }
 
-fn git(project: &Project, common_dir: &Path) -> Card {
-    let Some(git_dir) = git_dir(&project.root) else {
-        return unknown("The project's .git entry could not be read.");
-    };
-    match head(&git_dir, common_dir) {
+fn git(root: &Path, git_dir: &Path, common_dir: &Path, state: Option<&Path>) -> Card {
+    match head(git_dir, common_dir) {
         Head::Unborn => {
             return Card::new(
                 "no-commit",
@@ -281,7 +247,7 @@ fn git(project: &Project, common_dir: &Path) -> Card {
         Head::Unknown(reason) => return unknown(reason),
         Head::Commit => {}
     }
-    if let Some(map) = map_file(project, common_dir) {
+    if let Some(map) = state.and_then(|state| map_file(root, state, common_dir)) {
         return Card::new(
             "map-found",
             "An Impact Map file exists for this checkout. OAH has not checked whether it is current.",
@@ -290,7 +256,7 @@ fn git(project: &Project, common_dir: &Path) -> Card {
         )
         .path(map);
     }
-    match tracked(&git_dir) {
+    match tracked(git_dir) {
         Tracked::Some => Card::new(
             "ready",
             "Git tracks files here. No Impact Map has been built for this checkout.",
@@ -306,12 +272,17 @@ fn git(project: &Project, common_dir: &Path) -> Card {
     }
 }
 
-pub(super) fn card(project: &Project) -> ProjectToolDto {
-    let card = match &project.kind {
-        ProjectKind::Folder { .. } => no_git(&project.root),
-        ProjectKind::Git { common_dir } => git(project, common_dir),
+/// The card of the project at `root`. `state` is the source CLI's state folder, when the project has one.
+pub(super) fn card(root: &Path, found: &Git, state: Option<&Path>) -> ProjectToolDto {
+    let card = match found {
+        Git::None => no_git(root),
+        Git::WorkTree {
+            git_dir,
+            common_dir,
+        } => git(root, git_dir, common_dir, state),
+        Git::Unqualified(reason) => unknown(reason),
     };
-    let card = if has_graphify_file(&project.root) {
+    let card = if has_graphify_file(root) {
         card.note(
             "graphify-out/graph.json exists. OAH has not verified it and does not use it for this status.",
         )
@@ -326,7 +297,7 @@ mod tests {
     use super::*;
 
     /// A hand-made Git folder: these tests start no Git.
-    fn repo(head_text: &str) -> (tempfile::TempDir, PathBuf) {
+    fn repo(head_text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let git = dir.path().join(".git");
         fs::create_dir_all(git.join("refs/heads")).unwrap();
@@ -395,31 +366,5 @@ mod tests {
         );
         fs::write(git.join("index"), b"not an index").unwrap();
         assert_eq!(tracked(&git), Tracked::Unknown);
-    }
-
-    #[test]
-    fn a_linked_work_tree_names_its_git_folder_in_a_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let (root, linked) = (dir.path().join("tree"), dir.path().join("admin"));
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(&linked).unwrap();
-        assert_eq!(git_dir(&root), None);
-        fs::write(root.join(".git"), format!("gitdir: {}\n", linked.display())).unwrap();
-        assert_eq!(git_dir(&root), Some(linked));
-        fs::write(root.join(".git"), "gitdir: ../admin\n").unwrap();
-        assert_eq!(git_dir(&root), Some(root.join("../admin")));
-        fs::write(root.join(".git"), "something else\n").unwrap();
-        assert_eq!(git_dir(&root), None);
-    }
-
-    #[test]
-    fn only_a_bounded_prefix_of_a_regular_file_is_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("f");
-        fs::write(&file, b"abcdef").unwrap();
-        assert_eq!(prefix(&file, 4), Some((b"abcd".to_vec(), true)));
-        assert_eq!(prefix(&file, 6), Some((b"abcdef".to_vec(), false)));
-        assert_eq!(prefix(dir.path(), 4), None, "a folder is not read");
-        assert_eq!(prefix(&dir.path().join("missing"), 4), None);
     }
 }

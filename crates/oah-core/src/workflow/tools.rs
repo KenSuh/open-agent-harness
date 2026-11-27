@@ -5,6 +5,8 @@
 //! the session's open project, already located and identified by `app::project_open`, and requires the caller to
 //! name that project's id; the answer carries the id, so a caller that moved on meanwhile can drop it.
 //!
+//! [`project_tools_status_in`] is the CLI's entry: it finds the project itself, without starting Git.
+//!
 //! [`tools_status_at`] does the reading. It receives a located project and nothing else: no environment, so it
 //! cannot find a program to start, a home folder or a key, and it has no transport. It creates nothing. What it
 //! reads is bounded: `.oah/config.toml` through the Team Workflow's own link-refusing reader, the metadata of a
@@ -21,6 +23,7 @@
 //! `invalid`, `settings-unreadable`.
 
 mod impact;
+mod locate;
 mod wiki;
 
 use super::WorkflowError;
@@ -31,7 +34,9 @@ use crate::dto::{
     ProjectToolDto, ProjectToolIdDto, ProjectToolsDto, ToolPathDto, WorkflowProjectReq,
 };
 use crate::error::{Coded, Error};
-use crate::paths::Project;
+use crate::paths::{self, Project, ProjectKind};
+use locate::Git;
+use std::path::Path;
 
 /// The settings file the cards name.
 const SETTINGS_FILE: &str = ".oah/config.toml";
@@ -56,16 +61,54 @@ pub fn project_tools_status(
     Ok(tools_status_at(&open.project, &open.id))
 }
 
+/// `oah project-tools status`: the three cards of the project `folder` belongs to, found without starting Git or
+/// any other program (`locate`), so it works where Git is not installed. It neither reads nor changes the
+/// session's open project. `OAH_PROJECT_MISSING` or `OAH_PROJECT_NOT_FOLDER` when `folder` is not a folder.
+pub fn project_tools_status_in(ctx: &Ctx<'_>, folder: &Path) -> Result<ProjectToolsDto, Error> {
+    let (root, git) = locate::discover(ctx.env, folder)?;
+    let state = match &git {
+        Git::WorkTree { common_dir, .. } => Some(
+            match ctx
+                .env
+                .var("OAH_STATE_DIR")
+                .filter(|value| !value.is_empty())
+            {
+                Some(value) if Path::new(value).is_absolute() => Path::new(value).to_path_buf(),
+                Some(value) => ctx.env.cwd().join(value),
+                None => common_dir.join("oah"),
+            },
+        ),
+        _ => None,
+    };
+    Ok(cards(
+        &root,
+        &git,
+        state.as_deref(),
+        &paths::folder_id(&root),
+    ))
+}
+
 /// The three cards of the located `project`, read as the module describes. Never fails: what cannot be read is
-/// that card's state.
+/// that card's state. A Git project's files must agree with what Git reported when it was located.
 pub fn tools_status_at(project: &Project, project_id: &str) -> ProjectToolsDto {
-    let settings: Settings = read_config_source(&project.root, ConfigPathPhase::BeforeWrite)
-        .map_err(|error| error.code());
+    let (git, state) = match &project.kind {
+        ProjectKind::Folder { .. } => (Git::None, None),
+        ProjectKind::Git { common_dir } => (
+            locate::confirmed(&project.root, common_dir),
+            project.state_dir.parent(),
+        ),
+    };
+    cards(&project.root, &git, state, project_id)
+}
+
+fn cards(root: &Path, git: &Git, state: Option<&Path>, project_id: &str) -> ProjectToolsDto {
+    let settings: Settings =
+        read_config_source(root, ConfigPathPhase::BeforeWrite).map_err(|error| error.code());
     ProjectToolsDto {
         project_id: project_id.to_string(),
         tools: vec![
-            wiki::card(&project.root, &settings),
-            impact::card(project),
+            wiki::card(root, &settings),
+            impact::card(root, git, state),
             jev_card(&settings),
         ],
     }

@@ -3,7 +3,7 @@ use super::refuse;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use oah_core::Error;
 use oah_core::app::{self, Session};
-use oah_core::dto::{Empty, ProjectToolsDto, ToolPathBaseDto, WorkflowProjectReq};
+use oah_core::dto::{ProjectToolsDto, ToolPathBaseDto};
 use oah_core::paths::Env;
 use oah_core::tasks::{CancelToken, NoProgress};
 use std::process::ExitCode;
@@ -44,18 +44,12 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     }
 }
 
-/// The app's operations on the project at the invocation folder: open it read-only, then `project_tools_status`
-/// for the id that open returned. No agent is checked: the cards do not depend on one.
+/// The same cards the app shows, for the project the invocation folder belongs to. The project is found without
+/// starting Git or any other program, so this works on a machine without Git and with an empty `PATH`.
 fn status(session: &Session) -> Result<ProjectToolsDto, Error> {
     let cancel = CancelToken::new();
     let ctx = session.ctx(&cancel, &NoProgress);
-    let folder = session.env().cwd().to_path_buf();
-    let opened = app::project_open(&ctx, &folder)?;
-    let req = WorkflowProjectReq {
-        project_id: opened.id,
-        input: Empty {},
-    };
-    app::project_tools_status(&ctx, req)
+    app::project_tools_status_in(&ctx, session.env().cwd())
 }
 
 fn print(tools: &ProjectToolsDto, json: bool) {

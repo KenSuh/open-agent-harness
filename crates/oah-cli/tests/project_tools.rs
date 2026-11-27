@@ -55,6 +55,55 @@ impl Machine {
     fn oah(&self, args: &[&str]) -> Output {
         self.run(Path::new(env!("CARGO_BIN_EXE_oah")), args)
     }
+
+    fn git(&self, folder: &Path, args: &[&str]) {
+        let out = Command::new(self.root.join("bin").join("git"))
+            .env_clear()
+            .env("HOME", self.root.join("home"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Example",
+                "-c",
+                "user.email=example@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .current_dir(folder)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `oah project-tools status --json` in `folder` with an empty `PATH`: no Git, no agent, nothing to start.
+    fn states_without_any_program(&self, folder: &Path) -> Vec<String> {
+        let out = Command::new(env!("CARGO_BIN_EXE_oah"))
+            .env_clear()
+            .env("PATH", "")
+            .env("HOME", self.root.join("home"))
+            .env("GIT_CEILING_DIRECTORIES", &self.root)
+            .current_dir(folder)
+            .args(["project-tools", "status", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["state"].as_str().unwrap().to_string())
+            .collect()
+    }
 }
 
 /// Every entry below `root` with its bytes.
@@ -158,4 +207,59 @@ fn status_needs_its_subcommand_and_reports_a_broken_settings_file_per_card() {
     assert_eq!(json["tools"][0]["state"], "settings-unreadable");
     assert_eq!(json["tools"][1]["state"], "no-git");
     assert_eq!(json["tools"][2]["state"], "settings-unreadable");
+}
+
+#[test]
+fn status_needs_no_git_program_for_plain_unborn_committed_and_linked_projects() {
+    let machine = Machine::new();
+    let work = machine.work();
+    let (plain, unborn, repo, linked) = (
+        work.join("plain"),
+        work.join("unborn"),
+        work.join("repo"),
+        work.join("linked"),
+    );
+    for folder in [&plain, &unborn, &repo] {
+        fs::create_dir_all(folder.join("docs/wiki")).unwrap();
+        fs::write(folder.join("docs/wiki/index.md"), "# Wiki\n").unwrap();
+    }
+    machine.git(&unborn, &["init", "-q"]);
+    machine.git(&repo, &["init", "-q"]);
+    machine.git(&repo, &["add", "."]);
+    machine.git(&repo, &["commit", "-q", "-m", "first"]);
+    machine.git(&repo, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    let before = tree(&machine.root);
+
+    assert_eq!(
+        machine.states_without_any_program(&plain),
+        ["found", "no-git", "off"]
+    );
+    assert_eq!(
+        machine.states_without_any_program(&unborn),
+        ["found", "no-commit", "off"]
+    );
+    assert_eq!(
+        machine.states_without_any_program(&repo),
+        ["found", "ready", "off"]
+    );
+    assert_eq!(
+        machine.states_without_any_program(&linked),
+        ["found", "ready", "off"]
+    );
+    // From a folder inside the work tree the project is still the work tree.
+    assert_eq!(
+        machine.states_without_any_program(&repo.join("docs")),
+        ["found", "ready", "off"]
+    );
+
+    assert_eq!(tree(&machine.root), before, "status wrote something");
+    for agent in ["claude", "codex"] {
+        assert!(
+            !machine
+                .root
+                .join("home")
+                .join(format!("{agent}-was-run"))
+                .exists()
+        );
+    }
 }
