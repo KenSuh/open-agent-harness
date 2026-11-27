@@ -517,6 +517,36 @@ class UnavailableTest(unittest.TestCase):
 
 
 class DispatchTest(unittest.TestCase):
+    def test_unsupported_stage_owner_refuses_before_orca_setup(self):
+        for command in (None, [str(make_tmp_dir(self) / "missing-orca")]):
+            with self.subTest(orca_present=command is None):
+                project = OrcaProject(self, '\n[stages]\nbuild = "claude"\nreview = "opencode"\n',
+                                      orca_command=command)
+                config = project.repo / ".oah/config.toml"
+                before = config.read_bytes()
+                code, _, err = project.cli("call", "codex", "--stage", "review", "--task", "t1",
+                                           "--launcher", "orca", "--background")
+                self.assertEqual(code, 1, err)
+                self.assertTrue(err.startswith("OAH_STAGE_ENGINE_UNSUPPORTED"), err)
+                self.assertIn("stage review selects 'opencode'", err)
+                self.assertEqual(project.orca_calls(), [])
+                self.assertEqual(project.runs(), [])
+                self.assertFalse(project.record.exists())
+                self.assertEqual(config.read_bytes(), before)
+
+    def test_explicit_stage_override_launches_and_is_recorded(self):
+        project = OrcaProject(self, '\n[stages]\nfix = "opencode"\n')
+        project.start_host()
+        code, out, err = project.cli("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high",
+                                     "--launcher", "orca", "--override-stage", "--json")
+        self.assertEqual(code, 0, out + err)
+        result = json.loads(out)
+        self.assertEqual((result["engine"], result["status"], result["override_stage"]), ("codex", "finished", True))
+        self.assertIn("OAH_STAGE_OVERRIDDEN", err)
+        events = (project.state / "events.jsonl").read_text(encoding="utf-8")
+        self.assertIn(f"stage override: run {result['run_id']} runs codex for stage correction", events)
+        self.assertIn("workspace-write", project.recorded()["argv"])
+
     def test_orca_handoff_refuses_a_mutating_placement_outside_the_lease(self):
         project = OrcaProject(self)
         sibling = make_tmp_dir(self) / "sibling"
@@ -599,7 +629,10 @@ class DispatchTest(unittest.TestCase):
         judge.assert_not_called()
 
     def test_review_can_still_run_in_a_new_orca_worktree(self):
-        project = OrcaProject(self)
+        project = OrcaProject(self, '\n[stages]\nreview = "codex"\n')
+        config = project.repo / ".oah/config.toml"
+        config.write_text(config.read_text(encoding="utf-8").replace('review = "codex"', 'review = "claude"'),
+                          encoding="utf-8")
         project.start_host()
         code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium",
                                      "--launcher", "orca", "--json")
@@ -840,14 +873,19 @@ class DispatchTest(unittest.TestCase):
                 self.assertFalse(project.record.exists())
 
     def test_worker_rechecks_stage_and_review_permissions(self):
-        project = OrcaProject(self)
-        prepared = project.queued()
-        config = project.repo / ".oah" / "config.toml"
-        config.write_text(config.read_text(encoding="utf-8") + '\n[stages]\nreview = "claude"\n', encoding="utf-8")
-        code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
-        self.assertEqual(code, 1)
-        self.assertTrue(err.startswith("OAH_STAGE_ENGINE_MISMATCH"), err)
-        self.assertFalse(project.record.exists())
+        for owner, diagnostic in (("claude", "OAH_STAGE_ENGINE_MISMATCH"),
+                                  ("opencode", "OAH_STAGE_ENGINE_UNSUPPORTED")):
+            with self.subTest(owner=owner):
+                project = OrcaProject(self)
+                prepared = project.queued()
+                config = project.repo / ".oah/config.toml"
+                config.write_text(config.read_text(encoding="utf-8") + f'\n[stages]\nreview = "{owner}"\n',
+                                  encoding="utf-8")
+                code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
+                self.assertEqual(code, 1, err)
+                self.assertTrue(err.startswith(diagnostic), err)
+                self.assertIn(owner, err)
+                self.assertFalse(project.record.exists())
 
         project = OrcaProject(self)
         prepared = project.queued()

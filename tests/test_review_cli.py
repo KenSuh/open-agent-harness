@@ -281,8 +281,17 @@ class CliTest(unittest.TestCase):
         self.assertIn("review base", message)
 
     def test_cli_engine_must_be_codex(self):
-        project = Project(self, config='[stages]\nreview = "claude"\n')
-        self.refused(project, "OAH_REVIEW_ENGINE_UNSUPPORTED")
+        for stages, owner in (('review = "claude"\n', "claude"),
+                              ('build = "claude"\nreview = "opencode"\n', "opencode")):
+            with self.subTest(owner=owner):
+                project = Project(self, config="[stages]\n" + stages)
+                message = self.refused(project, "OAH_REVIEW_ENGINE_UNSUPPORTED")
+                self.assertIn(f"review is {owner!r}", message)
+                self.assertIn("review base", message)
+
+    def test_review_refuses_when_the_base_has_no_review_section(self):
+        project = Project(self, config='[sections]\norder = ["build", "fix"]\n[stages]\nreview = "codex"\n')
+        self.assertIn("sections.order", self.refused(project, "OAH_STAGE_UNKNOWN"))
 
     def test_cli_timeout_must_be_a_positive_number(self):
         project = Project(self)

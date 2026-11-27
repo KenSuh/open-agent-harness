@@ -8,7 +8,7 @@ import pathlib
 import sys
 
 from oah.routing import (ENGINES, INTENSITY_SCORES, KIND_SCORES, REASONING_SCORES, RISK_SCORES, STAGES, Axes,
-                         RoutingError, recommend)
+                         RoutingError, recommend, stage_owner)
 
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE = 0, 1, 2
 COMMANDS = ("recommend",)
@@ -149,9 +149,11 @@ def _model(args: argparse.Namespace, tier: str) -> tuple[dict, tuple[str, ...]]:
 
     info = repo_info(pathlib.Path.cwd())
     settings = call_cli.load_settings(info.root)
-    engine = args.engine or settings.stages[args.stage]
+    owner = stage_owner(args.stage, settings.stages) if args.stage else None
+    engine = args.engine or owner
+    assert engine is not None
     return call.preview(engine, args.stage, tier, args.kind, settings, state_dir=state_dir(info, os.environ),
-                        env=os.environ)
+                        env=os.environ, configured=args.engine is None)
 
 
 def _print_model(model: dict) -> None:

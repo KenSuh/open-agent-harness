@@ -15,8 +15,11 @@ from oah import recommend_cli, rerank
 from oah.engines.effort import EngineError
 from oah.paths import NotARepo
 from oah.secrets import NoKeychain
+from oah.config import parse_config
 from oah.routing import (INTENSITY_SCORES, KIND_SCORES, REASONING_SCORES, RISK_SCORES, Axes, RoutingError,
-                         check_stage, floor_tier, recommend, review_floor, same_engine_warning, score_axes)
+                         check_stage, floor_tier, recommend, review_floor, same_engine_warning, score_axes,
+                         stage_owner, stage_settings)
+from oah.routing import STAGES as SOURCE_STAGES
 
 from tests.helpers import make_git_repo, make_tmp_dir
 
@@ -162,7 +165,7 @@ class StageTest(unittest.TestCase):
             check_stage("codex", "deploy", STAGES, override=False)
         self.assertEqual(ctx.exception.code, "OAH_STAGE_UNKNOWN")
         with self.assertRaises(RoutingError) as ctx:
-            check_stage("gemini", "review", STAGES, override=True)
+            check_stage("cursor", "review", STAGES, override=True)
         self.assertEqual(ctx.exception.code, "OAH_ENGINE_UNKNOWN")
 
     def test_same_engine_warning(self):
@@ -180,6 +183,92 @@ def run_recommend(*argv: str) -> tuple[int, str, str]:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = recommend_cli.run(parser.parse_args(["recommend", *argv]))
     return code, out.getvalue(), err.getvalue()
+
+
+# Desktop writes section ids under [stages]; the source CLI runs build, review and fix as these three stages.
+SECTION_STAGE = {"build": "initial", "review": "review", "fix": "correction"}
+CONFORMANCE_CONFIG = pathlib.Path(__file__).resolve().parents[1] / "conformance" / "v0.4.0" / "config"
+
+# (name, .oah/config.toml as the app writes or reads it, section -> agent the Desktop reader reports, notice codes).
+# The section -> agent column has the shape of "stages" in conformance/v0.4.0/config/*/expect.json.
+STAGE_FIXTURES = [
+    ("missing-file", None,
+     {"plan": "claude", "build": "claude", "review": "codex", "fix": "codex"}, ()),
+    ("legacy-partial", '[stages]\nreview = "claude"\n',
+     {"plan": "claude", "build": "claude", "review": "claude", "fix": "codex"}, ()),
+    ("current-all-four", '[stages]\nplan = "gemini"\nbuild = "codex"\nreview = "claude"\nfix = "opencode"\n',
+     {"plan": "gemini", "build": "codex", "review": "claude", "fix": "opencode"}, ()),
+    ("current-partial", '[stages]\nbuild = "codex"\n',
+     {"plan": "claude", "build": "codex", "review": "codex", "fix": "codex"}, ()),
+    ("current-custom-section",
+     '[sections]\norder = ["plan", "build", "docs", "review", "fix"]\n\n[sections.docs]\nlabel = "Write Docs"\n'
+     'kind = "design"\n\n[stages]\ndocs = "copilot"\nfix = "claude"\n',
+     {"plan": "claude", "build": "claude", "docs": "copilot", "review": "codex", "fix": "claude"}, ()),
+    ("current-reordered-without-build", '[sections]\norder = ["fix", "review", "plan"]\n[stages]\nreview = "claude"\n',
+     {"fix": "codex", "review": "claude", "plan": "claude"}, ()),
+    ("current-unlisted-assignment",
+     '[sections]\norder = ["plan", "build", "review", "fix"]\n[stages]\nretired = "claude"\n',
+     {"plan": "claude", "build": "claude", "review": "codex", "fix": "codex"}, ("OAH_SECTION_UNLISTED",)),
+    ("mixed-legacy-keys-with-agents",
+     '[stages]\ninitial = "codex"\nreview = "claude"\ncorrection = "claude"\n[agents.codex]\ncommand = ["codex"]\n',
+     {"plan": "codex", "build": "codex", "review": "claude", "fix": "claude"}, ()),
+    ("mixed-legacy-keys-with-sections",
+     '[sections]\norder = ["plan", "build", "review", "fix"]\n[stages]\ninitial = "codex"\ncorrection = "claude"\n',
+     {"plan": "codex", "build": "codex", "review": "codex", "fix": "claude"}, ()),
+    ("mixed-new-keys-win",
+     '[stages]\nbuild = "codex"\ninitial = "claude"\ncorrection = "claude"\n',
+     {"plan": "claude", "build": "codex", "review": "codex", "fix": "codex"}, ("OAH_STAGES_LEGACY_IGNORED",)),
+]
+
+
+def source_view(sections: dict) -> dict:
+    """The source stages a Desktop section -> agent reading leaves, in section order."""
+    return {SECTION_STAGE[section]: agent for section, agent in sections.items() if section in SECTION_STAGE}
+
+
+class DesktopStageParityTest(unittest.TestCase):
+    def read(self, text: str | None):
+        return stage_settings(parse_config(b"" if text is None else text.encode("utf-8")))
+
+    def test_legacy_current_and_mixed_files_resolve_like_the_desktop_reader(self):
+        for name, text, sections, notices in STAGE_FIXTURES:
+            with self.subTest(name=name):
+                read = self.read(text)
+                self.assertEqual(list(read.owners.items()), list(source_view(sections).items()))
+                self.assertEqual(tuple(warning.split(":", 1)[0] for warning in read.warnings), notices)
+
+    def test_shared_conformance_cases_resolve_like_the_desktop_reader(self):
+        seen = []
+        for case in sorted(CONFORMANCE_CONFIG.iterdir()):
+            if not (case / "input.json").is_file():
+                continue
+            given = json.loads((case / "input.json").read_text(encoding="utf-8"))
+            expected = json.loads((case / "expect.json").read_text(encoding="utf-8")).get("ok", {})
+            if given.get("read") != "legacy-to-1.0" or "stages" not in expected:
+                continue
+            with self.subTest(case=case.name):
+                read = self.read(given["files"][".oah/config.toml"])
+                # expect.json sorts its keys, so this compares assignments, not order.
+                self.assertEqual(read.owners, source_view(expected["stages"]))
+                self.assertEqual(sorted({warning.split(":", 1)[0] for warning in read.warnings}),
+                                 sorted(expected["notices"]))
+                seen.append(case.name)
+        self.assertEqual(seen, ["legacy-new-keys-win", "legacy-only-legacy-keys"])
+
+    def test_plan_and_custom_sections_are_not_source_stages(self):
+        self.assertEqual(SOURCE_STAGES, ("initial", "review", "correction"))
+        for _, text, _, _ in STAGE_FIXTURES:
+            self.assertLessEqual(set(self.read(text).owners), set(SOURCE_STAGES))
+        owners = self.read('[sections]\norder = ["plan", "docs"]\n[stages]\nplan = "codex"\ndocs = "codex"\n').owners
+        self.assertEqual(owners, {})
+        for stage in ("plan", "docs", "build", "fix"):
+            with self.subTest(stage=stage):
+                with self.assertRaises(RoutingError) as ctx:
+                    stage_owner(stage, owners)
+                self.assertEqual(ctx.exception.code, "OAH_STAGE_UNKNOWN")
+                with self.assertRaises(SystemExit) as refused:
+                    run_recommend(*AXES, "--stage", stage)
+                self.assertEqual(refused.exception.code, 2)
 
 
 class RecommendCliTest(unittest.TestCase):
@@ -292,6 +381,20 @@ class RecommendModelTest(unittest.TestCase):
         code, out, err = recommend_in(self.project(), *AXES, "--stage", "review", "--json")
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["model"]["engine"], "codex")
+
+    def test_model_preview_refuses_an_assignment_without_a_runtime(self):
+        project = self.project('[stages]\nbuild = "opencode"\n')
+        code, _, err = recommend_in(project, *AXES, "--stage", "initial")
+        self.assertEqual(code, 1, err)
+        self.assertTrue(err.startswith("OAH_STAGE_ENGINE_UNSUPPORTED:"), err)
+        self.assertIn("stage initial selects 'opencode'", err)
+
+    def test_model_preview_refuses_a_removed_stage(self):
+        project = self.project('[sections]\norder = ["fix"]\n[stages]\nreview = "codex"\n')
+        code, _, err = recommend_in(project, *AXES, "--stage", "review")
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_STAGE_UNKNOWN", err)
+        self.assertIn("sections.order", err)
 
     def test_a_new_kind_gets_a_model_too(self):
         project = self.project()

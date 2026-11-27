@@ -12,10 +12,10 @@ import sys
 import time
 from typing import Callable, NamedTuple
 
-from oah import briefs, call, launchers, models, routing, runs
+from oah import briefs, call, launchers, routing, runs
 from oah.launchers import native as native_launcher
 from oah.atomic import StateCorrupt, StorageError
-from oah.config import ConfigError
+from oah.config import ConfigError, load_config
 from oah.discovery import boundaries, inputs, records
 from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
@@ -72,7 +72,8 @@ def register(commands: argparse._SubParsersAction) -> None:
                                  epilog="`oah call settle --run R ...` settles a native offer; see oah call settle --help")
     parser.__class__ = _CallParser  # `settle` is a reserved first token (see _CallParser)
     parser.settle = _settle_parser()
-    parser.add_argument("engine", choices=routing.ENGINES)
+    parser.add_argument("engine", choices=routing.STAGE_OWNERS,
+                        help="agent for the stage (Claude and Codex have source CLI runtime adapters)")
     parser.add_argument("--stage", required=True, choices=routing.STAGES)
     parser.add_argument("--task", default=call.DEFAULT_TASK, help=f"the task this run belongs to (default {call.DEFAULT_TASK})")
     parser.add_argument("--tier", choices=routing.TIERS, help="use this tier instead of scoring the difficulty (recorded)")
@@ -122,17 +123,10 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 
 def load_settings(root: pathlib.Path) -> call.Settings:
-    from oah.config import load_config
-
-    config = load_config(root)
-    return call.Settings.validated(config.section("stages", call.STAGE_DEFAULTS),
-                                   config.section("engines", call.ENGINE_DEFAULTS),
-                                   config.section("models", models.DEFAULTS))
+    return call.Settings.from_config(load_config(root))
 
 
 def load_call_section(root: pathlib.Path) -> dict:
-    from oah.config import load_config
-
     return load_config(root).section("call", launchers.DEFAULTS)
 
 
@@ -240,6 +234,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     if args.message and args.prompt_file:
         print("OAH_USAGE: give either --message or --prompt-file, not both", file=sys.stderr)
         return EXIT_USAGE
+    routing.require_runtime(args.engine, args.stage)
     args = argparse.Namespace(**_snapshot(args))
     if args.worktree:
         root = call.resolve_worktree(args.worktree, root, retry=lambda path: retry_command(args, path))
@@ -254,16 +249,21 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
             print("OAH_USAGE: --require-detach applies to the process launcher only; an Orca terminal never "
                   "belongs to this terminal. Remove --require-detach", file=sys.stderr)
             return EXIT_USAGE
+        creates_review_tree = not args.worktree and args.stage == "review"
+        stages = routing.stage_settings(load_config(root))
+        routing.check_stage(args.engine, args.stage, stages.owners, override=args.override_stage,
+                            require_match=not creates_review_tree)
+
         from oah.launchers import orca as orca_launcher
 
         orca = orca_launcher.find(section["orca_command"], os.environ)
         orca_launcher.check_runner(os.environ)
-        if args.worktree or args.stage != "review":
-            placement = orca_launcher.existing_worktree(orca, root)
-        else:
+        if creates_review_tree:
             placement = orca_launcher.new_worktree(orca, root, args.task)
             root = placement.path
             state = state_dir(repo_info(root), os.environ)
+        else:
+            placement = orca_launcher.existing_worktree(orca, root)
     settings = load_settings(root)
     tools = intent_tools()
     request = call.CallRequest(

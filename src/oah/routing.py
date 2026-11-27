@@ -13,11 +13,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from typing import Final, Mapping, Sequence
+
+from oah.config import Config, ConfigError
 
 TIERS = ("low", "medium", "high", "max")
 STAGES = ("initial", "review", "correction")
 ENGINES = ("claude", "codex")
+STAGE_OWNERS: Final = (*ENGINES, "gemini", "copilot", "opencode", "antigravity")
+STAGE_DEFAULTS: Final = {"initial": "claude", "review": "codex", "correction": "codex"}
+_SOURCE_STAGES: Final = {"build": "initial", "review": "review", "fix": "correction"}
+_NEW_STAGE_KEYS: Final = ("plan", "build", "fix")
+_LEGACY_STAGE_KEYS: Final = {"initial": "build", "correction": "fix"}
+_BUILTIN_SECTIONS: Final = ("plan", "build", "review", "fix")
+_SECTION_ID: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 KIND_SCORES = {
     "quick": 1, "docs": 1, "research": 1,
@@ -197,16 +206,84 @@ def score_axes(*, stage: str, kind: str | None, scope: Sequence[str],
     return ScoredAxes(axes=Axes(**values), reasons=tuple(reasons), warnings=tuple(warnings))
 
 
-def check_stage(engine: str, stage: str, stages: Mapping[str, str], *, override: bool) -> list[str]:
-    """Refuse an engine that is not configured for this stage, unless overridden (then warn)."""
-    if engine not in ENGINES:
+@dataclass(frozen=True, slots=True)
+class StageSettings:
+    owners: Mapping[str, str]
+    warnings: tuple[str, ...]
+
+
+def stage_settings(config: Config) -> StageSettings:
+    """Resolve the three source task stages from legacy or Desktop workflow assignments."""
+    given = config.section("stages", {})
+    has_new = any(key in given for key in _NEW_STAGE_KEYS)
+    source_only = not has_new and "sections" not in config.raw and "agents" not in config.raw
+    if source_only:
+        given = config.section("stages", STAGE_DEFAULTS)
+    order = config.section("sections", {}).get("order", list(_BUILTIN_SECTIONS))
+    if (not isinstance(order, list) or any(not isinstance(name, str) or not _SECTION_ID.fullmatch(name)
+                                          for name in order) or len(set(order)) != len(order)):
+        raise ConfigError("OAH_CONFIG_INVALID", f"{config.where}: sections.order must list unique section IDs")
+
+    warnings: list[str] = []
+    ignored: list[str] = []
+    assignments: dict[str, str] = {}
+    for key, owner in given.items():
+        legacy_section = None if has_new else _LEGACY_STAGE_KEYS.get(key)
+        if legacy_section is None and key not in order:
+            name = f"stages.{key}"
+            if key in _LEGACY_STAGE_KEYS:
+                ignored.append(name)
+            else:
+                warnings.append(f"OAH_SECTION_UNLISTED: {name!r} is ignored because its section is absent from "
+                                "sections.order. Add the section to sections.order or remove the assignment.")
+            continue
+        if not isinstance(owner, str):
+            raise ConfigError("OAH_CONFIG_INVALID", f"{config.where}: stages.{key} must be a string")
+        if owner not in STAGE_OWNERS:
+            raise ConfigError("OAH_CONFIG_INVALID", f"{config.where}: stages.{key} = {owner!r}; "
+                              f"use one of: {', '.join(STAGE_OWNERS)}")
+        assignments[legacy_section or key] = owner
+
+    if ignored:
+        warnings.insert(0, f"OAH_STAGES_LEGACY_IGNORED: {', '.join(ignored)} ignored because [stages] contains "
+                        "Desktop stage keys (plan, build, or fix). Remove the ignored assignments.")
+    owners = {stage: assignments.get(section, STAGE_DEFAULTS[stage]) for section in order
+              if (stage := _SOURCE_STAGES.get(section)) is not None}
+    return StageSettings(owners, tuple(warnings))
+
+
+def require_runtime(engine: str, stage: str | None, *, configured: bool = False) -> None:
+    """Refuse an engine without a source runtime before probing or starting it."""
+    if engine not in STAGE_OWNERS:
         raise RoutingError("OAH_ENGINE_UNKNOWN", f"engine {engine!r} is not known; use one of: {', '.join(ENGINES)}")
+    if engine not in ENGINES:
+        selection = f"stage {stage} selects {engine!r}" if configured else f"request names engine {engine!r}"
+        if not configured and stage is not None:
+            selection = f"stage {stage} {selection}"
+        raise RoutingError("OAH_STAGE_ENGINE_UNSUPPORTED",
+                           f"{selection}. The source CLI has no runtime adapter for {engine}.")
+
+
+def stage_owner(stage: str, stages: Mapping[str, str]) -> str:
+    if stage not in STAGES:
+        raise RoutingError("OAH_STAGE_UNKNOWN", f"stage {stage!r} is not known; use one of: {', '.join(STAGES)}")
     if stage not in stages:
-        raise RoutingError("OAH_STAGE_UNKNOWN", f"stage {stage!r} is not known; use one of: {', '.join(stages)}")
-    expected = stages[stage]
+        section = next(section for section, name in _SOURCE_STAGES.items() if name == stage)
+        raise RoutingError("OAH_STAGE_UNKNOWN", f"stage {stage!r} is inactive; add {section!r} to sections.order")
+    return stages[stage]
+
+
+def check_stage(engine: str, stage: str, stages: Mapping[str, str], *, override: bool,
+                require_match: bool = True) -> list[str]:
+    """Check adapters now, and match the owner once the execution worktree is known."""
+    require_runtime(engine, stage)
+    expected = stage_owner(stage, stages)
     if engine == expected:
         return []
     if not override:
+        require_runtime(expected, stage, configured=True)
+        if not require_match:
+            return []
         raise RoutingError("OAH_STAGE_ENGINE_MISMATCH",
                            f"stage {stage} runs on {expected}, not {engine}; run `oah call {expected} --stage "
                            f"{stage}`, change [stages] in .oah/config.toml, or pass --override-stage (recorded)")

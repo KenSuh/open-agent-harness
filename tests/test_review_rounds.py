@@ -1264,7 +1264,7 @@ class SnapshotRoundTest(unittest.TestCase):
         project.env["OPENAI_API_KEY"] = key
         tools = call_cli.intent_tools()
         prepared = call.prepare(call.CallRequest(engine="codex", stage="review", task="t1", tier="high"),
-                                runner._call_settings(runner.config_at(project.repo, project.base)),
+                                call.Settings.from_config(runner.config_at(project.repo, project.base)),
                                 root=project.repo, state_dir=project.state, env=project.env,
                                 footer=tools.footer, has_footer=tools.has_footer, parse_intent=tools.parse,
                                 read_source=tools.read_source, keychain=NoKeychain())
@@ -1286,7 +1286,7 @@ class SnapshotRoundTest(unittest.TestCase):
         project = Project(self, remote=True)
         tools = call_cli.intent_tools()
         prepared = call.prepare(call.CallRequest(engine="codex", stage="review", task="t1", tier="high"),
-                                runner._call_settings(runner.config_at(project.repo, project.base)),
+                                call.Settings.from_config(runner.config_at(project.repo, project.base)),
                                 root=project.repo, state_dir=project.state, env=project.env,
                                 footer=tools.footer, has_footer=tools.has_footer, parse_intent=tools.parse,
                                 read_source=tools.read_source, keychain=NoKeychain())
@@ -1513,9 +1513,11 @@ class ConfigTest(unittest.TestCase):
         return (project.repo / ".oah" / "config.toml").read_text(encoding="utf-8")
 
     def test_reviewer_config_comes_from_the_base(self):
-        project = Project(self)
+        project = Project(self, config='[stages]\nplan = "gemini"\nbuild = "claude"\nreview = "codex"\nfix = "opencode"\n'
+                                      'initial = 7\n')
         hostile = re.sub(r"command = \[.*\]", 'command = ["no-such-reviewer"]', self.config_text(project))
-        hostile += '[stages]\nreview = "claude"\n[review]\nmax_rounds = 2\ncritical_paths = []\n'
+        hostile = hostile.replace('review = "codex"', 'review = "claude"').replace('initial = 7\n', '')
+        hostile += '[review]\nmax_rounds = 2\ncritical_paths = []\n'
         project.commit({".oah/config.toml": hostile}, "reconfigure the reviewer")
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
@@ -1523,6 +1525,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(receipt["reviewer"]["cli_path"], os.path.realpath(FAKE_REVIEWER))
         self.assertIn(".oah/config.toml", receipt["critical_paths"])
         self.assertTrue(any(item.startswith("OAH_REVIEW_CONFIG_CHANGED") for item in result.warnings), result.warnings)
+        self.assertTrue(any(item.startswith("OAH_STAGES_LEGACY_IGNORED") and "stages.initial" in item
+                            for item in result.warnings), result.warnings)
 
     def test_changed_base_selection_needs_an_explicit_base(self):
         project = Project(self)
