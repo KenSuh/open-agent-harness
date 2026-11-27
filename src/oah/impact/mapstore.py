@@ -114,7 +114,9 @@ def digest(data: object) -> str:
 def tool_digest(settings: Mapping[str, object]) -> str:
     source = hashlib.sha256()
     for path in sorted(pathlib.Path(__file__).parent.glob("*.py")):
-        source.update(path.name.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+        # Line endings are not part of the identity: a checkout that converts them (Windows autocrlf), an
+        # installed wheel and the frozen project-tools runner must all name the same generator.
+        source.update(path.name.encode("utf-8") + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
     return digest({"version": oah.__version__, "schema": MAP_SCHEMA, "source": source.hexdigest(),
                    "settings": {key: settings[key] for key in MAP_KEYS}})
 
@@ -259,6 +261,8 @@ def _file_key(path: pathlib.Path) -> str | None:
     try:
         if path.is_symlink():
             return "sha256:" + hashlib.sha256(os.readlink(path).encode("utf-8", "surrogateescape")).hexdigest()
+        if not path.is_file():  # a pipe or device is not content, and reading one can wait forever
+            return None
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None

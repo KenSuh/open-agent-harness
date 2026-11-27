@@ -166,6 +166,13 @@ def load_graph(root: pathlib.Path, settings: Mapping) -> dict | None:
 def read_graph(root: pathlib.Path, settings: Mapping, commit: str | None = None) -> tuple[dict | None, str, str]:
     """(graph, status, reason). The status is analysed only when the graph records commit; a graph with no
     checkable commit identity is stale-unknown, never assumed fresh."""
+    return graph_identity(root, settings, commit)[:3]
+
+
+def graph_identity(root: pathlib.Path, settings: Mapping,
+                   commit: str | None = None) -> tuple[dict | None, str, str, str | None]:
+    """read_graph, plus the full commit id the graph records (None when it records none that can be checked).
+    graphify writes that id as `built_at_commit`."""
     name = settings["graph_file"]
     try:
         raw = json.loads((pathlib.Path(root) / name).read_bytes().decode("utf-8"))
@@ -181,7 +188,7 @@ def read_graph(root: pathlib.Path, settings: Mapping, commit: str | None = None)
         declared = {node["id"] for node in nodes}
         if len(declared) != len(nodes):
             return None, "unavailable", (f"OAH_IMPACT_GRAPH_UNAVAILABLE: {name} has duplicate node IDs; "
-                                         "run oah graph update to rebuild it")
+                                         "run oah graph update to rebuild it"), None
         if any(not isinstance(edge, dict)
                or any(not isinstance(edge.get(key), str) or edge[key] not in declared
                       for key in ("source", "target")) for edge in links):
@@ -194,24 +201,25 @@ def read_graph(root: pathlib.Path, settings: Mapping, commit: str | None = None)
         edges = [[e["source"], e["target"], str(e.get("relation") or e.get("label") or "")]
                  for e in links]
         meta = raw.get("graph")
-        recorded = raw.get("commit") or (meta.get("commit") if isinstance(meta, dict) else None)
+        recorded = (raw.get("commit") or (meta.get("commit") if isinstance(meta, dict) else None)
+                    or raw.get("built_at_commit"))
     except FileNotFoundError:
-        return None, "unavailable", f"{name} is missing; run oah graph update to build it"
+        return None, "unavailable", f"{name} is missing; run oah graph update to build it", None
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         return None, "unavailable", (f"OAH_IMPACT_GRAPH_UNAVAILABLE: {name} cannot be read as a graph; "
-                                     "run oah graph update to rebuild it")
+                                     "run oah graph update to rebuild it"), None
     graph = {"files": files, "edges": edges}
     if recorded is None:
         return graph, "stale-unknown", (f"{name} records no commit, so its freshness cannot be checked; "
-                                        "re-check graph neighbours by hand")
+                                        "re-check graph neighbours by hand"), None
     if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", recorded):
         return graph, "stale-unknown", (f"{name} records {str(recorded)[:40]!r}, which is not a full commit id, so "
-                                        "its freshness cannot be checked; re-check graph neighbours by hand")
+                                        "its freshness cannot be checked; re-check graph neighbours by hand"), None
     recorded = recorded.lower()
     if commit is not None and recorded != commit.lower():
         return graph, "stale", (f"{name} was built at commit {recorded[:12]}, not {commit[:12]}; run oah graph "
-                                "update to rebuild it")
-    return graph, "analysed", f"{name} built at commit {recorded[:12]}"
+                                "update to rebuild it"), recorded
+    return graph, "analysed", f"{name} built at commit {recorded[:12]}", recorded
 
 
 def _graph(graph: Mapping | None, data: Mapping, target: str) -> list[Row]:
