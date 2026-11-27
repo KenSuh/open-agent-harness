@@ -205,11 +205,11 @@ def add_to_index(data: bytes, label: str, item: str) -> bytes:
     return out + f"{label}:".encode("utf-8") + eol + item.encode("utf-8") + eol
 
 
-def scaffold_files(today: datetime.date) -> dict[str, bytes]:
-    """Wiki-relative paths and bytes that `oah init` writes into a new wiki folder.
+def standard_files(today: datetime.date) -> dict[str, bytes]:
+    """The five standard files of a wiki: index, log, guide and the two note templates.
 
-    The Obsidian templates under templates/ keep their {{title}}/{{date}} placeholders, which
-    Obsidian's core Templates plugin fills. No editor workspace state is shipped.
+    The desktop core builds the same bytes from the same packaged templates when it sets up a wiki
+    (crates/oah-core/src/project_tools/wiki.rs); one fixture pins both sides.
     """
     files = {
         "index.md": packaged("wiki", "index.md"),
@@ -218,7 +218,16 @@ def scaffold_files(today: datetime.date) -> dict[str, bytes]:
         "templates/note.md": packaged("wiki", "note.md"),
         "templates/decision.md": packaged("wiki", "decision.md"),
     }
-    out = {name: text.encode("utf-8") for name, text in files.items()}
+    return {name: text.encode("utf-8") for name, text in files.items()}
+
+
+def scaffold_files(today: datetime.date) -> dict[str, bytes]:
+    """Wiki-relative paths and bytes that `oah init` writes into a new wiki folder.
+
+    The Obsidian templates under templates/ keep their {{title}}/{{date}} placeholders, which
+    Obsidian's core Templates plugin fills. No editor workspace state is shipped.
+    """
+    out = standard_files(today)
     for resource in sorted((TEMPLATES / "obsidian").iterdir(), key=lambda item: item.name):
         if resource.name.endswith(".json"):
             out[f".obsidian/{resource.name}"] = resource.read_bytes().replace(b"\r\n", b"\n")

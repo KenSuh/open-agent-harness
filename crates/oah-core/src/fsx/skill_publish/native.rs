@@ -13,6 +13,8 @@ type Result<T> = std::result::Result<T, PublishError>;
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FileAccess {
     Read,
+    /// Reads a file other programs keep using: nobody is kept from writing, renaming or removing it meanwhile.
+    ReadShared,
     Create,
     Lock,
     Remove,
@@ -25,6 +27,15 @@ pub(super) enum LockAttempt {
     /// The lock file was replaced between opening and locking; try again at once.
     #[cfg_attr(windows, expect(dead_code))]
     Retry,
+}
+
+/// What a name in a folder is, as the listing reports it. A later open still checks the object itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    Dir,
+    File,
+    /// A symbolic link, a junction or another reparse point, a device, a socket or a pipe.
+    Other,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +344,42 @@ impl Dir {
         self.check()?;
         os::remove_empty(self, name, expected)?;
         self.sync()
+    }
+
+    /// Up to `limit` names with their kinds, and whether the folder holds more.
+    pub(super) fn entries(&self, limit: usize) -> Result<(Vec<(OsString, Kind)>, bool)> {
+        os::entries(self, limit)
+    }
+
+    /// The identities of this folder and of every folder above it, as one digest.
+    pub(super) fn stamp(&self) -> Result<String> {
+        let ids: Vec<&ObjectId> = self.ancestors().map(Dir::id).collect();
+        let data = serde_json::to_vec(&ids).map_err(|_| PublishError::UnsafePath)?;
+        Ok(crate::fsx::Fingerprint::of(&data).to_hex())
+    }
+
+    /// A new folder with the permissions an ordinary project folder gets. Never replaces a name.
+    pub(super) fn create_shared_dir(&self, name: &str) -> Result<Self> {
+        self.check()?;
+        os::mkdir_shared(self, name)?;
+        self.sync()?;
+        self.child(name)
+    }
+
+    /// Writes a complete new file under `name` and never replaces one: the bytes go to a temporary sibling that
+    /// is flushed and then renamed without replacement. `Occupied` when the name is taken.
+    pub(super) fn publish_new(&self, name: &str, data: &[u8]) -> Result<()> {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        self.check()?;
+        let temp = format!(
+            ".oah-{:016x}.tmp",
+            RandomState::new().hash_one(std::process::id())
+        );
+        os::publish_new(self, &temp, name, data)?;
+        self.sync()?;
+        self.check()
     }
 }
 

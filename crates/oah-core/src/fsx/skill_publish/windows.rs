@@ -1,4 +1,4 @@
-use super::native::{Dir, FileAccess, LockAttempt};
+use super::native::{Dir, FileAccess, Kind, LockAttempt};
 use super::{ObjectId, PublishError};
 use std::ffi::{OsStr, c_void};
 use std::fs::{self, File, OpenOptions};
@@ -12,7 +12,7 @@ use std::ptr::null_mut;
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo, GetDriveTypeW,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo, GetDriveTypeW,
     GetVolumeInformationByHandleW, SetFileInformationByHandle,
 };
 
@@ -141,6 +141,9 @@ pub(super) fn regular(dir: &Dir, name: &str, access: FileAccess) -> Result<File>
         .share_mode(FILE_SHARE_READ);
     match access {
         FileAccess::Read => {}
+        FileAccess::ReadShared => {
+            opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
         FileAccess::Remove => {
             opts.access_mode(windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ | DELETE);
         }
@@ -319,6 +322,28 @@ pub(super) fn remove_empty(dir: &Dir, name: &str, expected: &ObjectId) -> Result
     delete_on_close(&file)
 }
 
+pub(super) fn entries(dir: &Dir, limit: usize) -> Result<(Vec<(std::ffi::OsString, Kind)>, bool)> {
+    use std::os::windows::fs::MetadataExt;
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir.path())? {
+        let entry = entry?;
+        if found.len() == limit {
+            return Ok((found, true));
+        }
+        // The attributes come with the listing itself; nothing is opened and no link is followed.
+        let attrs = entry.metadata()?.file_attributes();
+        let kind = if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            Kind::Other
+        } else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            Kind::Dir
+        } else {
+            Kind::File
+        };
+        found.push((entry.file_name(), kind));
+    }
+    Ok((found, false))
+}
+
 pub(super) fn mkdir_shared(dir: &Dir, name: &str) -> Result<()> {
     mkdir(dir, name)
 }
@@ -472,4 +497,46 @@ pub(super) fn revert_file(
     Err(PublishError::MovedUnverified {
         path: dir.path().join(name),
     })
+}
+
+pub(super) fn publish_new(dir: &Dir, temp: &str, name: &str, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+
+    // One handle creates, writes and renames the file, so nothing can replace it in between.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir.path().join(temp))?;
+    let target = dir.path().join(name);
+    let landed = plain(&file, false)
+        .and_then(|()| Ok(file.write_all(data)?))
+        .and_then(|()| Ok(file.sync_all()?))
+        .and_then(|()| rename_shared(&file, &target));
+    if let Err(err) = landed {
+        let _ = delete_on_close(&file);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// [`rename_handle`] without replacement, retried for two seconds while another process (a scanner, an indexer)
+/// briefly holds the new file open without sharing its name.
+fn rename_shared(file: &File, target: &Path) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match rename_handle(file, target, 0) {
+            Err(PublishError::Io(err))
+                if matches!(err.raw_os_error(), Some(5 | 32))
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            outcome => return outcome,
+        }
+    }
 }

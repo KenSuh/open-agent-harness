@@ -1,4 +1,4 @@
-use super::native::{Dir, FileAccess, LockAttempt};
+use super::native::{Dir, FileAccess, Kind, LockAttempt};
 use super::{ObjectId, PublishError};
 use rustix::fs::{self as rx, AtFlags, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
@@ -98,7 +98,7 @@ pub(super) fn mkdir(dir: &Dir, name: &str) -> Result<()> {
 
 pub(super) fn regular(dir: &Dir, name: &str, access: FileAccess) -> Result<File> {
     let flags = match access {
-        FileAccess::Read | FileAccess::Remove => OFlags::RDONLY,
+        FileAccess::Read | FileAccess::ReadShared | FileAccess::Remove => OFlags::RDONLY,
         FileAccess::Create => OFlags::RDWR | OFlags::CREATE | OFlags::EXCL,
         FileAccess::Lock => OFlags::RDWR | OFlags::CREATE,
     } | OFlags::NOFOLLOW
@@ -168,6 +168,36 @@ pub(super) fn remove_empty(dir: &Dir, name: &str, expected: &ObjectId) -> Result
     }
     plain_payload(&file)?;
     rx::unlinkat(dir.file(), name, AtFlags::REMOVEDIR).map_err(native)
+}
+
+pub(super) fn entries(dir: &Dir, limit: usize) -> Result<(Vec<(OsString, Kind)>, bool)> {
+    let mut found = Vec::new();
+    for entry in rx::Dir::read_from(dir.file()).map_err(native)? {
+        let entry = entry.map_err(native)?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        if found.len() == limit {
+            return Ok((found, true));
+        }
+        let kind = match entry.file_type() {
+            rx::FileType::Directory => Kind::Dir,
+            rx::FileType::RegularFile => Kind::File,
+            rx::FileType::Unknown => {
+                match rx::statat(dir.file(), name, AtFlags::SYMLINK_NOFOLLOW)
+                    .map(|stat| rx::FileType::from_raw_mode(stat.st_mode))
+                {
+                    Ok(rx::FileType::Directory) => Kind::Dir,
+                    Ok(rx::FileType::RegularFile) => Kind::File,
+                    _ => Kind::Other,
+                }
+            }
+            _ => Kind::Other,
+        };
+        found.push((OsStr::from_bytes(name.to_bytes()).to_owned(), kind));
+    }
+    Ok((found, false))
 }
 
 pub(super) fn mkdir_shared(dir: &Dir, name: &str) -> Result<()> {
@@ -307,4 +337,30 @@ pub(super) fn revert_file(
     }
     rx::renameat_with(dir.file(), staged, dir.file(), name, RenameFlags::EXCHANGE)
         .map_err(|_| unverified())
+}
+
+pub(super) fn publish_new(dir: &Dir, temp: &str, name: &str, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    // The process umask narrows this, as it does for a file the user saves.
+    let mut file = File::from(
+        rx::openat(dir.file(), temp, flags, Mode::from_raw_mode(0o666)).map_err(native)?,
+    );
+    let landed = file
+        .write_all(data)
+        .and_then(|()| file.sync_all())
+        .map_err(PublishError::from)
+        .and_then(|()| {
+            rx::renameat_with(dir.file(), temp, dir.file(), name, RenameFlags::NOREPLACE)
+                .map_err(native)
+        });
+    if let Err(err) = landed {
+        let _ = rx::unlinkat(dir.file(), temp, AtFlags::empty());
+        return Err(err);
+    }
+    if identity(&regular(dir, name, FileAccess::Read)?)? != identity(&file)? {
+        return Err(PublishError::Changed);
+    }
+    Ok(())
 }

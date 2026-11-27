@@ -17,6 +17,8 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod folder;
+pub use folder::{Content, Entry, EntryKind, Folder, Listing};
 #[cfg(any(target_os = "macos", windows))]
 mod inventory;
 mod local_skill;

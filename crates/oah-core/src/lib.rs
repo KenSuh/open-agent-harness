@@ -34,6 +34,7 @@ pub mod paths;
 pub mod plan;
 mod proc;
 pub mod project;
+pub mod project_tools;
 pub mod registry;
 pub mod review;
 pub mod rules;

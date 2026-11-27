@@ -1,0 +1,10 @@
+{
+  "today": "2026-01-02",
+  "files": {
+    "index.md": "58803a3c48a1939db7755419338c85909d8cd64d9f57257c6951e19edac77ce3",
+    "log.md": "3c73e678a694dde9f3e915bf0ec4d75a3f397f2f1ff17a18a3e773c19e0e8e6e",
+    "wiki-guide.md": "fbe3b5f4f5021b17196f2f0709bafa6cfac758214a583aea951f92deab039884",
+    "templates/note.md": "f980b8df77bb056f1ba53baaa5132a107236d377eefe3f8105489ee90e33d751",
+    "templates/decision.md": "56999de4cfc78fef73bef75e697de9f7cc1d05842160e8d3d31946316b3172cb"
+  }
+}
