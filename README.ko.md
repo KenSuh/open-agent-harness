@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-ko-dark.svg">
-    <img src="docs/assets/banner-ko-light.svg" alt="Open Agent Harness. 그냥 묻고, 확인만 하면 돼. AI가 만들고 검토하고 기록한다. 단계마다 에이전트를 고르고, 판단이 필요할 때 답하고, 반영 전에 확인한다." width="100%">
+    <img src="docs/assets/banner-ko-light.svg" alt="Open Agent Harness. AI 개발팀 구성하기. Git 프로젝트를 열고 역할을 배정한 뒤 규칙을 동기화합니다. 선택한 에이전트 도구에서 작업을 시작합니다. macOS 및 Windows용 OAH 데스크톱." width="100%">
   </picture>
 </p>
 
@@ -17,7 +17,7 @@
 
 # open-agent-harness (`oah`)
 
-**OAH 데스크톱에서 개발 에이전트 팀을 구성하세요.** 사용할 수 있는 에이전트를 확인하고 **Team Workflow**에서 단계별 역할을 배정하세요. **Explore**와 **Installed**에서는 팀에 필요한 스킬을 찾고 관리할 수 있습니다.
+**OAH 데스크톱에서 프로젝트에 맞는 AI 개발팀을 구성합니다.** Git 프로젝트를 열고 설치된 에이전트에 설계·구현·리뷰·수정을 배정한 뒤 **Team Workflow**에서 프로젝트 규칙을 동기화합니다.
 
 **OAH 데스크톱 v1.4.0 다운로드**
 
@@ -26,89 +26,14 @@
   <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/OAH_1.4.0_x64-setup.exe"><img src="docs/assets/badge-download-windows.png" width="208" alt="Windows 11 x64용 OAH 다운로드"></a>
 </p>
 
-[데스크톱 설치](#데스크톱-앱) · [프로젝트 도구](#프로젝트-도구-설정하기) · [스킬 관리](#데스크톱에서-스킬-찾기-설치-갱신) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.4.0) · [체크섬](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/SHA256SUMS) · [소스 CLI](#소스-cli)
+[첫 프로젝트 설정](#데스크톱-앱-경로-팀-구성하기) · [데스크톱 설치](#데스크톱-앱) · [프로젝트 도구](#프로젝트-도구-설정하기) · [스킬 관리](#데스크톱에서-스킬-찾기-설치-갱신) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.4.0) · [체크섬](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/SHA256SUMS) · [소스 CLI](#소스-cli)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/desktop-start-ko-dark.svg">
   <img src="docs/assets/desktop-start-ko-light.svg" alt="Agents에서 쓸 수 있는 에이전트를 확인하고 + Open…으로 Git 작업 폴더를 고른다. Team Workflow에서 단계마다 에이전트를 직접 고르고 규칙을 동기화한다. 필요할 때 Explore와 Installed에서 스킬을 관리하거나 Team Workflow → Project Tools에서 Project Wiki, Impact Map, 선택 기능인 Jev를 설정한다. 코딩은 각 에이전트의 도구에서 하며, 선택 사항인 안내형 설계는 macOS의 Claude Code와 Python 소스 CLI를 쓴다." width="540">
 </picture>
 
-[처음 실행하기](#데스크톱-앱-경로-팀-구성하기)에서 OAH 데스크톱 v1.4.0 화면과 함께 각 단계를 설명한다.
-
-- **팀의 역할을 배정합니다.** **Team Workflow**에서 단계마다 에이전트를 선택하고 프로젝트 규칙을 동기화합니다.
-- **에이전트별로 스킬을 관리합니다.** **Installed**에서 에이전트별 목록을 보고 기존 스킬의 GitHub 출처를 등록합니다. 삭제 전에는 공유 경로를 사용하는 에이전트가 표시됩니다.
-- **앱 안에서 OAH를 업데이트합니다.** 새 버전이 나오면 왼쪽 아래에 표시됩니다. **Install and restart**를 누르면 새 버전으로 다시 시작합니다.
-
-## 이 프로젝트의 목적
-
-`oah`는 각자에게 맞고 AI가 발전하는 만큼 함께 바뀌는 개발 환경을 만들도록 돕는다.
-가져다 고쳐 쓸 수 있는 참고 구현이자 가이드다. **하네스**는 AI 코딩 도구를 둘러싼 도구와 규칙,
-기록의 묶음이다.
-
-AI가 전문가처럼 프로그램을 만들고 고치는 데 필요한 일을 스스로 챙긴다. 변경의 영향을 살피고, 프로젝트 위키를
-관리하고, 결과를 검사하고, 리뷰와 수정을 이어 간다.
-**사용자는 요청하고, AI가 판단을 물으며 멈추면 답하고, 반영 전에 확인한다.**
-
-필요한 부분만 가져가도 되고, 전체 구성으로 시작해 자기 것으로 만들어도 된다. 예전 규칙과 스킬
-(AI가 읽어 쓰는 작업 지침)은 새 모델의 능력을 막거나 결과를 나쁘게 만들 수 있다. 도움이 되는 것은 남기고,
-필요 없어진 것은 지우며, 도구가 바뀌면 규칙도 바꾼다. `oah`도 계속 바뀐다.
-기본값은 이해하고 바꾸기 쉬워야 한다.
-
-### 역할마다 에이전트 고르기
-
-OAH는 Claude Code가 첫 버전을 만들고 Codex가 검토하고 고치는 구성으로 시작했다.
-v1.0.0의 **Team Workflow**에서는 저장소의 각 단계를 맡을 에이전트를 고를 수 있다.
-기본값은 설계와 구현에 Claude Code, 리뷰와 수정에 Codex다.
-
-### 어떤 AI 구성에도 맞춰 쓴다
-
-데스크톱 앱에서는 **Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode, Antigravity**를
-단계에 배정할 수 있다. **Agents**에는 스킬과 규칙 전용인 Cursor도 표시된다. 내 컴퓨터에서 쓸 수 있는 에이전트 중에서 고른다.
-
-앱은 배정을 `.oah/config.toml`에 저장하고 `AGENTS.md`의 관리 규칙에 동기화한다. 각 에이전트는 해당
-도구에서 실행하거나 이 설정을 사용하는 데스크톱 번들 명령을 쓸 수 있다. 번들 도우미는 `doctor`,
-`sections show`, `rules check`, `rules sync`를 제공한다. 소스 CLI도 같은 구현·리뷰·수정 단계 배정을
-읽는다. `oah call`은 Claude Code와 Codex CLI를 직접 실행한다. 다른 에이전트는 각 도구에서 실행한다.
-전용 명령인 `oah review`와 자동 `oah fix`는 Codex를 실행한다.
-
-## oah가 챙겨 주는 일
-
-원하는 결과를 말하면 AI가 다음 도구를 함께 써서 작업을 이어 간다.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/features-ko-dark.svg">
-  <img src="docs/assets/features-ko-light.svg" alt="영향 지도, 경로를 예약하는 리스, 선택형 판정기 TypeSafe Jev가 구현과 검토를 돕는다. 사용자는 단계마다 에이전트를 고른다. 게이트와 위키에 증거와 결정을 남긴다. 판단이 필요할 때 답하고 반영 전에 확인한다." width="100%">
-</picture>
-
-- **[영향 지도](docs/ko/concepts.md#영향-지도).** AI가 파일을 고치면 관련 코드, 문서, 다시 돌릴 검사를 보여 줘서
-  작은 변경도 끝까지 챙기기 쉽다.
-- **[프로젝트 위키](docs/ko/concepts.md#프로젝트-위키).** AI가 작업 이력과 결정, 그 이유를 코드 옆에 남긴다.
-  다음 세션이 읽을 수 있는 기록이 남아 처음부터 다시 설명할 부담이 줄어든다.
-- **[리스](docs/ko/concepts.md#리스).** 작업이 바꿀 경로를 예약하고 겹치는 리스는 거절한다.
-  작업마다 범위가 분명해지고, 끝낼 때 실제 변경이 그 안에 있는지 확인한다.
-- **[게이트](docs/ko/concepts.md#게이트).** AI가 “끝났다”의 기준을 검사로 만들고 결과를 기록한다.
-  무엇이 통과했는지 물어보고 증거를 확인할 수 있다.
-- **[구현과 리뷰](docs/ko/concepts.md#리뷰-루프와-수정).** 단계에 배정한 에이전트가 구현, 검토, 수정을 이어 간다.
-  같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 사용자에게 답을 구한다.
-- **[TypeSafe Jev](docs/ko/how-it-works.md#선택형-판정기-jev).** 권장 선택형 판정기로, 고른 스킬의 순서를 다시 매긴다.
-  확신도와 최저 기준을 지키면서 난이도를 판정해 그 등급으로 모델을 고를 수 있다. 키가 없으면 규칙이 판단한다.
-
-## 어떻게 동작하는가
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-v1-ko-dark.svg">
-  <img src="docs/assets/how-it-works-v1-ko-light.svg" alt="변경을 요청하면 설치된 규칙에 따라 의도와 범위, 리스, 영향 지도를 준비한다. 배정한 에이전트가 구현하고 검토하고 고친다. 게이트에 검사 결과를, 위키에 결정을 남긴다. 사용자는 판단이 필요할 때 답하고 반영 전에 확인한다. Jev는 선택 사항이다. 안내형 설계는 Claude Code와 Python 소스 CLI를 사용한다." width="100%">
-</picture>
-
-AI에게 평소 말로 요청한다. `oah init`이 설치한 규칙과 각 명령의 다음 단계 안내에 따라 AI가 목표와 범위를
-적고, 경로를 예약하고, 모델과 스킬을 고르며 리뷰 라운드 사이에 영향 지도를 확인한다. Jev를 켜면 난이도를
-판정하고 고른 스킬의 순서를 다시 매길 수 있다. 구현을 맡은 에이전트가 변경을 만들고, 게이트는 검사 결과를,
-위키는 이유를 남긴다. 리뷰를 맡은 에이전트가 검토하고 수정을 맡은 에이전트가 지적 사항을 고친다.
-같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 사용자에게 묻는다. 반복 횟수에 상한을 둘 수도 있다.
-
-“리뷰 끝났어?”, “게이트 다 통과했어?”라고 물어본다. 결과를 살피고 확인한 뒤 프로젝트의 기본 브랜치에
-반영한다. [CLI 작업 흐름](docs/ko/how-it-works.md)에서 내부 명령을 볼 수 있다.
-Python 소스 CLI로 [Claude Code에서 안내형 설계 대화](docs/ko/skills-and-capabilities.md#안내형-설계)를 시작하거나 이어갈 수 있다.
+[첫 프로젝트 설정 안내](#데스크톱-앱-경로-팀-구성하기)에서 OAH 데스크톱 v1.4.0 화면과 함께 따라 합니다.
 
 ## 설치
 
@@ -123,27 +48,10 @@ PowerShell에서는 `Get-FileHash -Algorithm SHA256`으로 받은 파일을 검�
 - **Windows.** 설치 파일을 실행한다. 서명되지 않은 설치 파일이므로 Microsoft Defender SmartScreen이 경고할 수 있고,
   조직 정책에 따라 설치가 제한될 수 있다.
 
-앱 내 업데이트는 v1.2.0부터 지원한다. 왼쪽 아래의 **Check for app updates**로 직접 확인할 수 있으며,
-OAH는 배포 서명을 검증한 뒤 새 버전을 설치한다. 이전 버전을 사용 중이라면 위에서 최신 설치 파일을 받는다.
+OAH를 사용 중이면 왼쪽 아래의 **Check for app updates**를 누릅니다. 새 버전이 있으면 **Install and restart**를
+선택합니다. OAH가 배포 서명을 검증한 뒤 업데이트를 설치합니다. v1.2.0 이전 버전을 사용 중이면 최신 설치 파일을 받습니다.
 
-### 소스 CLI
-
-프로젝트 초기 설정, 스킬, 전체 작업 흐름에는 소스 CLI를 쓴다. Git과 Python 3.11 이상이 필요하다.
-설치 프로그램은 필요한 도구를 확인하고 빠진 도구를 설치하기 전에 묻는다.
-
-- **macOS.** [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.sh)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `bash ./install.sh`를 실행한다. [macOS CLI 설치 안내](docs/ko/install-macos.md)
-- **Windows.** [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.ps1)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `powershell -ExecutionPolicy Bypass -File .\install.ps1`을 실행한다. [Windows CLI 설치 안내](docs/ko/install-windows.md)
-
-[macOS용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.tar.gz)
-또는 [Windows용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.zip)을
-검증해서 풀고 `install/` 안의 해당 설치 프로그램을 실행해도 된다. `--dry-run`(Windows에서는 `-DryRun`)을 붙이면 진행 단계를 미리 볼 수 있다.
-
-그다음 새 터미널을 열어 버전을 확인한다.
-
-```console
-$ oah --version
-oah 1.4.0
-```
+[OAH 데스크톱에서 첫 프로젝트 열기](#데스크톱-앱-경로-팀-구성하기)
 
 ## 처음 실행하기
 
@@ -160,23 +68,23 @@ oah 1.4.0
    OpenCode가 기본 모델을 제공하면 표시하며, 이 조회는 OpenCode 백그라운드 서비스를 시작할 수 있다.
    **View installed skills**를 누르면 **Installed**에서 OpenCode 스킬을 볼 수 있다.
 
-2. **저장소를 열고 역할을 배정한다.** **+ Open…** 버튼으로 Git 작업 폴더를 고른 뒤 **Team Workflow**를 연다.
-   카드마다 사용할 수 있는 **Agent**를 고른 뒤 **Ready**가 표시되는지 확인한다. 새 Git 프로젝트는 이 컴퓨터에
-   설치되지 않은 기본 에이전트로 시작할 수 있다. 기본값은 **Plan & Clarify**와 **Write Code**에 Claude Code,
-   **Code Review**와 **Fix Issues**에 Codex다.
-   **Balanced** 프리셋도 같은 배정을 적용한다. 카드의 **Use a different agent than**에서 다른 단계를 선택하면
-   그 단계와 서로 다른 에이전트를 쓰도록 지정할 수 있다.
+2. **저장소를 열고 역할을 배정한다.** **+ Open…**으로 Git 작업 폴더를 고른 뒤 **Team Workflow**를 연다.
+   카드마다 사용할 수 있는 **Agent**를 고르고 **Ready**가 표시되는지 확인한다. 필요한 에이전트가 목록에 없으면
+   설치한 뒤 다시 확인하거나 다른 에이전트를 고른다. **Balanced**는 **Plan & Clarify**와 **Write Code**에 Claude Code,
+   **Code Review**와 **Fix Issues**에 Codex를 배정한다. 구현과 리뷰를 다른 에이전트에 맡기려면
+   **Code Review** 카드의 **Use a different agent than**에서 **Write Code**를 선택한다.
 
    [![macOS용 OAH v1.4.0의 Team Workflow 화면. field-notes Git 작업 폴더에 Ready, Rules: in sync, Balanced 프리셋이 보인다. Plan & Clarify와 Write Code는 Claude Code, Code Review와 Fix Issues는 Codex를 쓰고 Code Review는 Write Code와 다른 에이전트를 쓴다.](docs/assets/readme-v1/team-workflow-1.4.0.png)](docs/assets/readme-v1/team-workflow-1.4.0.png)
 
 3. **프로젝트 규칙을 확인한다.** **Rules**에 동기화가 필요하다고 나오면 **Sync now**를 눌러 `AGENTS.md`의
    관리 대상 규칙을 갱신한다. 그러면 **Rules: in sync**가 표시된다. 작업 폴더의 변경 사항을 살핀 뒤 커밋한다.
 
-4. **필요할 때 스킬과 프로젝트 도구를 더한다.** [데스크톱 스킬 가이드](#데스크톱에서-스킬-찾기-설치-갱신)와
-   [프로젝트 도구 설정하기](#프로젝트-도구-설정하기)를 따라 한다. 직접 확인하기 전에는 아무것도 설치하거나 켜지 않는다.
+4. **작은 변경을 시도한다.** **Write Code**에 배정한 도구에서 같은 프로젝트를 열고 README 한 줄을 다듬는 등
+   작은 작업을 요청한다. **Code Review**에 배정한 도구에서 변경 사항을 검토한다.
 
 화면은 예제 Git 프로젝트를 연 macOS 앱이다. Windows 11 x64 앱도 같은 소스로 만든다.
-코드는 배정한 에이전트의 도구에서 작성한다. 동기화된 규칙이 각 에이전트에게 맡은 단계를 알려 준다.
+필요에 따라 [스킬을 설치하거나](#데스크톱에서-스킬-찾기-설치-갱신)
+[프로젝트 도구를 설정한다](#프로젝트-도구-설정하기).
 
 앱은 macOS에서 `~/.oah`, Windows에서 `%USERPROFILE%\.oah` 아래에 `settings.toml`과 `bin/`의 동봉 도구를 저장한다.
 이 번들 명령은 데스크톱 설정과 함께 작동한다.
@@ -197,20 +105,6 @@ Git 작업 폴더를 연 뒤 **Team Workflow → Project Tools**로 이동한다
 - **Jev.** Impact Map 결과의 순서를 조정하는 선택 기능이며 직접 켜기 전에는 꺼져 있다. **Edit Jev Settings**로
   프로젝트에서 켜고, **Manage Jev on this device**에서 전송할 내용을 확인한 뒤 이 기기에서 승인한다. 같은 화면에서
   macOS 키체인이나 Windows 자격 증명 관리자에 키를 저장한다. [키와 승인 설정](docs/ko/keys.md)
-
-### 다른 경로: 별도 프로젝트에서 소스 CLI 초기화하기
-
-이 예제 실습에는 별도 작업 복사본을 사용한다. 소스 CLI의 `oah init`과 `oah rules sync`는 `AGENTS.md`의
-관리 블록을 바꿀 수 있다. 소스 CLI를 설치한 뒤 원격 저장소가 연결된 Git 저장소에서 `oah init`을
-실행한다. 설정 계획을 검토하고 승인한 뒤 생성된 프로젝트 파일을 커밋한다. 그 프로젝트에서 AI를 열고
-평소 말로 요청한다.
-
-- “로그인 기능을 oah로 만들어 줘.”
-- “리뷰 끝났어? 게이트 다 통과했어?”
-- “이 버전을 반영해 줘.” 결과와 검사를 살핀 뒤 확인한다.
-
-[소스 CLI 첫 작업 따라 하기](examples/hello-oah/README.ko.md)를 진행한다.
-[설정 상세](docs/ko/how-it-works.md#처음-실행하기)에서 설정 계획과 생성 파일을 설명한다.
 
 ### 데스크톱에서 스킬 찾기, 설치, 갱신
 
@@ -240,6 +134,41 @@ Git 작업 폴더를 연 뒤 **Team Workflow → Project Tools**로 이동한다
 에이전트가 있을 때 `compatible_agents`도 나타난다. [기존 스킬 관리 안내](docs/ko/skills-and-capabilities.md#이미-설치한-스킬-관리)
 
 기술별 스킬 검색과 툴킷 관리는 [Python 소스 CLI](#cli에서-스킬-확인하고-고르기)를 쓴다.
+
+## 소스 CLI로 작업하기
+
+### 소스 CLI
+
+프로젝트 초기 설정, 스킬, 전체 작업 흐름에는 소스 CLI를 쓴다. Git과 Python 3.11 이상이 필요하다.
+설치 프로그램은 필요한 도구를 확인하고 빠진 도구를 설치하기 전에 묻는다.
+
+- **macOS.** [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.sh)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `bash ./install.sh`를 실행한다. [macOS CLI 설치 안내](docs/ko/install-macos.md)
+- **Windows.** [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.ps1)를 받아 `SHA256SUMS`와 대조한 뒤, 파일을 받은 폴더에서 `powershell -ExecutionPolicy Bypass -File .\install.ps1`을 실행한다. [Windows CLI 설치 안내](docs/ko/install-windows.md)
+
+[macOS용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.tar.gz)
+또는 [Windows용 소스 압축 파일](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.zip)을
+검증해서 풀고 `install/` 안의 해당 설치 프로그램을 실행해도 된다. `--dry-run`(Windows에서는 `-DryRun`)을 붙이면 진행 단계를 미리 볼 수 있다.
+
+그다음 새 터미널을 열어 버전을 확인한다.
+
+```console
+$ oah --version
+oah 1.4.0
+```
+
+### 다른 경로: 별도 프로젝트에서 소스 CLI 초기화하기
+
+이 예제 실습에는 별도 작업 복사본을 사용한다. 소스 CLI의 `oah init`과 `oah rules sync`는 `AGENTS.md`의
+관리 블록을 바꿀 수 있다. 소스 CLI를 설치한 뒤 원격 저장소가 연결된 Git 저장소에서 `oah init`을
+실행한다. 설정 계획을 검토하고 승인한 뒤 생성된 프로젝트 파일을 커밋한다. 그 프로젝트에서 AI를 열고
+평소 말로 요청한다.
+
+- “로그인 기능을 oah로 만들어 줘.”
+- “리뷰 끝났어? 게이트 다 통과했어?”
+- “이 버전을 반영해 줘.” 결과와 검사를 살핀 뒤 확인한다.
+
+[소스 CLI 첫 작업 따라 하기](examples/hello-oah/README.ko.md)를 진행한다.
+[설정 상세](docs/ko/how-it-works.md#처음-실행하기)에서 설정 계획과 생성 파일을 설명한다.
 
 ### CLI에서 스킬 확인하고 고르기
 
@@ -277,6 +206,68 @@ v1.4.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스�
 쓰는 파일을 `oah skills find --task`로 만들려면 해당 프로필이 필요하다.
 [관리형 전달 요구 사항](docs/ko/skills-and-capabilities.md#필수-관리-전달)
 
+## 이 프로젝트의 목적
+
+**하네스**는 코딩 에이전트의 작업을 안내하는 도구, 규칙과 기록의 묶음이다. OAH를 쓰면 Git 프로젝트마다
+여러 에이전트에 같은 프로젝트 규칙을 적용할 수 있다. 사용하는 도구나 팀이 바뀌면 에이전트 배정과 스킬을 바꾼다.
+
+### 역할마다 에이전트 고르기
+
+**Team Workflow**에서 설계, 구현, 리뷰, 수정을 맡을 에이전트를 정한다. 배정은 `.oah/config.toml`에 저장하고
+프로젝트의 `AGENTS.md` 관리 규칙을 동기화한다. 배정된 단계는 각 에이전트의 도구에서 진행한다.
+
+<a id="어떤-ai-구성에도-맞춰-쓴다"></a>
+
+### 지원 에이전트와 명령
+
+데스크톱 앱에서는 **Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode, Antigravity**를
+단계에 배정할 수 있다. **Agents**에는 스킬과 규칙에 쓸 수 있는 Cursor도 표시된다. 내 컴퓨터에서 쓸 수 있는
+도구 중에서 고른다.
+
+데스크톱 동봉 도구는 `doctor`, `sections show`, `rules check`, `rules sync`를 제공한다. Python 소스 CLI도
+같은 단계 배정을 읽는다. 소스 CLI의 `oah call`은 Claude Code와 Codex CLI를 직접 실행한다. 다른 에이전트는
+각 도구에서 실행한다. 소스 CLI의 `oah review`는 Codex를 쓰며, 자동 수정 명령인 `oah fix`를 쓰려면
+수정 역할에 Codex를 배정해야 한다.
+
+## oah가 챙겨 주는 일
+
+프로젝트 도구와 Python 소스 CLI를 사용해 변경이 어떤 파일, 검사, 결정에 영향을 주는지 확인한다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/features-ko-dark.svg">
+  <img src="docs/assets/features-ko-light.svg" alt="영향 지도, 경로를 예약하는 리스, 선택형 판정기 TypeSafe Jev가 구현과 검토를 돕는다. 사용자는 단계마다 에이전트를 고른다. 게이트와 위키에 증거와 결정을 남긴다. 판단이 필요할 때 답하고 반영 전에 확인한다." width="100%">
+</picture>
+
+- **[영향 지도](docs/ko/concepts.md#영향-지도).** AI가 파일을 고치면 관련 코드, 문서, 다시 돌릴 검사를 보여 줘서
+  작은 변경도 끝까지 챙기기 쉽다.
+- **[프로젝트 위키](docs/ko/concepts.md#프로젝트-위키).** AI가 작업 이력과 결정, 그 이유를 코드 옆에 남긴다.
+  다음 세션이 읽을 수 있는 기록이 남아 처음부터 다시 설명할 부담이 줄어든다.
+- **[리스](docs/ko/concepts.md#리스).** 작업이 바꿀 경로를 예약하고 겹치는 리스는 거절한다.
+  작업마다 범위가 분명해지고, 끝낼 때 실제 변경이 그 안에 있는지 확인한다.
+- **[게이트](docs/ko/concepts.md#게이트).** AI가 “끝났다”의 기준을 검사로 만들고 결과를 기록한다.
+  무엇이 통과했는지 물어보고 증거를 확인할 수 있다.
+- **[구현과 리뷰](docs/ko/concepts.md#리뷰-루프와-수정).** 단계에 배정한 에이전트가 구현, 검토, 수정을 이어 간다.
+  같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 사용자에게 답을 구한다.
+- **[TypeSafe Jev](docs/ko/how-it-works.md#선택형-판정기-jev).** 권장 선택형 판정기로, 고른 스킬의 순서를 다시 매긴다.
+  확신도와 최저 기준을 지키면서 난이도를 판정해 그 등급으로 모델을 고를 수 있다. 키가 없으면 규칙이 판단한다.
+
+## 어떻게 동작하는가
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-v1-ko-dark.svg">
+  <img src="docs/assets/how-it-works-v1-ko-light.svg" alt="변경을 요청하면 설치된 규칙에 따라 의도와 범위, 리스, 영향 지도를 준비한다. 배정한 에이전트가 구현하고 검토하고 고친다. 게이트에 검사 결과를, 위키에 결정을 남긴다. 사용자는 판단이 필요할 때 답하고 반영 전에 확인한다. Jev는 선택 사항이다. 안내형 설계는 Claude Code와 Python 소스 CLI를 사용한다." width="100%">
+</picture>
+
+소스 CLI의 전체 작업 흐름에서는 `oah init`이 설치한 규칙과 각 명령의 안내에 따라 에이전트가 목표와 범위를
+적고, 경로를 예약하고, 모델과 스킬을 고르며 리뷰 라운드 사이에 영향 지도를 확인한다. Jev를 켜면 난이도를
+판정하고 고른 스킬의 순서를 다시 매길 수 있다. 구현을 맡은 에이전트가 변경을 만들고, 게이트는 검사 결과를,
+위키는 이유를 남긴다. 리뷰를 맡은 에이전트가 검토하고 수정을 맡은 에이전트가 지적 사항을 고친다.
+같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 사용자에게 묻는다. 반복 횟수에 상한을 둘 수도 있다.
+
+“리뷰 끝났어?”, “게이트 다 통과했어?”라고 물어본다. 결과를 살피고 확인한 뒤 프로젝트의 기본 브랜치에
+반영한다. [CLI 작업 흐름](docs/ko/how-it-works.md)에서 내부 명령을 볼 수 있다.
+Python 소스 CLI로 [Claude Code에서 안내형 설계 대화](docs/ko/skills-and-capabilities.md#안내형-설계)를 시작하거나 이어갈 수 있다.
+
 ## v0.4.0의 새 기능
 
 데스크톱 앱이 나온 v1.0.0에 앞서 [v0.4.0 릴리스](https://github.com/KenSuh/open-agent-harness/releases/tag/v0.4.0)에는
@@ -307,25 +298,10 @@ v1.4.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스�
 
 ### 예정 작업
 
-- **장단점과 함께 기술 조합 제안.** 프로젝트에 맞는 언어와 소스를 함께 추천하고, 그 조합을 배우고 운영할 때의
-  장단점을 설명한다. Rust나 여러 언어를 쓰도록 강요하지 않는다.
-- **작업에 맞춰 새로 확인하는 출처.** v0.4.0은 등록한 출처를 요청할 때나 하루에 한 번 확인한다. 작업을
-  시작하거나 이어 갈 때 새로 확인하는 기능은 계획 단계다. 그때도 확인에 실패하면 최신으로 표시하지 않는다.
-- **영향받는 작업만 오래됨.** v0.4.0에서는 더 새로운 리비전이 승인되면 묶인 작업이 모두 `stale`이 된다.
-  결정마다 영향을 받는 작업 지시와 검토 결과를 추적해 변경을 승인할 때 그것만 "오래됨"으로 표시하는 기능은
-  계획 단계다. 그런 작업을 반영하려면 해당 지시를 갱신하고 다시 검토해야 한다.
-- **설계가 바뀌면 이전 프로젝트 자료까지 자동 수정.** 설계나 결정의 변경을 승인하면 oah가 gbrain으로 이전 설계에
-  따라 만든 위키 페이지, 노트, 문서를 찾는다. 프로젝트에서 설정한 범위 안에서 변경의 영향을 받는 자료를
-  갱신하며, 변경 사항은 되돌릴 수 있다. 검색에는 Ollama가 내 컴퓨터에서 만든 임베딩을 쓴다. 모든 사용자에게
-  기본으로 켜질 예정이다. Ollama와 Bun, 약 2.7 GB의 디스크 공간, 처음 검색 색인을 만드는 시간이 필요하다.
-- **지원하는 모든 호스트에 스킬 전달.** v0.4.0은 Claude Code, Codex, Orca 작업자, 네이티브 하위 에이전트에 같은
-  방식으로 스킬 본문과 도구 결과를 준비하지만, 용량 검증 프로필을 갖춘 호스트에만 전달하며 아직 검증된 호스트가
-  없다. 실제 호스트 검증은 계획 단계다.
-- **반복되는 문제는 원인까지.** 수정 후 검토에서 같은 유형의 문제가 다시 발견되면, 앞선 수정으로 해결되지 않은
-  이유를 설명하고 같은 원인으로 문제가 생긴 곳을 모두 고쳐야 한다. 그 유형의 문제가 다시 생기면 실패하는
-  테스트도 하나 추가해야 한다.
-- **설계 선택지 순위에 Jev 활용.** TypeSafe Jev가 대화 안에서 선택지의 순위를 매기는 데 도움을 줄 수 있다.
-  설계의 기준은 기록된 사실과 사용자의 결정이다.
+프로젝트에 맞는 기술 조합을 제안하고, 작업을 재개할 때 등록한 출처를 다시 확인하는 기능을 검토하고 있다.
+승인한 설계가 바뀌었을 때 영향을 받는 작업 지시, 리뷰와 위키 기록을 찾는 기능도 검토 중이다.
+호스트의 관리형 스킬 전달 능력을 검증하고 같은 리뷰 문제가 반복되면 원인을 추적하는 작업도 계획에 포함된다.
+범위와 선행 조건은 프로젝트 계획에서 확인할 수 있다.
 
 ## 문서
 

@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
-    <img src="docs/assets/banner-light.svg" alt="Open Agent Harness. Just ask, then confirm. Your AI builds, reviews and records the work. Choose agents by stage, answer when a decision is needed and confirm before landing." width="100%">
+    <img src="docs/assets/banner-light.svg" alt="Open Agent Harness. Set up your AI team. Open a Git project, assign roles and sync its rules. Then work in the agent tools you chose. OAH Desktop for macOS and Windows." width="100%">
   </picture>
 </p>
 
@@ -17,7 +17,7 @@
 
 # open-agent-harness (`oah`)
 
-**Set up your AI coding team in OAH Desktop.** See which agents are available, assign each stage in **Team Workflow**, and use **Explore** and **Installed** to find and manage the skills your team uses.
+**Set up your AI coding team in OAH Desktop.** Open a Git project, choose which installed agents plan, implement, review and fix changes, then sync the project rules in **Team Workflow**.
 
 **Download OAH Desktop v1.4.0**
 
@@ -26,91 +26,14 @@
   <a href="https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/OAH_1.4.0_x64-setup.exe"><img src="docs/assets/badge-download-windows.png" width="208" alt="Download OAH for Windows 11 x64"></a>
 </p>
 
-[Install the desktop app](#desktop-app) · [Project tools](#configure-project-tools) · [Manage skills](#find-install-and-update-skills-in-desktop) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.4.0) · [Checksums](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/SHA256SUMS) · [Source CLI](#source-cli)
+[Set up your first project](#desktop-app-path-set-up-your-team) · [Install the desktop app](#desktop-app) · [Project tools](#configure-project-tools) · [Manage skills](#find-install-and-update-skills-in-desktop) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.4.0) · [Checksums](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/SHA256SUMS) · [Source CLI](#source-cli)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/desktop-start-dark.svg">
   <img src="docs/assets/desktop-start-light.svg" alt="Check the available agents in Agents, then use + Open… to choose a Git worktree. In Team Workflow, you choose an agent for each stage and sync the rules. When you need them, manage skills in Explore and Installed, or set up Project Wiki, Impact Map and optional Jev in Team Workflow → Project Tools. Coding happens in each agent’s own tool; optional guided design uses Claude Code on macOS with the Python source CLI." width="540">
 </picture>
 
-[First run](#desktop-app-path-set-up-your-team) walks through these steps with OAH Desktop v1.4.0 screenshots.
-
-- **Assign roles.** Choose an available agent for each stage and sync the project's rules from **Team Workflow**.
-- **Manage skills by agent.** In **Installed**, filter by agent, register GitHub sources for existing skills, and confirm shared removal with the affected agents listed.
-- **Update OAH from the app.** When a new version is available, use **Install and restart** in the lower-left sidebar.
-
-## Purpose: a harness that keeps adapting
-
-`oah` helps you build an AI development workflow that fits you and keeps changing as AI improves.
-It is a working reference and a guide you can adapt. A **harness** is the set of tools, rules and records
-around an AI coding assistant.
-
-Your AI takes care of the whole job of building and fixing a program like an expert. It checks what a change
-might affect, keeps the project wiki, proves the result and runs the review cycle.
-**You ask, answer when the AI stops for a decision, and confirm before anything lands.**
-
-Take the parts that help, or start with the whole setup and make it yours. Older rules and skills
-(instructions an AI can load) can hold a newer model back or make its results worse. Keep what helps,
-remove what no longer does, and change the rules as your tools change. `oah` keeps evolving too.
-Its defaults should be easy to understand and change.
-
-### Choose an agent for each role
-
-OAH started with a two-engine recipe. Claude Code wrote the first version, and Codex reviewed and corrected it.
-In v1.0.0, **Team Workflow** lets you choose an agent for each section of a repository. Claude Code is still the
-default for planning and building. Codex is the default for review and fixes.
-
-### Use it with any AI setup
-
-The desktop app offers **Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode and Antigravity** as workflow
-choices. **Agents** also lists Cursor for skills and rules only. Choose from the agents available on your machine.
-
-The desktop app saves assignments in `.oah/config.toml` and syncs them into the managed rules in `AGENTS.md`.
-Use each agent in its own tool, or use the desktop's bundled commands with that configuration. The bundled
-helper provides `doctor`, `sections show`, `rules check` and `rules sync`. The source CLI reads the same
-build, review and fix assignments. `oah call` launches Claude Code and Codex CLI directly. Use other
-assigned agents through their own tools. The dedicated `oah review` and automatic `oah fix` commands run Codex.
-
-## What oah does for you
-
-You describe the result you want. Your AI uses these parts together to carry the work through.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/features-dark.svg">
-  <img src="docs/assets/features-light.svg" alt="The impact map, path-reserving leases and optional TypeSafe Jev judgement support build and review. You choose agents by stage. Gates and the wiki keep evidence and decisions. You answer when the loop pauses and confirm before landing." width="100%">
-</picture>
-
-- **[Impact map](docs/concepts.md#the-impact-map).** When your AI changes a file, the impact map shows related code,
-  documents and the checks to rerun, so a small edit is easier to follow through.
-- **[Project wiki](docs/concepts.md#the-project-wiki).** Your AI keeps the task history, decisions and reasons
-  beside the code. The next session has a record to read instead of making you explain everything again.
-- **[Leases](docs/concepts.md#leases).** A lease reserves the paths a task changes, and an overlapping lease
-  is refused. Each task has a clear scope, and its changes are checked against that scope when it finishes.
-- **[Gates](docs/concepts.md#gates).** Your AI turns “done” into checks with recorded results.
-  You can ask what passed and see the evidence.
-- **[Build and review](docs/concepts.md#the-review-loop-and-corrections).** Agents assigned to build, review and
-  fix carry the work through. A repeated problem or a design choice pauses the loop for your answer.
-- **[TypeSafe Jev](docs/how-it-works.md#jev-the-optional-judge).** The recommended, optional judge re-orders
-  chosen skills and judges difficulty so its tier can pick the model, subject to confidence and minimum-level
-  rules. Without a key, the rules decide.
-
-## How it works
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-v1-dark.svg">
-  <img src="docs/assets/how-it-works-v1-light.svg" alt="Describe a change. The installed rules guide intent, scope, leases and impact checks. Assigned agents build, review and fix. Gates record checks and the wiki keeps decisions. You answer when a decision is needed and confirm landing. Jev is optional. Guided design uses Claude Code and the Python source CLI." width="100%">
-</picture>
-
-Talk to your AI in plain words. The rules installed by `oah init` and each command’s next-step message guide it
-through recording your goal and scope, reserving paths, choosing the model and skills, and checking the impact
-map between review rounds. If you enable Jev, it can judge difficulty and rank chosen skills.
-The agent assigned to build implements the change. Gates record the checks and the wiki keeps the reasons.
-The reviewer checks the change and the agent assigned to fixes addresses the findings. The loop can stop for
-your answer when a problem repeats or a design decision is needed. A round limit is optional.
-
-Ask “Is the review done?” or “Did all the gates pass?” Inspect the result and confirm before it lands in your
-project's main branch. The [CLI walkthrough](docs/how-it-works.md) shows the underlying commands.
-Start or resume a [guided design conversation in Claude Code](docs/skills-and-capabilities.md#guided-design) with the Python source CLI.
+[Follow the first-project guide](#desktop-app-path-set-up-your-team) with OAH Desktop v1.4.0 screenshots.
 
 ## Install
 
@@ -127,28 +50,11 @@ digest matches the corresponding entry.
 - **Windows.** Run the installer. The installer is unsigned, so Microsoft Defender SmartScreen may warn and
   your organization’s policy may restrict installation.
 
-In-app updates are available from v1.2.0. Use **Check for app updates** in the lower-left sidebar to check
-manually. OAH verifies the release signature before it installs an update. If you use an earlier version,
-download the current installer above.
+Already using OAH? Choose **Check for app updates** in the lower-left sidebar. When an update is available,
+choose **Install and restart**. OAH verifies the release signature before installing. For versions before
+v1.2.0, use the current installer.
 
-### Source CLI
-
-Use the source CLI for project setup, skills and the full task loop. It needs Git and Python 3.11 or later.
-The installers check prerequisites and ask before installing missing tools.
-
-- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
-- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
-
-You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.tar.gz)
-or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.zip),
-then run the corresponding installer under `install/`. Add `--dry-run` (`-DryRun` on Windows) to preview the steps.
-
-Then open a new terminal and check the version.
-
-```console
-$ oah --version
-oah 1.4.0
-```
+[Open your first project in OAH Desktop](#desktop-app-path-set-up-your-team)
 
 ## First run
 
@@ -166,22 +72,22 @@ oah 1.4.0
    Choose **View installed skills** to open its skills in **Installed**.
 
 2. **Open a repository and assign roles.** Use **+ Open…** to choose a Git worktree, then open **Team Workflow**.
-   Choose an available **Agent** on each card, then check that the page shows **Ready**. A new Git project can start
-   with default agents that are not installed on this computer. The defaults are Claude Code for **Plan & Clarify**
-   and **Write Code**, and Codex for **Code Review** and **Fix Issues**.
-   The **Balanced** preset applies the same assignments. The **Use a different agent than** checkboxes let you
-   require two sections to use different agents.
+   Pick an available **Agent** on each card and check for **Ready**. If an agent is missing, install it and rescan
+   or choose another available agent. Choose **Balanced** for Claude Code in **Plan & Clarify** and **Write Code**,
+   with Codex in **Code Review** and **Fix Issues**. To require a separate reviewer, set
+   **Use a different agent than** to **Write Code** on the **Code Review** card.
 
    [![OAH v1.4.0 Team Workflow on macOS for the field-notes Git work tree. It shows Ready, Rules: in sync and the Balanced preset. Plan & Clarify and Write Code use Claude Code, Code Review and Fix Issues use Codex, and Code Review uses a different agent than Write Code.](docs/assets/readme-v1/team-workflow-1.4.0.png)](docs/assets/readme-v1/team-workflow-1.4.0.png)
 
 3. **Check the project rules.** If **Rules** shows drift, choose **Sync now** to update the managed block in
    `AGENTS.md`. The tile then reads **Rules: in sync**. Review the changes in the worktree before committing them.
 
-4. **Add skills and project tools when you need them.** Follow the [Desktop skill guide](#find-install-and-update-skills-in-desktop)
-   and [Configure project tools](#configure-project-tools). Nothing is installed or turned on until you confirm it.
+4. **Try a small change.** Open the project in the tool you assigned to **Write Code** and ask it to do a small
+   task, such as clarifying one line of your README. Review the diff in the tool you assigned to **Code Review**.
 
 The screenshots show the macOS app with a sample Git project. The Windows 11 x64 app is built from the same source.
-Write code in each assigned agent's own tool; the synced rules tell each agent which section it does.
+When you need them, [install skills](#find-install-and-update-skills-in-desktop) or
+[configure project tools](#configure-project-tools).
 
 The desktop app uses `~/.oah` on macOS or `%USERPROFILE%\.oah` on Windows. It writes `settings.toml`
 and places its helper in `bin/`. These bundled commands work with the desktop configuration.
@@ -203,20 +109,6 @@ Open a Git worktree, then go to **Team Workflow → Project Tools**. Each card s
 - **Jev.** Optional Impact Map result ordering, off until you turn it on. Use **Edit Jev Settings** to turn it on
   for the project, then **Manage Jev on this device** to review what is sent and approve it. Store a key in macOS
   Keychain or Windows Credential Manager from the same panel. [Key and approval settings](docs/keys.md#a-key-alone-never-turns-the-re-ranker-on)
-
-### Alternative: initialize a separate project with the source CLI
-
-Use a separate working copy for this walkthrough. Source CLI commands `oah init` and `oah rules sync` can
-replace the managed `AGENTS.md` block. In a Git repository with a remote, run `oah init` after installing
-the source CLI. Review and confirm the setup plan, then commit the project files it creates. Open your AI
-in that project and ask in plain words.
-
-- “Build login with oah.”
-- “Is the review done? Did all the gates pass?”
-- “Land this version.” Say this after inspecting the result and the checks.
-
-[Source CLI first-task walkthrough](examples/hello-oah/README.md).
-[Setup details](docs/how-it-works.md#first-run) explain the plan and the generated files.
 
 ### Find, install and update skills in Desktop
 
@@ -246,6 +138,41 @@ The bundled native CLI lists local skill folders with `oah skills list`. Use `--
 `compatible_agents` when other agents use a location. See [Installed skill management](docs/skills-and-capabilities.md#manage-a-skill-already-installed-on-your-computer).
 
 For search by technology and toolkit management, use the [Python source CLI](#inspect-and-choose-skills-in-the-cli).
+
+## Work with the source CLI
+
+### Source CLI
+
+Use the source CLI for project setup, skills and the full task loop. It needs Git and Python 3.11 or later.
+The installers check prerequisites and ask before installing missing tools.
+
+- **macOS.** Download [install.sh](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.sh), verify it against `SHA256SUMS`, then run `bash ./install.sh` from its folder. [macOS CLI guide](docs/install-macos.md)
+- **Windows.** Download [install.ps1](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/install.ps1), verify it against `SHA256SUMS`, then run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from its folder. [Windows CLI guide](docs/install-windows.md)
+
+You can also verify and unpack the [macOS source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.tar.gz)
+or [Windows source archive](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/open-agent-harness-v1.4.0.zip),
+then run the corresponding installer under `install/`. Add `--dry-run` (`-DryRun` on Windows) to preview the steps.
+
+Then open a new terminal and check the version.
+
+```console
+$ oah --version
+oah 1.4.0
+```
+
+### Alternative: initialize a separate project with the source CLI
+
+Use a separate working copy for this walkthrough. Source CLI commands `oah init` and `oah rules sync` can
+replace the managed `AGENTS.md` block. In a Git repository with a remote, run `oah init` after installing
+the source CLI. Review and confirm the setup plan, then commit the project files it creates. Open your AI
+in that project and ask in plain words.
+
+- “Build login with oah.”
+- “Is the review done? Did all the gates pass?”
+- “Land this version.” Say this after inspecting the result and the checks.
+
+[Source CLI first-task walkthrough](examples/hello-oah/README.md).
+[Setup details](docs/how-it-works.md#first-run) explain the plan and the generated files.
 
 ### Inspect and choose skills in the CLI
 
@@ -283,6 +210,70 @@ v1.4.0 ships with no qualified host profile for managed worker delivery. `oah sk
 that profile to create the needs file used by `oah skills select --needs FILE --review REVIEW_ID`.
 [Managed delivery requirements](docs/skills-and-capabilities.md#required-managed-delivery)
 
+## Purpose: a harness that keeps adapting
+
+A **harness** is the tools, rules and records that guide a coding agent. OAH lets you share those rules with
+the agents you use in each Git project. Update the assignments and skills as your team or tools change.
+
+### Choose an agent for each role
+
+In **Team Workflow**, set the agents that handle planning, implementation, review and fixes. Save the
+assignments in `.oah/config.toml` and sync the project's managed `AGENTS.md` rules. Each agent uses its own
+tool to work through the stage you assigned.
+
+<a id="use-it-with-any-ai-setup"></a>
+
+### Supported agents and commands
+
+The desktop app offers **Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode and Antigravity** as workflow
+choices. **Agents** also lists Cursor for skills and rules. Choose from the tools available on your machine.
+
+The Desktop helper provides `doctor`, `sections show`, `rules check` and `rules sync`. The Python source CLI
+reads the same workflow assignments. Its `oah call` command directly launches Claude Code and Codex CLI.
+Use other assigned agents in their own tools. The source CLI's `oah review` uses Codex, and automatic
+`oah fix` requires Codex as the fix agent.
+
+## What oah does for you
+
+The project tools and the full Python source CLI help you trace which files, checks and decisions a change affects.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/features-dark.svg">
+  <img src="docs/assets/features-light.svg" alt="The impact map, path-reserving leases and optional TypeSafe Jev judgement support build and review. You choose agents by stage. Gates and the wiki keep evidence and decisions. You answer when the loop pauses and confirm before landing." width="100%">
+</picture>
+
+- **[Impact map](docs/concepts.md#the-impact-map).** When your AI changes a file, the impact map shows related code,
+  documents and the checks to rerun, so a small edit is easier to follow through.
+- **[Project wiki](docs/concepts.md#the-project-wiki).** Your AI keeps the task history, decisions and reasons
+  beside the code. The next session has a record to read instead of making you explain everything again.
+- **[Leases](docs/concepts.md#leases).** A lease reserves the paths a task changes, and an overlapping lease
+  is refused. Each task has a clear scope, and its changes are checked against that scope when it finishes.
+- **[Gates](docs/concepts.md#gates).** Your AI turns “done” into checks with recorded results.
+  You can ask what passed and see the evidence.
+- **[Build and review](docs/concepts.md#the-review-loop-and-corrections).** Agents assigned to build, review and
+  fix carry the work through. A repeated problem or a design choice pauses the loop for your answer.
+- **[TypeSafe Jev](docs/how-it-works.md#jev-the-optional-judge).** The recommended, optional judge re-orders
+  chosen skills and judges difficulty so its tier can pick the model, subject to confidence and minimum-level
+  rules. Without a key, the rules decide.
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-v1-dark.svg">
+  <img src="docs/assets/how-it-works-v1-light.svg" alt="Describe a change. The installed rules guide intent, scope, leases and impact checks. Assigned agents build, review and fix. Gates record checks and the wiki keeps decisions. You answer when a decision is needed and confirm landing. Jev is optional. Guided design uses Claude Code and the Python source CLI." width="100%">
+</picture>
+
+In the full source CLI workflow, the rules installed by `oah init` and each command’s next-step message guide the agent
+through recording your goal and scope, reserving paths, choosing the model and skills, and checking the impact
+map between review rounds. If you enable Jev, it can judge difficulty and rank chosen skills.
+The agent assigned to build implements the change. Gates record the checks and the wiki keeps the reasons.
+The reviewer checks the change and the agent assigned to fixes addresses the findings. The loop can stop for
+your answer when a problem repeats or a design decision is needed. A round limit is optional.
+
+Ask “Is the review done?” or “Did all the gates pass?” Inspect the result and confirm before it lands in your
+project's main branch. The [CLI walkthrough](docs/how-it-works.md) shows the underlying commands.
+Start or resume a [guided design conversation in Claude Code](docs/skills-and-capabilities.md#guided-design) with the Python source CLI.
+
 ## New in v0.4.0
 
 The [v0.4.0 release](https://github.com/KenSuh/open-agent-harness/releases/tag/v0.4.0) introduced the features
@@ -315,26 +306,10 @@ Plans can change as the tools change. See the [project plan](docs/PLAN.md) and [
 
 ### Planned work
 
-- **Stack suggestions with trade-offs.** oah suggests a language and source combination that fits, with what it
-  means for learning and operation. It never forces Rust or a multi-language setup.
-- **Sources refreshed as work moves.** v0.4.0 checks registered sources when you ask or once a day. Refreshing
-  them when work starts or resumes is planned; a failed refresh will still never be shown as fresh.
-- **Only affected work goes out of date.** In v0.4.0 any newer accepted revision makes a bound task stale.
-  Tracking which work instructions and reviews each decision affects, so that approving a change marks only those,
-  is planned. Before such work can be merged, those instructions must be updated and those reviews run again.
-- **Design changes update earlier project documents.** When you approve a change to the design or one of its
-  decisions, oah uses gbrain to find earlier wiki pages, notes and documents that depend on the previous design.
-  It updates affected material within the project's configured scope, and you can roll back those changes.
-  gbrain searches on your computer using embeddings from Ollama. This feature is planned to be on by default for
-  everyone. It needs Ollama, Bun, about 2.7 GB of disk space and time to build the first search index.
-- **Skills delivered on every supported host.** v0.4.0 prepares skill texts and tool results the same way for
-  Claude Code, Codex, Orca workers and native subagents, but delivers them only on a host with a qualified capacity
-  profile, and none is qualified yet. Qualifying real hosts is planned.
-- **Repeated problems are traced to their cause.** When the same kind of review problem comes back after a fix,
-  the correction has to explain why the earlier fix missed it, fix every place with the same cause, and add one
-  test that catches the whole kind.
-- **Jev helps rank design options.** TypeSafe Jev can help rank options inside the conversation. The design
-  follows recorded facts and your decisions.
+Open proposals cover project-specific stack suggestions, refreshing registered sources when work resumes,
+and tracking which task instructions, reviews and wiki records are affected when an accepted design changes.
+Other proposals cover managed skill delivery on qualified hosts and tracing repeated review findings to their
+cause. See the project plan for scope and prerequisites.
 
 ## Documentation
 
