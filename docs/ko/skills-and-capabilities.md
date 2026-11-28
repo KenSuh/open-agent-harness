@@ -10,15 +10,18 @@
 ## 안내형 설계
 
 macOS의 Claude Code와 [Python 소스 CLI](install-macos.md)로 진행한다. Git 프로젝트에서 설계를 보관할
-브랜치를 연다. 프로젝트 스킬을 설치할 때는 같은 버전의 OAH 소스를 지정한다.
+브랜치를 연다. 새 프로젝트라면 `oah init`을 실행한다. 초기화한 프로젝트는 OAH를 업데이트한 뒤
+`oah rules sync`를 실행한다.
+
+프로젝트에 `grilling` 스킬이 있으면 그 사본을 쓴다. 없다면 설치한 OAH 릴리스의 소스 경로를
+`OAH_KIT_DIR`에 지정하고 프로젝트 스킬을 설치한다.
 
 ```sh
-oah init
 OAH_KIT_DIR="/path/to/oah-source" oah skills install mattpocock-skills --project --target claude
 ```
 
-초기화한 프로젝트는 OAH를 업데이트한 뒤 `oah rules sync`를 실행한다. 프로젝트에 설치한 `grilling`
-스킬이 있으면 그 사본을 쓴다.
+설치 프로그램은 로컬 키트 캐시를 먼저 확인하고, 해당 키트가 캐시에 없으면 지정한 릴리스 소스를 쓴다.
+설치 계획에서 선택된 출처를 확인할 수 있다.
 
 설계를 시작할 때 프로젝트 ID와 설계 ID를 알려 준다. 첫 설계라면 사용자 요청을 `request.md`에,
 초안을 `draft.md`에 적고 대화 전에 등록한다.
