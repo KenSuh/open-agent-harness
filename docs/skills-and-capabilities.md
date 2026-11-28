@@ -10,16 +10,18 @@ except the one search step that says it sends something.
 ## Guided design
 
 Use this workflow from Claude Code on macOS with the [Python source CLI](install-macos.md).
-Run the setup in your Git project on the branch where you will keep the design. Use the toolkit from the
-matching OAH release for the project skill installation.
+In your Git project, switch to the branch where you will keep the design. Run `oah init` for a new
+project or `oah rules sync` after updating an initialized project.
+
+If the project already has the `grilling` skill, use that copy. Otherwise, set `OAH_KIT_DIR` to the
+source directory for your OAH release and install the project skill.
 
 ```sh
-oah init
 OAH_KIT_DIR="/path/to/oah-source" oah skills install mattpocock-skills --project --target claude
 ```
 
-For an initialized project, use `oah rules sync` after updating OAH. If you already installed the project's
-`grilling` skill, use that copy.
+The installer checks the local kit cache first and uses the release source when that kit is absent
+from the cache. The install plan shows the selected source.
 
 Give the project and design IDs when you start. If this is your first design, write the user's request in
 `request.md` and the initial design in `draft.md`. Register them before the interview.
