@@ -19,9 +19,9 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1
 
 `-ExecutionPolicy Bypass`는 이번 실행에만 적용되고 시스템 설정은 바뀌지 않는다.
 
-**v0.4.0 릴리스에서 설치한다.** 저장소의 릴리스 페이지에서 해당 태그의 소스 압축 파일과 `SHA256SUMS`를
-받는다. `SHA256SUMS`에 적힌 정확한 파일을 쓰고 다른 압축 형식으로 바꾸지 않는다. 클론은 필요 없지만 git은
-여전히 oah의 필수 도구다.
+**릴리스에서 설치한다.** [최신 정식 릴리스](https://github.com/KenSuh/open-agent-harness/releases/latest)에서
+소스 압축 파일과 `SHA256SUMS`를 받는다. `SHA256SUMS`에 적힌 파일과 이름이 같은 압축 파일을 사용한다.
+`oah`를 쓰려면 Git이 필요하다.
 
 압축을 풀기 전에 SHA-256을 계산한다. `<downloaded-archive>`는 받은 파일 이름으로 바꾼다.
 

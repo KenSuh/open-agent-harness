@@ -16,9 +16,9 @@ cd open-agent-harness
 bash install/install.sh
 ```
 
-**From the v0.4.0 release.** Open the repository’s release page and download the source archive of
-that tag and its `SHA256SUMS` file. Use the exact archive named in `SHA256SUMS`; do not substitute a
-different archive format. No clone is needed, but git is still one of oah’s required tools.
+**From a release.** Open the [latest stable release](https://github.com/KenSuh/open-agent-harness/releases/latest).
+Download the source archive and `SHA256SUMS` from that release. Use the exact archive named in
+`SHA256SUMS`. You still need Git to use `oah`.
 
 Before unpacking, compute the archive’s SHA-256 (replace `<downloaded-archive>` with its filename).
 

@@ -217,6 +217,17 @@ class AccuracyTest(unittest.TestCase):
                     with self.subTest(page=str(page.relative_to(REPO)), line=number, target=target):
                         self.assertTrue((page.parent / path).exists(), f"{target} does not exist")
 
+    def test_source_install_guides_select_the_stable_release(self) -> None:
+        releases = "https://github.com/KenSuh/open-agent-harness/releases/"
+        for docs, heading in (("docs", "## 1. Choose how to install"), ("docs/ko", "## 1. 설치 방법 고르기")):
+            for name in ("install-macos.md", "install-windows.md"):
+                page = REPO / docs / name
+                with self.subTest(page=page.relative_to(REPO)):
+                    setup, _ = split_section(read(page), heading)
+                    targets = [target for _, line in prose_lines(setup)
+                               for target in LINK.findall(line) if target.startswith(releases)]
+                    self.assertEqual(targets, [releases + "latest"])
+
     def test_korean_sentences_do_not_end_with_a_colon(self):
         pages = [REPO / "docs" / "ko" / f"{page}.md" for page in PAGES]
         pages += [REPO / "docs" / "ko" / f"{page}.md" for page in ("skills-and-capabilities", "design-sources")]
