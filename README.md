@@ -28,7 +28,12 @@
 
 [Install the desktop app](#desktop-app) · [Project tools](#configure-project-tools) · [Manage skills](#find-install-and-update-skills-in-desktop) · [Release notes](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.4.0) · [Checksums](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/SHA256SUMS) · [Source CLI](#source-cli)
 
-[![OAH Desktop Team Workflow with the planning, coding, review, and fix roles visible.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/desktop-start-dark.svg">
+  <img src="docs/assets/desktop-start-light.svg" alt="Check the available agents in Agents, then use + Open… to choose a Git worktree. In Team Workflow, you choose an agent for each stage and sync the rules. When you need them, manage skills in Explore and Installed, or set up Project Wiki, Impact Map and optional Jev in Team Workflow → Project Tools. Coding happens in each agent’s own tool; optional guided design uses Claude Code on macOS with the Python source CLI." width="540">
+</picture>
+
+[First run](#desktop-app-path-set-up-your-team) walks through these steps with OAH Desktop v1.4.0 screenshots.
 
 - **Assign roles.** Choose an available agent for each stage and sync the project's rules from **Team Workflow**.
 - **Manage skills by agent.** In **Installed**, filter by agent, register GitHub sources for existing skills, and confirm shared removal with the affected agents listed.
@@ -152,7 +157,7 @@ oah 1.4.0
 1. **Check the agents.** Open **Agents** to see what OAH found and which sign-in states it can verify.
    Follow the install or sign-in instructions for the agents you want to use, then choose **Rescan agents**.
 
-   ![OAH v1.0.0 Agents screen with the seven-agent roster and OpenCode selected. OpenCode is installed, its sign-in is unknown, and it can take a section.](docs/assets/readme-v1/agents.png)
+   [![OAH v1.4.0 Agents detail for OpenCode on macOS. OpenCode was found, its sign-in is unknown and it can take a section. View installed skills and Check OpenCode details are available.](docs/assets/readme-v1/agents-1.4.0.png)](docs/assets/readme-v1/agents-1.4.0.png)
 
    *Open an agent card to find its sign-in instructions and check whether it can take a section.*
 
@@ -161,29 +166,43 @@ oah 1.4.0
    Choose **View installed skills** to open its skills in **Installed**.
 
 2. **Open a repository and assign roles.** Use **+ Open…** to choose a Git worktree, then open **Team Workflow**.
-   Check readiness and choose an **Agent** on each card. The defaults are Claude Code for **Plan & Clarify**
-   and **Write Code**, and Codex for **Code Review** and **Fix Issues**. The **Use a different agent than**
-   checkboxes let you require two sections to use different agents.
+   Choose an available **Agent** on each card, then check that the page shows **Ready**. A new Git project can start
+   with default agents that are not installed on this computer. The defaults are Claude Code for **Plan & Clarify**
+   and **Write Code**, and Codex for **Code Review** and **Fix Issues**.
+   The **Balanced** preset applies the same assignments. The **Use a different agent than** checkboxes let you
+   require two sections to use different agents.
+
+   [![OAH v1.4.0 Team Workflow on macOS for the field-notes Git work tree. It shows Ready, Rules: in sync and the Balanced preset. Plan & Clarify and Write Code use Claude Code, Code Review and Fix Issues use Codex, and Code Review uses a different agent than Write Code.](docs/assets/readme-v1/team-workflow-1.4.0.png)](docs/assets/readme-v1/team-workflow-1.4.0.png)
 
 3. **Check the project rules.** If **Rules** shows drift, choose **Sync now** to update the managed block in
-   `AGENTS.md`. Review the changes in the worktree before committing them.
+   `AGENTS.md`. The tile then reads **Rules: in sync**. Review the changes in the worktree before committing them.
 
-4. **Add a project skill.** Follow the [Desktop skill guide](#find-install-and-update-skills-in-desktop).
+4. **Add skills and project tools when you need them.** Follow the [Desktop skill guide](#find-install-and-update-skills-in-desktop)
+   and [Configure project tools](#configure-project-tools). Nothing is installed or turned on until you confirm it.
+
+The screenshots show the macOS app with a sample Git project. The Windows 11 x64 app is built from the same source.
+Write code in each assigned agent's own tool; the synced rules tell each agent which section it does.
 
 The desktop app uses `~/.oah` on macOS or `%USERPROFILE%\.oah` on Windows. It writes `settings.toml`
 and places its helper in `bin/`. These bundled commands work with the desktop configuration.
 
 ### Configure project tools
 
-Open a Git worktree, then go to **Team Workflow → Project Tools**.
+Open a Git worktree, then go to **Team Workflow → Project Tools**. Each card shows the tool's state and its next step.
+**Check Again** only reads the project. Settings and wiki files are written only after you review the exact changes.
 
-- **Project Wiki.** Set up a new wiki or point OAH to existing Markdown notes. Use text search or build a
-  local semantic index of committed notes with gbrain and Ollama.
-- **Impact Map.** Build or refresh a map of the selected worktree and check whether an existing Graphify
-  graph matches it. Use `oah impact` in the source CLI to query affected files and checks.
-- **Jev.** Turn on optional Impact Map result ordering for this project. Review what is sent and approve it
-  on this device. Store a key in macOS Keychain or Windows Credential Manager and manage approval from the
-  same panel. [Key and approval settings](docs/keys.md#a-key-alone-never-turns-the-re-ranker-on)
+[![OAH v1.4.0 Project Tools on macOS for the field-notes project. Project Wiki found docs/wiki, an Impact Map was built with no Graphify file attached, and Jev is off for the project.](docs/assets/readme-v1/project-tools-1.4.0.png)](docs/assets/readme-v1/project-tools-1.4.0.png)
+
+- **Project Wiki.** In the app, **Wiki Setup & Search** sets up a new wiki or points OAH to existing Markdown
+  notes and searches their text. **Local Wiki Index** is optional: it builds a semantic index of committed notes
+  with gbrain and Ollama, which you install and run yourself. OAH does not install, start or download them.
+- **Impact Map.** In the app, **Build Impact Map** or **Refresh Impact Map** builds a map of the selected worktree
+  on this computer. **Check Graphify** checks whether an existing Graphify file matches the checkout. A Graphify
+  graph is optional and is made with Graphify itself. To query affected files and checks, use `oah impact` in
+  the Python source CLI.
+- **Jev.** Optional Impact Map result ordering, off until you turn it on. Use **Edit Jev Settings** to turn it on
+  for the project, then **Manage Jev on this device** to review what is sent and approve it. Store a key in macOS
+  Keychain or Windows Credential Manager from the same panel. [Key and approval settings](docs/keys.md#a-key-alone-never-turns-the-re-ranker-on)
 
 ### Alternative: initialize a separate project with the source CLI
 
@@ -209,19 +228,20 @@ in that project and ask in plain words.
    agent and check the destination. Claude Code uses `.claude/skills/` and Codex uses `.agents/skills/` in the project.
    Acknowledge any warnings, then select **Confirm install**.
 
-   [![OAH v1.1.0 Explore screen reviewing the public Ponytail skill folder. The source is pinned to a commit, MIT license and review decision are shown, Codex targets the project's .agents/skills/ folder, and Confirm install is available.](docs/assets/readme-v1/explore-1.1.0.png)](docs/assets/readme-v1/explore-1.1.0.png)
+   [![OAH v1.4.0 Explore on macOS after reviewing the public Ponytail skill folder. Review passed, the MIT license is eligible and the commit is pinned. Install in this project targets Codex in the project's .agents/skills/ folder, with Confirm install.](docs/assets/readme-v1/explore-1.4.0.png)](docs/assets/readme-v1/explore-1.4.0.png)
 3. **Find installed copies and check for updates.** **Installed** shows copies in the open project and your user
    folders, with the agent, scope and path for each copy. Choose an agent to see its own skills and shared skills.
    **Refresh inventory** rereads those folders. For an eligible
    OAH-managed project copy, select **Check for update** to review the upstream revision. When a compatible new
    revision passes review, read the result, acknowledge any warnings and select **Apply update** to confirm.
 
-   [![OAH v1.1.0 Installed screen showing a Codex Project skill row, its project path, Refresh inventory, Check for update, and the confirmed Up to date result.](docs/assets/readme-v1/installed-1.1.0.png)](docs/assets/readme-v1/installed-1.1.0.png)
+   [![OAH v1.4.0 Installed on macOS, filtered to Codex. The ponytail Codex Project row shows its project path, Check for update, the Up to date result and Manage…, below Refresh inventory.](docs/assets/readme-v1/installed-1.4.0.png)](docs/assets/readme-v1/installed-1.4.0.png)
 
 4. **Register or remove an existing skill.** In **Installed**, open **Manage…** next to the skill. Use **Register Git source**
    to review a GitHub folder or `SKILL.md` link. A Claude Code or Codex project copy that matches the reviewed files
    can use **Check for update**. Use **Remove…** to check the folder and its agents before moving it to a recovery location.
 
+In **Installed**, **Manage skills with the source CLI** lists the matching Python source CLI commands.
 The bundled native CLI lists local skill folders with `oah skills list`. Use `--json` to include
 `compatible_agents` when other agents use a location. See [Installed skill management](docs/skills-and-capabilities.md#manage-a-skill-already-installed-on-your-computer).
 

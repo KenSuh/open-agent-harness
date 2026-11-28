@@ -20,6 +20,7 @@ Their geometry, palette and type are recorded in the style guide's [Banner secti
 
 | Stem | Skill type · fit canvas | Nodes / arrows | Purpose |
 |---|---|---|---|
+| `desktop-start` | Process, single actor, 540 × 964 | 7 / 5 | First OAH Desktop session; top of both READMEs |
 | `how-it-works` | Swimlane, 1080 × 1420 | 8 / 8 | Whole harness; both READMEs and both how-it-works pages |
 | `features` | Architecture, 960 × 1040 | 6 / 6 | Six parts together; both READMEs |
 | `architecture-build` | Architecture, 1160 × 1340 | 9 / 8 | Task preparation, routing, Jev and evidence |
@@ -44,7 +45,17 @@ type ramp, chips, ghost numbers, zones, icons and connector rules for the other 
 one focal accent hue. All four variants of each gallery figure have the same structural geometry; Korean keeps
 the same meaning, with 12px-or-larger Hangul and Korean system fallbacks.
 
-Both READMEs now embed `features` after the purpose, before the whole-harness overview. Each picture uses
+Both READMEs open with `desktop-start`, the first OAH Desktop v1.4.0 session, above the release screenshots.
+It adapts the skill's Process type to one actor, the user in the app, so it drops the lane grid and the parametric
+6–9px chip text. Three rows of paired steps keep the canvas 540 wide: Agents and `+ Open…`; choosing each stage's
+agent and syncing Rules in Team Workflow; then dashed "when you need it" arrows to Explore · Installed and
+Team Workflow → Project Tools. A dashed note outside the flow places coding in each agent's own tool and optional
+guided design in Claude Code on macOS with the Python source CLI. Node headers use the app's exact labels in mono in both
+languages. At about 390 CSS px, the 16px names and 12px detail render near 11px and 9px. The single focal accent
+marks the stage-agent choice. There are no ghost numbers; the arrows give the order.
+The README pictures set `width="540"` so the figure is not enlarged on wide pages.
+
+Both READMEs embed `features` after the purpose, before the whole-harness overview. Each picture uses
 its language's SVG description verbatim as the image alt text in both themes.
 
 The overview and features wording follows the same contract as the pages: you ask, answer when a repeated

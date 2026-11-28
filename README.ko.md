@@ -28,7 +28,12 @@
 
 [데스크톱 설치](#데스크톱-앱) · [프로젝트 도구](#프로젝트-도구-설정하기) · [스킬 관리](#데스크톱에서-스킬-찾기-설치-갱신) · [릴리스 노트](https://github.com/KenSuh/open-agent-harness/releases/tag/v1.4.0) · [체크섬](https://github.com/KenSuh/open-agent-harness/releases/download/v1.4.0/SHA256SUMS) · [소스 CLI](#소스-cli)
 
-[![OAH 데스크톱 Team Workflow에서 계획, 구현, 리뷰, 수정 역할을 설정하는 화면.](docs/assets/readme-v1/team-workflow-layout.png)](docs/assets/readme-v1/team-workflow-layout.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/desktop-start-ko-dark.svg">
+  <img src="docs/assets/desktop-start-ko-light.svg" alt="Agents에서 쓸 수 있는 에이전트를 확인하고 + Open…으로 Git 작업 폴더를 고른다. Team Workflow에서 단계마다 에이전트를 직접 고르고 규칙을 동기화한다. 필요할 때 Explore와 Installed에서 스킬을 관리하거나 Team Workflow → Project Tools에서 Project Wiki, Impact Map, 선택 기능인 Jev를 설정한다. 코딩은 각 에이전트의 도구에서 하며, 선택 사항인 안내형 설계는 macOS의 Claude Code와 Python 소스 CLI를 쓴다." width="540">
+</picture>
+
+[처음 실행하기](#데스크톱-앱-경로-팀-구성하기)에서 OAH 데스크톱 v1.4.0 화면과 함께 각 단계를 설명한다.
 
 - **팀의 역할을 배정합니다.** **Team Workflow**에서 단계마다 에이전트를 선택하고 프로젝트 규칙을 동기화합니다.
 - **에이전트별로 스킬을 관리합니다.** **Installed**에서 에이전트별 목록을 보고 기존 스킬의 GitHub 출처를 등록합니다. 삭제 전에는 공유 경로를 사용하는 에이전트가 표시됩니다.
@@ -147,7 +152,7 @@ oah 1.4.0
 1. **에이전트를 확인한다.** **Agents**에서 OAH가 찾은 에이전트와 확인 가능한 로그인 상태를 본다.
    사용할 에이전트의 설치 또는 로그인 안내를 따른 뒤 **Rescan agents**를 누른다.
 
-   ![OAH v1.0.0의 Agents 화면. 일곱 에이전트 중 OpenCode가 선택돼 있다. OpenCode는 설치돼 있고, 로그인 상태는 알 수 없으며, 작업 단계를 맡을 수 있다.](docs/assets/readme-v1/agents.png)
+   [![macOS용 OAH v1.4.0의 Agents 화면에서 OpenCode 상세를 연 모습. OpenCode가 발견됐고 로그인 상태는 알 수 없으며 작업 단계를 맡을 수 있다. View installed skills와 Check OpenCode details를 누를 수 있다.](docs/assets/readme-v1/agents-1.4.0.png)](docs/assets/readme-v1/agents-1.4.0.png)
 
    *에이전트 카드를 열면 로그인 방법과 작업 단계를 맡을 수 있는지 확인할 수 있다.*
 
@@ -156,29 +161,42 @@ oah 1.4.0
    **View installed skills**를 누르면 **Installed**에서 OpenCode 스킬을 볼 수 있다.
 
 2. **저장소를 열고 역할을 배정한다.** **+ Open…** 버튼으로 Git 작업 폴더를 고른 뒤 **Team Workflow**를 연다.
-   준비 상태를 확인하고 카드마다 **Agent**를 고른다. 기본값은 **Plan & Clarify**와 **Write Code**에 Claude Code,
-   **Code Review**와 **Fix Issues**에 Codex다. 카드의 **Use a different agent than**에서 다른 단계를 선택하면
+   카드마다 사용할 수 있는 **Agent**를 고른 뒤 **Ready**가 표시되는지 확인한다. 새 Git 프로젝트는 이 컴퓨터에
+   설치되지 않은 기본 에이전트로 시작할 수 있다. 기본값은 **Plan & Clarify**와 **Write Code**에 Claude Code,
+   **Code Review**와 **Fix Issues**에 Codex다.
+   **Balanced** 프리셋도 같은 배정을 적용한다. 카드의 **Use a different agent than**에서 다른 단계를 선택하면
    그 단계와 서로 다른 에이전트를 쓰도록 지정할 수 있다.
 
-3. **프로젝트 규칙을 확인한다.** **Rules**에 동기화가 필요하다고 나오면 **Sync now**를 눌러 `AGENTS.md`의
-   관리 대상 규칙을 갱신한다. 작업 폴더의 변경 사항을 살핀 뒤 커밋한다.
+   [![macOS용 OAH v1.4.0의 Team Workflow 화면. field-notes Git 작업 폴더에 Ready, Rules: in sync, Balanced 프리셋이 보인다. Plan & Clarify와 Write Code는 Claude Code, Code Review와 Fix Issues는 Codex를 쓰고 Code Review는 Write Code와 다른 에이전트를 쓴다.](docs/assets/readme-v1/team-workflow-1.4.0.png)](docs/assets/readme-v1/team-workflow-1.4.0.png)
 
-4. **프로젝트에 스킬을 추가한다.** [데스크톱 스킬 가이드](#데스크톱에서-스킬-찾기-설치-갱신)를 따라 한다.
+3. **프로젝트 규칙을 확인한다.** **Rules**에 동기화가 필요하다고 나오면 **Sync now**를 눌러 `AGENTS.md`의
+   관리 대상 규칙을 갱신한다. 그러면 **Rules: in sync**가 표시된다. 작업 폴더의 변경 사항을 살핀 뒤 커밋한다.
+
+4. **필요할 때 스킬과 프로젝트 도구를 더한다.** [데스크톱 스킬 가이드](#데스크톱에서-스킬-찾기-설치-갱신)와
+   [프로젝트 도구 설정하기](#프로젝트-도구-설정하기)를 따라 한다. 직접 확인하기 전에는 아무것도 설치하거나 켜지 않는다.
+
+화면은 예제 Git 프로젝트를 연 macOS 앱이다. Windows 11 x64 앱도 같은 소스로 만든다.
+코드는 배정한 에이전트의 도구에서 작성한다. 동기화된 규칙이 각 에이전트에게 맡은 단계를 알려 준다.
 
 앱은 macOS에서 `~/.oah`, Windows에서 `%USERPROFILE%\.oah` 아래에 `settings.toml`과 `bin/`의 동봉 도구를 저장한다.
 이 번들 명령은 데스크톱 설정과 함께 작동한다.
 
 ### 프로젝트 도구 설정하기
 
-Git 작업 폴더를 연 뒤 **Team Workflow → Project Tools**로 이동한다.
+Git 작업 폴더를 연 뒤 **Team Workflow → Project Tools**로 이동한다. 카드마다 도구의 상태와 다음 단계가 표시된다.
+**Check Again**은 프로젝트를 읽기만 한다. 설정과 위키 파일은 바뀔 내용을 확인한 뒤에만 기록된다.
 
-- **Project Wiki.** 새 위키를 만들거나 기존 Markdown 노트가 담긴 폴더를 지정한다. 텍스트로 검색하거나,
-  gbrain과 Ollama로 커밋된 노트의 로컬 의미 검색 인덱스를 만들 수 있다.
-- **Impact Map.** 선택한 작업 폴더의 영향 지도를 만들거나 갱신하고, 기존 Graphify 그래프가 현재
-  체크아웃과 맞는지 확인한다. 변경에 영향을 받는 파일과 검사는 소스 CLI의 `oah impact`로 조회한다.
-- **Jev.** 프로젝트에서 Impact Map 결과의 순서를 조정하는 선택 기능이다. 전송할 내용을 확인한 뒤
-  이 기기에서 승인한다. macOS 키체인이나 Windows 자격 증명 관리자에 키를 저장하고 같은 화면에서
-  승인을 관리할 수 있다. [키와 승인 설정](docs/ko/keys.md)
+[![macOS용 OAH v1.4.0의 Project Tools 화면. field-notes 프로젝트에서 Project Wiki가 docs/wiki를 찾았고, Impact Map은 Graphify 파일 없이 만들어졌으며, Jev는 꺼져 있다.](docs/assets/readme-v1/project-tools-1.4.0.png)](docs/assets/readme-v1/project-tools-1.4.0.png)
+
+- **Project Wiki.** 앱에서 **Wiki Setup & Search**로 새 위키를 만들거나 기존 Markdown 노트 폴더를 지정하고
+  텍스트로 검색한다. **Local Wiki Index**는 선택 기능으로, 직접 설치하고 실행한 gbrain과 Ollama로 커밋된 노트의
+  의미 검색 인덱스를 만든다. OAH는 이 도구를 설치하거나 시작하거나 내려받지 않는다.
+- **Impact Map.** 앱에서 **Build Impact Map** 또는 **Refresh Impact Map**으로 선택한 작업 폴더의 영향 지도를
+  이 컴퓨터에서 만든다. **Check Graphify**는 기존 Graphify 파일이 현재 체크아웃과 맞는지 확인한다. Graphify
+  그래프는 선택 사항이며 Graphify에서 직접 만든다. 영향을 받는 파일과 검사는 Python 소스 CLI의 `oah impact`로 조회한다.
+- **Jev.** Impact Map 결과의 순서를 조정하는 선택 기능이며 직접 켜기 전에는 꺼져 있다. **Edit Jev Settings**로
+  프로젝트에서 켜고, **Manage Jev on this device**에서 전송할 내용을 확인한 뒤 이 기기에서 승인한다. 같은 화면에서
+  macOS 키체인이나 Windows 자격 증명 관리자에 키를 저장한다. [키와 승인 설정](docs/ko/keys.md)
 
 ### 다른 경로: 별도 프로젝트에서 소스 CLI 초기화하기
 
@@ -203,20 +221,21 @@ Git 작업 폴더를 연 뒤 **Team Workflow → Project Tools**로 이동한다
    스킬이면 **+ Open…**으로 설치할 프로젝트를 열고, 설치된 호환 에이전트를 골라 대상 경로를 확인한다. 프로젝트 안에서
    Claude Code는 `.claude/skills/`, Codex는 `.agents/skills/`를 쓴다. 경고가 있으면 읽고 확인한 뒤 **Confirm install**을 누른다.
 
-   [![OAH v1.1.0 Explore 화면에서 공개 Ponytail 스킬 폴더를 검토한다. 커밋에 고정된 출처, MIT 라이선스와 검토 결과가 보이고 Codex 설치 대상은 프로젝트의 .agents/skills/ 폴더이며 Confirm install을 누를 수 있다.](docs/assets/readme-v1/explore-1.1.0.png)](docs/assets/readme-v1/explore-1.1.0.png)
+   [![macOS용 OAH v1.4.0의 Explore 화면에서 공개 Ponytail 스킬 폴더를 검토한 결과. 검토를 통과했고 MIT 라이선스는 사용할 수 있으며 커밋이 고정돼 있다. Install in this project의 설치 대상은 프로젝트의 .agents/skills/ 폴더를 쓰는 Codex이고 Confirm install을 누를 수 있다.](docs/assets/readme-v1/explore-1.4.0.png)](docs/assets/readme-v1/explore-1.4.0.png)
 3. **설치된 스킬과 갱신 여부를 확인한다.** **Installed**에는 열어 둔 프로젝트와 사용자 폴더의 스킬이 각각 에이전트,
    범위, 경로와 함께 표시된다. 에이전트를 고르면 해당 에이전트의 스킬과 공유 스킬을 함께 볼 수 있다.
    **Refresh inventory**는 폴더를 다시 읽는다. 갱신할 수 있는 OAH 관리 프로젝트 사본에서
    **Check for update**를 누르면 원본의 최신 버전을 검토한다. 호환되는 새 버전이 검토를 통과하면 결과를 살피고
    경고가 있으면 확인한 뒤 **Apply update**를 눌러 갱신을 확정한다.
 
-   [![OAH v1.1.0 Installed 화면에서 Codex Project 스킬 행과 프로젝트 경로, Refresh inventory, Check for update, 확인된 Up to date 결과를 보여 준다.](docs/assets/readme-v1/installed-1.1.0.png)](docs/assets/readme-v1/installed-1.1.0.png)
+   [![macOS용 OAH v1.4.0의 Installed 화면을 Codex로 거른 모습. ponytail Codex Project 행에 프로젝트 경로, Check for update, Up to date 결과, Manage…가 보이고 위에 Refresh inventory가 있다.](docs/assets/readme-v1/installed-1.4.0.png)](docs/assets/readme-v1/installed-1.4.0.png)
 
 4. **기존 스킬의 출처를 등록하거나 삭제한다.** **Installed**에서 스킬 옆 **Manage…**를 연다. **Register Git source**에
    GitHub 폴더나 `SKILL.md` 링크를 붙여 넣는다. 검토 파일과 일치하는 Claude Code·Codex 프로젝트 사본은
    **Check for update**로 갱신을 확인할 수 있다. **Remove…**에서는 대상 폴더와 사용하는 에이전트를 확인한 뒤
    폴더를 복구 위치로 옮길 수 있다.
 
+**Installed**의 **Manage skills with the source CLI**를 펼치면 같은 일을 하는 Python 소스 CLI 명령이 나온다.
 동봉된 네이티브 CLI에서는 `oah skills list`로 로컬 스킬 폴더를 확인할 수 있다. `--json`을 붙이면 해당 위치를 공유하는
 에이전트가 있을 때 `compatible_agents`도 나타난다. [기존 스킬 관리 안내](docs/ko/skills-and-capabilities.md#이미-설치한-스킬-관리)
 
