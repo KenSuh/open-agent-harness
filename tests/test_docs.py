@@ -402,11 +402,11 @@ CONCEPT_DIAGRAMS = (
     "concepts-routing-rules", "concepts-routing-skills", "concepts-impact-freshness",
     "concepts-impact-ranked", "concepts-review", "concepts-landing-local", "concepts-landing-checks",
 )
-DIAGRAMS = ("banner", "features", "how-it-works", "how-it-works-v1", "architecture-build", "architecture-land", "loop-start", "loop-review",
+DIAGRAMS = ("banner", "desktop-start", "features", "how-it-works", "how-it-works-v1", "architecture-build", "architecture-land", "loop-start", "loop-review",
             *CONCEPT_DIAGRAMS)
 DIAGRAM_PAGES = {
-    "README.md": ("banner", "features", "how-it-works-v1"),
-    "README.ko.md": ("banner-ko", "features-ko", "how-it-works-v1-ko"),
+    "README.md": ("banner", "desktop-start", "features", "how-it-works-v1"),
+    "README.ko.md": ("banner-ko", "desktop-start-ko", "features-ko", "how-it-works-v1-ko"),
     "docs/how-it-works.md": ("how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review"),
     "docs/ko/how-it-works.md": ("how-it-works-ko", "architecture-build-ko", "architecture-land-ko", "loop-start-ko", "loop-review-ko"),
     "docs/concepts.md": CONCEPT_DIAGRAMS,
@@ -854,6 +854,39 @@ class BannerTest(unittest.TestCase):
                     for phrase in (("안내형 설계", "질문 하나", "Python 소스 CLI") if language
                                    else ("GUIDED DESIGN", "one question", "Python source CLI")):
                         self.assertIn(phrase, visible)
+
+    def test_desktop_start_names_the_first_session_ui_and_matches_its_source(self) -> None:
+        text_elements = {f"{SVG}{name}" for name in ("title", "desc", "text")}
+        ui = ("Agents", "+ Open…", "Team Workflow", "Plan & Clarify", "Write Code", "Code Review", "Fix Issues",
+              "Rules", "Sync now", "Explore ·", "Installed", "Team Workflow →", "Project Tools", "Project Wiki",
+              "Impact Map", "Jev", "Claude Code", "Python")
+        for language in ("", "-ko"):
+            for theme in ("light", "dark"):
+                name = f"desktop-start{language}-{theme}"
+                with self.subTest(asset=name):
+                    export = ET.parse(ASSETS / f"{name}.svg").getroot()
+                    self.assertEqual(export.get("data-diagram-type"), "Process")
+                    self.assertEqual({n.get("data-node-id") for n in export.iter() if n.get("data-node-id")},
+                                     {"agents", "open", "roles", "rules", "skills", "tools", "outside"})
+                    edges = {(n.get("data-from"), n.get("data-to"), "5,4" in (n.get("stroke-dasharray") or ""))
+                             for n in export.iter() if n.get("data-edge-id")}
+                    # Setup runs in order; skills and project tools are two entry points used when needed.
+                    self.assertEqual(edges, {("agents", "open", False), ("open", "roles", False),
+                                             ("roles", "rules", False), ("rules", "skills", True),
+                                             ("rules", "tools", True)})
+                    lines = [" ".join("".join(t.itertext()).split()) for t in export.findall(f".//{SVG}text")]
+                    visible = " ".join(lines)
+                    for label in ui:
+                        self.assertIn(label, visible)
+                    # Narrow enough that 16px names and 12px detail stay readable near 390 CSS px.
+                    self.assertLessEqual(float(export.get("viewBox").split()[2]), 560)
+                    source = read(ASSETS / "diagrams" / f"{name}.html")
+                    match = re.search(r"<svg\b.*?</svg>", source, re.DOTALL)
+                    if match is None:
+                        self.fail("the editable figure must contain an SVG")
+                    editable = ET.fromstring(match.group())
+                    self.assertEqual([" ".join("".join(n.itertext()).split()) for n in export.iter() if n.tag in text_elements],
+                                     [" ".join("".join(n.itertext()).split()) for n in editable.iter() if n.tag in text_elements])
 
     def test_guided_design_overviews_match_editable_and_published_text(self) -> None:
         text_elements = {f"{SVG}{name}" for name in ("title", "desc", "text")}
