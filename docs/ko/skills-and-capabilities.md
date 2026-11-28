@@ -41,9 +41,12 @@ oah design new field-team equipment-booking --title "장비 예약" --file draft
 
 새 세션에서는 “저장한 `field-team`의 `equipment-booking` 설계를 이어가자”라고 말한다.
 Claude는 `oah design coverage PROJECT DESIGN --next`로 다음 단계를 읽는다.
-`oah design coverage PROJECT DESIGN --check`가 통과하면 전체 초안을 검토하고 해당 리비전을
-별도로 승인한다. Claude가 `oah design accept`로 승인을 기록한다. 승인한 설계의 구현을 요청하면
-`oah packet new TASK --design PROJECT/DESIGN`으로 작업 지시에 연결한다.
+`oah design coverage PROJECT DESIGN --revision N --check`가 통과하면 전체 초안을 검토하고 해당
+리비전을 별도로 승인한다. Claude는 그 리비전과 digest로 `oah design accept`를 실행한다.
+구현을 요청하면 `oah design check PROJECT DESIGN --revision N --digest DIGEST --accepted`로 같은
+승인을 확인한 뒤 `oah packet new TASK --design PROJECT/DESIGN --design-revision N`을 실행한다.
+작업 지시가 같은 승인 리비전과 digest를 가리키는지 확인한다. 승인이 바뀌었다면 검사한 어느
+리비전을 구현할지 사용자에게 묻는다.
 작업 지시 생성 중 `OAH_DESIGN_UNJUDGED`가 나오면
 `oah recommend --kind design --task TASK --request-file request.md`로 설계 추천을 기록한다.
 

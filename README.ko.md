@@ -284,8 +284,7 @@ v1.4.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스�
 
 ### 안내형 설계
 
-v1.4.0에서는 Claude Code와 Python 소스 CLI로 설계 질문을 하나씩 진행한다. 미결·보류 결정을 저장하고
-저장한 리비전에서 다시 이어 갈 수 있다. [안내형 설계 문서](docs/ko/skills-and-capabilities.md#안내형-설계)
+[안내형 설계](docs/ko/skills-and-capabilities.md#안내형-설계)
 
 ### 예정 작업
 

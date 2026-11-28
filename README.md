@@ -291,8 +291,7 @@ Plans can change as the tools change. See the [project plan](docs/PLAN.md) and [
 
 ### Guided design
 
-v1.4.0 uses Claude Code and the Python source CLI to ask one question at a time. Save open or deferred
-decisions and resume from the saved revision. [Guided design walkthrough](docs/skills-and-capabilities.md#guided-design)
+[Guided design](docs/skills-and-capabilities.md#guided-design)
 
 ### Planned work
 

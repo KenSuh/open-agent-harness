@@ -42,9 +42,12 @@ The current revision and its wiki page show the saved result.
 
 In a fresh terminal session, say “Continue the saved `equipment-booking` design in `field-team`.”
 `oah design coverage PROJECT DESIGN --next` tells Claude where to resume.
-Review the full draft once `oah design coverage PROJECT DESIGN --check` succeeds. Approve that specific
-revision separately. Claude records the approval with `oah design accept`. When you ask to implement the
-approved design, it connects the task with `oah packet new TASK --design PROJECT/DESIGN`.
+Review the full draft once `oah design coverage PROJECT DESIGN --revision N --check` succeeds. Approve
+that specific revision separately. Claude records the approval with `oah design accept` using its revision
+and digest. When you ask to implement it, Claude verifies the same approval with
+`oah design check PROJECT DESIGN --revision N --digest DIGEST --accepted`, then creates the packet with
+`oah packet new TASK --design PROJECT/DESIGN --design-revision N`. It checks that the packet names the same
+accepted revision and digest. If the approval has changed, Claude asks which checked revision to implement.
 If packet creation reports `OAH_DESIGN_UNJUDGED`, record the recommendation for the task with
 `oah recommend --kind design --task TASK --request-file request.md`.
 

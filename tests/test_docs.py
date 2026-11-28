@@ -257,6 +257,9 @@ class AccuracyTest(unittest.TestCase):
                     text = read(page)
                     if page == readme_path:
                         text, _ = split_section(text, heading)
+                        relative = guide.relative_to(REPO).as_posix()
+                        label = heading.removeprefix("### ")
+                        self.assertEqual(text.strip(), f"[{label}]({relative}#{anchor})")
                     self.assertTrue(any(
                         (page.parent / path).resolve() == guide and fragment == anchor
                         for _, line in prose_lines(text) for target in LINK.findall(line)

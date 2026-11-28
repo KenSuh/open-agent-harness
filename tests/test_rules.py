@@ -5,6 +5,7 @@ import contextlib
 import io
 import os
 import pathlib
+import re
 import unittest
 
 from oah import rules, rules_cli
@@ -20,17 +21,28 @@ def block_of(data: bytes) -> bytes:
 
 class RulesTest(unittest.TestCase):
     def test_synced_guided_design_rule_describes_coverage_exceptions(self) -> None:
-        for lang, terms in (
-            ("en", ("deferrals", "reason", "revisit point", "inapplicable stages")),
-            ("ko", ("보류 항목", "사유", "다시 볼 시점", "해당 없는 단계")),
-        ):
+        required = {"deferred": {"reason", "impact", "resolve_by", "answer_refs"},
+                    "not-applicable": {"set-applicability", "value", "reason"}}
+        for lang in rules.LANGS:
             with self.subTest(lang=lang):
                 rules.sync(self.root, lang=lang)
                 block = block_of(self.agents.read_bytes()).decode("utf-8")
-                guidance = next((paragraph for paragraph in block.split("\n\n")
-                                 if "oah design coverage" in paragraph), "")
-                for term in terms:
-                    self.assertIn(term, guidance)
+                rows = [set(re.findall(r"`([a-z_-]+)`", line))
+                        for line in block.splitlines() if line.startswith("- ")]
+                for case, fields in required.items():
+                    self.assertEqual([row - {case} for row in rows if case in row], [fields])
+
+    def test_synced_guided_design_rule_reuses_the_approved_identity(self) -> None:
+        for lang in rules.LANGS:
+            with self.subTest(lang=lang):
+                rules.sync(self.root, lang=lang)
+                block = block_of(self.agents.read_bytes()).decode("utf-8")
+                for command in (
+                    "oah design coverage PROJECT DESIGN --revision N --check",
+                    "oah design check PROJECT DESIGN --revision N --digest DIGEST --accepted",
+                    "oah packet new TASK --design PROJECT/DESIGN --design-revision N",
+                ):
+                    self.assertIn(f"`{command}`", block)
 
     def test_the_lead_asks_for_a_design_or_packet_tier_before_writing_one(self):
         for lang in ("en", "ko"):
