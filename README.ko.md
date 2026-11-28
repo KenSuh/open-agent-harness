@@ -48,14 +48,17 @@ PowerShell에서는 `Get-FileHash -Algorithm SHA256`으로 받은 파일을 검�
 - **Windows.** 설치 파일을 실행한다. 서명되지 않은 설치 파일이므로 Microsoft Defender SmartScreen이 경고할 수 있고,
   조직 정책에 따라 설치가 제한될 수 있다.
 
-OAH를 사용 중이면 왼쪽 아래의 **Check for app updates**를 누릅니다. 새 버전이 있으면 **Install and restart**를
-선택합니다. OAH가 배포 서명을 검증한 뒤 업데이트를 설치합니다. v1.2.0 이전 버전을 사용 중이면 최신 설치 파일을 받습니다.
+OAH를 사용 중이면 왼쪽 아래의 **Check for app updates**를 누른다. 새 버전이 있으면 **Install and restart**를
+선택한다. OAH가 배포 서명을 검증한 뒤 업데이트를 설치한다. v1.2.0 이전 버전을 사용 중이면 최신 설치 파일을 받는다.
 
 [OAH 데스크톱에서 첫 프로젝트 열기](#데스크톱-앱-경로-팀-구성하기)
 
 ## 처음 실행하기
 
 ### 데스크톱 앱 경로: 팀 구성하기
+
+[Git 2.31 이상](https://git-scm.com/downloads)을 설치해 PATH에 등록하고, 내 컴퓨터에 Git 작업 폴더를 준비한다.
+터미널에서 `git --version`을 실행해 설치를 확인할 수 있다.
 
 1. **에이전트를 확인한다.** **Agents**에서 OAH가 찾은 에이전트와 확인 가능한 로그인 상태를 본다.
    사용할 에이전트의 설치 또는 로그인 안내를 따른 뒤 **Rescan agents**를 누른다.
@@ -69,10 +72,12 @@ OAH를 사용 중이면 왼쪽 아래의 **Check for app updates**를 누릅니�
    **View installed skills**를 누르면 **Installed**에서 OpenCode 스킬을 볼 수 있다.
 
 2. **저장소를 열고 역할을 배정한다.** **+ Open…**으로 Git 작업 폴더를 고른 뒤 **Team Workflow**를 연다.
-   카드마다 사용할 수 있는 **Agent**를 고르고 **Ready**가 표시되는지 확인한다. 필요한 에이전트가 목록에 없으면
-   설치한 뒤 다시 확인하거나 다른 에이전트를 고른다. **Balanced**는 **Plan & Clarify**와 **Write Code**에 Claude Code,
-   **Code Review**와 **Fix Issues**에 Codex를 배정한다. 구현과 리뷰를 다른 에이전트에 맡기려면
-   **Code Review** 카드의 **Use a different agent than**에서 **Write Code**를 선택한다.
+   카드마다 사용할 수 있는 **Agent**를 고른다. 배정이 앱의 검사를 통과하면 **Ready**가 표시된다.
+   로그인 상태를 알 수 없으면 해당 에이전트의 도구에서 직접 확인한다. 필요한 에이전트가 목록에 없으면
+   설치한 뒤 다시 확인하거나 다른 에이전트를 고른다. **Balanced** 프리셋은 **Plan & Clarify**와 **Write Code**에
+   Claude Code, **Code Review**와 **Fix Issues**에 Codex를 배정한다. 배정을 바꾸면 OAH가 `.oah/config.toml`에
+   저장한다. 구현과 리뷰를 다른 에이전트에 맡기려면 **Code Review** 카드의 **Use a different agent than**에서
+   **Write Code** 체크를 유지한다.
 
    [![macOS용 OAH v1.4.0의 Team Workflow 화면. field-notes Git 작업 폴더에 Ready, Rules: in sync, Balanced 프리셋이 보인다. Plan & Clarify와 Write Code는 Claude Code, Code Review와 Fix Issues는 Codex를 쓰고 Code Review는 Write Code와 다른 에이전트를 쓴다.](docs/assets/readme-v1/team-workflow-1.4.0.png)](docs/assets/readme-v1/team-workflow-1.4.0.png)
 
@@ -213,8 +218,8 @@ v1.4.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스�
 
 ### 역할마다 에이전트 고르기
 
-**Team Workflow**에서 설계, 구현, 리뷰, 수정을 맡을 에이전트를 정한다. 배정은 `.oah/config.toml`에 저장하고
-프로젝트의 `AGENTS.md` 관리 규칙을 동기화한다. 배정된 단계는 각 에이전트의 도구에서 진행한다.
+**Team Workflow**에서 설계, 구현, 리뷰, 수정을 맡을 에이전트를 정한다. OAH가 배정을 `.oah/config.toml`에
+저장하고 `AGENTS.md`의 관리 규칙을 동기화한다. 배정된 단계는 각 에이전트의 도구에서 진행한다.
 
 <a id="어떤-ai-구성에도-맞춰-쓴다"></a>
 
@@ -224,8 +229,8 @@ v1.4.0에는 워커에게 스킬을 전달하는 데 필요한 검증된 호스�
 단계에 배정할 수 있다. **Agents**에는 스킬과 규칙에 쓸 수 있는 Cursor도 표시된다. 내 컴퓨터에서 쓸 수 있는
 도구 중에서 고른다.
 
-데스크톱 동봉 도구는 `doctor`, `sections show`, `rules check`, `rules sync`를 제공한다. Python 소스 CLI도
-같은 단계 배정을 읽는다. 소스 CLI의 `oah call`은 Claude Code와 Codex CLI를 직접 실행한다. 다른 에이전트는
+데스크톱 동봉 도구는 `doctor`, `sections show`, `rules check`, `rules sync`를 제공한다. Python 소스 CLI는
+구현, 리뷰, 수정 단계의 배정을 읽는다. 소스 CLI의 `oah call`은 Claude Code와 Codex CLI를 직접 실행한다. 다른 에이전트는
 각 도구에서 실행한다. 소스 CLI의 `oah review`는 Codex를 쓰며, 자동 수정 명령인 `oah fix`를 쓰려면
 수정 역할에 Codex를 배정해야 한다.
 

@@ -60,6 +60,9 @@ v1.2.0, use the current installer.
 
 ### Desktop app path: set up your team
 
+Have [Git 2.31 or later](https://git-scm.com/downloads) on your PATH and a local checkout of a Git repository.
+Run `git --version` in a terminal to check your installation.
+
 1. **Check the agents.** Open **Agents** to see what OAH found and which sign-in states it can verify.
    Follow the install or sign-in instructions for the agents you want to use, then choose **Rescan agents**.
 
@@ -72,10 +75,12 @@ v1.2.0, use the current installer.
    Choose **View installed skills** to open its skills in **Installed**.
 
 2. **Open a repository and assign roles.** Use **+ Open…** to choose a Git worktree, then open **Team Workflow**.
-   Pick an available **Agent** on each card and check for **Ready**. If an agent is missing, install it and rescan
-   or choose another available agent. Choose **Balanced** for Claude Code in **Plan & Clarify** and **Write Code**,
-   with Codex in **Code Review** and **Fix Issues**. To require a separate reviewer, set
-   **Use a different agent than** to **Write Code** on the **Code Review** card.
+   Pick an available **Agent** on each card. **Ready** means the assignments passed the app's checks.
+   If sign-in shows as unknown, check it in that agent's own tool. If an agent is missing, install it and rescan
+   or choose another available agent. The **Balanced** preset uses Claude Code for **Plan & Clarify** and
+   **Write Code**, and Codex for **Code Review** and **Fix Issues**. OAH saves assignments to `.oah/config.toml`
+   when you change them. To require a separate reviewer, keep **Write Code** checked under
+   **Use a different agent than** on the **Code Review** card.
 
    [![OAH v1.4.0 Team Workflow on macOS for the field-notes Git work tree. It shows Ready, Rules: in sync and the Balanced preset. Plan & Clarify and Write Code use Claude Code, Code Review and Fix Issues use Codex, and Code Review uses a different agent than Write Code.](docs/assets/readme-v1/team-workflow-1.4.0.png)](docs/assets/readme-v1/team-workflow-1.4.0.png)
 
@@ -217,8 +222,8 @@ the agents you use in each Git project. Update the assignments and skills as you
 
 ### Choose an agent for each role
 
-In **Team Workflow**, set the agents that handle planning, implementation, review and fixes. Save the
-assignments in `.oah/config.toml` and sync the project's managed `AGENTS.md` rules. Each agent uses its own
+In **Team Workflow**, set the agents that handle planning, implementation, review and fixes. OAH saves
+the assignments in `.oah/config.toml` and syncs the managed rules in `AGENTS.md`. Each agent uses its own
 tool to work through the stage you assigned.
 
 <a id="use-it-with-any-ai-setup"></a>
@@ -229,7 +234,7 @@ The desktop app offers **Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode a
 choices. **Agents** also lists Cursor for skills and rules. Choose from the tools available on your machine.
 
 The Desktop helper provides `doctor`, `sections show`, `rules check` and `rules sync`. The Python source CLI
-reads the same workflow assignments. Its `oah call` command directly launches Claude Code and Codex CLI.
+reads the build, review and fix assignments. Its `oah call` command directly launches Claude Code and Codex CLI.
 Use other assigned agents in their own tools. The source CLI's `oah review` uses Codex, and automatic
 `oah fix` requires Codex as the fix agent.
 
