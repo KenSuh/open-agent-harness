@@ -228,6 +228,34 @@ class AccuracyTest(unittest.TestCase):
                 with self.subTest(page=name, line=number):
                     self.assertIsNone(HANGUL_COLON.search(line), line)
 
+    def test_public_guided_design_claims_point_to_the_walkthrough(self) -> None:
+        old_rollout = re.compile(
+            r"(?:guided design|design conversation)[^.?!]{0,160}"
+            r"\b(?:not (?:yet )?available|planned for a later release)\b"
+            r"|\bplanned for a later release\b[^.?!]{0,160}\b(?:guided design|design question)\b"
+            r"|(?:안내형 설계|설계 대화)[^.?!]{0,100}(?:아직 제공하지|이후 릴리스에 계획)"
+            r"|이후 릴리스에 계획[^.?!]{0,100}(?:안내형 설계|설계 질문)",
+            re.IGNORECASE,
+        )
+        for page in all_docs():
+            with self.subTest(page=page.relative_to(REPO)):
+                prose = " ".join(line.replace("**", "") for _, line in prose_lines(read(page)))
+                self.assertNotRegex(prose, old_rollout)
+
+        for readme, docs, anchor in (
+            ("README.md", REPO / "docs", "guided-design"),
+            ("README.ko.md", REPO / "docs/ko", "안내형-설계"),
+        ):
+            guide = docs / "skills-and-capabilities.md"
+            self.assertIn(anchor, heading_anchors(read(guide)))
+            for page in (REPO / readme, EXAMPLE / readme, docs / "how-it-works.md"):
+                with self.subTest(page=page.relative_to(REPO)):
+                    self.assertTrue(any(
+                        (page.parent / path).resolve() == guide and fragment == anchor
+                        for _, line in prose_lines(read(page)) for target in LINK.findall(line)
+                        for path, _, fragment in [target.partition("#")]
+                    ), "link directly to the guided design walkthrough")
+
     def test_managed_admission_has_one_linked_owner_per_language(self) -> None:
         pages = {page: read(page) for page in all_docs()}
         outside = pages.copy()

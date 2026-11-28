@@ -6,7 +6,7 @@
 
 **설계·패킷 초안(리드 세션).** 설계나 패킷의 초안을 만들기 전에 사용자 요청을 담은 파일로 `oah recommend --kind design --task <task> --request-file <요청 파일>`을 실행한다. 패킷은 `--kind packet`을 쓴다. 결과가 가리키는 `oah-<tier>` 하위 에이전트에게 초안 작성을 맡긴다.
 
-**안내형 설계(Claude Code 리드와 Python CLI).** 설계 대화를 시작하거나 이어 달라는 요청을 받으면 프로젝트의 `grilling` 스킬을 읽는다. `oah design show PROJECT DESIGN`과 `oah design coverage PROJECT DESIGN --next`로 저장된 상태를 읽는다. 미결 질문 하나와 추천 답을 제시하고 응답을 기다린다. 저장 요청을 받으면 리드가 현재 리비전과 digest에 맞춰 `oah design save`로 답과 미결 항목을 기록한다. 커버리지는 `coverage edit`으로 미리 본 뒤 저장한다. `coverage --check`를 통과하고 사용자가 별도로 승인한 리비전만 `oah design accept`로 기록한다. 구현 요청을 받으면 `oah packet new TASK --design PROJECT/DESIGN`으로 승인한 설계를 작업 지시에 연결한다.
+**안내형 설계(Claude Code 리드와 Python CLI).** 설계 대화를 시작하거나 이어 달라는 요청을 받으면 프로젝트의 `grilling` 스킬을 읽는다. `oah design show PROJECT DESIGN`과 `oah design coverage PROJECT DESIGN --next`로 저장된 상태를 읽는다. 미결 질문 하나와 추천 답을 제시하고 응답을 기다린다. 저장 요청을 받으면 리드가 현재 리비전과 digest에 맞춰 `oah design save`로 답과 미결 항목을 기록한다. 보류 항목은 사유와 다시 볼 시점을, 해당 없는 단계는 사유를 남긴다. 커버리지는 `coverage edit`으로 미리 본 뒤 저장한다. `coverage --check`를 통과하고 사용자가 별도로 승인한 리비전만 `oah design accept`로 기록한다. 구현 요청을 받으면 `oah packet new TASK --design PROJECT/DESIGN`으로 승인한 설계를 작업 지시에 연결한다.
 
 1. **단계 순서.** 1차 구현은 Claude Code 가 한다. 그다음 Codex CLI 가 정해진 라운드 안에서 리뷰·수정·재리뷰한다(`oah review`, `oah fix`). 1차 구현자는 리뷰 지적을 직접 고치지 않고 돌려준다.
 2. **리스.** 발주된 워커는 발주자의 리스를 사용하며 리스를 시작·갱신·종료하지 않는다. 그 범위 안에서만 편집하고 변경과 증거를 발주자에게 반환한다. 발주자는 편집 전에 `oah start --task <task> --agent <you> --scope <path>` 를 실행한다(`--scope` 반복 가능). 범위를 넓힐 때는 `oah renew --scope …` 를 쓰고, 끝나면 `oah finish --summary "…"` 로 닫는다. 다른 리스와 겹치면 멈추고 보고한다.

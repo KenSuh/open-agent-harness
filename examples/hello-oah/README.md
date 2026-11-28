@@ -95,9 +95,9 @@ AI to prepare the practice copy; step 2 installs the project rules.
 - **You check or answer:** Inspect the exact version, review, gates, secret scan and CI results. Give the final
   confirmation only for the result you want to land; a refusal still needs resolving.
 
-**Planned for a later release:** before implementation, you will say what you want to build and oah will ask one
-design question at a time with a recommendation. That guided design conversation is not available yet. Today you
-can already discuss the goal with your AI and answer decisions when the review loop stops.
+If you want to design before implementation, start a guided design conversation in Claude Code with the Python
+source CLI. Claude asks one question at a time with a recommendation and can resume from a saved revision.
+[Guided design walkthrough](../../docs/skills-and-capabilities.md#guided-design)
 
 ## What runs underneath
 

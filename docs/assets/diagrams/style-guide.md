@@ -94,7 +94,7 @@ If either language needs an abbreviation, put the full condition in a lettered t
 same letter with a short label on both language variants. Command exchanges may also use keys to retain
 their full command text. Keep keyed inline labels within 14 characters.
 The architecture route-to-Jev label explicitly keeps “SKILL ORDER + DIFFICULTY”. Label masks must also clear nodes, zone headings and zone borders; widen the gutter when needed. Dash meanings belong in
-the legend: optional paths, returns, recorded CI exceptions, or a planned future note as appropriate.
+the legend: optional paths, returns, recorded CI exceptions, or a separate note as appropriate.
 Sequence returns retain dashed lines; their loop frame covers only participating actors.
 
 For every concepts node retain `data-node-id`, `data-source-label` and all visible source words in
@@ -105,8 +105,8 @@ wrapping must not change its words.
 
 Keep the architecture's 14 unique components and 16 connections across its two figures, and all
 15 numbered sequence messages. The overview may summarize these details, but must show the whole
-harness and both user touchpoints. The guided design conversation is **planned for a later release**, never
-shown as available. The features figure explains the six supporting parts together.
+harness and both user touchpoints. Keep the optional guided design note beside the main flow and name Claude Code
+and the Python source CLI. The features figure explains the six supporting parts together.
 
 ## Banner
 
