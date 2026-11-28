@@ -19,6 +19,19 @@ def block_of(data: bytes) -> bytes:
 
 
 class RulesTest(unittest.TestCase):
+    def test_synced_guided_design_rule_describes_coverage_exceptions(self) -> None:
+        for lang, terms in (
+            ("en", ("deferrals", "reason", "revisit point", "inapplicable stages")),
+            ("ko", ("보류 항목", "사유", "다시 볼 시점", "해당 없는 단계")),
+        ):
+            with self.subTest(lang=lang):
+                rules.sync(self.root, lang=lang)
+                block = block_of(self.agents.read_bytes()).decode("utf-8")
+                guidance = next((paragraph for paragraph in block.split("\n\n")
+                                 if "oah design coverage" in paragraph), "")
+                for term in terms:
+                    self.assertIn(term, guidance)
+
     def test_the_lead_asks_for_a_design_or_packet_tier_before_writing_one(self):
         for lang in ("en", "ko"):
             with self.subTest(lang=lang):

@@ -229,30 +229,37 @@ class AccuracyTest(unittest.TestCase):
                     self.assertIsNone(HANGUL_COLON.search(line), line)
 
     def test_public_guided_design_claims_point_to_the_walkthrough(self) -> None:
+        topic = re.compile(r"guided design|design conversation|design question|안내형 설계|설계 대화|설계 질문",
+                           re.IGNORECASE)
         old_rollout = re.compile(
-            r"(?:guided design|design conversation)[^.?!]{0,160}"
-            r"\b(?:not (?:yet )?available|planned for a later release)\b"
-            r"|\bplanned for a later release\b[^.?!]{0,160}\b(?:guided design|design question)\b"
-            r"|(?:안내형 설계|설계 대화)[^.?!]{0,100}(?:아직 제공하지|이후 릴리스에 계획)"
-            r"|이후 릴리스에 계획[^.?!]{0,100}(?:안내형 설계|설계 질문)",
+            r"planned for a later release|guided design is planned[.!]"
+            r"|\bnot (?:yet available|available yet)[.!]"
+            r"|이후 릴리스에 계획|안내형 설계 대화는 계획 단계|아직 제공하지 않는다",
             re.IGNORECASE,
         )
         for page in all_docs():
             with self.subTest(page=page.relative_to(REPO)):
-                prose = " ".join(line.replace("**", "") for _, line in prose_lines(read(page)))
-                self.assertNotRegex(prose, old_rollout)
+                prose = "\n".join(line for _, line in prose_lines(read(page)))
+                for paragraph in re.split(r"\n\s*\n", prose):
+                    paragraph = " ".join(paragraph.replace("**", "").split())
+                    if topic.search(paragraph):
+                        self.assertNotRegex(paragraph, old_rollout)
 
-        for readme, docs, anchor in (
-            ("README.md", REPO / "docs", "guided-design"),
-            ("README.ko.md", REPO / "docs/ko", "안내형-설계"),
+        for readme, docs, heading, anchor in (
+            ("README.md", REPO / "docs", "### Guided design", "guided-design"),
+            ("README.ko.md", REPO / "docs/ko", "### 안내형 설계", "안내형-설계"),
         ):
             guide = docs / "skills-and-capabilities.md"
+            readme_path = REPO / readme
             self.assertIn(anchor, heading_anchors(read(guide)))
-            for page in (REPO / readme, EXAMPLE / readme, docs / "how-it-works.md"):
+            for page in (readme_path, EXAMPLE / readme, docs / "how-it-works.md"):
                 with self.subTest(page=page.relative_to(REPO)):
+                    text = read(page)
+                    if page == readme_path:
+                        text, _ = split_section(text, heading)
                     self.assertTrue(any(
                         (page.parent / path).resolve() == guide and fragment == anchor
-                        for _, line in prose_lines(read(page)) for target in LINK.findall(line)
+                        for _, line in prose_lines(text) for target in LINK.findall(line)
                         for path, _, fragment in [target.partition("#")]
                     ), "link directly to the guided design walkthrough")
 
@@ -831,6 +838,27 @@ class BannerTest(unittest.TestCase):
                     for phrase in (("안내형 설계", "질문 하나", "Python 소스 CLI") if language
                                    else ("GUIDED DESIGN", "one question", "Python source CLI")):
                         self.assertIn(phrase, visible)
+
+    def test_guided_design_overviews_match_editable_and_published_text(self) -> None:
+        text_elements = {f"{SVG}{name}" for name in ("title", "desc", "text")}
+        stems = {stem for stems in DIAGRAM_PAGES.values() for stem in stems if stem.startswith("how-it-works")}
+        for stem in sorted(stems):
+            label, cli = ("안내형 설계", "Python 소스 CLI") if stem.endswith("-ko") else ("GUIDED DESIGN", "Python source CLI")
+            for theme in ("light", "dark"):
+                name = f"{stem}-{theme}"
+                with self.subTest(asset=name):
+                    export = ET.parse(ASSETS / f"{name}.svg").getroot()
+                    source = read(ASSETS / "diagrams" / f"{name}.html")
+                    match = re.search(r"<svg\b.*?</svg>", source, re.DOTALL)
+                    if match is None:
+                        self.fail("the editable overview must contain an SVG")
+                    editable = ET.fromstring(match.group())
+                    exported_text = [" ".join("".join(node.itertext()).split())
+                                     for node in export.iter() if node.tag in text_elements]
+                    self.assertIn(f"{label} · CLAUDE CODE", exported_text)
+                    self.assertIn(cli, " ".join(exported_text))
+                    self.assertEqual(exported_text, [" ".join("".join(node.itertext()).split())
+                                                     for node in editable.iter() if node.tag in text_elements])
 
     def assert_concepts_edge_labels(self, root, expected_labels):
         def normalized(text):
