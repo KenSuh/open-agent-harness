@@ -2,10 +2,78 @@
 
 A design says what to build. Before a worker starts, `oah` does three more things with it: it tracks the nine
 design stages, it finds and reviews specialist skills for each stage, and it hands the reviewed skill texts and
-the tools they name to the worker. Everything on this page runs locally and gives the same result for the same
-inputs, except the one search step that says it sends something.
+the tools they name to the worker. The CLI checks run locally and give the same result for the same inputs,
+except the one search step that says it sends something.
 
 [한국어](ko/skills-and-capabilities.md)
+
+## Guided design
+
+Use this workflow from Claude Code on macOS with the [Python source CLI](install-macos.md).
+Run the setup in your Git project on the branch where you will keep the design. Use the toolkit from the
+matching OAH release for the project skill installation.
+
+```sh
+oah init
+OAH_KIT_DIR="/path/to/oah-source" oah skills install mattpocock-skills --project --target claude
+```
+
+For an initialized project, use `oah rules sync` after updating OAH. If you already installed the project's
+`grilling` skill, use that copy.
+
+Give the project and design IDs when you start. If this is your first design, write the user's request in
+`request.md` and the initial design in `draft.md`. Register them before the interview.
+
+```sh
+oah design project add field-team --title "Field team"
+oah design new field-team equipment-booking --title "Equipment booking" --file draft.md --part request=request.md
+```
+
+Open Claude Code in the project and say “Let's design `equipment-booking` in `field-team`.” The project
+rules tell Claude to use `grilling`, look up the saved design and ask one open question with a recommendation.
+You can say you do not know or ask to defer a decision. Record a reason and when to revisit a deferral.
+Use “not applicable” with a reason for a stage whose applicability is optional.
+
+Ask Claude to save the confirmed answers and open items when you pause. It reads the current revision
+and digest with `oah design status PROJECT DESIGN --json` and uses them to save the draft.
+To record the stage's checks, it previews a coverage edit and then runs the save command the preview prints.
+If someone saved in the meantime, reread the current design and reconcile the edits before retrying.
+The current revision and its wiki page show the saved result.
+
+In a fresh terminal session, say “Continue the saved `equipment-booking` design in `field-team`.”
+`oah design coverage PROJECT DESIGN --next` tells Claude where to resume.
+Review the full draft once `oah design coverage PROJECT DESIGN --check` succeeds. Approve that specific
+revision separately. Claude records the approval with `oah design accept`. When you ask to implement the
+approved design, it connects the task with `oah packet new TASK --design PROJECT/DESIGN`.
+
+### Coverage edit input
+
+For a saved answer headed `### [decision:purpose.first-scope]`, this edit records the answer on the
+corresponding check. Use the current revision and digest from `oah design status`. The answer reference's
+SHA-256 covers the UTF-8 body after the heading up to the next decision heading or the end of the part.
+Use LF line endings and include blank lines and the final newline if they are present in the saved body.
+
+```json
+{
+  "version": 1,
+  "expected": {"project": "field-team", "design": "equipment-booking", "revision": 2, "digest": "sha256:<revision-digest>"},
+  "ops": [
+    {
+      "op": "set-check", "stage": "purpose", "check": "first-scope",
+      "status": "answered", "impact": "outcome",
+      "note": null, "decision": null, "reason": null, "resolve_by": null,
+      "answer_refs": [{"part": "design", "region": "purpose.first-scope", "sha256": "sha256:<answer-body-digest>"}]
+    }
+  ]
+}
+```
+
+Save the edit as `edits.json` and preview it with
+`oah design coverage edit field-team equipment-booking --from edits.json --out coverage.md`.
+Use a new output filename for each preview. To keep a check open, use `status: open`, a note describing
+what remains unknown and an empty `answer_refs` list. For a deferred check, set `status: deferred` and
+fill `reason` and `resolve_by`. To mark an optional stage inapplicable use `set-applicability` with
+`value: not-applicable` and a reason.
 
 ## The nine design stages
 

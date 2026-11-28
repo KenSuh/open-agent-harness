@@ -2,10 +2,52 @@
 
 설계는 무엇을 만들지 말한다. 워커가 일을 시작하기 전에 `oah`는 설계로 세 가지를 더 한다. 아홉 설계 단계를
 추적하고, 단계마다 쓸 전문 스킬을 찾아 검토하고, 검토한 스킬 본문과 그 스킬이 이름 붙인 도구를 워커에게
-넘긴다. 이 문서의 모든 일은 이 컴퓨터 안에서 돌고 같은 입력에는 같은 결과를 낸다. 예외는 무엇을 보낸다고
+넘긴다. CLI 검사는 이 컴퓨터 안에서 실행되고 같은 입력에는 같은 결과를 낸다. 예외는 무엇을 보낸다고
 밝힌 검색 한 단계뿐이다.
 
 [English](../skills-and-capabilities.md)
+
+## 안내형 설계
+
+macOS의 Claude Code와 [Python 소스 CLI](install-macos.md)로 진행한다. Git 프로젝트에서 설계를 보관할
+브랜치를 연다. 프로젝트 스킬을 설치할 때는 같은 버전의 OAH 소스를 지정한다.
+
+```sh
+oah init
+OAH_KIT_DIR="/path/to/oah-source" oah skills install mattpocock-skills --project --target claude
+```
+
+초기화한 프로젝트는 OAH를 업데이트한 뒤 `oah rules sync`를 실행한다. 프로젝트에 설치한 `grilling`
+스킬이 있으면 그 사본을 쓴다.
+
+설계를 시작할 때 프로젝트 ID와 설계 ID를 알려 준다. 첫 설계라면 사용자 요청을 `request.md`에,
+초안을 `draft.md`에 적고 대화 전에 등록한다.
+
+```sh
+oah design project add field-team --title "현장팀"
+oah design new field-team equipment-booking --title "장비 예약" --file draft.md --part request=request.md
+```
+
+프로젝트에서 Claude Code를 열고 “설계부터 하자. 프로젝트 ID는 `field-team`이고 설계 ID는
+`equipment-booking`이야”라고 말한다. Claude는 프로젝트 규칙에 따라 `grilling`을 읽고 저장된
+설계를 확인한 뒤, 미결 질문 하나와 추천 답을 제시한다. 모르는 항목은 미결로 둘 수 있다.
+보류할 때는 사유와 다시 확인할 시점을 기록한다. 선택적으로 적용되는 단계는 사유와 함께
+해당 없음으로 둘 수 있다.
+
+중간에 멈출 때 확인한 답과 미결 항목을 저장해 달라고 한다. Claude는
+`oah design status PROJECT DESIGN --json`에서 읽은 현재 리비전과 digest를 사용해 초안을 저장한다.
+단계별 확인 항목은 커버리지 편집을 미리 본 뒤 출력된 저장 명령으로 기록한다. 그 사이 다른 저장이 있었다면
+현재 설계를 다시 읽고 변경을 맞춘 뒤 재시도한다. 위키 페이지에서도 저장한 리비전을 볼 수 있다.
+
+새 세션에서는 “저장한 `field-team`의 `equipment-booking` 설계를 이어가자”라고 말한다.
+Claude는 `oah design coverage PROJECT DESIGN --next`로 다음 단계를 읽는다.
+`oah design coverage PROJECT DESIGN --check`가 통과하면 전체 초안을 검토하고 해당 리비전을
+별도로 승인한다. Claude가 `oah design accept`로 승인을 기록한다. 승인한 설계의 구현을 요청하면
+`oah packet new TASK --design PROJECT/DESIGN`으로 작업 지시에 연결한다.
+
+커버리지 편집에는 현재 리비전과 digest 그리고 적용할 작업을 적는다. 답변 근거의 SHA-256은 결정 제목
+다음 줄부터 다음 결정 제목 직전까지의 UTF-8 본문을 사용한다. 줄바꿈을 LF로 통일하고 본문에 남아
+있는 빈 줄과 끝 줄바꿈을 포함한다. [커버리지 편집 JSON 예시](../skills-and-capabilities.md#coverage-edit-input)
 
 ## 아홉 설계 단계
 
