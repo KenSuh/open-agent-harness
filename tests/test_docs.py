@@ -800,11 +800,9 @@ class BannerTest(unittest.TestCase):
                     visible = " ".join(" ".join(t.itertext()) for t in overview.findall(f".//{SVG}text"))
                     for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init"):
                         self.assertIn(phrase, visible)
-                    # The guided design conversation stays planned without a version number.
-                    self.assertIn("계획 · 이후 릴리스" if language else "PLANNED · LATER RELEASE", visible)
-                    self.assertNotIn("v0.4.0", visible)
-                    self.assertIn("예정된 기능이며 아직 제공하지 않는다." if language
-                                  else "Planned, not available yet.", visible)
+                    for phrase in (("안내형 설계", "질문 하나", "Python 소스 CLI") if language
+                                   else ("GUIDED DESIGN", "one question", "Python source CLI")):
+                        self.assertIn(phrase, visible)
 
     def assert_concepts_edge_labels(self, root, expected_labels):
         def normalized(text):

@@ -45,6 +45,8 @@ In a fresh terminal session, say “Continue the saved `equipment-booking` desig
 Review the full draft once `oah design coverage PROJECT DESIGN --check` succeeds. Approve that specific
 revision separately. Claude records the approval with `oah design accept`. When you ask to implement the
 approved design, it connects the task with `oah packet new TASK --design PROJECT/DESIGN`.
+If packet creation reports `OAH_DESIGN_UNJUDGED`, record the recommendation for the task with
+`oah recommend --kind design --task TASK --request-file request.md`.
 
 ### Coverage edit input
 
@@ -71,9 +73,10 @@ Use LF line endings and include blank lines and the final newline if they are pr
 Save the edit as `edits.json` and preview it with
 `oah design coverage edit field-team equipment-booking --from edits.json --out coverage.md`.
 Use a new output filename for each preview. To keep a check open, use `status: open`, a note describing
-what remains unknown and an empty `answer_refs` list. For a deferred check, set `status: deferred` and
-fill `reason` and `resolve_by`. To mark an optional stage inapplicable use `set-applicability` with
-`value: not-applicable` and a reason.
+what remains unknown and an empty `answer_refs` list. For a deferral, use `status: deferred`, an empty
+`answer_refs` list, a `reason` and `impact` set to `minor` or `outcome`. Set `resolve_by` to
+`before-implementation`, `before-release`, `after-first-release` or a stage ID. To mark an optional stage
+inapplicable use `set-applicability` with `value: not-applicable` and a reason.
 
 ## The nine design stages
 

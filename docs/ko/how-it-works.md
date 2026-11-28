@@ -20,7 +20,7 @@ Python 3.11 이상과 표준 라이브러리만 쓰며 macOS와 Windows에서 WS
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/how-it-works-ko-dark.svg">
-  <img src="../assets/how-it-works-ko-light.svg" alt="사용자가 말로 변경을 요청하면 설치된 규칙에 따라 의도·범위·경로를 예약하는 리스·영향 지도와 권장 선택형 TypeSafe Jev 판정을 준비하고, Claude Code가 구현하며 게이트와 위키가 증거를 남기고 Codex CLI가 검토·수정하며, 같은 문제가 반복되거나 설계 선택이 필요해 멈추면 사용자가 답하고 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 v0.3.0에 포함돼 있고 안내형 설계 대화는 이후 릴리스에 계획돼 있다." width="100%">
+  <img src="../assets/how-it-works-ko-light.svg" alt="사용자가 말로 변경을 요청하면 설치된 규칙에 따라 의도·범위·경로를 예약하는 리스·영향 지도와 권장 선택형 TypeSafe Jev 판정을 준비하고, Claude Code가 구현하며 게이트와 위키가 증거를 남기고 Codex CLI가 검토·수정하며, 같은 문제가 반복되거나 설계 선택이 필요해 멈추면 사용자가 답하고 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 v0.3.0에 포함돼 있고 안내형 설계는 Claude Code와 Python 소스 CLI를 사용한다." width="100%">
 </picture>
 
 AI 세션 둘은 같은 파일을 고치거나 증거 없이 끝났다고 하거나 끝낼 기준 없이 검토를 반복할 수 있다.
@@ -71,8 +71,8 @@ TypeSafe Jev는 권장 선택형 판정기다. `oah init`이 쓸지 한 번 묻�
 위에서 설명한 난이도 판정과 모델 선택은 v0.3.0에 포함돼 있다. v0.4.0은 설계 출처와 스킬에 쓰는 조언형 Jev 단계를
 더하며, 모두 자기 스위치가 따로 있다([설계 출처](design-sources.md#선택-사항인-판정),
 [이 단계들에서 Jev](skills-and-capabilities.md#이-단계들에서-jev)). 장애가 반복되면 Jev를 잠시 쉬게 한다
-([Jev가 난이도를 판정한다](concepts.md#jev가-난이도를-판정한다)). [로드맵](../../README.ko.md#로드맵)은 이후 릴리스에
-계획된 안내형 설계 대화를 설명한다.
+([Jev가 난이도를 판정한다](concepts.md#jev가-난이도를-판정한다)). v1.4.0에서 설계 대화를 시작하거나
+이어 가는 방법은 별도 문서에서 확인할 수 있다. [Claude Code 안내형 설계](skills-and-capabilities.md#안내형-설계)
 
 ## 강점
 

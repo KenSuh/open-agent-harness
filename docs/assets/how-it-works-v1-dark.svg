@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 1080 1420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-v1-dark-title how-it-works-v1-dark-desc" data-diagram-type="Swimlane" data-size="fit" id="how-it-works-v1-dark-root">
 <title id="how-it-works-v1-dark-title">You ask, answer and confirm; the harness carries the work.</title>
-<desc id="how-it-works-v1-dark-desc">Describe a change. The installed rules guide intent, scope, leases and impact checks. Assigned agents build, review and fix. Gates record checks and the wiki keeps decisions. You answer when a decision is needed and confirm landing. Jev is optional and guided design is planned.</desc>
+<desc id="how-it-works-v1-dark-desc">Describe a change. The installed rules guide intent, scope, leases and impact checks. Assigned agents build, review and fix. Gates record checks and the wiki keeps decisions. You answer when a decision is needed and confirm landing. Jev is optional. Guided design uses Claude Code and the Python source CLI.</desc>
 <defs>
       <style>#how-it-works-v1-dark-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f5f5f5; }
       #how-it-works-v1-dark-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -36,10 +36,10 @@
 <rect x="752" y="144" width="272" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
 <text x="768" y="168" class="zone-label" text-anchor="start">AGENTS BY STAGE</text>
 <rect x="40" y="1096" width="984" height="128" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="64" y="1124" class="label" text-anchor="start">PLANNED · LATER RELEASE</text>
+<text x="64" y="1124" class="label" text-anchor="start">GUIDED DESIGN · CLAUDE CODE</text>
 <text x="64" y="1160" class="node" text-anchor="start">Design together, one question at a time</text>
-<text x="64" y="1188" class="prose" text-anchor="start">You describe what to build; oah asks a design question with a recommendation.</text>
-<text x="64" y="1208" class="prose" text-anchor="start">Planned, not available yet.</text>
+<text x="64" y="1188" class="prose" text-anchor="start">Claude asks one question about the design and recommends an answer.</text>
+<text x="64" y="1208" class="prose" text-anchor="start">Use the Python source CLI to save, resume and approve the design.</text>
 <path d="M 288,280 L 376,280" data-edge-id="h1" data-from="request" data-to="prepare" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-v1-dark-arrow)"/>
 <path d="M 688,304 L 728,304 Q 736,304 736,312 L 736,472 Q 736,480 744,480 L 776,480" data-edge-id="h2" data-from="prepare" data-to="build" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-v1-dark-arrow)"/>
 <path d="M 888,524 L 888,544 Q 888,552 880,552 L 540,552 Q 532,552 532,560 L 532,584" data-edge-id="h3" data-from="build" data-to="evidence" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-v1-dark-arrow)"/>
@@ -166,7 +166,7 @@
 <path d="M 356,1364 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-v1-dark-arrow)"/>
 <text x="392" y="1368" class="prose" text-anchor="start">Work / handoff</text>
 <rect x="528" y="1358" width="24" height="12" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="564" y="1368" class="prose" text-anchor="start">Future design note</text>
+<text x="564" y="1368" class="prose" text-anchor="start">Guided design</text>
 <rect x="792" y="1354" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <text x="806" y="1368" class="label" text-anchor="middle">A</text>
 <text x="832" y="1368" class="prose" text-anchor="start">changes requested</text>

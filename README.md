@@ -93,7 +93,7 @@ You describe the result you want. Your AI uses these parts together to carry the
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-v1-dark.svg">
-  <img src="docs/assets/how-it-works-v1-light.svg" alt="Describe a change. The installed rules guide intent, scope, leases and impact checks. Assigned agents build, review and fix. Gates record checks and the wiki keeps decisions. You answer when a decision is needed and confirm landing. Jev is optional and guided design is planned." width="100%">
+  <img src="docs/assets/how-it-works-v1-light.svg" alt="Describe a change. The installed rules guide intent, scope, leases and impact checks. Assigned agents build, review and fix. Gates record checks and the wiki keeps decisions. You answer when a decision is needed and confirm landing. Jev is optional. Guided design uses Claude Code and the Python source CLI." width="100%">
 </picture>
 
 Talk to your AI in plain words. The rules installed by `oah init` and each command’s next-step message guide it
@@ -289,21 +289,13 @@ below before the v1.0.0 desktop app. [Upgrade notes for v0.4.0](docs/upgrade.md#
 
 Plans can change as the tools change. See the [project plan](docs/PLAN.md) and [release history](https://github.com/KenSuh/open-agent-harness/releases).
 
-### Planned: design together, one question at a time
+### Guided design
 
-**Planned for a later release.** You say what you want to build, and oah asks one design
-question at a time with a recommendation. You take part in the design decisions before implementation begins.
-v0.4.0 introduced the design records, stages and sources this conversation builds on. The update is planned to
-include:
+v1.4.0 uses Claude Code and the Python source CLI to ask one question at a time. Save open or deferred
+decisions and resume from the saved revision. [Guided design walkthrough](docs/skills-and-capabilities.md#guided-design)
 
-- **One question at a time.** oah asks one key design question, says why it matters and recommends an answer.
-  You can say you don't know, decide later, mark a question as not applicable, and pick up where you left off.
-- **The whole design, not one issue.** The conversation covers behaviour, how long data is kept, what the server
-  decides, secrets, effects outside the project, recovery, cost, accessibility and payment where it applies. It
-  skips irrelevant topics and returns to the parts of the design that depend on a decision when it changes.
-  v0.4.0 records these topics in the nine coverage stages; asking about them is planned.
-- **Starts when you ask.** In supported AI tools, asking for a design in plain words opens the design
-  conversation and applies its question-by-question method. You can turn this off.
+### Planned work
+
 - **Stack suggestions with trade-offs.** oah suggests a language and source combination that fits, with what it
   means for learning and operation. It never forces Rust or a multi-language setup.
 - **Sources refreshed as work moves.** v0.4.0 checks registered sources when you ask or once a day. Refreshing

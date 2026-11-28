@@ -44,10 +44,17 @@ Claude는 `oah design coverage PROJECT DESIGN --next`로 다음 단계를 읽는
 `oah design coverage PROJECT DESIGN --check`가 통과하면 전체 초안을 검토하고 해당 리비전을
 별도로 승인한다. Claude가 `oah design accept`로 승인을 기록한다. 승인한 설계의 구현을 요청하면
 `oah packet new TASK --design PROJECT/DESIGN`으로 작업 지시에 연결한다.
+작업 지시 생성 중 `OAH_DESIGN_UNJUDGED`가 나오면
+`oah recommend --kind design --task TASK --request-file request.md`로 설계 추천을 기록한다.
 
 커버리지 편집에는 현재 리비전과 digest 그리고 적용할 작업을 적는다. 답변 근거의 SHA-256은 결정 제목
 다음 줄부터 다음 결정 제목 직전까지의 UTF-8 본문을 사용한다. 줄바꿈을 LF로 통일하고 본문에 남아
 있는 빈 줄과 끝 줄바꿈을 포함한다. [커버리지 편집 JSON 예시](../skills-and-capabilities.md#coverage-edit-input)
+
+미결은 `status: open`과 메모를 기록하고 `answer_refs`를 비워 둔다. 보류는 `status: deferred`,
+빈 `answer_refs`, `reason`, `minor` 또는 `outcome`인 `impact`를 기록한다. `resolve_by`는
+`before-implementation`, `before-release`, `after-first-release` 또는 단계 ID로 지정한다.
+해당 없는 단계는 `set-applicability`에서 `value: not-applicable`과 사유를 쓴다.
 
 ## 아홉 설계 단계
 
