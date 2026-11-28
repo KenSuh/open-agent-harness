@@ -1,26 +1,23 @@
 ## open-agent-harness 규칙
 
-이 저장소에서 Claude Code 와 Codex CLI 는 모두 아래 규칙을 따른다.
+**워커(`OAH_WORKER=1`).** 세션 시작 절차를 건너뛰고 발주 작업만 한다. 구현·수정은 발주자의 리스 워크트리에서 한다. 리뷰는 읽기 전용이며 별도 트리를 쓸 수 있다.
 
-**발주된 워커:** `OAH_WORKER=1` 이 설정돼 있으면 `oah` 가 한 작업을 위해 띄운 것이다. 세션 시작 절차(상태 둘러보기, 인계문 읽기, 인사)를 건너뛰고 프롬프트의 작업만 한다. 1차 구현·수정 워커는 발주자의 리스 워크트리에서 실행한다. 리뷰는 읽기 전용이며 다른 트리에서도 실행할 수 있다.
+**리드 초안.** 작성 전 `oah recommend --kind design --task <task> --request-file <요청파일>`을 실행하고, 결과의 `oah-<tier>`에 초안을 맡긴다. 패킷은 `--kind packet`을 쓴다.
 
-**설계·패킷 초안(리드 세션).** 설계나 패킷의 초안을 만들기 전에 사용자 요청을 담은 파일로 `oah recommend --kind design --task <task> --request-file <요청 파일>`을 실행한다. 패킷은 `--kind packet`을 쓴다. 결과가 가리키는 `oah-<tier>` 하위 에이전트에게 초안 작성을 맡긴다.
+**안내형 설계(Claude Code 리드, Python CLI).** 설계를 시작하거나 이어 달라는 요청 시 프로젝트 `grilling`을 읽고 `oah design show PROJECT DESIGN`, `oah design coverage PROJECT DESIGN --next`를 실행한다. 미결 질문 하나와 추천 답을 제시하고 기다린다. 저장 요청 시 현재 리비전과 digest로 `oah design save`에 답과 미결을 기록한다. 저장 전 `coverage edit`으로 미리 본다.
 
-**안내형 설계(Claude Code 리드와 Python CLI).** 설계 대화를 시작하거나 이어 달라는 요청을 받으면 프로젝트의 `grilling` 스킬을 읽는다. `oah design show PROJECT DESIGN`과 `oah design coverage PROJECT DESIGN --next`로 저장된 상태를 읽는다. 미결 질문 하나와 추천 답을 제시하고 응답을 기다린다. 저장 요청을 받으면 리드가 현재 리비전과 digest에 맞춰 `oah design save`로 답과 미결 항목을 기록한다. 커버리지는 `coverage edit`으로 미리 본 뒤 저장한다.
+- `deferred`: `reason`, `impact`, `resolve_by`, 빈 `answer_refs`.
+- 선택 단계: `set-applicability`, `value`는 `not-applicable`, `reason`.
 
-- 보류한 확인 항목(`deferred`)은 사유(`reason`), 영향(`impact`), 다시 볼 시점(`resolve_by`)과 빈 `answer_refs` 목록을 남긴다.
-- 적용이 선택인 단계는 `set-applicability`의 `value`를 `not-applicable`로 설정하고 사유(`reason`)를 남긴다.
+`oah design coverage PROJECT DESIGN --revision N --check` 통과 후 N과 DIGEST를 별도 승인받아 `oah design accept`한다. 구현 요청 시 `oah design check PROJECT DESIGN --revision N --digest DIGEST --accepted` 후 `oah packet new TASK --design PROJECT/DESIGN --design-revision N`을 실행한다. 패킷의 승인 리비전과 digest가 같은지 확인한다. 승인이 바뀌면 멈추고 검사한 어느 판을 구현할지 사용자에게 묻는다.
 
-검토할 리비전은 `oah design coverage PROJECT DESIGN --revision N --check`로 검사한다. 검사한 리비전과 digest를 사용자가 별도로 승인하면 `oah design accept`로 기록한다. 구현 요청을 받으면 `oah design check PROJECT DESIGN --revision N --digest DIGEST --accepted`로 그 승인을 확인한다. `oah packet new TASK --design PROJECT/DESIGN --design-revision N`을 실행하고 작업 지시가 같은 승인 리비전과 digest를 가리키는지 확인한다. 승인이 바뀌었다면 멈추고 검사한 어느 리비전을 구현할지 사용자에게 묻는다.
-
-1. **단계 순서.** 1차 구현은 Claude Code 가 한다. 그다음 Codex CLI 가 정해진 라운드 안에서 리뷰·수정·재리뷰한다(`oah review`, `oah fix`). 1차 구현자는 리뷰 지적을 직접 고치지 않고 돌려준다.
-2. **리스.** 발주된 워커는 발주자의 리스를 사용하며 리스를 시작·갱신·종료하지 않는다. 그 범위 안에서만 편집하고 변경과 증거를 발주자에게 반환한다. 발주자는 편집 전에 `oah start --task <task> --agent <you> --scope <path>` 를 실행한다(`--scope` 반복 가능). 범위를 넓힐 때는 `oah renew --scope …` 를 쓰고, 끝나면 `oah finish --summary "…"` 로 닫는다. 다른 리스와 겹치면 멈추고 보고한다.
-3. **패킷과 의도.** `.oah/tasks/<task>/PACKET.md` 에 작업의 의도·범위·계획·수용 조건이 있다. 의도를 작업에 맞춰 고치지 않는다. 목표가 바뀌면 Revision 을 올린다. 반환에는 `INTENT` 줄과 성공 조건마다 `AC<n>: met|unmet|deferred` 줄을 넣는다.
-4. **사전 점검.** 시작 전에 `oah preflight` 를 실행한다. ABORT 면 멈춘다.
-5. **게이트가 완료를 증명한다.** 수용 조건마다 `GATES.md` 에 CHECK·EXPECT·EVIDENCE 를 가진 게이트가 있다. 검사를 실제로 돌리고 실제 출력을 적는다. 증거 없이 켠 체크는 꺼진 체크보다 나쁘다. 보고의 숫자마다 검사가 있어야 한다.
-6. **바뀐 만큼만 검증.** 리뷰 라운드 사이에는 바뀐 파일에 묶인 게이트(`oah impact --changed-since <rev>`)와 빠른 구조 검사만 다시 돌린다. 무거운 게이트는 최종 head 에서 한 번 돌린다.
-7. **정직한 표시.** 실패·생략·미룬 게이트를 있는 그대로 보고한다. 코드를 쓴 엔진의 리뷰는 독립 리뷰가 아니며, 그렇다고 밝힌다.
-8. **워커는 푸시하지 않는다.** push·merge·force-push·공유 이력 재작성·브랜치 삭제를 하지 않는다. 리드가 `oah finish` 뒤에 푸시한다.
-9. **키 금지.** API 키·토큰·비밀번호·쿠키·계정 식별자를 파일·커밋 메시지·테스트 픽스처·로그에 넣지 않는다. 키는 실행 시점에 환경 변수나 OS 키체인에서 읽는다. 문서와 템플릿은 `${ENV_VAR}` 자리표시만 쓴다.
-10. **위키를 최신으로.** 결정과 오래 남을 발견은 `oah wiki new`·`oah wiki log` 로 `docs/wiki/` 에 출처와 함께 남긴다. `oah wiki lint` 는 문제를 나열할 뿐이며, 그 결과만으로 노트를 지우거나 합치거나 옮기지 않는다.
-11. **막히면** 소유자만 정할 수 있는 결정에서 멈추고 묻는다. 추측하지 않는다.
+1. 1차 구현은 Claude Code. Codex CLI 가 정해진 라운드에서 리뷰·수정·재리뷰한다(`oah review`, `oah fix`). 구현자는 리뷰 지적을 리드에게 반환한다.
+2. 워커는 발주자의 리스를 쓰며 시작·갱신·종료하지 않는다. 범위 안에서 편집하고 변경과 증거를 돌려준다. 발주자는 편집 전 `oah start --task <task> --agent <you> --scope <path>`(`--scope` 반복 가능), 범위 확대 시 `oah renew --scope …`, 종료 시 `oah finish --summary "…"`를 쓴다. 겹치면 멈추고 보고한다.
+3. `.oah/tasks/<task>/PACKET.md`에 의도·범위·계획·수용 조건을 둔다. 승인된 의도를 지킨다. 목표 변경 시 Revision을 올린다. `INTENT`와 조건별 `AC<n>: met|unmet|deferred`를 반환한다.
+4. 시작 전 `oah preflight`. ABORT면 중단한다.
+5. 수용 조건별 `GATES.md`에 CHECK·EXPECT·실측 EVIDENCE를 기록한다. CHECK를 실행하고 보고한 숫자를 각각 검사한다.
+6. 바뀐 만큼만 검증한다. 라운드 사이 결속 게이트(`oah impact --changed-since <rev>`)와 구조 검사를 돌린다. 무거운 게이트는 최종 head에서 한 번 돈다.
+7. 실패·생략·이월을 밝힌다. 작성 엔진 리뷰는 독립 리뷰가 아니며 이를 명시한다.
+8. 워커는 푸시하지 않는다. 병합·강제 푸시·공유 이력 재작성·브랜치 삭제도 금지. 리드는 `oah finish` 후 푸시한다.
+9. 키 금지. 키·토큰·비밀번호·쿠키·계정 ID를 파일·커밋·픽스처·로그에 넣지 않는다. 환경 변수나 OS 키체인에서 읽고 문서·템플릿은 `${ENV_VAR}`를 쓴다.
+10. `oah wiki new`·`oah wiki log`로 `docs/wiki/`에 결정·발견과 출처를 남긴다. `oah wiki lint`는 보고만 한다. 소유자만 정할 사항은 멈추고 묻는다.

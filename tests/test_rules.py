@@ -224,6 +224,23 @@ class RulesTest(unittest.TestCase):
         local.write_text("- rule\n" * 1000, encoding="utf-8")
         self.refused("OAH_RULES_BLOCK_TOO_LARGE")
 
+    def test_sync_preserves_v130_project_rule_capacity(self) -> None:
+        v130_maximum_single_line_bytes = {
+            "en": {b"\n": 2926, b"\r\n": 2901},
+            "ko": {b"\n": 2425, b"\r\n": 2400},
+        }
+        local = self.root / rules.LOCAL_RULES
+        local.parent.mkdir()
+        for lang, by_eol in v130_maximum_single_line_bytes.items():
+            for eol, size in by_eol.items():
+                with self.subTest(lang=lang, eol=eol):
+                    note = b"- " + b"x" * (size - 2) + eol
+                    local.write_bytes(note)
+                    self.agents.write_bytes(b"# Existing project" + eol)
+                    rules.sync(self.root, lang=lang)
+                    self.assertIn(eol + note, block_of(self.agents.read_bytes()))
+                    self.assertEqual(local.read_bytes(), note)
+
     def test_claude_import_line_once(self):
         self.claude.write_text("# Notes\n  @AGENTS.md  \nmore\n", encoding="utf-8")
         rules.sync(self.root)
